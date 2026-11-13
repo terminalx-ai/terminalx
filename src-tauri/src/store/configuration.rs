@@ -349,41 +349,56 @@ pub(crate) fn with_private_sources(project: Option<&str>, mut resolved: Resoluti
     resolved
 }
 
-/// The setup and archive commands a repository's hooks run, after every layer.
+/// The archive command a repository's removal hook runs, and how long it may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scripts {
-    pub setup: String,
-    pub archive: String,
-    pub archive_timeout: Duration,
+pub struct ArchiveScript {
+    pub script: String,
+    pub timeout: Duration,
+}
+fn timeout(minutes: Option<u64>) -> Duration {
+    Duration::from_secs(minutes.filter(|m| ARCHIVE_TIMEOUT_CHOICES.contains(m)).unwrap_or(DEFAULT_ARCHIVE_TIMEOUT_MINUTES) * 60)
 }
 impl Resolution {
-    /// A committed script that is not trusted is refused, never skipped: the
-    /// caller asks (archive) or reports (setup) instead of running nothing silently.
-    pub fn scripts(&self) -> Result<Scripts> {
-        let text = |key: &str| -> Result<String> {
-            let Some(value) = self.values.get(key) else { return Ok(String::new()) };
-            let text = value.value.as_str().unwrap_or_default().to_string();
-            ensure!(text.trim().is_empty() || !self.trust.as_ref().is_some_and(|trust| trust.required && trust.keys.iter().any(|k| k == key)),
-                "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Repositories → Scripts and choose Review and trust.",
-                if key == SETUP_SCRIPT { "setup" } else { "archive" });
-            Ok(text)
-        };
-        let minutes = self.values.get(ARCHIVE_TIMEOUT).and_then(|value| value.value.as_u64()).unwrap_or(DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
-        Ok(Scripts { setup: text(SETUP_SCRIPT)?, archive: text(ARCHIVE_SCRIPT)?, archive_timeout: Duration::from_secs(minutes * 60) })
+    /// One script after every layer. Each is trust-checked on its own: an
+    /// untrusted committed archive script never stops the person's own setup
+    /// script, nor the reverse. A refused script is an error, never skipped:
+    /// the caller asks (archive) or reports a failed setup instead.
+    fn script(&self, key: &str) -> Result<String> {
+        let Some(value) = self.values.get(key) else { return Ok(String::new()) };
+        let text = value.value.as_str().unwrap_or_default().to_string();
+        ensure!(text.trim().is_empty() || !self.trust.as_ref().is_some_and(|trust| trust.required && trust.keys.iter().any(|k| k == key)),
+            "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Repositories → Scripts and choose Review and trust.",
+            if key == SETUP_SCRIPT { "setup" } else { "archive" });
+        Ok(text)
+    }
+    pub fn setup_script(&self) -> Result<String> { self.script(SETUP_SCRIPT) }
+    pub fn archive_script(&self) -> Result<ArchiveScript> {
+        Ok(ArchiveScript { script: self.script(ARCHIVE_SCRIPT)?, timeout: timeout(self.values.get(ARCHIVE_TIMEOUT).and_then(|value| value.value.as_u64())) })
     }
 }
-/// Scripts for a project or one of its workspaces. A folder that is not a Git
-/// checkout has no repository layers, so only the project store applies; a
-/// checkout whose configuration cannot be read fails rather than run less.
-pub fn scripts(project: &Path) -> Result<Scripts> {
+/// Where a project's scripts come from. A folder that is not a Git checkout
+/// has no repository layers, so only the project store applies; a checkout
+/// whose configuration cannot be read fails rather than run less.
+enum ScriptSource { Layers(Resolution), Saved(super::projects::RepositoryScripts) }
+fn script_source(project: &Path) -> Result<ScriptSource> {
     match repository(project) {
-        Ok(repository) => Store::current()?.resolve(Some(&repository))?.scripts(),
-        Err(_) if !project.join(".terminalx").exists() && !project.join(".git").exists() => {
-            let saved = super::projects::scripts(project)?;
-            let minutes = saved.archive_timeout_minutes.filter(|m| ARCHIVE_TIMEOUT_CHOICES.contains(m)).unwrap_or(DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
-            Ok(Scripts { setup: saved.setup, archive: saved.archive, archive_timeout: Duration::from_secs(minutes * 60) })
-        }
+        Ok(repository) => Ok(ScriptSource::Layers(Store::current()?.resolve(Some(&repository))?)),
+        Err(_) if !project.join(".terminalx").exists() && !project.join(".git").exists() => Ok(ScriptSource::Saved(super::projects::scripts(project)?)),
         Err(error) => Err(error),
+    }
+}
+/// The setup script for a project or one of its workspaces.
+pub fn setup_script(project: &Path) -> Result<String> {
+    match script_source(project)? {
+        ScriptSource::Layers(resolved) => resolved.setup_script(),
+        ScriptSource::Saved(saved) => Ok(saved.setup),
+    }
+}
+/// The archive script and its timeout for a project or one of its workspaces.
+pub fn archive_script(project: &Path) -> Result<ArchiveScript> {
+    match script_source(project)? {
+        ScriptSource::Layers(resolved) => resolved.archive_script(),
+        ScriptSource::Saved(saved) => Ok(ArchiveScript { script: saved.archive, timeout: timeout(saved.archive_timeout_minutes) }),
     }
 }
 

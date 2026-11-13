@@ -1,4 +1,4 @@
-//! Local archive hooks. The script comes from `configuration::scripts`: the
+//! Local archive hooks. The script comes from `configuration::archive_script`: the
 //! Scripts page's saved value, or a repository file once it is trusted.
 //! A failed run grants a short-lived, single-use receipt, bound to its checkout
 //! and script. A force-delete flag is never consent to skip a failed hook.
@@ -121,8 +121,8 @@ impl Drop for RemovalLease {
 /// Called inside the removal fence, before the final Git/session checks.
 pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
     anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
-    let scripts = configuration::scripts(project)?;
-    let script = scripts.archive;
+    let archive = configuration::archive_script(project)?;
+    let script = archive.script;
     if script.trim().is_empty() || !path.exists() {
         // A cleared hook no longer needs consent. Release its matching old log
         // immediately rather than retaining it until expiry.
@@ -172,7 +172,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     }
     let session = sessions.iter().find(|session| canonical(Path::new(&session.cwd)) == path);
     let env = environment(&project, &path, session);
-    let failure = run(runner, &path, &script, &env, scripts.archive_timeout, started)?;
+    let failure = run(runner, &path, &script, &env, archive.timeout, started)?;
     if let Some(mut failure) = failure {
         failure.sessions_stopped = !sessions.is_empty();
         if !runner.unattended { remember(runner, project, path, identity, script, &failure); }

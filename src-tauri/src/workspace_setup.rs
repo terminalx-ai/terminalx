@@ -92,7 +92,7 @@ fn publish(manager: &SessionManager, setup: &Setup) -> Result<()> {
     Ok(())
 }
 fn script(entry: &SessionEntry) -> Result<Option<String>> {
-    let command = store::configuration::scripts(Path::new(&entry.project_path))?.setup;
+    let command = store::configuration::setup_script(Path::new(&entry.project_path))?;
     Ok((!command.trim().is_empty()).then_some(command))
 }
 fn attempt(entry: &SessionEntry, command: String) -> Setup {
@@ -104,7 +104,17 @@ fn attempt(entry: &SessionEntry, command: String) -> Setup {
 /// index entry exist. The caller logs persistence failure without failing creation.
 pub fn prepare(entry: &SessionEntry) -> Result<()> {
     if entry.worktree_name.is_none() { return Ok(()) }
-    if let Some(command) = script(entry)? { save(&attempt(entry, command))?; }
+    match script(entry) {
+        Ok(Some(command)) => save(&attempt(entry, command))?,
+        Ok(None) => {}
+        // Refused (an untrusted repository file) or unreadable: record a pending
+        // attempt anyway, so the start that follows creation reads the script
+        // again and publishes the refusal as a failed setup the person sees.
+        Err(error) => {
+            log::warn!("Workspace setup for {} cannot run: {error:#}", entry.id);
+            save(&attempt(entry, String::new()))?;
+        }
+    }
     Ok(())
 }
 

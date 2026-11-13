@@ -460,8 +460,8 @@ impl Pass<'_> {
             (status.reason, status.detail, status.fresh, status.sessions) = (Some(reason), detail, fresh, sessions);
         };
 
-        let script = match crate::store::configuration::scripts(&repository.root) {
-            Ok(scripts) => scripts.archive,
+        let script = match crate::store::configuration::archive_script(&repository.root) {
+            Ok(archive) => archive.script,
             Err(error) => return keep(self, Vec::new(), "its scripts could not be read".into(), Some(error.to_string())),
         };
         let fingerprint = if script.trim().is_empty() { None } else {

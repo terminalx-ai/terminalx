@@ -194,3 +194,30 @@ fn timeout_stops_descendants_and_exposes_a_retryable_failure() {
     start(&rig.manager, &entry.id, true).unwrap();
     rig.wait(&entry.id, Status::Succeeded);
 }
+
+#[test]
+fn an_untrusted_committed_setup_script_becomes_a_failed_setup_and_never_runs() {
+    let mut rig = Rig::new();
+    let entry = rig.entry("refused");
+    std::fs::create_dir(rig.root.join(".terminalx")).unwrap();
+    std::fs::write(rig.root.join(".terminalx/settings.json"), r#"{"setupScript":"touch untrusted"}"#).unwrap();
+    prepare(&entry).unwrap();
+    assert_eq!(read(&entry.id).unwrap().unwrap().status, Status::Pending, "recorded, so the refusal is reported");
+    start_pending(&rig.manager, &entry.id);
+    let setup = rig.wait(&entry.id, Status::Failed);
+    assert!(setup.error.as_deref().unwrap_or_default().contains("setup script that is not trusted"), "{setup:?}");
+    assert!(!Path::new(&entry.cwd).join("untrusted").exists());
+}
+
+#[test]
+fn an_untrusted_committed_archive_script_leaves_the_saved_setup_running() {
+    let mut rig = Rig::new();
+    let entry = rig.entry("independent");
+    rig.script("printf saved > marker");
+    std::fs::create_dir(rig.root.join(".terminalx")).unwrap();
+    std::fs::write(rig.root.join(".terminalx/settings.json"), r#"{"archiveScript":"touch untrusted"}"#).unwrap();
+    prepare(&entry).unwrap();
+    start(&rig.manager, &entry.id, false).unwrap();
+    rig.wait(&entry.id, Status::Succeeded);
+    assert_eq!(std::fs::read_to_string(Path::new(&entry.cwd).join("marker")).unwrap(), "saved");
+}

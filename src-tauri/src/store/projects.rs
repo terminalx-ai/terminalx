@@ -50,7 +50,7 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
-    /// This computer's scripts; repository files are resolved by `configuration::scripts`.
+    /// This computer's scripts; repository files are resolved by `configuration::setup_script` and `configuration::archive_script`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<RepositoryScripts>,
     /// Local repository choices; file-based layers are resolved separately.
@@ -59,7 +59,7 @@ pub struct Project {
 }
 
 /// The Scripts page's values saved on this computer. They are the user layer
-/// of `configuration::scripts`, which the workspace hooks read: repository
+/// of `configuration::setup_script` and `configuration::archive_script`, which the workspace hooks read: repository
 /// files and managed policy can take precedence over them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -70,7 +70,7 @@ pub struct RepositoryScripts {
     pub archive_timeout_minutes: Option<u64>,
 }
 
-/// Only this store; the hooks use `configuration::scripts` for every layer.
+/// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))

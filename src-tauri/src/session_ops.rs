@@ -1834,6 +1834,29 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_committed_setup_script_does_not_hold_up_the_saved_archive_script() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "exit 3".into(), archive_timeout_minutes: None }), ..Default::default()
+        }).unwrap();
+        let session = worktree_session(dir.path());
+        // Committed after the worktree exists, as a pull would bring it.
+        std::fs::create_dir_all(dir.path().join(".terminalx")).unwrap();
+        std::fs::write(dir.path().join(".terminalx/settings.json"), r#"{"setupScript":"touch untrusted"}"#).unwrap();
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(sink());
+        let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
+        // The saved archive script ran and failed: the person gets the Remove anyway question, not a trust error.
+        let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
+        assert_eq!(failure.code, Some(3));
+        assert!(Path::new(&session.cwd).exists());
+        terminals.kill_all();
+    }
+
+    #[test]
     fn successful_archive_finishes_before_removal_and_script_changes_invalidate_consent() {
         let _home = crate::store::temp_home();
         let dir = repo();
