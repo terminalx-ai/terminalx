@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation } from "./reviewThreads";
+import { discoverSessionPr, noteSessionPrs, reviewFileReader, githubReviewAnchor, reviewBody, githubReviewDraft, githubReviewLocation, githubThreadCode, githubThreadLines, threadCounts } from "./reviewThreads";
+import type { GitSource } from "./gitSource";
 import { reviewSnapshot as snapshot, reviewThread as thread, reviewFile } from "@/test/reviewThreads";
 
 const file = { path: thread.path, headOid: snapshot.headOid, baseOid: snapshot.baseOid, beforeLines: 100, afterLines: 100 };
@@ -43,13 +44,23 @@ describe("suggestions and chat drafts", () => {
     const body = "````markdown\n```suggestion\nexample\n```\n````\n```suggestion\nunclosed";
     expect(reviewBody(body, thread)).toEqual([{ kind: "markdown", text: body }]);
   });
-  it("includes path, side, text from every author, and stale state in a draft", () => {
+  it("includes path, lines, PR link, the code, text from every author, and stale state in a draft", () => {
     const draft = githubReviewDraft({ ...thread, isOutdated: true, comments: [...thread.comments, { ...thread.comments[0], author: null, body: "Second\nreply" }] }, snapshot.url);
     expect(draft).toContain("src/login.ts:12 (head, original) · Outdated");
-    expect(draft).toContain(snapshot.url);
+    expect(draft).toContain(`Path: src/login.ts\nLines: original line 12 (head)\nPR: ${snapshot.url}`);
+    expect(draft).toContain("Code:\n```\nconst token = legacy.token;\n```");
     expect(draft).toContain("untrusted reviewer text");
     expect(draft).toContain("@reviewer:\n> Use the session token.");
-    expect(draft).toContain("@deleted-user:\n> Second\n> reply");
+    expect(draft).toContain("@deleted-user (reply):\n> Second\n> reply");
+  });
+  it("quotes a multi-line range's code and says when GitHub's hunk lacks it", () => {
+    const range = { ...thread, startLine: 41, originalStartLine: 11 };
+    expect(githubThreadCode(range)).toBe("new\nconst token = legacy.token;");
+    expect(githubThreadLines(range)).toBe("lines 41–42");
+    expect(githubReviewDraft({ ...thread, originalLine: 300 }, snapshot.url)).toContain("Code: unavailable in GitHub's recorded hunk.");
+  });
+  it("counts open and resolved threads", () => {
+    expect(threadCounts([thread, { ...thread, id: "r", isResolved: true }, { ...thread, id: "o" }])).toEqual({ open: 2, resolved: 1 });
   });
 });
 
@@ -110,4 +121,33 @@ it("does not let an old snapshot's failed request discard a newer file cache", a
   await oldError;
   expect(await read(reviewFile.path, snapshot)).toEqual(reviewFile);
   expect(load).toHaveBeenCalledTimes(2);
+});
+
+describe("the session's PR for the Changes view", () => {
+  const source = (key: string, prs: { url: string; number: number; state: "OPEN" | "CLOSED" | "MERGED" }[]) => ({
+    key, reviewThreads: vi.fn(),
+    workStatus: vi.fn(async () => ({ branch: "feature", defaultBranch: "main" })),
+    prs: vi.fn(async () => prs),
+    prAssociations: vi.fn(async () => ({ associations: [], discoveryOnly: true })),
+    errorMessage: String,
+  }) as unknown as GitSource;
+
+  it("finds the branch's open PR once for every surface that asks at the same time", async () => {
+    const git = source("local:/discover", [{ url: "https://github.com/o/r/pull/3", number: 3, state: "CLOSED" }, { url: "https://github.com/o/r/pull/14", number: 14, state: "OPEN" }]);
+    const [a, b] = await Promise.all([discoverSessionPr(git, "s"), discoverSessionPr(git, "s")]);
+    expect(a).toEqual({ url: "https://github.com/o/r/pull/14", number: 14, state: "OPEN" });
+    expect(b).toBe(a);
+    expect(await discoverSessionPr(git, "s")).toBe(a);
+    expect(git.prs).toHaveBeenCalledTimes(1);
+    expect(git.prs).toHaveBeenCalledWith("feature");
+    await discoverSessionPr(git, "s", true);
+    expect(git.prs).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses what the PR panel already read instead of asking GitHub again", async () => {
+    const git = source("local:/noted", []);
+    noteSessionPrs(git, "s", [{ url: "https://github.com/o/r/pull/9", number: 9, state: "OPEN" }]);
+    expect(await discoverSessionPr(git, "s")).toEqual({ url: "https://github.com/o/r/pull/9", number: 9, state: "OPEN" });
+    expect(git.prs).not.toHaveBeenCalled();
+  });
 });
