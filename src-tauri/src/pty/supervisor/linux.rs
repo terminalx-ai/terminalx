@@ -121,6 +121,25 @@ pub(super) fn signal_children(signal: i32) -> io::Result<()> {
     failure.map_or(Ok(()), Err)
 }
 
+/// TERM each child not yet sent one, as a single `kill` would: a program
+/// shutting down on its first TERM is not interrupted by more while it does
+/// (a shell would run its trap again). A child seen later, such as an orphan
+/// reparented here once its parent exits, gets its own. `sent` keeps only
+/// children still held, so a reaped child's pid, reused, is asked again.
+fn terminate_children_once(sent: &mut Vec<libc::pid_t>) -> io::Result<()> {
+    let children = candidates()?;
+    sent.retain(|pid| children.contains(pid));
+    let mut failure = None;
+    for pid in children {
+        if sent.contains(&pid) { continue; }
+        match signal_child(pid, libc::SIGTERM) {
+            Ok(()) => sent.push(pid),
+            Err(error) => { failure.get_or_insert(error); }
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
 /// Call in the freshly exec'd, dedicated, single-thread helper before any
 /// owned fork. Unsupported kernel/seccomp/proc configurations fail pre-launch.
 /// What preflight found missing: the facility, and how it failed.
@@ -431,7 +450,19 @@ fn observe_exec_eof(pid: libc::pid_t) -> io::Result<ExecObservation> {
     Ok(if flags & PF_EXITING != 0 { ExecObservation::Exiting } else { ExecObservation::Ready })
 }
 
-struct Stop { claim: u64, started: i64, reported: bool }
+/// The Stop under way: TERM once to each child until `kill_at`, then KILL.
+/// Its claim is reported unconfirmed [`UNCONFIRMED_AFTER_KILL`] after that.
+struct Stop { claim: u64, kill_at: i64, reported: bool, terminated: Vec<libc::pid_t> }
+
+impl Stop {
+    fn new(claim: u64, now: i64, grace: u32, reported: bool) -> Self {
+        Self { claim, kill_at: now + i64::from(grace), reported, terminated: Vec::new() }
+    }
+}
+
+/// How long after its KILL a Stop's launch may take to be seen empty before
+/// the claim is reported unconfirmed: two seconds from a default Stop.
+const UNCONFIRMED_AFTER_KILL: i64 = 2000 - protocol::STOP_GRACE as i64;
 
 /// Invoked before application/thread initialization. The fixed descriptors are
 /// created by the exact parent launch; there is no listener or discoverable RPC.
@@ -580,7 +611,7 @@ pub(super) fn run(launch: Uuid) -> i32 {
             if matches!(children, Ok(Children::Empty)) && !current.reported {
                 replies.push_back(Response::Extinct { claim: current.claim });
                 current.reported = true;
-            } else if !current.reported && now - current.started >= 2000 {
+            } else if !current.reported && now - current.kill_at >= UNCONFIRMED_AFTER_KILL {
                 replies.push_back(Response::Unconfirmed { claim: current.claim });
                 current.reported = true;
             }
@@ -588,12 +619,12 @@ pub(super) fn run(launch: Uuid) -> i32 {
             #[cfg(test)]
             let signal = signal && !(std::env::var("TX467_SUPERVISOR_FAULT").as_deref() == Ok("timeout-late-exec") && exec_pipe.is_some());
             if signal {
-                let _ = signal_children(if now - current.started >= 400 { libc::SIGKILL } else { libc::SIGTERM });
+                let _ = if now >= current.kill_at { signal_children(libc::SIGKILL) } else { terminate_children_once(&mut current.terminated) };
             }
         } else if admission_closed {
             // Local bootstrap failure also closes admission, but cannot produce
             // a positive response without a parent's explicit current claim.
-            stop = Some(Stop { claim: 0, started: now, reported: true });
+            stop = Some(Stop::new(0, now, protocol::STOP_GRACE, true));
         }
 
         if channel.is_none() {
@@ -654,7 +685,12 @@ pub(super) fn run(launch: Uuid) -> i32 {
                             }
                         }
                     }
-                    Request::Stop { claim } if claim > 0 && stop.as_ref().is_none_or(|old| claim > old.claim) => {
+                    // The current claim again: its caller forcing the stop.
+                    Request::Stop { claim, grace } if stop.as_ref().is_some_and(|current| current.claim == claim && claim > 0) => {
+                        let current = stop.as_mut().unwrap();
+                        current.kill_at = current.kill_at.min(now + i64::from(grace));
+                    }
+                    Request::Stop { claim, grace } if claim > 0 && stop.as_ref().is_none_or(|old| claim > old.claim) => {
                         if !bootstrap_finished {
                             bootstrap_finished = true;
                             replies.push_back(Response::Failed { stage: "launch cancelled".into(), errno: libc::ECANCELED });
@@ -662,7 +698,7 @@ pub(super) fn run(launch: Uuid) -> i32 {
                         admission_closed = true;
                         slave.take();
                         config.clear();
-                        stop = Some(Stop { claim, started: now, reported: false });
+                        stop = Some(Stop::new(claim, now, grace, false));
                     }
                     Request::Release { claim } if stop.as_ref().is_some_and(|current| current.claim == claim && claim > 0 && current.reported)
                         && admission_closed && matches!(children, Ok(Children::Empty)) => return 0,
@@ -673,7 +709,7 @@ pub(super) fn run(launch: Uuid) -> i32 {
                 channel.take(); replies.clear(); slave.take(); config.clear();
                 bootstrap_finished = true; // Release temporary original-child hold on loss.
                 admission_closed = true;
-                if stop.is_none() { stop = Some(Stop { claim: 0, started: now, reported: true }); }
+                if stop.is_none() { stop = Some(Stop::new(0, now, protocol::STOP_GRACE, true)); }
             }
         }
         let mut poll = [

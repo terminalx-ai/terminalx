@@ -22,9 +22,17 @@ pub(super) struct Envelope<T> { pub version: u8, pub launch: Uuid, pub body: T }
 pub(super) enum Request {
     Config { offset: usize, bytes: Vec<u8> },
     Launch { length: usize },
-    Stop { claim: u64 },
+    /// TERM each of the launch's processes once, then KILL `grace`
+    /// milliseconds after this Stop arrived. The same claim again, with a
+    /// shorter grace, brings that KILL forward: the caller forcing its stop.
+    Stop { claim: u64, #[serde(default = "stop_grace")] grace: u32 },
     Release { claim: u64 },
 }
+
+/// A Stop's grace when its caller names none, and the supervisor's own
+/// when it stops a launch by itself (its channel lost).
+pub(super) const STOP_GRACE: u32 = 400;
+fn stop_grace() -> u32 { STOP_GRACE }
 #[derive(Debug, Serialize, Deserialize)]
 // snake_case, as `Request`: the helper's private wire format.
 #[serde(tag = "op", rename_all_fields = "snake_case", deny_unknown_fields)]
