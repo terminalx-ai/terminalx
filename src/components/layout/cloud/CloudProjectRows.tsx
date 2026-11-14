@@ -1,3 +1,5 @@
+import { CloudWorkspaceAttention } from "@/components/cloud/CloudWorkspaceAttention";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { StatusGroups } from "../StatusGroups";
@@ -192,7 +194,8 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const removable = !project.workspaces.length && (added || pendingBlank);
   // One workspace has no row of its own: its state, extra repositories and access show on the project's row.
   const onlyAgentRan = useCloudAgentRan(only?.item ?? null);
-  const onlyState = only ? deriveCloudActivity(only.item, { agentRan: onlyAgentRan }) : null;
+  const onlyConnection = useCloudConnection(only?.key ?? "");
+  const onlyState = only ? deriveCloudActivity(only.item, { agentRan: onlyAgentRan, connection: onlyConnection.state }) : null;
   const extra = only ? extraRepositories(only.item) : null;
 
   return (
@@ -313,6 +316,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
           </DropdownMenu>
         </RowActions>
       </div>
+      {only && <CloudWorkspaceAttention item={only.item} input={{ agentRan: onlyAgentRan, connection: onlyConnection.state }} compact />}
       {error && <p className="ml-8 text-[10px] text-destructive">{error}</p>}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: project.orgId, workspaceId: only?.item.workspace.id ?? null }} onClose={() => setDiagnostics(false)} />}
       {pipelineOpen && <CloudIssuePipelineSettingsDialog project={project} open onOpenChange={setPipelineOpen} />}
@@ -384,7 +388,8 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
 export function workspaceOpenable(item: CloudWorkspaceListItem, tone?: RowTone): boolean {
   const { state } = item.workspace;
   const judged = tone ?? deriveCloudActivity(item, { agentRan: cloudAgentRan(item) }).tone;
-  return (state === "ready" || state === "suspended") && judged !== "changing" && judged !== "attention";
+  const recovered = state === "attention-required" && !resolveCloudAttention(item);
+  return (state === "ready" || state === "suspended" || recovered) && judged !== "changing" && judged !== "attention";
 }
 
 /** "Open workspace" in a menu: the workspace's view, the one way to its terminals, files, Git and ports. */
@@ -486,6 +491,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
           </DropdownMenu>
         </RowActions>
       </div>
+      <CloudWorkspaceAttention item={node.item} input={{ tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state }} compact />
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
       {deletionLine(node.item) && (
         <p className={cn("ml-6 text-[10px]", deletion(node.item) === "failed" ? "whitespace-normal break-words text-destructive" : "text-faint")} data-testid="cloud-workspace-row-deletion">
