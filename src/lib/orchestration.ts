@@ -376,6 +376,7 @@ export function pieceCheck(piece: Pick<RunPiece, "tries">): RunVerification | un
 export function verifyingText(piece: Pick<RunPiece, "tries">): string {
   const review = pieceCheck(piece)?.review;
   if (!review) return "Running its checks";
+  if (review.verifiers.some((verifier) => verifier.waiting && !verifier.verdict && !verifier.problem)) return "Verifier needs you: open its conversation";
   if (review.voters === 1) return "Waiting on the verifier";
   const answered = review.verifiers.filter((verifier) => verifier.verdict || verifier.problem).length;
   return `Waiting on verifiers, ${answered} of ${review.voters} answered`;

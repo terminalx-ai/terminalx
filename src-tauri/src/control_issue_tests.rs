@@ -342,6 +342,30 @@ fn worker_limit_child() {
     assert_eq!(started["started"], json!(["one"]));
     assert_eq!(started["waiting"], json!([{"piece": "two", "on": [], "queuedFor": "runLimit"}]));
 
+    // Capacity queues are automatic: the lead cannot act on them with runs start.
+    let run_id = created["run"]["id"].as_str().unwrap();
+    for workers in [1, 2] {
+        crate::orchestration::store::update(run_id, |run| {
+            run.limits.workers = workers;
+            run.pieces[1].queued_for = Some(if workers == 1 { crate::orchestration::Hold::RunLimit } else { crate::orchestration::Hold::AppLimit });
+            Ok(())
+        }).unwrap();
+        assert_eq!(service.execute("runs.show", json!({"caller": caller}), "show-capacity").unwrap()["ready"], json!([]));
+        for mode in [None, Some("any"), Some("all")] {
+            let began = Instant::now();
+            let waited = service.execute("wait", json!({"childrenOf": lead["sessionId"], "mode": mode, "timeoutSeconds": 1}), "wait-capacity").unwrap();
+            assert_eq!(waited["timedOut"], true, "{waited}");
+            assert!(began.elapsed() >= Duration::from_secs(1));
+            assert_eq!(waited["ready"], json!([]));
+            assert_eq!(waited["why"], json!([]));
+        }
+    }
+    crate::orchestration::store::update(run_id, |run| {
+        run.limits.workers = 1;
+        run.pieces[1].queued_for = Some(crate::orchestration::Hold::RunLimit);
+        Ok(())
+    }).unwrap();
+
     // The limits are reached; a person starts a session by hand, and it starts.
     let by_hand = service.execute("sessions.create", json!({"project": project.path, "agent": "claude", "prompt": "something else", "useWorktree": true, "noPipeline": true}), "by-hand").unwrap();
     let entry = index::get(by_hand["sessionId"].as_str().unwrap()).unwrap();

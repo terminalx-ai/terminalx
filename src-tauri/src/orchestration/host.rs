@@ -276,7 +276,8 @@ impl Host for ManagerHost {
         let view = self.manager.wait_view(&session.id, tab);
         match crate::control::open_turn(&view) {
             Some(worker_report::OpenTurn::Working) => return VerifierNow::Working,
-            Some(worker_report::OpenTurn::Waiting) => return VerifierNow::Stuck("It stopped on a permission request, a question or an error, and gave no verdict.".into()),
+            Some(worker_report::OpenTurn::Waiting) if view.recovery.is_some() && !view.asks => return VerifierNow::Stuck("It stopped on an error and gave no verdict.".into()),
+            Some(worker_report::OpenTurn::Waiting) => return VerifierNow::Waiting("It needs an answer to a permission request or question. Open its conversation to continue the review.".into()),
             None => {}
         }
         let events = match self.manager.load_events(&session.id, tab) {
