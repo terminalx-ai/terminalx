@@ -867,12 +867,28 @@ A piece with a passing `command` check, a small diff, no security area and a kin
 command that really proves it, and keep pieces small: that is what keeps checking free.
 
 A verifier is a conversation of its own in the worker's worktree that cannot edit files and
-runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else, and every
-tool of a connected server, is refused. It
+runs only vetted commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`, `head`, and
+`sed -n '41,60p' file`). `sed` accepts only a positive numeric line or range followed by `p`,
+with `-n`; general scripts and other options are refused. Pipelines and semicolon lists work
+only when every stage is vetted; redirects, substitutions and writes are refused with a
+reason and a supported alternative. TerminalX runs the vetted programs directly, without a
+shell, only when read-only commands are enabled and provider sandbox settings cannot narrow
+their reads. Otherwise use the provider's native `Read`, `Grep`, or `Glob` tools on permitted
+files, or the supplied diff. Those file tools retain provider permissions: allowing one
+outside-worktree Read does not authorize other calls. A hook response distinguishes a policy
+refusal (nothing ran), a provider permission denial, and an executed command's exit status
+(search status 1 can mean no matches). The app's failed-tool row may show a generic recovery
+message; the model receives the hook's reason or execution report. Every tool of a connected
+server is refused. It
 is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
 the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
 medium, unless the person changed it), not on the worker's model, and ends with a verdict:
 pass, or fail with `file:line` evidence.
+
+A verifier waiting for a permission decision or question remains in verification. The run
+shows that the verifier needs you and links to its conversation. Answer there; the same
+verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
+invalid final reply still leaves the review inconclusive.
 
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not

@@ -257,3 +257,36 @@ fn a_lead_with_no_workers_returns_at_once_and_a_bad_lead_is_refused() {
     let refused = fixture.service.execute("wait", json!({"childrenOf": "no-such-session", "timeoutSeconds": 1}), "w").unwrap_err();
     assert_eq!(refused.code, "not_found");
 }
+
+#[test]
+fn verifier_host_distinguishes_resumable_requests_from_final_replies_and_deletion() {
+    use crate::orchestration::{engine::{Host, VerifierNow}, host::ManagerHost, SessionRef};
+    let fixture = Fixture::new(1);
+    let (session, tab) = &fixture.sessions[0];
+    let host = ManagerHost::new(fixture.service.sink.clone(), fixture.service.manager.clone());
+    let verifier = SessionRef { session_id: session.clone(), tab_id: Some(tab.clone()) };
+    assert_eq!(host.verifier(&verifier), VerifierNow::Working);
+    for asks in [true, false] {
+        fixture.set(0, TabStatus::Waiting, asks);
+        assert!(matches!(host.verifier(&verifier), VerifierNow::Waiting(_)));
+    }
+    fixture.set(0, TabStatus::InProgress, false);
+    assert_eq!(host.verifier(&verifier), VerifierNow::Working);
+    let reply = "```terminalx-verdict\n{\"verdict\":\"pass\",\"evidence\":[]}\n```";
+    let log = crate::store::log_path(session, tab).unwrap();
+    for (seq, payload) in [(1, json!({"type": "user_message", "text": "review"})), (2, json!({"type": "turn_started"})), (3, json!({"type": "assistant_text", "text": reply})), (4, json!({"type": "turn_completed", "status": "ok", "finalText": reply}))] {
+        let event = json!({"id": format!("v{seq}"), "sessionId": session, "tabId": tab, "harness": "codex", "seq": seq, "ts": index::now(), "payload": payload});
+        crate::store::append_line(&log, &event.to_string()).unwrap();
+    }
+    fixture.service.manager.load_events(session, tab).unwrap();
+    fixture.set(0, TabStatus::Completed, false);
+    assert_eq!(host.verifier(&verifier), VerifierNow::Replied(reply.into()));
+    for (seq, payload) in [(5, json!({"type": "user_message", "text": "continue"})), (6, json!({"type": "turn_started"})), (7, json!({"type": "recovery", "kind": "failed"}))] {
+        let event = json!({"id": format!("v{seq}"), "sessionId": session, "tabId": tab, "harness": "codex", "seq": seq, "ts": index::now(), "payload": payload});
+        crate::store::append_line(&log, &event.to_string()).unwrap();
+    }
+    fixture.set(0, TabStatus::Idle, false);
+    fixture.service.manager.load_events(session, tab).unwrap();
+    assert!(matches!(host.verifier(&verifier), VerifierNow::Stuck(_)), "an agent error remains a terminal problem");
+    assert_eq!(host.verifier(&SessionRef { session_id: session.clone(), tab_id: Some("deleted".into()) }), VerifierNow::Gone);
+}
