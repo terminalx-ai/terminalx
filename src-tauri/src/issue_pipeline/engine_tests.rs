@@ -4054,6 +4054,8 @@ fn restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits() 
     // The restarted resolver's result still receives an independent review
     // when the original attempt had exhausted the automatic round budget.
     run.host.commit(C2);
+    run.host.world().workspace.dirty.clear();
+    run.host.world().workspace.merging.clear();
     let fresh = run.pipeline().resolver.unwrap();
     turn_completed(&run.host, &fresh.session_id, &fresh.tab_id, Some(&done("Resolved the merge.")));
     let reviewing = run.pipeline();
@@ -4184,16 +4186,38 @@ fn an_unconfirmed_resolver_exit_keeps_its_reservation_and_identity() {
 
 
 #[test]
-fn a_closed_resolver_can_restart_its_pinned_unfinished_merge_after_releasing_admission() {
+fn a_closed_resolver_restarts_its_pinned_merge_without_discarding_manual_edits() {
     let run = Run::start(&github_issue(), false);
     let before = resolving(&run);
     run.host.world().sessions.remove("resolver");
     let closed = run.poll();
     assert!(closed.resolution.is_none());
     assert_eq!(closed.interrupted_resolution, before.resolution);
+    run.host.world().workspace.dirty.push("manual-resolution.rs".into());
+    let dirty = run.host.world().workspace.dirty.clone();
     let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
     assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
     assert!(restarted.resolution.is_some() && restarted.interrupted_resolution.is_none());
     assert_ne!(restarted.resolver, before.resolver);
-    assert_eq!(run.host.aborts(), [(C1.to_string(), BASE.to_string())]);
+    let fresh = restarted.resolver.unwrap();
+    assert!(run.host.prompts_to(&fresh.session_id)[0].contains("Continue the existing merge"));
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+    turn_completed(&run.host, &fresh.session_id, &fresh.tab_id, Some(&resolver_blocked("Needs manual inspection")));
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+}
+
+#[test]
+fn restart_without_resolver_identity_retains_the_reservation() {
+    let run = Run::start(&github_issue(), false);
+    let mut before = resolving(&run);
+    before.resolver = None;
+    store::commit(&mut before).unwrap();
+    let after = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(after.resolution, before.resolution);
+    assert_eq!(after.state, State::NeedsYou);
+    assert!(after.note.as_deref().is_some_and(|note| note.contains("identity is missing")));
+    assert_eq!(run.host.world().resolvers, 1);
+    assert!(run.host.aborts().is_empty());
 }

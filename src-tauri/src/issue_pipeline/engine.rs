@@ -1016,21 +1016,33 @@ impl Step<'_> {
         };
         if let Some(detail) = self.host.resolver_failure(&resolver)? { bail!("{detail} Restart the resolver after signing in or fixing its recovery."); }
         if resolver == self.p.author || self.p.reviewer.as_ref() == Some(&resolver) { bail!("The conflict resolver must be independent of the author and reviewer"); }
+        let continuing;
         {
             let _admission = super::admission::lock();
             if !self.host.workspace_idle(&self.p, &self.cwd)? || self.halted() || (!restart && !store::get(&self.p.id)?.resolve_conflicts) { return Ok(false); }
-            let Some(current) = self.clean_workspace()? else { return Ok(true) };
+            // A fresh resolver can continue the exact pinned merge without
+            // aborting it or discarding edits made after recovery released it.
+            let workspace = self.host.workspace(&self.cwd)?;
+            continuing = restart && workspace.branch.as_deref() == Some(self.p.branch.as_str())
+                && same_commit(&workspace.head, &resolution.head)
+                && matches!(workspace.merging.as_slice(), [base] if same_commit(base, &resolution.base_commit));
+            let current = if continuing { workspace } else {
+                let Some(current) = self.clean_workspace()? else { return Ok(true) };
+                current
+            };
             if !same_commit(&current.head, &resolution.head) { return Ok(false); }
             resolution.return_stage = if self.p.stage == Stage::Resolve { Stage::Work } else { self.p.stage };
             self.p.resolver = Some(resolver.clone());
             self.p.interrupted_resolution = None;
+            self.p.preserve_resolution_edits = continuing;
             self.p.resolution = Some(resolution.clone());
             if !restart { self.p.resolutions += 1; }
             self.enter(Stage::Resolve, format!("Resolving conflicts with {base}."));
             self.save()?;
         }
         self.doing = "Starting the conflict resolver";
-        if let Err(error) = self.host.send(&resolver, &prompts::resolve(&resolution)) {
+        let prompt = if continuing { prompts::continue_resolution(&resolution) } else { prompts::resolve(&resolution) };
+        if let Err(error) = self.host.send(&resolver, &prompt) {
             self.p.resolution = None;
             self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
             self.save()?;
@@ -1063,6 +1075,9 @@ impl Step<'_> {
     }
 
     fn restart_resolution(&mut self) -> Result<()> {
+        if self.p.resolution.is_some() && self.p.resolver.is_none() {
+            bail!("The checkout remains reserved because the old resolver identity is missing and its process exit cannot be confirmed.");
+        }
         if let Some(old) = self.p.resolver.clone() {
             self.host.close_resolver(&old)?;
             self.p.releasing.retain(|who| who != &old);
@@ -1075,7 +1090,20 @@ impl Step<'_> {
         self.p.resolver = None;
         self.needs_you(StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: "Restarting the conflict resolver. Inspect any unfinished merge before continuing.".into() });
         self.save()?;
-        if let Some(resolution) = previous { self.unfinished_merge(&resolution, true); }
+        if let Some(resolution) = previous {
+            let workspace = self.host.workspace(&self.cwd)?;
+            if !workspace.merging.is_empty() {
+                if workspace.branch.as_deref() != Some(self.p.branch.as_str())
+                    || !same_commit(&workspace.head, &resolution.head)
+                    || !matches!(workspace.merging.as_slice(), [base] if same_commit(base, &resolution.base_commit)) {
+                    bail!("The unfinished merge no longer matches the interrupted resolution. Inspect it before restarting; its changes have been preserved.");
+                }
+                if !self.start_resolution_with(resolution, true)? {
+                    bail!("The checkout is in use; restart once it is quiet.");
+                }
+                return Ok(());
+            }
+        }
         self.record("resolutionRestarted", "Restart requested; the next resolver uses a fresh conversation and current sign-in.");
         if self.p.pr.is_some() { self.leave_resolution_with(true) } else {
             let Some(workspace) = self.clean_workspace()? else { return Ok(()) };
@@ -1252,7 +1280,7 @@ impl Step<'_> {
             return;
         }
         let (_, stopped) = self.switches();
-        if !abort || stopped {
+        if !abort || stopped || self.p.preserve_resolution_edits {
             self.record("mergeLeft", format!("The conflict resolver's merge of {base} is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel."));
             return;
         }
@@ -2076,6 +2104,7 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         resolver: None,
         resolution: None,
         interrupted_resolution: None,
+            preserve_resolution_edits: false,
         cloud,
         issue_body,
         stopped: false,
