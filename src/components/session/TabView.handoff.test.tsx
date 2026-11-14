@@ -77,7 +77,10 @@ it.each([undefined, "experimentalCodexStdio"] as const)("hands off a %s source a
 });
 
 it("hides both actions when the other agent is not installed", async () => {
-  mocks.invoke.mockImplementation(async (command: string) => command === "list_harnesses" ? [{ id: "codex", name: "Codex", available: true }] : []);
+  // Lists are empty; anything else answers as the backend does with nothing,
+  // so a turn's checkpoint, read after the turn ends, is null rather than [].
+  mocks.invoke.mockImplementation(async (command: string) => command === "list_harnesses" ? [{ id: "codex", name: "Codex", available: true }]
+    : ["load_tab_events", "list_workspaces", "list_models"].includes(command) ? [] : null);
   await refreshHarnesses();
   render(<Harness />);
   emit({ type: "user_message", queued: false, text: "Prompt" });
