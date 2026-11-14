@@ -482,8 +482,13 @@ fn startup_launched_terminalx_runs_approved_commands_without_a_shell() {
         ("pwd; cat file | grep hello", 0, format!("{}\nhello\n", root.display())),
         ("git status --short", 0, "?? file\n".to_string()),
     ];
-    if which::which("rg").is_ok() {
+    if crate::binpath::find("rg").is_some() {
         commands.push(("rg hello file", 0, "hello\n".into()));
+    } else {
+        assert!(
+            approved_in("Bash", &serde_json::json!({"command":"rg hello file"}), root.to_str(), &execution).is_none(),
+            "ripgrep outside the trusted directories must require approval"
+        );
     }
     for (command, status, expected) in commands {
         let ran = approved(command).run();
@@ -617,7 +622,8 @@ fn approved_commands_keep_pipes_conditionals_statuses_and_literal_arguments() {
         ("cat missing-file", 1, "missing-file"),
         ("rg '$(literal)' \"a'b;file\" || pwd -P", 0, "/"),
     ] {
-        if command.starts_with("rg") && which::which("rg").is_err() {
+        if command.starts_with("rg") && crate::binpath::find("rg").is_none() {
+            assert!(repo.approved(command).is_none(), "an unavailable trusted binary must not authorize even part of {command}");
             continue;
         }
         let ran = repo.approved(command).unwrap().run();

@@ -783,7 +783,15 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
             ("ls; cat file", "file\nhello\n".into()),
             ("cat file | grep -n hello", "1:hello\n".into()),
         ];
-        if which::which("rg").is_ok() { commands.push(("pwd; rg --files", format!("{app_path}\nfile\n"))); }
+        if crate::binpath::find("rg").is_some() {
+            commands.push(("pwd; rg --files", format!("{app_path}\nfile\n")));
+        } else {
+            // An ambient PATH hit (for example Codex's bundled rg) is not
+            // trusted by PRO-330. It must ask instead of blocking this test
+            // forever in a hook whose permission card nobody will answer.
+            answer_command(&rig, command_frame(&rig, gate, "pwd; rg --files", app_path), "deny", true);
+            assert!(rig.manager.pending_permissions().is_empty());
+        }
         for (command, expected) in commands {
             let reply = rig.manager.on_hook(command_frame(&rig, gate, command, app_path));
             // TerminalX ran it and answers with its result: the provider
