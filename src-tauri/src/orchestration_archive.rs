@@ -431,6 +431,9 @@ if scanner.findings:
     let mut command = std::process::Command::new(
         crate::binpath::resolve("python3").unwrap_or_else(|| "python3".into()),
     );
+    // Finder's PATH may locate Python but omit tools its credential loader
+    // invokes, such as Homebrew's gh. Use the same login PATH as other children.
+    command.env("PATH", crate::binpath::login_path());
     command.args(["-I", "-c", script]).arg(temp.path());
     let output =
         git::output_within(command, std::time::Duration::from_secs(120)).map_err(|error| {
@@ -583,6 +586,28 @@ mod tests {
         assert!(!error.contains(&secret), "credential leaked in scanner diagnostic");
         assert!(f.backup().is_none());
         f.assert_no_probe_refs();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_path_still_scans_and_preserves_unpublished_commits() {
+        // A fresh process also gives binpath fresh caches, as at GUI launch.
+        // Exercise the real scanner, credential loader and bare-remote push.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "orchestration_archive::tests::unpublished_head_is_scanned_backed_up_and_idempotent",
+                "--nocapture",
+            ])
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
