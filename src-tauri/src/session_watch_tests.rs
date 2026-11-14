@@ -783,14 +783,9 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
             ("ls; cat file", "file\nhello\n".into()),
             ("cat file | grep -n hello", "1:hello\n".into()),
         ];
-        if crate::binpath::find("rg").is_some() {
+        let has_trusted_rg = crate::binpath::find("rg").is_some();
+        if has_trusted_rg {
             commands.push(("pwd; rg --files", format!("{app_path}\nfile\n")));
-        } else {
-            // An ambient PATH hit (for example Codex's bundled rg) is not
-            // trusted by PRO-330. It must ask instead of blocking this test
-            // forever in a hook whose permission card nobody will answer.
-            answer_command(&rig, command_frame(&rig, gate, "pwd; rg --files", app_path), "deny", true);
-            assert!(rig.manager.pending_permissions().is_empty());
         }
         for (command, expected) in commands {
             let reply = rig.manager.on_hook(command_frame(&rig, gate, command, app_path));
@@ -799,6 +794,13 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
             assert_eq!(ran_by_terminalx(&reply, kind), Some((0, expected)), "{command}");
             assert!(rig.manager.pending_permissions().is_empty());
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
+        }
+        if !has_trusted_rg {
+            // Exercise denial after the no-card loop: answered requests stay
+            // in the persisted event log. An ambient PATH hit (for example
+            // Codex's bundled rg) is not trusted by PRO-330 and must ask.
+            answer_command(&rig, command_frame(&rig, gate, "pwd; rg --files", app_path), "deny", true);
+            assert!(rig.manager.pending_permissions().is_empty());
         }
         for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
             answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
