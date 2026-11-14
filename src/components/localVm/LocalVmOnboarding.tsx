@@ -24,6 +24,7 @@ export function LocalVmOnboarding({ enabled, environments, creation }: { enabled
   const lock = useRef(false);
   const canCreate = creation?.protocol === 1 && creation.profileId === "macos-local-v1" &&
     creation.available === true && creation.firstAccountPersonalization === true && creation.accountBoundTransport === true;
+  const canEnroll = creation?.existingVmEnrollment === true;
   const acknowledged = pending?.kind === "create" && environments.some((environment) => {
     // Deletion after successful creation does not erase its durable request receipt.
     const report = boundSetupReport(environment, true);
@@ -37,7 +38,7 @@ export function LocalVmOnboarding({ enabled, environments, creation }: { enabled
   }, [acknowledged]);
 
   async function submit() {
-    if (lock.current || !enabled || !consent || saved.error || create && !canCreate) return;
+    if (lock.current || !enabled || !consent || saved.error || create && !canCreate || !create && !canEnroll) return;
     const vmName = sandbox.trim();
     if (!name.trim() || !(create ? /^[a-z\d_-]{1,80}$/i : /^local:[a-z\d_-]{1,80}$/i).test(vmName)) { setError("Provide a name and a valid local VM reference."); return; }
     lock.current = true; setBusy(true); setError(null);
@@ -64,10 +65,12 @@ export function LocalVmOnboarding({ enabled, environments, creation }: { enabled
   }
 
   const modeDisabled = busy || !enabled || !!pending || !!saved.error;
-  const fieldsDisabled = modeDisabled || create && !canCreate;
+  const unavailable = create ? !canCreate : !canEnroll;
+  const fieldsDisabled = modeDisabled || unavailable;
   return <form aria-label={create ? "Create and set up local VM" : "Enroll existing local VM"} className="space-y-3 rounded-lg border border-border p-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <div><h3 className="text-sm font-medium">{create ? "Create and set up your guest Mac" : "Use an existing guest Mac"}</h3><p className="text-muted-foreground">{create ? canCreate ? "One confirmed setup creates the VM, installs its verified runtime and tools, and guides you through any remaining guest steps." : "New VM creation is unavailable with the current tool profile. No VM or download is started here." : "Enroll an existing compatible guest whose Cua connection already works, then check its runtime and desktop in the setup card. Enrollment does not create or secure a guest account, reset its password, or prove readiness."}</p></div>
-    {create && !canCreate ? <p role="status" className="text-warning">Secure guest account setup is unavailable. This profile cannot personalize the first account and bind its guest connection to that account. You can use an existing compatible VM below; fresh guided onboarding remains unavailable.</p> : null}
+    {create && !canCreate ? <p role="status" className="text-warning">Secure guest account setup is unavailable. This profile cannot personalize the first account and bind its guest connection to that account, so fresh guided onboarding is unavailable.</p> : null}
+    {!create && !canEnroll ? <p role="status" className="text-warning">Using an existing Cua VM is unavailable for now. Every stock Cua VM shares a lume account with a published default password, so a provider sign-in kept there could be read by anything that reaches the VM over its network. It returns once TerminalX can set up a personal guest account.</p> : null}
     <label className="flex items-center gap-2"><input type="checkbox" checked={!create} disabled={modeDisabled} onChange={(event) => { setCreate(!event.target.checked); setConsent(false); setSandbox(""); }} />Use an existing VM instead</label>
     {create ? <section aria-label="Local VM creation profile" className="space-y-2 rounded-md bg-well p-3 leading-relaxed">
       <p className="font-medium">{canCreate ? "Review downloads and resources" : "Candidate profile · creation unavailable"}</p>
@@ -77,8 +80,8 @@ export function LocalVmOnboarding({ enabled, environments, creation }: { enabled
     <label className="block space-y-1"><span>Environment name</span><input className={localVmFieldClass} value={name} disabled={fieldsDisabled} onChange={(event) => { setName(event.target.value); setConsent(false); }} maxLength={120} required placeholder="My guest Mac" /></label>
     <label className="block space-y-1"><span>{create ? "New local VM name" : "Existing Cua VM reference"}</span><input className={localVmFieldClass} value={sandbox} disabled={fieldsDisabled} onChange={(event) => { setSandbox(event.target.value); setConsent(false); }} required placeholder={create ? "my-macos-vm" : "local:my-macos-vm"} /></label>
     {create ? <label className="block space-y-1"><span>Guest AI provider</span><select className={localVmFieldClass} value={harness} disabled={fieldsDisabled} onChange={(event) => { if (event.target.value === "codex") { setHarness(event.target.value); setConsent(false); } }}><option value="codex">Codex</option><option value="claude" disabled>Claude (guided setup not yet supported)</option></select></label> : null}
-    <label className="flex items-start gap-2 leading-relaxed"><input type="checkbox" checked={consent} disabled={busy || !enabled || !!saved.error || create && !canCreate} onChange={(event) => setConsent(event.target.checked)} /><span>{create ? "I confirm creation and setup with the pinned image, downloads, tools, resources and storage shown above. I will complete any guest sign-in or macOS approvals myself." : "I have already created this guest VM and want to enroll its shared account and desktop for selected tasks."}</span></label>
-    <Button type="submit" size="sm" disabled={busy || !enabled || !consent || !name.trim() || !sandbox.trim() || !!saved.error || create && !canCreate}>{busy ? "Request in progress…" : pending ? "Retry same VM setup request" : create ? "Create and set up VM" : "Enroll VM"}</Button>
+    <label className="flex items-start gap-2 leading-relaxed"><input type="checkbox" checked={consent} disabled={busy || !enabled || !!saved.error || unavailable} onChange={(event) => setConsent(event.target.checked)} /><span>{create ? "I confirm creation and setup with the pinned image, downloads, tools, resources and storage shown above. I will complete any guest sign-in or macOS approvals myself." : "I have already created this guest VM and want to enroll its shared account and desktop for selected tasks."}</span></label>
+    <Button type="submit" size="sm" disabled={busy || !enabled || !consent || !name.trim() || !sandbox.trim() || !!saved.error || unavailable}>{busy ? "Request in progress…" : pending ? "Retry same VM setup request" : create ? "Create and set up VM" : "Enroll VM"}</Button>
     {pending ? <><p role="status" className="text-warning">An earlier creation request may already exist. Its exact settings and key are retained until the owner acknowledges them. Check retained status before any recovery; reopening Settings never replays creation.</p><Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void recheck()}>Check retained creation</Button></> : null}
     {saved.error || error ? <p role="alert" className="text-destructive">{saved.error ?? error}</p> : null}
   </form>;

@@ -467,6 +467,7 @@ fn safe_receipt(receipt: &Value) -> Value {
 
 pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
     let current = env(journal, &params)?;
+    if current.transport.is_legacy_macos() { super::creation::require_personal_account()?; }
     validate_key(host::field(&params, "idempotencyKey")?)?;
     // Intentionally never checkpoint this reply: the one-time challenge lives
     // only in the same guest process and the requesting UI's memory.

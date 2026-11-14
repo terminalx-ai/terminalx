@@ -195,6 +195,8 @@ export interface LocalVmCreationCapability {
   available: boolean;
   firstAccountPersonalization: boolean;
   accountBoundTransport: boolean;
+  /** Whether an existing stock Cua VM can be enrolled; false while its shared account has a published password. */
+  existingVmEnrollment?: boolean;
   reasonCode: string;
 }
 

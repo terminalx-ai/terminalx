@@ -84,6 +84,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     match method {
         "enrollContainer" => super::transport::enroll(&journal, params),
         "enroll" => {
+            super::creation::require_personal_account()?;
             compatible()?;
             let sandbox = field(&params, "sandbox")?;
             let info = inspect_sandbox(sandbox)?;
@@ -945,6 +946,8 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result<()> {
+    // Its provider would sign in to the stock image's shared account.
+    super::creation::require_personal_account()?;
     env.transport.require_legacy()?;
     if harness != "codex" {
         bail!("This prepared profile supports automatic Codex setup; existing other provider installations are preserved");
@@ -1567,6 +1570,20 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Review 2: a stock Cua VM's shared account has a published password, so
+    /// it is neither enrolled nor signed in to a provider, before any Cua call.
+    #[test]
+    fn a_stock_cua_vm_is_never_enrolled_or_signed_in_while_its_account_is_shared() {
+        let _home = crate::store::temp_home();
+        journal().unwrap().transaction(|state| { state.enabled = true; Ok(()) }).unwrap();
+        let error = request("enroll", json!({"name":"Existing","sandbox":"local:existing"})).unwrap_err();
+        assert!(format!("{error:#}").contains("published default password"), "{error:#}");
+        assert!(journal().unwrap().read().unwrap().environments.is_empty());
+        assert_eq!(super::super::creation::capability()["existingVmEnrollment"], false);
+        let env = journal().unwrap().enroll("Already enrolled", "local:existing").unwrap();
+        let error = prepare_guest_provider(&env, "codex").unwrap_err();
+        assert!(format!("{error:#}").contains("Nothing was enrolled or signed in"), "{error:#}");
+    }
     #[test]
     fn fresh_creation_refuses_unsupported_account_profile_before_reservation() {
         let temp = tempfile::tempdir().unwrap();

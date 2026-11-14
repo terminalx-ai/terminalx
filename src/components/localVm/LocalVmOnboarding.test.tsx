@@ -106,8 +106,17 @@ describe("one confirmed local VM onboarding", () => {
     expect(calls("environment.create")).toHaveLength(0);
   });
 
-  it("enrolls an existing guest without starting setup, querying models or copying credentials", async () => {
+  it("keeps a stock Cua VM, whose shared account's password is published, from being enrolled", () => {
     mount(); fireEvent.click(screen.getByLabelText("Use an existing VM instead"));
+    expect(screen.getByRole("status").textContent).toMatch(/published default password/);
+    expect((screen.getByLabelText("Existing Cua VM reference") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Enroll VM" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("enrolls an existing guest without starting setup, querying models or copying credentials", async () => {
+    render(<LocalVmOnboarding enabled environments={[]} creation={{ ...unavailable, existingVmEnrollment: true }} />);
+    fireEvent.click(screen.getByLabelText("Use an existing VM instead"));
     fireEvent.change(screen.getByLabelText("Environment name"), { target: { value: "Existing" } });
     fireEvent.change(screen.getByLabelText("Existing Cua VM reference"), { target: { value: "local:existing" } });
     const form = screen.getByRole("form", { name: "Enroll existing local VM" });
