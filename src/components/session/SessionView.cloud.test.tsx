@@ -126,7 +126,7 @@ import { LocalPathLeakError, cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetPanelTabs } from "@/lib/panelTab";
 import { resetPurged } from "@/lib/cloudLifecycle";
-import { takeOrganizationRequest } from "@/lib/settingsLinks";
+import { takeAgentLoginsRequest, takeAgentLoginsSignIn, takeOrganizationRequest } from "@/lib/settingsLinks";
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
@@ -1296,6 +1296,39 @@ describe("a cloud tab whose agent has no way to sign in", () => {
     await waitFor(() => expect(document.getElementById("session-agent-panel-t-1")?.getAttribute("aria-hidden")).toBe("false"));
     expect(noticeOver("t-1")).toBeNull();
     expect(guard.violations).toEqual([]);
+  });
+
+  // #667: the provider refused the organization's login. The runtime says so of the tab, and the failed turn carries
+  // the agent's own last line.
+  it("names the organization whose login was refused, shows what the agent said, and opens its sign-in again", async () => {
+    mocks.role = "owner";
+    const said = "API Error: 401 OAuth token has expired · Please run /login";
+    runtime.events = [
+      ev({ type: "user_message", text: "fix the build", queued: false }),
+      ev({ type: "turn_completed", status: "error", finalText: "The agent is signed out, or its sign-in expired. Sign in again, then retry.", authFailed: true, detail: said }),
+    ];
+    await openConnected();
+    runtime.tabs = [tabInfo({ signIn: { provider: "claude", state: "sign-in-required", reason: "provider-refused" } })];
+    await act(async () => runtime.notify("session.tabs", { tabs: runtime.tabs }));
+    const shown = await waitFor(() => noticeOver("t-1")!);
+    expect(shown.textContent).toContain("Claude Code sign-in for Acme was revoked or expired, so it can't take prompts here. Sign in again, then start the agent or send again.");
+    expect((await screen.findByTestId("agent-said")).textContent).toContain(said);
+    fireEvent.click(within(shown).getByRole("button", { name: "Sign in again" }));
+    expect(takeOrganizationRequest()).toBe(ORG);
+    expect(takeAgentLoginsRequest(ORG)).toBe(true);
+    expect(takeAgentLoginsSignIn(ORG)).toBe("claude");
+    expect(takeAgentLoginsSignIn(ORG)).toBeNull();
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("tells a member whose agent's login was refused to ask an owner or admin, with nothing to press", async () => {
+    mocks.role = "member";
+    await openConnected();
+    runtime.tabs = [tabInfo({ signIn: { provider: "claude", state: "sign-in-required", reason: "provider-refused" } })];
+    await act(async () => runtime.notify("session.tabs", { tabs: runtime.tabs }));
+    const shown = await waitFor(() => noticeOver("t-1")!);
+    expect(shown.textContent).toContain("Ask an owner or admin to sign it in again, then send again.");
+    expect(within(shown).queryByRole("button")).toBeNull();
   });
 
   it("tells a member to ask an owner or admin, and goes once the runtime says the agent can sign in", async () => {

@@ -89,6 +89,26 @@ is refused locally with `cloud_organization_unavailable`.
 ChatGPT" are the lasting ways to connect a subscription; lending this Mac's
 sign-in is the secondary, temporary one. Cursor connects with an API key.
 
+## A login the provider no longer accepts (#667)
+
+The service marks a stored login whose provider refuses it (a revoked or
+expired refresh, or a workspace runtime's report of a refused grant,
+terminalx-saas #241) with `state: "sign-in-required"` in the list. The row
+says **Sign-in required** instead of Connected, and its sign-in button reads
+"Sign in again with ChatGPT" (or Claude). Such a login is not usable: a
+member's create check and the workspaces' grants treat it as missing. A
+request the service refuses for it answers
+`cloud_agent_credential_reauth_required`, which the create form words as
+"sign in again" (it is in `known_error_code`).
+
+**Sign in again** over a cloud tab (an owner's or admin's) opens this page
+for the tab's organization with that agent's sign-in already opened at its
+consent (`openAgentLogins(organization, agent)`): the consents and the
+replace choice are still the person's to give, nothing starts by itself, and
+it happens once per request. Signing in again replaces the stored login, so
+the service bumps its version or epoch and running workspaces take it on
+their next fetch.
+
 ## Who may do it
 
 Owners and admins. The service refuses every credential route, the list

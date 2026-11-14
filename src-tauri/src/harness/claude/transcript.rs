@@ -422,7 +422,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             });
         }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
-            out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
+            out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false, detail: None });
         }
         "assistant" => decode_assistant(&v, out),
         "system" if v["subtype"] == "api_error" => {
@@ -431,7 +431,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             // retrying; only the last attempt is the request failing.
             match (v["retryAttempt"].as_u64(), v["maxRetries"].as_u64()) {
                 (Some(attempt), Some(max_retries)) => out.push(Payload::ApiRetry { attempt: attempt as u32, max_retries: max_retries as u32, reason: Some(message.into()) }),
-                _ => out.push(Payload::Error { message: message.into(), fatal: false }),
+                _ => out.push(Payload::Error { message: message.into(), fatal: false, detail: None }),
             }
         }
         "system" if v["subtype"] == "compact_boundary" => {
@@ -472,7 +472,7 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         return;
     }
     if interruption(&prompt) {
-        out.push(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false });
+        out.push(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None });
         return;
     }
     if command_output(&prompt) {

@@ -203,6 +203,7 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
                 let (tx, rx) = mpsc::unbounded_channel();
                 let live = RelayLive {
                     tx,
+                    signals: Arc::new(ControlSignals::new(now_ms())),
                     director_url: "https://relay.example.invalid".into(),
                     cell_url: assignment.cell_url,
                     assignment_epoch: 1,
@@ -280,4 +281,84 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
     ] {
         assert!(!bytes.contains(sensitive));
     }
+}
+
+#[tokio::test]
+async fn control_frames_prove_liveness_and_carry_the_pairing_hint() {
+    let account = Arc::new(crate::account::AccountManager::default());
+    account.set_context_for_test(Some(context()));
+    let manager = Arc::new(PairingManager::new(account));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server_origin = origin.clone();
+    let (send_hint, hint_requested) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_hdr_async(stream, verify_control_headers)
+            .await
+            .unwrap();
+        socket.next().await.unwrap().unwrap();
+        let (challenge, _) = challenge(&HostKeypair::from_secret([5; 32]), &server_origin);
+        socket.send(Message::Text(challenge.to_string().into())).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket.send(Message::Text(serde_json::json!({
+            "type": "host-hello-ack", "v": 1, "generation": 1,
+            "controlResumeSecret": general_purpose::URL_SAFE_NO_PAD.encode([6; 32]),
+            "leaseExpiresAt": now_ms() + 60_000, "activeConnIds": [], "pendingConns": [],
+        }).to_string().into())).await.unwrap();
+        socket.send(Message::Text(r#"{"type":"ping","t":1}"#.into())).await.unwrap();
+        let pong: serde_json::Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(pong, serde_json::json!({ "type": "pong", "t": 1 }));
+        hint_requested.await.unwrap();
+        socket.send(Message::Text(r#"{"type":"account-pairing-changed"}"#.into())).await.unwrap();
+        // Like every control frame, the hint takes no field it does not know.
+        socket
+            .send(Message::Text(r#"{"type":"account-pairing-changed","hostId":"other"}"#.into()))
+            .await
+            .unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    });
+    let keypair = HostKeypair::from_secret([5; 32]);
+    let assignment = RelayAssignment {
+        v: 1,
+        cell_url: origin,
+        assignment_epoch: 1,
+        lease: "synthetic-lease".into(),
+    };
+    let (socket, ack) = open_control(&context(), &keypair, &assignment, "synthetic-relay-token")
+        .await
+        .unwrap();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let live = RelayLive {
+        tx,
+        // Silent since before the connection, so only a new frame can verify it.
+        signals: Arc::new(ControlSignals::new(now_ms() - 60_000)),
+        director_url: "https://relay.example.invalid".into(),
+        cell_url: assignment.cell_url,
+        assignment_epoch: 1,
+        relay_host_id: keypair.host_id(),
+        generation: ack.generation,
+    };
+    assert!(!live.control_verified());
+    let control = tokio::spawn(control_loop(manager, socket, rx, live.clone(), context(), keypair));
+    wait_until(|| live.control_verified()).await;
+    send_hint.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), live.pairing_changed())
+        .await
+        .expect("the hint reaches the host-binding poll");
+    let error = tokio::time::timeout(Duration::from_secs(5), control)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
+    tokio::time::timeout(Duration::from_secs(5), live.control_closed())
+        .await
+        .expect("the poll sees the channel close");
+    server.abort();
 }

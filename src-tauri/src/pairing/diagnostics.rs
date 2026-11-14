@@ -24,6 +24,9 @@ pub(super) enum Stage {
     ControlConnect,
     HostProof,
     ControlSession,
+    /// The account service's heartbeat, grant and revocation requests for
+    /// this host, made beside a connected control channel.
+    HostBinding,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Error, PartialEq, Eq)]
@@ -147,6 +150,8 @@ pub(super) enum Event {
     Started,
     Failed,
     Connected,
+    /// A host-binding request succeeded after `attempt` failed rounds.
+    Recovered,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

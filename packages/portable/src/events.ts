@@ -1,3 +1,6 @@
+import type { CompactionEvidence } from "./compactionLifecycle";
+export type { CompactionEvidence, CompactionScope } from "./compactionLifecycle";
+
 /**
  * Portable twin of src-tauri/src/events.rs. Field names are the serde wire
  * contract: payload `type` and enum values are snake_case, fields camelCase.
@@ -124,7 +127,10 @@ export type Payload =
       usage?: Usage;
       durationMs?: number;
       head?: string;
+      /** The agent's provider refused its sign-in (#667). */
       authFailed: boolean;
+      /** A failed turn's last line from the agent itself, when it exited before it ever worked: bounded and redacted by the runtime. */
+      detail?: string;
     }
   | { type: "settings_changed"; model?: string; effort?: string; permissionMode?: string }
   | {
@@ -179,6 +185,9 @@ export type Payload =
   | { type: "model_request_started" }
   | ({ type: "usage_update" } & Usage)
   | { type: "context_compaction_started" }
+  /** Additive scoped evidence. Only an admitted after-gates start is confirmed.
+   * persisted=false reports append uncertainty, never restart-recoverable success. */
+  | { type: "context_compaction_lifecycle"; evidence: CompactionEvidence; confirmedStart?: boolean; persisted: boolean }
   | { type: "context_compacted"; preTokens?: number; postTokens?: number }
   /** What the agent kept of the conversation the compaction before it folded away; never a prompt (#524). */
   | { type: "compaction_summary"; text: string }
@@ -191,7 +200,8 @@ export type Payload =
    * the conversation the tab began with.
    */
   | { type: "conversation"; id?: string; harness: string; resumed?: boolean }
-  | { type: "error"; message: string; fatal: boolean }
+  /** `detail`: what a launch that was refused said (Codex too old, not installed), bounded and redacted by the runtime (#667). */
+  | { type: "error"; message: string; fatal: boolean; detail?: string }
   | { type: "unknown"; kind: string };
 
 export type PayloadType = Payload["type"];

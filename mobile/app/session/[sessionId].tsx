@@ -9,6 +9,7 @@ import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-nat
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
+import { draftContent, draftIdFor, readDraftId, type DraftId } from "@mobile/data/draft-id";
 import { watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
@@ -80,6 +81,8 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const [earlierError, setEarlierError] = useState<string | null>(null);
   const earlierRequest = useRef<object | null>(null);
   const [draft, setDraft] = useConversationState(`${stateKey}:draft`, "");
+  // The id the draft was last sent under, kept until a send under it succeeds (#675).
+  const [draftId, setDraftId] = useConversationState<DraftId | null>(`${stateKey}:draftId`, null);
   const [sendToAgent, setSendToAgent] = useConversationState(`${stateKey}:sendToAgent`, true);
   const [sending, setSending] = useConversationState(`${stateKey}:sending`, false);
   const [sendFeedback, setSendFeedback] = useConversationState<{ kind: "error" | "success"; message: string } | null>(`${stateKey}:sendFeedback`, null);
@@ -89,6 +92,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const [permissionErrors, setPermissionErrors] = useConversationState<Record<string, string>>(`${stateKey}:permissionErrors`, {});
   const draftEdited = useRef(false);
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
+  const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
   const transcript = useMemo(() => buildTranscript(events, connected), [connected, events]);
 
   useEffect(() => {
@@ -128,8 +132,15 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     void AsyncStorage.getItem(cacheKey).then((value) => {
       if (active && !draftEdited.current && value) setDraft((current) => current || value);
     });
+    // A draft whose send failed goes again under the same id after the app
+    // was closed (#675). Not once the person has typed or sent: a send that
+    // succeeded retired the id.
+    void AsyncStorage.getItem(draftIdKey).then((value) => {
+      const saved = readDraftId(value);
+      if (active && !draftEdited.current && saved) setDraftId((current) => current ?? saved);
+    });
     return () => { active = false; };
-  }, [cacheKey, setDraft]);
+  }, [cacheKey, draftIdKey, setDraft, setDraftId]);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -193,24 +204,34 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       app.connection.reportError("Session message failed", message);
     };
     try {
+      // The reply can be lost after the Mac has the message. Sending the same
+      // draft again goes under the same id, and a Mac that has it answers as
+      // it did the first time instead of taking it twice (#675).
+      const sendId = draftIdFor(draftId, draftContent(sendToAgent ? "agent" : "note", text, attachments.map(({ id }) => id)));
+      if (sendId !== draftId) {
+        setDraftId(sendId);
+        // Saved before the message can reach the Mac, for a retry after the app is closed.
+        await AsyncStorage.setItem(draftIdKey, JSON.stringify(sendId)).catch(() => undefined);
+      }
       // A message for the agent is one request, and the transcript shows it
       // as the turn's prompt. Saving it as a note first showed it twice, and
       // a failed promotion left a note behind for every retry (#541).
       if (sendToAgent) {
         const inputs = attachments.map(({ mediaType, data, name }) => ({ mediaType, data, name }));
-        const sent = await app.api.sendSession(tabId, text, inputs);
+        const sent = await app.api.sendSession(tabId, text, inputs, sendId.id);
         if (!sent.sent) return showError(sent.message);
         setSendFeedback({ kind: "success", message: sent.queued ? "Queued for the agent." : "Sent to the agent." });
       } else {
-        const posted = await app.api.postNote(sessionId, text);
+        const posted = await app.api.postNote(sessionId, text, sendId.id);
         if (!posted.sent) return showError(posted.message);
         setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
         setSendFeedback({ kind: "success", message: "Note added." });
       }
       setDraft("");
+      setDraftId(null);
       setAttachments([]);
       setAttachmentError(null);
-      await AsyncStorage.removeItem(cacheKey);
+      await Promise.all([AsyncStorage.removeItem(cacheKey), AsyncStorage.removeItem(draftIdKey)]);
     } catch (error) {
       showError(error instanceof Error ? error.message : "The host could not send this message.");
     } finally {

@@ -2,13 +2,14 @@ import { useState } from "react";
 import { ArrowLeft, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type OrganizationSummary } from "@/lib/api";
-import { refreshAccount, useAccount } from "@/lib/account";
+import { deleteOrganization, refreshAccount, useAccount } from "@/lib/account";
 import { defaultOrgId } from "@/lib/cloudCatalog";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
+import { OrganizationDelete } from "./OrganizationDelete";
 import { OrganizationConsoleLink } from "./OrganizationConsoleLink";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
@@ -117,6 +118,9 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           </div>
         </>
       )}
+      <OrganizationDelete organization={organization} contextRevision={contextRevision}
+        unavailableReason={organization.isPersonal ? "Personal/default organizations cannot be deleted." : undefined}
+        remove={deleteOrganization} onDeleted={onBack} />
     </div>
   );
 }

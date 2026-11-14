@@ -4,6 +4,7 @@ import type { PaneAgent, ShellPane, TabPtyEvent } from "@/lib/api";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import { byHandLock, defaultTabView, followedSelection, tabLabel, tabPaneId, tabViewIn } from "./tabFront";
 import { buildTranscript, conversationEvents } from "./transcript";
+import compactionProviderSwitch from "./fixtures/compaction-provider-switch.json";
 
 /**
  * Tabs follow what runs in their terminal (#437), as a window sees it.
@@ -261,6 +262,24 @@ describe("the conversations of one tab", () => {
   const event = (harness: string, payload: Payload): AgentEvent => ({ id: `e${++seq}`, sessionId: "s1", tabId: "t", harness, seq, ts: at(seq), payload });
   const prompts = (events: AgentEvent[]) => buildTranscript(events, false).turns.flatMap((turn) => (turn.prompt ? [turn.prompt.text] : []));
 
+  it("folds the manager's retained-provider loss shape after a cross-provider switch", () => {
+    // This source-derived shape is also asserted against actual manager
+    // returned/saved events in session_watch_tests.rs. It is not a live capture.
+    const log = compactionProviderSwitch as AgentEvent[];
+    const project = (events: AgentEvent[], conversationId: string | null) => buildTranscript(conversationEvents(events, conversationId), false, { conversationId, compactionContinuityKnown: true });
+    const loss = log[log.length - 1];
+    expect(loss.harness).toBe("claude");
+    expect(loss.payload).toMatchObject({ evidence: { scope: { provider: "claude", conversationId: null }, type: "continuity_lost" } });
+    const a = project(log, null);
+    expect(a.compacting).toBe(false);
+    expect(a.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "unknown" }) })]);
+    expect(project(log, "B").turns).toEqual([]);
+    expect(project(log, "B").compacting).toBe(false);
+    // Preserve the frontend equality gate: the old contradictory envelope
+    // is rejected, so it cannot resolve A. Fixing the producer is essential.
+    expect(project([...log.slice(0, -1), { ...loss, harness: "codex" }], null).compacting).toBe(true);
+  });
+
   it("are kept apart in the one log: each is its own chat, and one picked up again is all of its stretches", () => {
     const log = [
       event("claude", { type: "user_message", text: "first, with Claude", queued: false }),
@@ -284,5 +303,183 @@ describe("the conversations of one tab", () => {
     const log = [event("claude", { type: "user_message", text: "only one", queued: false })];
     expect(conversationEvents(log, null)).toBe(log);
     expect(conversationEvents(log, "c2")).toEqual([]);
+  });
+
+  it("routes late A-scoped loss and completion past B's marker into A's actual fold", () => {
+    const scope = { sessionId: "s1", tabId: "t", conversationId: null, provider: "claude", threadId: "thread-A", subagentId: null };
+    const aOpen = event("claude", { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "connection_opened", generation: 1 } });
+    const aStart = event("claude", { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, type: "item_started", generation: 1, turnId: "turn", itemId: "item" } });
+    const bMarker = event("codex", { type: "conversation", id: "B", harness: "codex" });
+    const legacyB = event("codex", { type: "context_compacted", preTokens: 17, postTokens: 0 });
+    const aLoss = event("claude", { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "continuity_lost", generation: 1, reason: "restarted" } });
+    const log = [aOpen, aStart, bMarker, legacyB, aLoss];
+    const project = (events: AgentEvent[], conversationId: string | null) => buildTranscript(conversationEvents(events, conversationId), false, { conversationId, compactionContinuityKnown: true });
+    const a = project(log, null);
+    expect(a.compacting).toBe(false);
+    expect(a.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "unknown" }) })]);
+    expect(conversationEvents(log, null)).toEqual([aOpen, aStart, aLoss]);
+    expect(conversationEvents(log, "B")).toEqual([legacyB]);
+    const b = project(log, "B");
+    expect(b.compacting).toBe(false);
+    expect(b.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", preTokens: 17, postTokens: 0 })]);
+    expect(b.turns.flatMap(t => t.work).some(w => w.kind === "compaction" && w.lifecycle)).toBe(false);
+
+    const aCompletion = event("claude", { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "completion_reconciled", turnId: "turn", itemId: "item" } });
+    const directCompletion = project([aOpen, aStart, bMarker, aCompletion], null);
+    expect(directCompletion.compacting).toBe(false);
+    expect(directCompletion.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "completed" }) })]);
+    const completed = project([...log, aCompletion], null);
+    expect(completed.compacting).toBe(false);
+    expect(completed.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "completed" }) })]);
+    expect(conversationEvents([...log, aCompletion], "B")).toEqual([legacyB]);
+  });
+
+  it("routes explicit scope without a marker but retains downstream scope validation", () => {
+    const scope = { sessionId: "wrong-session", tabId: "t", conversationId: "A", provider: "claude", threadId: "thread-A", subagentId: null };
+    const wrongSession = event("claude", { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "completion_reconciled", turnId: "turn", itemId: "item" } });
+    const legacy = event("claude", { type: "context_compacted" });
+    const selected = conversationEvents([legacy, wrongSession], "A");
+    expect(selected).toEqual([wrongSession]);
+    expect(conversationEvents([legacy, wrongSession], null)).toEqual([legacy]);
+    expect(buildTranscript(selected, false, { conversationId: "A", compactionContinuityKnown: true }).turns).toEqual([]);
+  });
+});
+
+describe("terminal view metadata lifetime", () => {
+  async function populated() {
+    const window = await openWindow("main");
+    const { renderHook } = await import("@testing-library/react/pure");
+    const hook = renderHook(() => window.tabViews.useTabViews());
+    const info = { sessionId: session.id, tabId: "first", paneId: "first", command: "codex --resume retained-conversation", harness: "codex" };
+    emit("tab_pty", info);
+    await vi.waitFor(() => expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "first")).toBeDefined());
+    return { ...window, hook, info };
+  }
+
+  it("adopts the pane of an agent started by hand, announced before the session update that lists its tab (#437)", async () => {
+    const main = await openWindow("main");
+    const floating = await openWindow("floating");
+    const { renderHook } = await import("@testing-library/react/pure");
+    const hooks = [main, floating].map((window) => renderHook(() => window.tabViews.useTabViews()));
+    const shell = await main.terminal.openTerminal(session.id, session.cwd);
+    expect(main.terminal.getTerminalState().active[session.id]).toBe(shell.id);
+    // The backend's order when it attaches to the agent: the pane, then the tab.
+    const tab = agentTab(`tab-of-${shell.id}`, "claude", shell.created!, { front: "by_hand", pane: shell.id, permissionMode: "terminal" });
+    session.tabs.push(tab);
+    emit("tab_pty", { sessionId: session.id, tabId: tab.id, paneId: shell.id, command: "claude (started in this terminal)", harness: "claude", byHand: true } satisfies TabPtyEvent);
+    for (const [index, window] of [main, floating].entries()) {
+      // Every window owns the agent's pane, so none of them treats it as a shell of the session.
+      await vi.waitFor(() => expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === shell.id)).toMatchObject({ hidden: true, owned: true }));
+      hooks[index].rerender();
+      expect(hooks[index].result.current.info[tab.id]?.command).toBe("claude (started in this terminal)");
+    }
+    // The window that was on the shell is on the tab it became, and has no shell as its terminal.
+    expect(main.terminal.getTerminalState().selected[session.id]).toEqual({ kind: "agent", id: tab.id });
+    expect(main.terminal.getTerminalState().active[session.id]).toBe("");
+    emit("session_updated", structuredClone(session));
+    expect(main.selected()).toBe(`agent:${tab.id}`);
+    for (const hook of hooks) hook.unmount();
+  });
+
+  it("drops all transient metadata on removal, without removing archived history or unrelated cloud view choices", async () => {
+    const window = await populated();
+    const tab = session.tabs[0];
+    await window.tabViews.enterTerminalView(session, tab, { remote: true });
+    await window.tabViews.enterTerminalView(session, { ...tab, id: "cloud-tab" }, { remote: true });
+    const retained = { ...session, archived: true, worktreeRemoved: true, futureField: { preserved: true } };
+    window.sessions.upsertSession(retained);
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first.command).toContain("retained-conversation");
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    expect(window.sessions.getSessionStore().sessions[0]).toMatchObject(retained);
+    window.sessions.upsertSession({ ...retained, tabs: [] });
+    window.hook.rerender();
+    for (const map of Object.values(window.hook.result.current)) expect(map).not.toHaveProperty("first");
+    expect(window.hook.result.current.views["cloud-tab"]).toBe("terminal");
+    // A delayed event for a removed tab must not put its metadata back.
+    emit("tab_pty", window.info);
+    window.hook.rerender();
+    expect(window.hook.result.current.info).toEqual({});
+    window.hook.unmount();
+  });
+
+  it("keeps metadata when deletion fails, then clears it when the session disappears on refresh", async () => {
+    const window = await populated();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "remove_tab") throw new Error("store unavailable");
+      return backend(command, args);
+    });
+    await expect(window.sessions.removeTab(session.id, "first")).rejects.toThrow("store unavailable");
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first).toBeDefined();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "list_sessions" ? [] : backend(command, args));
+    await window.sessions.refreshSessions();
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    window.hook.unmount();
+  });
+
+  it("ignores an old pane response after closing and reopening the same retained tab", async () => {
+    const window = await populated();
+    let release!: (value: TabPtyEvent) => void;
+    const oldPane = new Promise<TabPtyEvent>((resolve) => { release = resolve; });
+    let releaseNew!: (value: TabPtyEvent) => void;
+    const newPane = new Promise<TabPtyEvent>((resolve) => { releaseNew = resolve; });
+    let requests = 0;
+    let starts = 0;
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "ensure_tab_started") { starts++; return null; }
+      if (command === "tab_pane") return ++requests === 1 ? oldPane : newPane;
+      return backend(command, args);
+    });
+    const oldStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    await vi.waitFor(() => expect(requests).toBe(1));
+    window.sessions.upsertSession({ ...session, tabs: [] });
+    await Promise.resolve(); // Finish the old pane's queued disposal before reattachment.
+    window.sessions.upsertSession(session);
+    const newStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    await vi.waitFor(() => expect(requests).toBe(2));
+    release({ ...window.info, paneId: "obsolete-pane" });
+    await oldStart;
+    // Completing the old promise must not evict the new shared start.
+    const sharedStart = window.tabViews.startTabAgent(session, session.tabs[0]);
+    releaseNew({ ...window.info, paneId: "new-pane", command: "new command" });
+    await Promise.all([newStart, sharedStart]);
+    expect(starts).toBe(2);
+    window.hook.rerender();
+    expect(window.hook.result.current.info.first.command).toBe("new command");
+    expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "new-pane")).toBeDefined();
+    expect(window.terminal.getTerminalState().panes.find((pane) => pane.id === "obsolete-pane")).toBeUndefined();
+    window.hook.unmount();
+  });
+
+  it("clears successful tab removal and cancels pane adoption already waiting on subscription", async () => {
+    const window = await populated();
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "remove_tab" ? null : backend(command, args));
+    await window.sessions.removeTab(session.id, "first");
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    expect(window.sessions.getSessionStore().sessions[0].tabs).toEqual([]);
+    let active = true;
+    const adoption = window.terminal.adoptPane({ id: "late-pane", sessionId: session.id, title: "Agent", hidden: true, owned: true }, () => active);
+    active = false;
+    await adoption;
+    expect(window.terminal.getTerminalState().panes.some((pane) => pane.id === "late-pane")).toBe(false);
+    window.hook.unmount();
+  });
+
+  it("does not restore a start error or switching state after the tab is removed", async () => {
+    const window = await populated();
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_, fail) => { reject = fail; });
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "ensure_tab_started" ? pending : backend(command, args));
+    const entering = window.tabViews.enterTerminalView(session, session.tabs[0]);
+    await vi.waitFor(() => expect(bus.invoke).toHaveBeenCalledWith("ensure_tab_started", { sessionId: session.id, tabId: "first" }));
+    window.sessions.removeSessions([session.id]);
+    reject(new Error("late failure"));
+    await entering;
+    window.hook.rerender();
+    expect(window.hook.result.current).toEqual({ views: {}, info: {}, errors: {}, switching: {} });
+    window.hook.unmount();
   });
 });

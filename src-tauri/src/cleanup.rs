@@ -623,7 +623,7 @@ mod tests {
     }
 
     fn tab(harness: &str, conversation: &str) -> TabEntry {
-        TabEntry {
+        TabEntry { transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,

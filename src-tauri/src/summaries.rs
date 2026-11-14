@@ -466,7 +466,7 @@ mod tests {
     }
 
     fn a_tab(id: &str, status: TabStatus) -> TabEntry {
-        TabEntry {
+        TabEntry { transport: Default::default(),
             id: id.into(),
             harness: "claude".into(),
             title: None,

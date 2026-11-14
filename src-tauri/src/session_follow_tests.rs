@@ -233,8 +233,13 @@ impl Rig {
     /// The tab's own CLI as the app launches one, less the CLI: a pane whose
     /// program exits when it is given a line, and a runtime that holds it.
     fn launched(&self, tab: &str, kind: CliKind, transcript: &Path) -> String {
+        self.launched_running(tab, kind, transcript, "sh -c 'read line'")
+    }
+
+    /// [`Self::launched`], the pane running `command` for the CLI.
+    fn launched_running(&self, tab: &str, kind: CliKind, transcript: &Path, command: &str) -> String {
         let pane = SessionManager::pane_id(tab);
-        self.pane(&pane, "sh -c 'read line'");
+        self.pane(&pane, command);
         let (decode, marker): (tui::Decoder, tui::Marker) = match kind {
             CliKind::Claude => (claude::transcript::decode_line, claude::transcript::decode_marked),
             CliKind::Codex => (codex::rollout::decode_line, codex::rollout::decode_marked),
@@ -248,6 +253,8 @@ impl Rig {
             mode: "default".into(),
             pane_id: pane.clone(),
             nudge_by: None,
+            nudges_left: 0,
+            entered_at: None,
             held: Vec::new(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
@@ -259,6 +266,7 @@ impl Rig {
             status_names_model: false,
             settings_command_is_ours: false,
             ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
+            recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
             awaiting_delivery: None,
@@ -521,6 +529,69 @@ fn a_runtime_that_does_not_follow_terminals_treats_an_exit_as_it_always_did() {
     let shell = rig.shell(1);
     rig.manager.pane_foreground(&shell, Some(agent("claude", CLAUDE_PID)));
     assert_eq!(rig.tabs().len(), 1);
+}
+
+/// #667, seen 2026-10-29 with codex 0.159.1.
+const CODEX_REVOKED: &str = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
+
+impl Rig {
+    /// A Codex launched for a prompt, which prints `last` and exits 1 as
+    /// soon as the reader gives it a line: before any hook or record.
+    fn failing_at_startup(&self, last: &str) -> String {
+        let transcript = self.dir.path().join("codex.jsonl");
+        let pane = self.launched_running("t1", CliKind::Codex, &transcript, &format!("sh -c 'read line; printf \"%s\\n\" \"{last}\"; exit 1'"));
+        // As the composer sends one, keystrokes aside.
+        let rt = self.runtime("t1");
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
+        self.manager.record_composer_prompt(&mut rt.lock().unwrap(), &prompt, Vec::new(), self.dir.path().to_str().unwrap(), None);
+        self.exit(&pane);
+        self.wait("the exit to be settled", || matches!(self.runtime("t1").lock().unwrap().engine, Engine::None));
+        pane
+    }
+
+    /// The failed turn's end, as the chat gets it.
+    fn ended(&self) -> (TurnStatus, bool, Option<String>, Option<String>) {
+        self.events("t1").into_iter().find_map(|event| match event.payload {
+            Payload::TurnCompleted { status, auth_failed, detail, final_text, .. } => Some((status, auth_failed, detail, final_text)),
+            _ => None,
+        }).expect("a turn end")
+    }
+}
+
+#[test]
+fn a_codex_refused_at_startup_fails_its_turn_as_a_sign_in_on_a_cloud_runtime() {
+    let rig = Rig::not_following(json!([agent_tab("t1", "codex", CODEX_ID)]));
+    let pane = rig.failing_at_startup(CODEX_REVOKED);
+    assert_eq!(rig.ended(), (TurnStatus::Error, true, Some(CODEX_REVOKED.into()), Some(RecoveryKind::SignedOut.message().into())));
+    assert_eq!(rig.runtime("t1").lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
+    assert_eq!(rig.status("t1"), TabStatus::Waiting);
+    assert_eq!(rig.tab().follow.front, Front::Agent);
+    assert!(!rig.manager.terminals.is_running(&pane));
+}
+
+#[test]
+fn a_codex_refused_at_startup_stays_the_agents_tab_with_a_sign_in_on_a_desktop() {
+    let rig = Rig::new(json!([agent_tab("t1", "codex", CODEX_ID)]));
+    let pane = rig.failing_at_startup(CODEX_REVOKED);
+    assert!(rig.ended().1);
+    assert_eq!(rig.runtime("t1").lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
+    // Not the reader leaving the agent: no shell takes its place.
+    std::thread::sleep(tui::POLL_INTERVAL * 3);
+    assert_eq!(rig.tab().follow.front, Front::Agent);
+    assert!(!rig.manager.terminals.is_running(&pane));
+    // Raised with the turn's end, taken back as the CLI is let go, and raised for the tab.
+    assert_eq!(rig.said("t1"), ["user: fix the build", "recovery: SignedOut", "turn Error", "recovery: SignedOut"]);
+}
+
+#[test]
+fn a_crash_at_startup_says_what_the_cli_said_and_is_no_sign_in() {
+    let rig = Rig::new(json!([agent_tab("t1", "codex", CODEX_ID)]));
+    rig.failing_at_startup("error: unexpected argument --no-daemon found");
+    let (status, auth_failed, detail, final_text) = rig.ended();
+    assert_eq!((status, auth_failed), (TurnStatus::Error, false));
+    assert_eq!(detail.as_deref(), Some("error: unexpected argument --no-daemon found"));
+    assert_eq!(final_text.as_deref(), Some(RecoveryKind::Failed.message()));
+    assert_eq!(rig.runtime("t1").lock().unwrap().recovery, Some(RecoveryKind::Failed));
 }
 
 #[test]

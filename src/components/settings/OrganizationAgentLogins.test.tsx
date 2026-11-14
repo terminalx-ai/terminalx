@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
 import { openAgentLogins } from "@/lib/settingsLinks";
-import { agentLoginConfigurerLeft, agentLoginMessage, agentLoginReach, agentLoginStatus, codexSignInLine, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
+import { agentLoginConfigurerLeft, agentLoginMessage, agentLoginReach, agentLoginStatus, agentLoginUsable, codexSignInLine, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -209,6 +209,38 @@ describe("agent logins in Settings (PRO-79)", () => {
     await show();
     expect(scrolled).toHaveBeenCalled();
     expect(scrolled.mock.contexts.at(-1)).toBe(screen.getByTestId("agent-logins"));
+  });
+
+  // #667, terminalx-saas #241: the provider no longer accepts a stored login.
+  it("shows a login its provider refused as Sign-in required, never as Connected, with the way to sign in again", async () => {
+    const refused = login({ provider: "codex", state: "sign-in-required", displayIdentity: "ada@example.com" });
+    const status = agentLoginStatus(refused);
+    expect(status.warn).toBe(true);
+    expect(status.text).toMatch(/^Sign-in required \(subscription login · ada@example\.com\): the provider no longer accepts it/);
+    expect(status.text).toContain("Sign in again to use this agent again.");
+    expect(status.text).not.toContain("Connected");
+    expect(agentLoginStatus(login({ authKind: "api-key", state: "sign-in-required" })).text).toContain("Replace it with a working key");
+    expect(agentLoginUsable(refused)).toBe(false);
+
+    stored = [refused];
+    await show();
+    expect(within(row("codex")).getByTestId("agent-login-status").textContent).toContain("Sign-in required");
+    expect(within(row("codex")).getByRole("button", { name: "Sign in again with ChatGPT" })).toBeTruthy();
+  });
+
+  it("opens the agent's sign-in, at its consent, when a tab whose login was refused sent the person here", async () => {
+    stored = [login({ provider: "codex", state: "sign-in-required" })];
+    openAgentLogins("org-1", "codex");
+    await show();
+    const panel = await waitFor(() => within(row("codex")).getByTestId("agent-login-consent"));
+    // Nothing starts by itself: the consents and the replace choice are still the person's to give.
+    expect(within(panel).getByRole("button", { name: "Get a code to sign in with ChatGPT" }).hasAttribute("disabled")).toBe(true);
+    expect(within(panel).getAllByRole("checkbox").every((box) => !(box as HTMLInputElement).checked)).toBe(true);
+    expect(api.cloudAgentCodexLoginStart).not.toHaveBeenCalled();
+    // Once: a page opened again by hand opens nothing.
+    cleanup();
+    await show();
+    expect(within(row("codex")).queryByTestId("agent-login-consent")).toBeNull();
   });
 
   // Review of #293: lending a sign-in silently replaced a working API key.

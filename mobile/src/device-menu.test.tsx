@@ -162,14 +162,15 @@ it("returns to the device list after removing from the sessions screen", async (
   expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
 });
 
-it("opens the session list when a Mac is tapped, dismissing any previous conversation (#388)", async () => {
+it.each([false, true])("selects Sessions when a Mac is tapped (signed in: %s)", async (signedIn) => {
+  if (!signedIn) mocks.app.session = null;
   await show(<MachinesScreen />);
   const row = [...container.querySelectorAll("button")].find((node) => node.textContent?.includes("Paresh’s Mac mini"));
   expect(row).toBeDefined();
   await act(async () => row!.click());
   expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
-  expect(mocks.dismissTo).toHaveBeenCalledWith("/(tabs)/sessions");
-  expect(mocks.navigate).not.toHaveBeenCalled();
+  expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)/sessions");
+  expect(mocks.dismissTo).not.toHaveBeenCalled();
 });
 
 it("keeps the fallback for a desktop that never sent its name, and tells two same-named computers apart", async () => {
@@ -206,4 +207,5 @@ it.each([false, true])("does not open sessions when selection fails (signed in: 
   await act(async () => row.click());
   expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
   expect(mocks.dismissTo).not.toHaveBeenCalled();
+  expect(mocks.navigate).not.toHaveBeenCalled();
 });

@@ -26,6 +26,22 @@ function toolDone(callId: string): AgentEvent {
 }
 
 describe("buildTranscript", () => {
+  // #667: what the agent (or its launch) last said rides under the error, and only under a failure.
+  it("keeps the agent's own last line under a failed turn and under a launch error", () => {
+    const said = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "fix the build", queued: false }),
+      ev({ type: "error", message: "The agent encountered an error. Review the conversation before continuing.", fatal: false, detail: "TerminalX requires Codex's --no-daemon option" }),
+      ev({ type: "turn_completed", status: "error", finalText: "The agent is signed out, or its sign-in expired. Sign in again, then retry.", authFailed: true, detail: said }),
+      ev({ type: "user_message", text: "again", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false, detail: "never shown for a turn that worked" }),
+    ], false);
+    expect(t.turns[0].detail).toBe(said);
+    expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "error", detail: "TerminalX requires Codex's --no-daemon option" }));
+    expect(t.turns[1].detail).toBeUndefined();
+    expect(t.authFailed).toBe(true);
+  });
+
   it("ignores harness prompts without splitting the current turn or abandoning its tools (#388)", () => {
     const t = buildTranscript([
       ev({ type: "user_message", text: "Run the task", queued: false }),
@@ -609,5 +625,80 @@ describe("buildTranscript", () => {
       ev({ type: "user_message", text: summary, queued: true }),
     ], true);
     expect(queued.turns[0].work.map((item) => item.kind)).toEqual(["compaction", "queued"]);
+  });
+});
+
+// Source-derived lifecycle integration controls; no provider execution/fixtures.
+type WithoutScope<T> = T extends unknown ? Omit<T, "scope"> : never;
+type LifecycleObservation = WithoutScope<import("@/types/events").CompactionEvidence>;
+describe("scoped compaction projection (#644)", () => {
+  const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+  const lifecycle = (observation: LifecycleObservation, extra: object = {}) =>
+    ev({ type: "context_compaction_lifecycle", evidence: { ...observation, scope }, persisted: true, confirmedStart: true, ...extra });
+  const opened = () => lifecycle({ type: "connection_opened", generation: 1 });
+  const started = () => lifecycle({ type: "item_started", generation: 1, turnId: "turn", itemId: "item" });
+  const completed = () => lifecycle({ type: "item_completed", generation: 1, turnId: "turn", itemId: "item" });
+  const rows = (events: AgentEvent[], known = true) => buildTranscript(events, false, { compactionContinuityKnown: known });
+  const operations = (t: ReturnType<typeof rows>) => t.turns.flatMap(turn => turn.work).filter(w => w.kind === "compaction");
+
+  it("shows confirmed work independently of turn busy, then retains one completion during continuation", () => {
+    const events = [opened(), started()];
+    expect(rows(events).compacting).toBe(true);
+    const done = rows([...events, completed(), ev({ type: "assistant_text", text: "Continuing" })]);
+    expect(done.compacting).toBe(false);
+    expect(operations(done)).toHaveLength(1);
+    expect(operations(done)[0].lifecycle?.state).toBe("completed");
+    expect(done.turns.every(t => !t.prompt)).toBe(true);
+  });
+
+  it("does not animate an unqualified start or an unresolved replay after continuity loss", () => {
+    const start = started();
+    expect(rows([opened(), { ...start, payload: { ...start.payload, confirmedStart: false } as Payload }]).compacting).toBe(false);
+    const replay = rows([opened(), start], false);
+    expect(replay.compacting).toBe(false);
+    expect(operations(replay)[0].lifecycle?.state).toBe("unknown");
+    expect(rows([ev({ type: "context_compaction_started" })]).compacting).toBe(false);
+  });
+
+  it("distinguishes retry, owning-turn interruption and append uncertainty", () => {
+    const events = [opened(), started()];
+    const retry = lifecycle({ type: "turn_error", generation: 1, turnId: "turn", willRetry: true });
+    expect(rows([...events, retry]).compacting).toBe(true);
+    const interrupted = lifecycle({ type: "turn_ended", generation: 1, turnId: "turn", outcome: "interrupted" });
+    const stopped = rows([...events, retry, interrupted]);
+    expect(operations(stopped)[0].lifecycle).toMatchObject({ state: "stopped", stoppedBy: "interrupted" });
+    const lost = lifecycle({ type: "continuity_lost", generation: 1, reason: "disconnected" }, { persisted: false });
+    expect(operations(rows([...events, lost]))[0]).toMatchObject({ uncertain: true, lifecycle: { state: "unknown" } });
+  });
+
+  it("replays the observed nonretrying error then failed terminal as stopped compaction", () => {
+    const events = [opened(), started(),
+      lifecycle({ type: "turn_error", generation: 1, turnId: "turn", willRetry: false }),
+      lifecycle({ type: "turn_ended", generation: 1, turnId: "turn", outcome: "failed" }),
+    ];
+    const replay = rows(events);
+    expect(replay.compacting).toBe(false);
+    expect(operations(replay)).toHaveLength(1);
+    expect(operations(replay)[0].lifecycle).toMatchObject({ state: "stopped", stoppedBy: "failed" });
+    expect(replay.turns).toHaveLength(1);
+    expect(replay.turns[0].prompt).toBeUndefined();
+  });
+
+  it("deduplicates completion without start and rejects stale starts and other scopes", () => {
+    const completion = completed();
+    const done = rows([opened(), completion, completion, started()]);
+    expect(done.compacting).toBe(false);
+    expect(operations(done)).toHaveLength(1);
+    expect(rows([opened(), started()], true).turns).toHaveLength(1);
+    expect(buildTranscript([opened(), started()], true, { conversationId: "other" }).compacting).toBe(false);
+    const subagentEvents = [opened(), started()].map(e => ({ ...e, subagent: { id: "child" } }));
+    expect(rows(subagentEvents).compacting).toBe(false);
+  });
+
+  it("keeps a completed summary as system information without a prompt (#524/#566)", () => {
+    const t = rows([opened(), completed(), ev({ type: "compaction_summary", text: "Kept context" })]);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].prompt).toBeUndefined();
+    expect(operations(t)[0].summary).toBe("Kept context");
   });
 });

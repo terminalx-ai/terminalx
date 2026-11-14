@@ -28,7 +28,7 @@ import { cn } from "@/lib/cn";
 import { clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
-import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
+import { classifyRecovery, CONTINUE_PROMPT, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useModels } from "@/lib/models";
@@ -217,7 +217,10 @@ export function TabView({
 
   // Nothing is running in a conversation that is only being read.
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
-  const transcript = useMemo(() => buildTranscript(events, live), [events, log.version, live]);
+  const transcript = useMemo(() => buildTranscript(events, live, {
+    conversationId: conversation,
+    compactionContinuityKnown: log.compactionContinuityKnown ?? false,
+  }), [events, log.version, live, conversation, log.compactionContinuityKnown]);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(events, session.baseRef), [events, log.version, session.baseRef]);
@@ -318,19 +321,14 @@ export function TabView({
     });
   }, [backend, local, tab.id, gate?.mayStop, sendScope]);
 
-  const retry = async (model?: string) => {
+  // One recovery at a time. It sends through the backend, not the composer's
+  // `send`, whose failure would write the message into an empty draft.
+  const recover = async (sendRecovery: () => ReturnType<SessionBackend["send"]>) => {
     if (recoveryLock.current) return;
     recoveryLock.current = true;
     setRecovering(true);
     try {
-      // Await confirmed local exit before starting a replacement. Remote
-      // outcomes remain unknown and the continuation asks to verify them.
-      await backend.stop(tab.id);
-      if (model) {
-        await backend.setModel(tab.id, model);
-        backend.patchTab(tab.id, { model });
-      }
-      const out = await backend.send(tab.id, RECOVERY_PROMPT, []);
+      const out = await sendRecovery();
       setStopped(false);
       for (const ev of out.events) applyEvent(ev);
       setError(null);
@@ -340,6 +338,21 @@ export function TabView({
     } catch (e) { setError(safeError(e)); }
     finally { recoveryLock.current = false; setRecovering(false); }
   };
+
+  const retry = (model?: string) => recover(async () => {
+    // Await confirmed local exit before starting a replacement. Remote
+    // outcomes remain unknown and the continuation asks to verify them.
+    await backend.stop(tab.id);
+    if (model) {
+      await backend.setModel(tab.id, model);
+      backend.patchTab(tab.id, { model });
+    }
+    return backend.send(tab.id, RECOVERY_PROMPT, []);
+  });
+
+  // The agent carries on in the same conversation (#665). Nothing is stopped: a
+  // send starts an agent whose process has gone, and one still running takes it as its next turn.
+  const sendContinue = () => recover(() => backend.send(tab.id, CONTINUE_PROMPT, []));
 
   // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
   const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
@@ -437,7 +450,7 @@ export function TabView({
   const banner = (placement: "top" | "composer") => (
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
-        onRetry={retry} onStop={stop} onSignIn={signInAgent} onContinue={() => {
+        onRetry={retry} onStop={stop} onSignIn={signInAgent} onSendContinue={() => void sendContinue()} onContinue={() => {
           if (recoveryLock.current) return;
           recoveryLock.current = true;
           setRecovering(true);
@@ -693,6 +706,7 @@ export function TabView({
     {stopped && !terminalTab && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
+      <Button size="sm" variant="outline" disabled={recovering} title={'Send "continue" to the agent in this conversation'} onClick={() => void sendContinue()}>Continue here</Button>
     </div>}
     {terminalMode && banner("top")}
     {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}

@@ -17,7 +17,7 @@ fn prompt(text: &str, queued: bool) -> AgentEvent {
     event(Payload::UserMessage { author: None, text: text.into(), images: vec![], baseline: None, queued, cwd: None })
 }
 fn done(status: TurnStatus) -> AgentEvent {
-    event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false })
+    event(Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None })
 }
 fn show(core: &mut Core, status: StarStatus, now: i64) {
     let ticket = core.begin_check(now).expect("eligible");

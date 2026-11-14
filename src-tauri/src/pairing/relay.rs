@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,10 +20,44 @@ use super::{pairing_websocket_config, PairingManager};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const BACKOFF_MS: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
+/// How long the control channel may go without a frame and still count as
+/// working: two missed cell pings (`PING_INTERVAL_MS` is 20 s) and slack.
+pub(super) const CONTROL_LIVENESS: Duration = Duration::from_secs(45);
+
+/// What the control loop has heard, for the host-binding poll beside it.
+pub(super) struct ControlSignals {
+    last_frame_ms: AtomicI64,
+    /// The cell's hint that this host's pairing grants or revocations changed.
+    pairing_changed: tokio::sync::Notify,
+}
+
+impl ControlSignals {
+    fn new(now_ms: i64) -> Self {
+        Self { last_frame_ms: AtomicI64::new(now_ms), pairing_changed: tokio::sync::Notify::new() }
+    }
+
+    pub(super) fn frame_received(&self, at_ms: i64) {
+        self.last_frame_ms.store(at_ms, Ordering::SeqCst);
+    }
+
+    /// Whether a frame arrived within [`CONTROL_LIVENESS`] of `now_ms`. A
+    /// socket whose network is gone stays open and silent (#666), so an
+    /// open socket alone says nothing about reachability.
+    pub(super) fn verified(&self, now_ms: i64) -> bool {
+        now_ms - self.last_frame_ms.load(Ordering::SeqCst) <= CONTROL_LIVENESS.as_millis() as i64
+    }
+
+    /// Kept as a permit when no one is waiting, so a hint that arrives
+    /// during a poll round is not lost.
+    pub(super) fn hint_pairing_changed(&self) {
+        self.pairing_changed.notify_one();
+    }
+}
 
 #[derive(Clone)]
 pub struct RelayLive {
     tx: mpsc::UnboundedSender<ControlCommand>,
+    pub(super) signals: Arc<ControlSignals>,
     pub director_url: String,
     pub cell_url: String,
     pub assignment_epoch: u64,
@@ -31,6 +66,36 @@ pub struct RelayLive {
 }
 
 impl RelayLive {
+    pub(super) fn control_verified(&self) -> bool {
+        self.signals.verified(now_ms())
+    }
+
+    pub(super) async fn pairing_changed(&self) {
+        self.signals.pairing_changed.notified().await;
+    }
+
+    /// Resolves once the control loop has ended and dropped its receiver.
+    pub(super) async fn control_closed(&self) {
+        self.tx.closed().await;
+    }
+
+    /// A live channel with no socket behind it; dropping the returned end
+    /// closes it, as the control loop ending does.
+    #[cfg(test)]
+    pub(super) fn for_test(relay_host_id: &str, generation: u64) -> (Self, ControlEnd) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let live = Self {
+            tx,
+            signals: Arc::new(ControlSignals::new(now_ms())),
+            director_url: "https://relay.example.invalid".into(),
+            cell_url: "https://cell.example.invalid".into(),
+            assignment_epoch: 1,
+            relay_host_id: relay_host_id.into(),
+            generation,
+        };
+        (live, ControlEnd(rx))
+    }
+
     pub async fn create_invite(&self, device_id: String) -> Result<RelayPairingOffer> {
         self.mint_invite(device_id, None).await
     }
@@ -126,6 +191,10 @@ impl RelayLive {
         let _ = self.tx.send(ControlCommand::Shutdown);
     }
 }
+
+/// The control loop's end of a [`RelayLive::for_test`] channel.
+#[cfg(test)]
+pub(super) struct ControlEnd(#[allow(dead_code)] mpsc::UnboundedReceiver<ControlCommand>);
 
 enum ControlCommand {
     CreateInvite {
@@ -296,6 +365,17 @@ struct Ping {
     t: i64,
 }
 
+/// `{"type":"account-pairing-changed"}`: the account service has a grant
+/// request or revocation for this host. It carries no data; the host fetches.
+/// An unknown frame closes the control channel, so hosts accept this one
+/// before any cell sends it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountPairingChanged {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostHello<'a> {
@@ -450,6 +530,7 @@ async fn connect_once(
     let (tx, rx) = mpsc::unbounded_channel();
     let live = RelayLive {
         tx,
+        signals: Arc::new(ControlSignals::new(now_ms())),
         director_url,
         cell_url: assignment.cell_url.clone(),
         assignment_epoch: assignment.assignment_epoch,
@@ -661,6 +742,7 @@ async fn control_loop(
             incoming = tokio::time::timeout(SILENCE_TIMEOUT, socket.next()) => {
                 let incoming = incoming.context(Category::Timeout)?
                     .ok_or_else(|| anyhow!(Category::Network))??;
+                live.signals.frame_received(now_ms());
                 let Message::Text(text) = incoming else {
                     if matches!(incoming, Message::Close(_)) { return Err(anyhow!(Category::Network)); }
                     bail!("relay sent a non-text control message");
@@ -671,6 +753,11 @@ async fn control_loop(
                         let ping: Ping = serde_json::from_value(value)?;
                         if ping.kind != "ping" || ping.t < 0 { bail!("invalid relay ping"); }
                         socket.send(Message::Text(serde_json::to_string(&serde_json::json!({"type":"pong", "t": ping.t}))?.into())).await?;
+                    }
+                    Some("account-pairing-changed") => {
+                        let hint: AccountPairingChanged = serde_json::from_value(value)?;
+                        if hint.kind != "account-pairing-changed" { bail!("invalid relay pairing hint"); }
+                        live.signals.hint_pairing_changed();
                     }
                     Some("invite-created") => {
                         let invite: InviteCreated = serde_json::from_value(value)?;

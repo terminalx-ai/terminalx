@@ -2,6 +2,105 @@
 
 ## Unreleased
 
+### Relay
+
+- Poll the account service for pairing grants and revocations once every 30
+  seconds while idle, over one kept-alive connection, instead of a new TLS
+  connection every two seconds. Back off on failures, honour `Retry-After`, use
+  a refreshed access token, and record failures in `relay-diagnostics.json`.
+  Report this Mac as live only while its Relay control channel is still hearing
+  from the cell, so a phone stops offering Pair for a Mac it cannot reach.
+  Accept a cell's `account-pairing-changed` hint, which polls at once and then
+  every two seconds for a minute. (#671)
+
+### Mobile
+
+- Switch to Sessions when tapping a connected machine on iPhone, preserving its
+  active connection and session list. (#653)
+- Sending a message or worktree note again after the connection dropped no
+  longer gives the agent the prompt twice or adds the note twice. Each draft
+  goes under one id, and a Mac that already has it answers as it did the first
+  time, so the phone reports it sent and clears the box. Older Macs behave as
+  before. (#675)
+
+### Organizations
+
+- Let organization owners delete non-personal organizations, including test
+  organizations, with exact-name confirmation and guidance for remaining resources.
+  Refresh membership and clear a deleted default selection without choosing a replacement.
+
+### Terminal
+
+- Release a tab's terminal view metadata when the tab is removed, and ignore
+  late start or adoption replies from its previous lifetime. Archived tabs,
+  retained conversation history and reattachment are unchanged. (#232)
+- Cancel xterm's pending buffer compaction when a terminal is disposed,
+  including buffers replaced by a reset, so a closed terminal's scrollback is
+  not kept alive by the timer. (#232)
+- Reuse one small canvas for terminal palette conversion instead of creating
+  two surfaces per palette. (#232)
+- Add an opt-in memory diagnostic to the terminal benchmark: weak inventories of
+  xterm buffers, parsers, renderers and canvases, Tauri callback counts, and
+  WebContent footprint in exact bytes. It reports typed-array spans without
+  materializing their backing buffers. (#232)
+
+### Chat
+
+- Deliver Continue in New Session handoffs that the new agent left in its input.
+  The Enter waits until the agent has shown the paste, and is written again up
+  to twice. A handoff still in the input is offered as **Press Enter**, not
+  reported as a failure. The dialog shows each delivery step, finishes about
+  20 s after the last Enter instead of after 90 s, and turns a late delivery
+  into success. (#662)
+- Recognize completed Codex context compaction and preserve scoped compaction
+  history and status across conversation changes. Add a default-off experimental
+  owned-stdio connection for explicitly created new Codex sessions, with confirmed
+  compaction start/completion events and retained interruption status. Existing
+  PTY sessions keep their current behavior. (#644)
+
+### Issue work status
+
+- Refresh shared issue work when the account service changes its supported
+  capabilities, and republish actual linked sessions after support returns.
+  Explain when the account service has not reported support; shared activity
+  still requires a supported backend. (#642)
+
+### Cloud workspaces
+
+- Treat enabled cloud control as consent for routine cloud workspace starts,
+  resumes and session launches without repeated native confirmations. Preserve
+  destructive confirmations and security checks. (#658)
+- Route new sessions to the selected, verified repository checkout and keep child
+  checkout sessions visible. Require the runtime's `session-repository/1`
+  capability; refuse unavailable or mismatched checkouts instead of using the
+  blank workspace root. (#656)
+
+## 0.2.21
+
+### Sessions and workspace
+
+- Create sessions from a compact dialog with a combined agent menu, branch picker
+  and searchable GitHub or Linear issues. Keep unsent prompts when the dialog
+  closes, reuse an open branch or check out another branch in a new worktree,
+  and name new worktrees from the prompt or issue. (#651)
+- Add a Linux desktop in the Computer panel using Docker or Podman, with live
+  viewing, manual control and agent computer tools. The container has no host
+  mounts, its viewer listens on loopback, and Stop and Reset check ownership. (#651)
+- Add a resizable terminal dock, per-turn changed files, branch renaming and
+  clearer loading and signed-out states. Fix transcript-only task notifications
+  leaving a conversation stuck on Working. (#651)
+
+### Updates
+
+- Check for updates shortly after launch and every four hours in release builds.
+  Show an Update button and a dismissible notice with Update and relaunch. (#651)
+
+### Permissions
+
+- Preserve the session directory and supplied approval reason through live events
+  and transcript replay. Prefer an explicit tool working directory, and explain
+  when Ask every time caused the permission request. (#636)
+
 ### Terminal
 
 - Cancel pending atlas warm-up when its final terminal owner is disposed, while

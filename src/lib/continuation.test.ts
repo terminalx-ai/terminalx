@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn(), delivery: vi.fn() }));
+vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String, onPromptDelivery: mocks.delivery }));
 vi.mock("@/lib/sessions", () => ({ addTab: mocks.add }));
 vi.mock("@/lib/pipelineLaunch", () => ({ preparePipelineContinuation: mocks.pipeline }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: mocks.apply }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-default" }, lastEffort: { codex: "high" }, lastMode: "default" }) }));
-import { continuationPrompt, launchContinuation, type ContinuationContext } from "./continuation";
+import { continuationPrompt, IN_INPUT, launchContinuation, type ContinuationContext } from "./continuation";
 import { clearDrafts, getDraft, setDraft } from "@/lib/drafts";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
 const settings = (harness: string): LaunchSettings => ({ harness, model: `${harness}-model`, effort: "medium", permissionMode: "acceptEdits" });
@@ -14,7 +14,10 @@ const codex = settings("codex");
 const providers = [{ id: "claude", available: true }, { id: "codex", available: true }] as HarnessInfo[];
 const context: ContinuationContext = { sessionId: "workspace", tabId: "source", title: "Issue 109", cwd: "/same/cwd", provider: "claude", providerSessionId: "original", sourceActive: true, transcriptPath: "/saved/history```file.jsonl", fullUnavailableReason: null, lastPrompt: "Finish ```this```", lastUpdate: "Halfway", partialCapture: null };
 const tab = { id: "fresh", harness: "codex", providerSessionId: null } as TabEntry;
-beforeEach(() => { vi.clearAllMocks(); mocks.pipeline.mockImplementation(async (_session, _tab, prompt) => prompt); setDraft(tab.id, ""); mocks.list.mockResolvedValue(providers); mocks.add.mockResolvedValue(tab); mocks.start.mockResolvedValue(undefined); mocks.send.mockResolvedValue({ queued: false, events: [] }); });
+// What the new tab tells of its continuations' deliveries, to whoever listens.
+let tells: ((stage: string, seq: number) => void)[] = [];
+const unlisten = vi.fn();
+beforeEach(() => { vi.clearAllMocks(); tells = []; mocks.delivery.mockImplementation(async (_session, _tab, onStage) => { tells.push(onStage); return unlisten; }); mocks.pipeline.mockImplementation(async (_session, _tab, prompt) => prompt); setDraft(tab.id, ""); mocks.list.mockResolvedValue(providers); mocks.add.mockResolvedValue(tab); mocks.start.mockResolvedValue(undefined); mocks.send.mockResolvedValue({ queued: false, events: [] }); });
 describe("context", () => {
   it("preserves full file references, safe fences, and historical reference rules in both modes", () => {
     for (const mode of ["focused", "full"] as const) {
@@ -89,6 +92,33 @@ describe("launch and actual send boundary", () => {
     const result = await running;
     expect(result.stage).toBe("delivery");
     expect(getDraft("fresh")).toBe("prepared prompt");
+  });
+  it("leaves a handoff the agent holds in its input there, to send once, rather than in the composer too", async () => {
+    mocks.send.mockResolvedValue({ queued: false, events: [{ seq: 7 }], inInput: true });
+    const result = await launchContinuation(context, settings("claude"), "prepared prompt", vi.fn());
+    expect(result).toEqual({ stage: "input", launched: { sessionId: "workspace", tab }, seq: 7, error: IN_INPUT });
+    expect(getDraft("fresh")).toBe("");
+  });
+  it("takes the prompt back out of the composer when a handoff it could not confirm arrives after all", async () => {
+    mocks.send.mockRejectedValue(new Error("could not be confirmed"));
+    expect((await launchContinuation(context, codex, "prepared prompt", vi.fn())).stage).toBe("delivery");
+    expect(getDraft("fresh")).toBe("prepared prompt");
+    await vi.waitFor(() => expect(tells).toHaveLength(1));
+    expect(mocks.delivery).toHaveBeenCalledWith("workspace", "fresh", expect.any(Function));
+    tells[0]("nudged", 1);
+    expect(getDraft("fresh")).toBe("prepared prompt");
+    // The reader pressed Enter in its terminal: sending the composer now would send it twice.
+    tells[0]("delivered", 1);
+    expect(getDraft("fresh")).toBe("");
+    await vi.waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
+  });
+  it("keeps what the reader wrote in the composer when a late handoff arrives", async () => {
+    mocks.send.mockRejectedValue(new Error("could not be confirmed"));
+    await launchContinuation(context, codex, "prepared prompt", vi.fn());
+    await vi.waitFor(() => expect(tells).toHaveLength(1));
+    setDraft("fresh", "prepared prompt, and one more thing");
+    tells[0]("delivered", 1);
+    expect(getDraft("fresh")).toBe("prepared prompt, and one more thing");
   });
   it.each(["delivered", "delivery"])("preserves a new draft when a dismissed dialog finishes with %s", async (stage) => {
     let resolve!: (value: unknown) => void;

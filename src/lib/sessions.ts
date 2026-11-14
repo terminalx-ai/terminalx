@@ -1,3 +1,4 @@
+import { forgetClosedTabViews } from "@/lib/tabViews";
 import { keepMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -130,7 +131,12 @@ function set(patch: Partial<State>) {
   ) {
     next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
   }
+  const activeTabs = patch.sessions ? new Set(next.sessions.flatMap((session) => session.tabs.map((tab) => tab.id))) : null;
+  const removedTabs = activeTabs ? state.sessions.flatMap((session) =>
+    session.tabs.filter((tab) => !activeTabs.has(tab.id)).map((tab) => tab.id),
+  ) : [];
   state = next;
+  if (removedTabs.length) forgetClosedTabViews(removedTabs);
   if (patch.sessions) setArchivedTerminalSessions(patch.sessions.filter((session) => session.archived).map((session) => session.id));
   for (const l of listeners) l();
 }

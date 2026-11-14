@@ -107,6 +107,18 @@ function setup(turnCount: number) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows confirmed compaction while ordinary work is idle", () => {
+    const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
+    const events: AgentEvent[] = [
+      { id: "open", seq: 1, sessionId: "s", tabId: "t", harness: "claude", ts: "", payload: { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "connection_opened", generation: 1 } } },
+      { id: "start", seq: 2, sessionId: "s", tabId: "t", harness: "claude", ts: "", payload: { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, type: "item_started", generation: 1, turnId: "turn", itemId: "item" } } },
+    ];
+    const transcript = buildTranscript(events, false, { compactionContinuityKnown: true });
+    render(<Chat sessionId="s" transcript={transcript} cwd="/tmp/repo" live={false} progressing={false} answering={false} stream={[]} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />);
+    expect(screen.getByText("Compacting context…")).toBeDefined();
+    expect(screen.queryByText("Context compacted")).toBeNull();
+  });
+
   beforeEach(() => {
     heights = new Map();
     top = 0;

@@ -51,7 +51,7 @@ const sessions = await import("./sessions");
 const { resetCloudAgents } = await import("./cloudAgents");
 
 const ORG = "org-a";
-const connected: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: ["session/1", "session/2"], authority: "manage" };
+const connected: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: ["session/1", "session/2", "session-repository/1"], authority: "manage" };
 
 /** A runtime: session.create makes a session with one tab. */
 function fakeRuntime(workspaceId: string, initial: WorkspaceConnectionState) {
@@ -108,7 +108,7 @@ function item(id: string, fields: Record<string, unknown> = {}): CloudWorkspaceL
   } as CloudWorkspaceListItem;
 }
 
-const api = { identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true };
+const api = { identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", targetDirectory: "api", primary: true };
 
 function signIn() {
   mocks.status = {
@@ -205,6 +205,50 @@ describe("a member's new session only uses a workspace they manage (PRO-73)", ()
 });
 
 describe("new session in a cloud project", () => {
+  it.each(["/var/lib/terminalx/workspace/Acme/App", "/srv/terminalx/state/workspace/Acme/App"])("carries the selected absolute in-scope catalog checkout %s", async (targetDirectory) => {
+    const repository = { identity: "github.com/acme/app", fullName: "Acme/App", cloneUrl: "https://github.com/Acme/App.git", ref: "main", targetDirectory, primary: true };
+    await place([item("image-checkout", { repositories: [repository] })]);
+    await flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/app")) as never, request);
+    expect(runtimes.get("image-checkout")!.created[0]).toMatchObject({ repository: { identity: "github.com/acme/app", directory: targetDirectory } });
+  });
+
+  it.each(["/home/repos/Acme/App", "/var/lib/terminalx/workspace-other/Acme/App"])("refuses unsupported advertised Environment scope %s before waking", async (targetDirectory) => {
+    const repository = { identity: "github.com/acme/app", fullName: "Acme/App", cloneUrl: "https://github.com/Acme/App.git", ref: null, targetDirectory, primary: true };
+    await place([item("image-outside", { state: "suspended", repositories: [repository] })]);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/app")) as never, request)).rejects.toThrow("cloud_repository_checkout_scope_unsupported");
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an unselected advertised absolute checkout", async () => {
+    await place([item("unselected", { repositories: [{ ...api, fullName: null, targetDirectory: "/var/lib/terminalx/workspace/api" }] })]);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request)).rejects.toThrow("cloud_repository_checkout_unavailable");
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("refuses an old runtime instead of letting it ignore the selected checkout", async () => {
+    await place([item("old-runtime", { repositories: [api] })]);
+    const runtime = fakeRuntime("old-runtime", { ...connected, capabilities: ["session/1", "session/2"] });
+    vi.spyOn(runtime.connection.client, "hasCapability").mockImplementation((capability) => capability !== "session-repository/1");
+    runtimes.set("old-runtime", runtime);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request)).rejects.toThrow("cloud_repository_session_runtime_update_required");
+    expect(runtime.created).toEqual([]);
+  });
+
+  it("requires an advertised checkout directory, not catalog identity alone", async () => {
+    await place([item("unplanned", { repositories: [{ ...api, targetDirectory: null }] })]);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request)).rejects.toThrow("cloud_repository_checkout_unavailable");
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("never retries a repository checkout refusal as a blank non-worktree session", async () => {
+    await place([item("wrong-origin", { repositories: [api] })]);
+    const runtime = fakeRuntime("wrong-origin", connected);
+    runtime.connection.client.createAgentTab.mockRejectedValue(new Error("repository checkout is not a git repository"));
+    runtimes.set("wrong-origin", runtime);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request)).rejects.toThrow("repository checkout");
+    expect(runtime.connection.client.createAgentTab).toHaveBeenCalledTimes(1);
+  });
+
   it("reuses the most recently active running workspace, with a worktree, and selects the new session", async () => {
     await place([item("old", { repositories: [api], lastActivityAt: 5 }), item("recent", { repositories: [api], lastActivityAt: 50 })]);
     const plan = flow.planCloudStart(project("github.com/acme/api"));
@@ -212,7 +256,7 @@ describe("new session in a cloud project", () => {
     const key = await flow.startInWorkspace(plan as never, request);
     expect(key).toBe(`cloud:${ORG}:recent:recent-s1`);
     expect(sessions.getSessionStore().selectedSessionId).toBe(key);
-    expect(runtimes.get("recent")!.created[0]).toMatchObject({ agent: "claude", model: "opus", useWorktree: true, prompt: request.prompt, title: "Fix the login redirect" });
+    expect(runtimes.get("recent")!.created[0]).toMatchObject({ agent: "claude", model: "opus", useWorktree: true, prompt: request.prompt, title: "Fix the login redirect", repository: { identity: "github.com/acme/api", directory: "api" } });
     expect(mocks.workspaceConnection.mock.calls).toEqual([[{ kind: "cloud", organizationId: ORG, workspaceId: "recent" }, "connect"]]);
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
@@ -375,6 +419,7 @@ describe("blank projects", () => {
     await flow.startInWorkspace(plan as never, { ...request, prompt: "Second task" });
     expect(mocks.api.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
     expect(runtimes.get("scratch-ws")!.created).toHaveLength(1);
+    expect(runtimes.get("scratch-ws")!.created[0]).not.toHaveProperty("repository");
   });
 
   it("falls back to working in the folder when the runtime cannot cut a worktree there", async () => {
@@ -492,7 +537,7 @@ it("sends an explicit conflict opt-out for an issue whose project default is on"
   const { DEFAULT_PIPELINE_SETTINGS } = await import("./issuePipeline");
   await place([item("issue-work", { repositories: [api] })]);
   const plan = flow.planCloudStart(project("github.com/acme/api"));
-  const runtime = fakeRuntime("issue-work", { ...connected, capabilities: ["session/1", "session/2", "pipeline/1"] });
+  const runtime = fakeRuntime("issue-work", { ...connected, capabilities: ["session/1", "session/2", "session-repository/1", "pipeline/1"] });
   runtimes.set("issue-work", runtime);
   await flow.startInWorkspace(plan as never, {
     ...request,

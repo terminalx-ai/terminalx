@@ -958,7 +958,7 @@ export function IssuesView({
                 </div>
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
-              {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
+              {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} note={workNote} />}
               <div className="mt-1 rounded-xl bg-well/60 p-1.5 hairline" data-testid="issue-start-card">
                 {/* Where it runs, and the buttons. The buttons take a line of their own
                     when the pane is too narrow for both, rather than sit on the words. */}

@@ -103,6 +103,19 @@ pub async fn organization_select(
 
 // ------------------------------------------------------ organization members
 
+#[tauri::command]
+pub async fn organization_delete(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    confirmation_name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::account::RolesRefresh, crate::account::organization_delete::DeleteError> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || account.delete_organization(&app, &organization_id, &context_revision, &confirmation_name))
+        .await.map_err(|_| crate::account::organization_delete::DeleteError::local("organization_delete_outcome_unknown"))?
+}
+
 type MembersResult = Result<crate::organization_members::OrganizationRoster, crate::organization_members::OrganizationMembersError>;
 
 async fn members_call(
@@ -2348,6 +2361,15 @@ pub async fn send_message(
         .map_err(err)?
 }
 
+/// Press Enter in a new session for the handoff left in its input (#662).
+#[tauri::command]
+pub async fn submit_waiting_prompt(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<bool> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.submit_waiting(&session_id, &tab_id, seq).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.sessions().map_err(err)?.interrupt(&session_id, &tab_id).map_err(err)
@@ -2839,7 +2861,7 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
         let answer = cloud_control_question(
             app,
             "Let agents in local sessions control cloud workspaces?".to_string(),
-            "Any agent running in a local session will be able to list your organizations' cloud workspaces, read their conversations and send messages to running ones. Starting, stopping or creating a workspace will still ask you each time.".to_string(),
+            "Agents in local sessions will be able to list your organizations' cloud workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. Stopping a workspace will still ask you each time.".to_string(),
             "Turn on".to_string(),
         )
         .await;
@@ -3511,7 +3533,7 @@ mod command_tests {
     }
     #[test]
     fn new_tabs_use_the_default_permission_mode_when_unspecified() {
-        let tab = new_tab_entry(&NewTab {
+        let tab = new_tab_entry(&NewTab { transport: Default::default(),
             harness: "claude".into(),
             model: String::new(),
             effort: None,
@@ -3524,9 +3546,9 @@ mod command_tests {
         );
 
         // Blank is unset too; a named mode is the reader's and is kept.
-        let blank = new_tab_entry(&NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
+        let blank = new_tab_entry(&NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: Some(String::new()) });
         assert_eq!(blank.permission_mode, "bypassPermissions");
-        let chosen = new_tab_entry(&NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
+        let chosen = new_tab_entry(&NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some("manual".into()) });
         assert_eq!(chosen.permission_mode, "manual");
     }
 
@@ -3645,7 +3667,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab {
+            tab: Some(NewTab { transport: Default::default(),
                 harness: "codex".into(),
                 model: String::new(),
                 effort: None,
@@ -3711,7 +3733,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: None,
-            tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
+            tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap();
         let attached = crate::store::projects::add(project.to_str().unwrap()).unwrap();
@@ -3761,7 +3783,7 @@ mod command_tests {
             issue: None,
             automation: None,
             cwd: Some(worktree.to_string_lossy().into_owned()),
-            tab: Some(NewTab {
+            tab: Some(NewTab { transport: Default::default(),
                 harness: "codex".into(),
                 model: "gpt-5".into(),
                 effort: None,

@@ -5,7 +5,7 @@ import { GitBranch, LoaderCircle } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { agent, api, errorMessage } from "@/lib/api";
+import { agent, api, errorMessage, onPromptDelivery, type DeliveryStage } from "@/lib/api";
 import { continuationPrompt, launchContinuation, moveChatToProject, type ContextMode, type ContinuationContext, type Launched } from "@/lib/continuation";
 import { loadModels, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
@@ -25,6 +25,12 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * source stays pinned even when creation selects the destination underneath.
  * Once the destination exists the reader may leave while it starts; a failure
  * after that goes to `onLateError`, if given, rather than nowhere.
+ *
+ * While the handoff is delivered the dialog says where it has got to, as the
+ * new tab tells it. A handoff the agent has not taken but holds in its input
+ * is one Enter from sent, and the dialog offers that Enter. Whenever the agent
+ * does take it, even after the dialog said it could not confirm it, the
+ * dialog closes as it would have on success (#662).
  */
 export function ContinuationDialog({ session, source, into, onClose, onLateError }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
@@ -43,6 +49,11 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const [destination, setDestination] = useState<Launched>();
   // The prompt went, or may have: nothing is left to retry, only the destination to open.
   const [sent, setSent] = useState(false);
+  // How far the handoff has got; "delivered" closes the dialog instead.
+  const [progress, setProgress] = useState<Exclude<DeliveryStage, "delivered"> | null>(null);
+  // The handoff the agent holds in its input, for the Enter that sends it.
+  const [inInput, setInInput] = useState<{ seq: number; pressed: boolean } | null>(null);
+  const [pressing, setPressing] = useState(false);
   const startingRef = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
@@ -71,6 +82,24 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   };
 
   useEffect(() => {
+    if (!destination) return;
+    let stop: (() => void) | undefined;
+    let gone = false;
+    void onPromptDelivery(destination.sessionId, destination.tab.id, (stage) => {
+      if (stage === "delivered") close();
+      else setProgress(stage);
+    }).then((unlisten) => {
+      if (gone) unlisten();
+      else stop = unlisten;
+    });
+    return () => {
+      gone = true;
+      stop?.();
+    };
+    // `close` reads refs only; the subscription follows the destination.
+  }, [destination]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     let canceled = false;
     setLoading(true);
     setError(null);
@@ -97,6 +126,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     startingRef.current = true;
     setStarting(true);
     setDelivering(false);
+    setProgress(null);
     setError(null);
     try {
       const prompt = preparedPrompt.current ?? continuationPrompt(context, mode, into?.project.path);
@@ -113,7 +143,10 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
         return;
       }
       if (result.stage === "delivered") close();
-      else {
+      else if (result.stage === "input") {
+        setSent(true);
+        setInInput({ seq: result.seq, pressed: false });
+      } else {
         setError(result.error);
         setSent(result.stage !== "launch");
         if (!result.launched) preparedPrompt.current = undefined;
@@ -126,6 +159,31 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       if (active.current) setStarting(false);
     }
   };
+  const pressEnter = async () => {
+    if (!destination || !inInput || pressing) return;
+    setPressing(true);
+    setError(null);
+    try {
+      const pressed = await agent.submitWaiting(destination.sessionId, destination.tab.id, inInput.seq);
+      if (!active.current) return;
+      if (pressed) setInInput({ ...inInput, pressed: true });
+      else {
+        setInInput(null);
+        setError("The handoff is no longer waiting in the new session's input. Open it to check its chat and terminal.");
+      }
+    } catch (e) {
+      if (active.current) setError(errorMessage(e));
+    } finally {
+      if (active.current) setPressing(false);
+    }
+  };
+  const agentName = providers.find((p) => p.id === settings?.harness)?.name ?? "the agent";
+  const delivery = {
+    body_written: `Typing the handoff into ${agentName}…`,
+    submit_written: `Waiting for ${agentName} to take the handoff…`,
+    nudged: `Pressed Enter again: ${agentName} had not taken the handoff yet…`,
+    stalled: `Holding off: ${agentName} is not reading its input…`,
+  }[progress ?? "body_written"];
   const sourceActive = context?.sourceActive || source.status === "in_progress" || source.status === "waiting";
   const canClose = !starting || !!destination;
   const locked = starting || !!destination;
@@ -174,11 +232,15 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           </fieldset>
           {context?.partialCapture && <p className="mt-3 text-xs text-muted-foreground">Focused mode will use a bounded partial capture of recent saved conversation history. Older content is omitted.</p>}
         </>}
-        {starting && delivering && <p role="status" className="mt-4 text-sm text-muted-foreground">Waiting for the new session to confirm receipt. You can open it to follow progress; do not send the handoff again.</p>}
+        {starting && delivering && <p role="status" className="mt-4 text-sm text-muted-foreground">{progress ? delivery : `Waiting for ${agentName} to start…`} You can open it to follow progress; do not send the handoff again.</p>}
+        {inInput && <p role="status" className="mt-4 text-sm">{inInput.pressed
+          ? `Pressed Enter. Waiting for ${agentName} to take the handoff… If nothing happens, open the new session and check its terminal.`
+          : `The handoff is in ${agentName}'s input but has not been sent yet. Press Enter to send it.`}</p>}
         {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
+          {inInput && <Button disabled={pressing} onClick={() => void pressEnter()}>{pressing ? <><LoaderCircle className="size-4 animate-spin" />Pressing Enter…</> : inInput.pressed ? "Press Enter Again" : "Press Enter"}</Button>}
           {!sent && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
         </DialogFooter>
       </DialogContent>

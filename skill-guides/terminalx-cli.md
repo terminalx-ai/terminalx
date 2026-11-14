@@ -109,6 +109,27 @@ Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`
 `path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
 its title without changing its worktree name.
 
+### Experimental Codex connection (new local sessions only)
+
+Local project and quick-chat creation accept `--experimental-codex-stdio` with
+`--agent codex`. This opt-in requires Codex CLI 0.164.0 and selects its experimental
+app-server stdio API. Ordinary creation continues to use the PTY engine. This is
+an experimental integration, not a production-supported replacement.
+
+The transport choice is persisted. Opening the view never starts or resumes it;
+existing sessions cannot be migrated into this mode. The owner handles local
+send, command/file approvals, interrupt, Stop and `/compact`. Manual compaction
+adds system status, not a user message. Unsupported modes or protocol requests
+fail explicitly. Shared/mobile input, issue pipelines, continuation delivery,
+terminal handoff and changing model/effort/mode in place are not supported.
+Create a new experimental session with the desired settings instead.
+
+Confirmed compaction events update the existing chat indicator. If the connection
+ends, retained status records loss of continuity; it does not invent completion
+or replay a prompt. Stop confirms reader and process cleanup, retaining ownership
+on a timeout so it can be retried. A version mismatch sends no prompt and does not
+fall back to a different engine.
+
 ### Start a quick chat (no project)
 
 ```text
@@ -163,8 +184,26 @@ terminalx wait <session-or-tab> [--timeout <seconds>] --json
 
 `send` types into the live agent TUI through the composer path. `read` returns normalized,
 persisted transcript events; `--since` is exclusive and `--tail` is applied after it. `wait`
-returns when the turn completes, the agent asks for permission, the tab stops, or the timeout
-expires. Its result names the reason and includes the current tab status.
+returns when the turn completes, the agent asks for a decision, the agent stops on an error, the
+agent asks something in its own terminal, the tab stops, or the timeout expires. Its result names
+the `reason` and includes the current tab `status`:
+
+- `permission`: the agent asks for a decision someone can give. `permissions list` shows it.
+- `recovery`: the agent stopped on an error and waits for someone to deal with it. Nothing is
+  in `permissions list`. `recovery` names the error: `failed`, `signed_out`, `usage_limit`,
+  `capacity`, `timeout`, `disconnected`, `delivery_unconfirmed` or `permission_expired`.
+  Read the transcript before sending again, and tell the person when only they can fix it
+  (for example, signing the agent in again).
+- `terminal`: the agent asks something in its own terminal, such as its own permission prompt in
+  a CLI started by hand. Nothing is in `permissions list`, and it cannot be answered from this
+  CLI: tell the person to answer it in the tab.
+- `stop`: the turn ended.
+- `stopped`: nothing is running.
+- `timeout`: none of these before the timeout.
+
+A `wait` right after a `send` waits for the agent to take that message, so a turn that ended or
+failed before it is not reported. A message the agent holds behind an error it has stopped on
+still reports that `recovery`.
 
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
@@ -360,9 +399,12 @@ command; an app that does not know one answers `unsupported`.
 **The person decides whether the command line may touch the cloud.** These commands run with the
 signed-in person's account, and any agent in a local session can run them. They are all refused
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
-cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
-command that starts billed compute or stops a workspace is still confirmed by the person in a
-native dialog first. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). Turning it on
+authorizes routine compute within the person's existing organization and workspace permissions:
+session launches, resume, send-wake and new workspace creation can incur billing without another
+native confirmation. The switch does not grant a new role or repository access.
+Stopping a workspace still requires `--yes` and the person's native confirmation. Enabling the
+switch also requires native confirmation. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
 while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
@@ -381,9 +423,9 @@ scripting; or any program when TerminalX itself has been granted Accessibility. 
 prevent the last two from inside. The person's switch and their
 answer are the control, not a security boundary against software already running as them.
 
-`send` to a workspace the app is not connected to reads the workspace list again first. If the
-workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the
-message would start it.
+`send` can resume a stopped workspace under the enabled switch. When supported, the server first
+receives the message with wake disabled; a stopped response is followed by the same message with
+wake allowed. Older servers use a fresh workspace list. Neither path adds a routine compute dialog.
 
 The switch is kept in a file in the app's home (`cloud-control.json`), not in the window. That
 protects it from an agent that uses the app; it does not protect it from a process that already
@@ -423,7 +465,9 @@ session has no tab there, or its first prompt failed to start one (the message s
   it answers `spend_confirmation_required` unless `--confirm-spend` is passed, which creates a
   new machine and returns its `workspace` key and `operationId`; the first session appears in
   `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
-  retrying a create.
+  retrying a create. `--wake` and `--confirm-spend` remain explicit command scope for compatibility:
+  they allow waking an existing workspace or allocating a new one, respectively. They do not
+  request another native dialog when cloud control is enabled.
 - `sessions create --issue` starts a session from one of the cloud project's GitHub or Linear
   issues, read first with the person's own `gh` or Linear key, in a worktree of the project's
   workspace (with `--wake` for a stopped one; never a new machine: it answers
@@ -432,8 +476,10 @@ session has no tab there, or its first prompt failed to start one (the message s
   itself, so `--auto-merge` is refused, and the merge is the person's, from the issue page.
   The response carries `pipeline`, or `null` with the reason in `pipelineNote`.
 
-`wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
-`stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
+`wait` returns `reason`: `permission` (the agent asks for a decision), `recovery` (the agent
+stopped on an error; `recovery` names it, as for a local tab), `terminal` (the agent asks in its
+own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeout`. As for a local tab, a `wait` right after a `send` does not
+report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
 ### This guide

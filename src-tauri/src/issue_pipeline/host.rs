@@ -237,7 +237,7 @@ impl Host for LocalHost {
     /// reused by the engine, including legacy separate sessions.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        let reviewer = self.manager.add_tab(&author.id, &NewTab {
+        let reviewer = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(),
             harness: tab.harness.clone(), model: tab.model.clone(), effort: tab.effort.clone(), permission_mode: Some(tab.permission_mode.clone()),
         })?;
         crate::session_ops::rename_tab_entry(&author.id, &reviewer.id, Some("Reviewer".into())).map_err(anyhow::Error::msg)?;

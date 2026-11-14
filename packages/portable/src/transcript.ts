@@ -1,5 +1,6 @@
 import type { AgentEvent, BackgroundTask, FileEdit, Payload, PermissionOption, Question, ToolResult } from "./events";
 import { withoutHarnessBlocks } from "./harnessText";
+import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
 /** Turns an event log into the platform-neutral transcript model. */
 export interface ToolCall {
@@ -33,8 +34,9 @@ export type WorkItem =
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
   | { kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[] }
   | { kind: "status"; text: string; initiatingPrompt?: string; key: string; seq: number }
-  | { kind: "error"; text: string; key: string; seq: number }
-  | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; key: string; seq: number }
+  /** `detail`: the agent's (or its launch's) own words under the error (#667). */
+  | { kind: "error"; text: string; detail?: string; key: string; seq: number }
+  | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; lifecycle?: CompactionOperation; uncertain?: boolean; key: string; seq: number }
   | { kind: "retry"; attempt: number; maxRetries: number; reason?: string; key: string; seq: number }
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
   | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number };
@@ -47,6 +49,8 @@ export interface Turn {
   prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; messageTs?: string; seq: number };
   work: WorkItem[];
   finalText?: string;
+  /** Under a failed turn's `finalText`: the agent's last line, when it exited before it ever worked (#667). */
+  detail?: string;
   completed?: { status: string; durationMs?: number; ts: string; head?: string };
   usage?: { contextUsed?: number; contextMax?: number };
   toolCount: number;
@@ -155,21 +159,23 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
  * one the tab began with (whose events come before any marker). A
  * conversation that was left and picked up again is all of its stretches.
  *
- * A log with no marker is one conversation and is returned as it is, so a
- * tab that never changed hands costs nothing here.
+ * Scoped lifecycle corrections can arrive after a later conversation's
+ * marker. Their explicit scope takes precedence over positional membership.
  */
 export function conversationEvents(events: AgentEvent[], conversation: string | null): AgentEvent[] {
-  if (!events.some((event) => event.payload.type === "conversation")) return conversation === null ? events : [];
+  if (!events.some((event) => event.payload.type === "conversation" || event.payload.type === "context_compaction_lifecycle")) return conversation === null ? events : [];
   const own: AgentEvent[] = [];
   let under: string | null = null;
   for (const event of events) {
     if (event.payload.type === "conversation") under = event.payload.id ?? null;
-    else if (under === conversation) own.push(event);
+    else if (event.payload.type === "context_compaction_lifecycle") {
+      if (event.payload.evidence.scope.conversationId === conversation) own.push(event);
+    } else if (under === conversation) own.push(event);
   }
   return own;
 }
 
-export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
+export function buildTranscript(events: AgentEvent[], live: boolean, options: { conversationId?: string | null; compactionContinuityKnown?: boolean } = {}): Transcript {
   const turns: Turn[] = [];
   const asks = new Map<string, PendingAsk>();
   const calls = new Map<string, ToolCall>();
@@ -178,6 +184,8 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let contextMax: number | undefined;
   let model: string | undefined;
   let compacting = false;
+  const compactions = new Map<string, CompactionLifecycle>();
+  const compactionRows = new Map<string, Extract<WorkItem, { kind: "compaction" }>>();
   let retry: Transcript["retry"];
   let modelRequestOpen = false;
   let authFailed = false;
@@ -352,6 +360,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           if (payload.status !== "ok") turn.finalText = payload.finalText;
           else if (!lastText) turn.work.push({ kind: "text", text: payload.finalText, key: `f${event.seq}`, seq: event.seq, messageTs: event.messageTs });
         }
+        if (payload.status !== "ok" && payload.detail) turn.detail = payload.detail;
         if (payload.usage) {
           if (payload.usage.contextUsed != null) contextUsed = payload.usage.contextUsed;
           if (payload.usage.contextMax != null) contextMax = payload.usage.contextMax;
@@ -416,8 +425,38 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         if (payload.model) model = payload.model;
         break;
       case "context_compaction_started":
-        compacting = true;
+        // Old unscoped starts cannot establish owner/connection continuity.
+        ensureTurn(event).work.push({ kind: "compaction", key: `k${event.seq}`, seq: event.seq,
+          lifecycle: { turnId: "", itemId: event.id, state: "unknown", generation: null, retrying: false } });
         break;
+      case "context_compaction_lifecycle": {
+        const evidence = payload.evidence;
+        const scope = evidence.scope;
+        if (event.subagent || scope.subagentId !== null || scope.sessionId !== event.sessionId || scope.tabId !== event.tabId
+          || scope.provider !== event.harness || scope.conversationId !== (options.conversationId ?? null)) break;
+        if (evidence.type === "item_started" && (!payload.confirmedStart || !payload.persisted)) break;
+        const scopeKey = JSON.stringify([scope.sessionId, scope.tabId, scope.conversationId, scope.provider, scope.threadId, scope.subagentId]);
+        const previous = compactions.get(scopeKey) ?? emptyCompactionLifecycle(scope);
+        // Append uncertainty is a loss of evidence, never an optimistic terminal.
+        const admitted = !payload.persisted && previous.generation !== null
+          ? { type: "continuity_lost" as const, scope, generation: previous.generation, reason: "disconnected" as const } : evidence;
+        if (!payload.persisted && previous.generation === null) break;
+        const next = reduceCompactionLifecycle(previous, admitted);
+        compactions.set(scopeKey, next);
+        if (payload.persisted && (evidence.type === "item_completed" || evidence.type === "completion_reconciled")) afterCompaction = true;
+        for (const operation of Object.values(next.operations)) {
+          const key = `${scopeKey}:${compactionOperationKey(operation)}`;
+          let row = compactionRows.get(key);
+          if (!row) {
+            row = { kind: "compaction", key: `k${event.seq}:${key}`, seq: event.seq };
+            ensureTurn(event).work.push(row);
+            compactionRows.set(key, row);
+          }
+          row.lifecycle = operation;
+          if (!payload.persisted && operation.state === "unknown") row.uncertain = true;
+        }
+        break;
+      }
       case "context_compacted": {
         compacting = false;
         if (payload.postTokens != null) contextUsed = payload.postTokens;
@@ -473,7 +512,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         break;
       case "error": {
         const turn = ensureTurn(event);
-        turn.work.push({ kind: "error", text: payload.message, key: `e${event.seq}`, seq: event.seq });
+        turn.work.push({ kind: "error", text: payload.message, detail: payload.detail, key: `e${event.seq}`, seq: event.seq });
         break;
       }
       case "settings_changed":
@@ -484,6 +523,17 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     }
   }
 
+  // A reader gap is uncertainty, not evidence that the backend stopped. A
+  // subsequent reconciled history read can establish current ownership again.
+  for (const [scopeKey, state] of compactions) {
+    const resolved = options.compactionContinuityKnown !== true && state.generation !== null
+      ? reduceCompactionLifecycle(state, { type: "continuity_lost", scope: state.scope, generation: state.generation, reason: "disconnected" }) : state;
+    for (const operation of Object.values(resolved.operations)) {
+      const row = compactionRows.get(`${scopeKey}:${compactionOperationKey(operation)}`);
+      if (row) row.lifecycle = operation;
+      if (operation.state === "item_started") compacting = true;
+    }
+  }
   if (!live) for (const call of calls.values()) if (!call.result) call.abandoned = true;
   const last = turns[turns.length - 1];
   if (last && !last.completed && live) last.live = true;

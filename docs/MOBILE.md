@@ -197,6 +197,35 @@ or injected frames fail closed. The relay can see connection metadata and
 handshake frames; it cannot see the device token, RPC, transcript, terminal,
 or pairing payloads.
 
+### Message size and fragments (#669)
+
+The relay cell accepts at most 1 MiB per WebSocket message (its
+`maxPayloadLength`) and closes both legs on a larger one; the Mac's pairing
+socket accepts 10 MiB. Each side therefore sizes what it sends to the
+connection's transport: on Relay one text frame carries about 765 KiB of
+plaintext once sealing and base64 are counted. Transcript pages
+(`session.sync`, `session.tail`) are held to one such frame.
+
+A larger message crosses as fragments: binary E2EE frames, each sealed on its
+own so the counter stays in order, carrying a 12 byte header (`0x66`, version
+1, two zero bytes, the message length and the part's offset, both u32 little
+endian) and that part of the UTF-8 JSON. One message's fragments are sent
+back to back from offset 0, up to 10 MiB in all. Both ends must agree first:
+right after authentication the phone calls
+`transport.negotiate({fragments: 1})`, and a Mac that answers
+`{fragments: 1}` reassembles requests and may fragment replies. A Mac from
+before this refuses the method, and nothing is fragmented in either direction.
+
+A message the connection cannot carry is never sent, because sending it would
+close the connection and fail every request in flight. The phone refuses that
+request with a message that names the limit. The Mac answers that request with
+`message_too_large`, and drops a notification the phone can read again. An
+event too large for a page on its own is sent alone. If even that is too large,
+its longest strings are cut short with a note saying so; see
+[mobile-incremental-sync.md](./mobile-incremental-sync.md).
+Implementation: `src-tauri/src/pairing/wire.rs` and
+`mobile/src/transport/wire.ts`.
+
 The app keeps the deployed runtime protocol range and existing capability
 names. Relevant checks include `account-bound-host-pairing.v1`,
 `remote-runtime.shared-control.v1`, `terminal.binary-stream.v1`,
@@ -236,6 +265,39 @@ note (one entry per tab, `seq` being the `UserMessage` it became), and the
 phone leaves the note out of that tab's conversation. Phones before #541
 posted and then promoted every message without that record; the phone hides
 such a note when a prompt with the same text follows it within 30 seconds.
+
+The phone learns that a send arrived only from the host's reply, and a
+connection that drops first loses it even when the host has the message
+(#675). So the phone gives each draft a `clientMessageId` (a UUID) the first
+time it is sent, and sends the same draft again under the same id; any change
+to where it goes, its text or its attachments makes it another message under a
+new id, and a send that succeeds retires the id. The id is saved with the
+draft, so a retry after the app was closed still carries it. A host that
+reports `sendIds: 1` in `sync.capabilities` accepts the field on `session.send`
+and `chat.post`; the phone sends it to no other host, since every params type
+refuses fields it does not know.
+
+- `session.send`, delivered: the host keeps its reply (`{ status, queued }`)
+  for each tab and id in `mobile-sends.json`, for 24 hours and at most 1,000
+  replies. A repeat returns that reply and sends nothing.
+- `session.send`, queued behind the agent's turn: the queued copy belongs to
+  the connection it came over, and is skipped if that connection closes before
+  the turn ends; that is the connection whose drop lost the reply. So a queued
+  reply answers no repeat. The repeat goes to the runtime with the id, which
+  knows where the first copy is: delivered (it answers sent, and sends
+  nothing), still queued (that copy moves under the new connection, in the
+  same place in line, instead of a second one joining it), being delivered
+  right now (refused, to try again in a moment), or dropped (sent as new). A
+  runtime that predates #675 ignores the id and queues it again, as before.
+- A repeat that arrives while the first try is still being sent is refused at
+  once, with a message to send it again in a moment, rather than holding the
+  connection it came over. A send that failed is not kept; sending it again
+  tries it in full.
+- `chat.post`: the note records the id, and the same draft posted again
+  returns that note, promotions included, without adding another.
+- The same id with other text or attachments is refused, never answered with
+  the reply to a different message.
+
 Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.

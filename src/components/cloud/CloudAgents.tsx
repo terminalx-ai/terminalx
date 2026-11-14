@@ -13,6 +13,8 @@ import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { managesOrganization } from "@/lib/multiOrg";
+import { openAgentLogins } from "@/lib/settingsLinks";
+import type { AgentLoginProvider } from "@/lib/api";
 import { useTabLog } from "@/lib/agentEvents";
 import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
 import { buildTranscript } from "@/lib/transcript";
@@ -333,12 +335,35 @@ const ROUTE_REASONS: Record<string, string> = {
   "route-creator-left": "its route belongs to someone who is no longer a member",
 };
 
-export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null): string | null {
+/**
+ * The login the provider no longer accepts (#667): the server's `sign-in-required` (terminalx-saas #241), or the
+ * runtime's own word for a grant an agent here was refused with.
+ */
+export const SIGN_IN_REQUIRED = "sign-in-required";
+
+/** The agents whose organization login is signed in again (rather than replaced with a key): Settings opens their sign-in. */
+const SIGNS_IN_AGAIN: Record<string, AgentLoginProvider> = { claude: "claude", codex: "codex" };
+
+/** The agent `info`'s tab may be signed in again for, by someone who may: null when it is not a refused login. */
+export function signInAgain(info: Pick<AgentTabInfo, "signIn">, mayManage: boolean | null): AgentLoginProvider | null {
+  return info.signIn?.state === SIGN_IN_REQUIRED && mayManage ? (SIGNS_IN_AGAIN[info.signIn.provider] ?? null) : null;
+}
+
+export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null, organization?: string | null): string | null {
   const signIn = info.signIn;
   if (!signIn) return null;
   const agent = cloudAgentLabel(info.harness);
   const route = signIn.reason ? ROUTE_REASONS[signIn.reason] : undefined;
   if (route) return `Needs sign-in: ${agent} uses its own route in this workspace, and ${route} (Settings → Organizations → Your model access).`;
+  if (signIn.state === SIGN_IN_REQUIRED) {
+    const what = `${agent} sign-in for ${organization?.trim() || "this organization"} was revoked or expired`;
+    const fix = !mayManage
+      ? "Ask an owner or admin to sign it in again, then send again."
+      : SIGNS_IN_AGAIN[signIn.provider]
+        ? "Sign in again, then start the agent or send again."
+        : `Connect it again in ${AGENT_LOGIN_PLACE}, then send again.`;
+    return `${what}, so it can't take prompts here. ${fix}`;
+  }
   const what =
     signIn.reason === "token-expired"
       ? `The organization's ${agent} login has expired`
@@ -366,11 +391,22 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
 export function SignInNotice({ info, organizationId }: { info: Pick<AgentTabInfo, "harness" | "signIn">; organizationId: string }) {
   const { status: account } = useAccount();
   // Who connects a login is an owner or admin, which is not who may start a session (any member, PRO-73).
-  const message = signInMessage(info, managesOrganization(account, organizationId));
+  const mayManage = managesOrganization(account, organizationId);
+  const organization = account.state === "signed-in" ? account.organizations?.find((org) => org.id === organizationId)?.name : null;
+  const message = signInMessage(info, mayManage, organization);
   if (!message) return null;
+  // A login the provider refused is signed in again where its organization's logins are, at that agent's sign-in (#667).
+  const again = signInAgain(info, mayManage);
   return (
     <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
-      {message} <AgentLoginsLink message={message} organizationId={organizationId} className="ml-1 align-baseline" />
+      {message}{" "}
+      {again ? (
+        <Button type="button" size="xs" className="ml-1 align-baseline" data-testid="cloud-agent-sign-in-again" onClick={() => openAgentLogins(organizationId, again)}>
+          Sign in again
+        </Button>
+      ) : (
+        <AgentLoginsLink message={message} organizationId={organizationId} className="ml-1 align-baseline" />
+      )}
     </p>
   );
 }
