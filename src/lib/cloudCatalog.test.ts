@@ -1435,4 +1435,35 @@ describe("attention across catalog refreshes (#934)", () => {
     expect(resolveCloudAttention(getCloudCatalog().orgs[ORG].workspaces[0])?.code).toBe("agent-start-failed");
   });
 
+
+  it.each([undefined, null])("retains observed runtime recovery across idle refreshes without failedAt (%s)", async (failedAt) => {
+    signIn();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { failedAt } };
+    const runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 100);
+    // Even a dated cached session cannot order itself after an undated failure.
+    cacheCloudSessions(ORG, "w", [{ id: "old", created: new Date(101).toISOString(), tabs: [{ id: "t", status: "idle" }] }] as never, null);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 2, activeTurns: 1 } })] });
+    await refreshCloudCatalog(ORG, () => 200);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Working");
+    for (const online of [true, false]) {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 3, online } })] });
+      await refreshCloudCatalog(ORG, () => online ? 300 : 400);
+      expect(resolveCloudAttention(read())).toBeNull();
+      expect(deriveCloudActivity(read()).label).toBe("Ready");
+    }
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])).toBeNull();
+    // A new launch identity cannot inherit recovery, even with the old cache.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch: { ...launch, launchId: "next" }, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 500);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+  });
+
 });

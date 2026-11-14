@@ -143,14 +143,14 @@ describe("shared attention and recovery", () => {
     expect(resolveCloudAttention(reconciled)?.code).toBe("runtime-interrupted");
   });
 
-  it("does not persist runtime recovery without a dated failure", () => {
+  it("persists current runtime recovery even without a dated failure", () => {
     const row = failed("runtime-interrupted");
     row.workspace.runtimeActivity = { online: true, reportedAt: 20, activeTurns: 1, pendingApprovals: 0 };
     const reconciled = reconcileCloudAttention(row);
     expect(resolveCloudAttention(reconciled)).toBeNull();
-    expect(reconciled).not.toHaveProperty("resolvedLaunchFailure");
+    expect(reconciled).toHaveProperty("resolvedLaunchFailure");
     reconciled.workspace.runtimeActivity = null;
-    expect(resolveCloudAttention(reconciled)?.code).toBe("runtime-interrupted");
+    expect(resolveCloudAttention(reconciled)).toBeNull();
   });
 
 });

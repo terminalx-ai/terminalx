@@ -57,7 +57,9 @@ function runtimeAgentRan(item: CloudWorkspaceListItem): boolean {
  * Catalog ingestion records authoritative agent activity for this exact failure.
  * Carry it across list/snapshot replacement so going idle/offline cannot revive
  * the historical failure. A different launch/failure starts with no such evidence.
- * Credential installation and an online idle runtime deliberately do not count.
+ * Current runtime activity also counts when older launch reports omit failedAt.
+ * Cached sessions always require dated ordering. Credential installation and
+ * an online idle runtime deliberately do not count.
  */
 export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?: CloudWorkspaceListItem, sessions: readonly RuntimeSession[] = []): CloudWorkspaceListItem {
   const key = launchFailureKey(item);
@@ -66,7 +68,7 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
     || afterFailure(item, Date.parse(session.lastMessageAt ?? ""))
     || session.tabs.some((tab) => tabAfterFailure(item, tab))
   ));
-  const resolved = launchFailed(item) && (laterSession || (runtimeAgentRan(item) && afterFailure(item, item.workspace.runtimeActivity?.reportedAt ?? undefined))
+  const resolved = launchFailed(item) && (laterSession || runtimeAgentRan(item)
     || (item as ObservedItem).resolvedLaunchFailure === key
     || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key);
   const { resolvedLaunchFailure: _old, ...clean } = item as ObservedItem;
@@ -88,7 +90,8 @@ function tabAfterFailure(item: CloudWorkspaceListItem, tab: { created?: string; 
  * Preserve explicit caller evidence for this read: agentRan or live tabs can
  * suppress a historical failure without changing the item. Cached tabs require
  * dated evidence. Only reconcileCloudAttention records durable recovery, using
- * activity strictly after the failed launch; these hints never set its marker.
+ * dated activity after the failure or current runtime activity when failedAt is
+ * absent; these caller hints never set its marker.
  */
 export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<CloudAttentionInput, "tabs" | "agentRan" | "agentActivityAt" | "fromCache"> = {}): boolean {
   if (input.agentRan || input.tabs?.some((tab) => tab.live || !input.fromCache)) return false;
