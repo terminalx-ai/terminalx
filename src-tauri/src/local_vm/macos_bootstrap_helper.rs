@@ -4,8 +4,9 @@
 //! Receipts are local observations, not authenticated owner/share trust proofs.
 use super::macos_helper_fs as fs;
 use super::{
+    guest_account::User,
     journal,
-    macos_account::{Account, User},
+    macos_account::Account,
     macos_personalization::{self, Target},
 };
 use anyhow::{bail, Context, Result};
@@ -179,7 +180,7 @@ impl Source {
         if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             bail!("macOS arm64 guest required")
         }
-        let user = super::macos_account::current_user()?;
+        let user = super::guest_account::current_user()?;
         let uid = user.uid;
         let executable = std::env::current_exe()?;
         if executable.file_name().and_then(|name| name.to_str())

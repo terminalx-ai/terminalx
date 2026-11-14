@@ -94,7 +94,7 @@ pub(super) fn installed_identity() -> Result<(PathBuf, Identity)> {
     #[cfg(target_os = "macos")]
     {
         super::macos_account::check_installation_binding(&base, identity.macos_account.as_ref())?;
-        if identity.macos_account.is_none() { super::macos_account::check_legacy_user()?; }
+        if identity.macos_account.is_none() { super::guest_account::check_legacy_user()?; }
     }
     Ok((base, identity))
 }
