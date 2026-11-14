@@ -125,6 +125,17 @@ export function setupStatusLabel(report: LocalVmSetupReport): string {
   }
 }
 
+/**
+ * The guest session's state, named (review 2): no one signed in at the
+ * guest's screen, or signed in with the lock unknown, which a stopped or
+ * locked screen looks like from outside.
+ */
+export function sessionLabel(check: { state: string; reasonCode: string }): string {
+  if (check.reasonCode === "guest_gui_session_unavailable") return "Login needed: no one is signed in at the guest's screen";
+  if (check.reasonCode === "guest_screen_unlock_unverified") return "Signed in; the screen may be locked. Open the desktop to check";
+  return readinessLabel(check.state);
+}
+
 export function readinessLabel(state: string): string {
   switch (state) {
     case "ready": return "Connected";
