@@ -57,6 +57,9 @@ pub struct Launch {
     pub category: Category,
     pub evidence: Evidence,
     pub phase: Phase,
+    /// Startup proof survives temporary permission waits and loss of observation.
+    #[serde(default)]
+    pub startup_proven: bool,
     pub started_at: i64,
     pub last_progress_at: i64,
     pub exit_code: Option<u32>,
@@ -183,12 +186,25 @@ pub struct Ticket { monitor: Arc<Monitor>, id: String }
 
 impl Ticket {
     pub fn spawned(&self, pid: Option<u32>) { self.change(|launch| {
-        launch.pid = pid; launch.phase = Phase::AwaitingReady;
+        if matches!(launch.phase, Phase::Exited | Phase::Unobserved) { return; }
+        if launch.pid == pid && launch.phase != Phase::Spawning { return; }
+        launch.last_progress_at = now();
+        launch.pid = pid;
+        if launch.phase == Phase::Spawning { launch.phase = Phase::AwaitingReady; }
         #[cfg(target_os = "macos")]
         { launch.pid_birth = pid.and_then(macos::identity); }
     }); }
-    pub fn ready(&self) { self.change(|launch| { launch.phase = Phase::Running; launch.last_progress_at = now(); }); }
-    pub fn exited(&self, code: Option<u32>) { self.change(|launch| { launch.phase = Phase::Exited; launch.exit_code = code; launch.last_progress_at = now(); }); }
+    pub fn ready(&self) { self.change(|launch| {
+        if matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::Unobserved) {
+            launch.startup_proven = true;
+            launch.phase = Phase::Running; launch.last_progress_at = now();
+        }
+    }); }
+    pub fn exited(&self, code: Option<u32>) { self.change(|launch| {
+        if launch.phase != Phase::Exited || launch.exit_code.is_none() && code.is_some() {
+            launch.phase = Phase::Exited; launch.exit_code = code; launch.last_progress_at = now();
+        }
+    }); }
     fn change(&self, work: impl FnOnce(&mut Launch)) {
         if let Err(error) = update_at(&self.monitor.directory, |state| {
             if let Some(launch) = state.launches.iter_mut().find(|launch| launch.id == self.id) { work(launch); }
@@ -205,7 +221,7 @@ impl Monitor {
             let id = uuid::Uuid::new_v4().to_string();
             state.launches.push(Launch { id: id.clone(), pane: pane.into(), generation: generation.into(), pid,
                 category: if pane.starts_with("tab:") { Category::Agent } else { Category::Shell }, evidence: Evidence::Readiness,
-                phase: if pid.is_some() { Phase::AwaitingReady } else { Phase::Spawning }, started_at: now(), last_progress_at: now(), exit_code: None, cpu_time: None, resident_bytes: None,
+                startup_proven: false, phase: if pid.is_some() { Phase::AwaitingReady } else { Phase::Spawning }, started_at: now(), last_progress_at: now(), exit_code: None, cpu_time: None, resident_bytes: None,
                 pid_birth: process_identity(pid), recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None });
             Ok(id)
         })?;
@@ -229,18 +245,26 @@ impl Monitor {
             let permissions = permissions.unwrap_or(&previous_permissions);
             for launch in &mut state.launches {
                 if launch.evidence == Evidence::Readiness && matches!(launch.phase, Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) {
-                    if permissions.contains(&launch.pane) { launch.phase = Phase::PermissionPrompt; launch.last_progress_at = at; }
-                    else if launch.phase == Phase::PermissionPrompt { launch.phase = Phase::AwaitingReady; launch.last_progress_at = at; }
-                    if launch.phase == Phase::AwaitingReady && launch.recorder.is_none() && terminals.pid(&launch.pane) == launch.pid && terminals.last_output(&launch.pane).is_some() { launch.phase = Phase::Running; launch.last_progress_at = at; }
+                    // A known application permission card proves startup, but
+                    // repeated observation of the same wait is not progress.
+                    if permissions.contains(&launch.pane) {
+                        if launch.phase != Phase::PermissionPrompt { launch.last_progress_at = at; }
+                        launch.startup_proven = true;
+                        launch.phase = Phase::PermissionPrompt;
+                    }
+                    else if launch.phase == Phase::PermissionPrompt { launch.startup_proven = true; launch.phase = Phase::Running; launch.last_progress_at = at; }
+                    if launch.phase == Phase::AwaitingReady && launch.recorder.is_none() && launch.pid.is_some() && terminals.pid(&launch.pane) == launch.pid && terminals.last_output(&launch.pane).is_some() { launch.startup_proven = true; launch.phase = Phase::Running; launch.last_progress_at = at; }
                 }
             }
             #[cfg(target_os = "macos")]
             macos::observe(state, children, permissions, at);
+            // Join all newly overdue launches before considering recovery, so
+            // health cannot split one ongoing host incident into two.
+            state.tick(at);
             if let Err(error) = probe::refresh(&self.directory, state, at) {
                 // A recorder or filesystem error must not suspend incident age.
                 log::warn!("refresh startup probe: {error:#}");
             }
-            state.tick(at);
             Ok(state != &before)
         })
     }

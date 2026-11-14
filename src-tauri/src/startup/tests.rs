@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn launch(pane: &str, phase: Phase) -> Launch {
-    Launch { id: uuid::Uuid::new_v4().to_string(), pane: pane.into(), generation: "generation".into(), pid: Some(42),
+    Launch { startup_proven: false, id: uuid::Uuid::new_v4().to_string(), pane: pane.into(), generation: "generation".into(), pid: Some(42),
         category: Category::Agent, evidence: Evidence::Readiness, phase, started_at: 0, last_progress_at: 0,
         exit_code: None, cpu_time: None, resident_bytes: None, pid_birth: None, recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None }
 }
@@ -100,6 +100,9 @@ fn export_allowlist_excludes_secrets_even_in_identifiers_and_child_output() {
     let secret = "token=secret /Users/alice/private source prompt transcript history alice@example.com";
     let mut state = Snapshot { launches: vec![launch(secret, Phase::AwaitingReady)], ..Snapshot::default() };
     state.launches[0].generation = secret.into();
+    state.launches[0].pid_birth = Some(secret.into());
+    state.launches[0].recorder = Some(secret.into());
+    state.launches[0].pipeline_id = Some(secret.into());
     state.tick(120_000);
     let incident = state.incidents.last_mut().unwrap();
     incident.id = secret.into();
@@ -108,6 +111,14 @@ fn export_allowlist_excludes_secrets_even_in_identifiers_and_child_output() {
     incident.probe = Some(probe::Probe { id: secret.into(), started_at: 0, observation_timed_out: true, shell: None,
         owner: Some(RecorderIdentity { pid: 12345, birth: Some(secret.into()) }), owner_exit: Some(recorder_exit(0, 180_000)),
         result: Some(probe::ProbeResult { finished_at: 180_000, shell: captured.clone(), native: captured }) });
+    // Forward-compatible unknown fields in a private record must never turn
+    // the allowlist into raw serialization of newly added sensitive data.
+    let mut raw = serde_json::to_value(&state).unwrap();
+    for field in ["environment", "source", "transcripts", "history", "command", "account"] {
+        raw[field] = serde_json::json!(secret);
+        raw["launches"][0][field] = serde_json::json!(secret);
+    }
+    let state: Snapshot = serde_json::from_value(raw).unwrap();
     let report = export(&state).unwrap();
     for word in ["token", "secret", "/Users", "alice", "private", "source", "prompt", "transcript", "history", "environment"] {
         assert!(!report.contains(word), "leaked {word}: {report}");
@@ -210,4 +221,188 @@ fn completed_probe_needs_the_durable_wait_after_reopening() {
     assert!(reopened.active().is_none());
     assert_eq!(reopened.incidents[0].probe.as_ref().unwrap().owner_exit.as_ref().unwrap().exit_code, Some(0));
     assert_eq!(reopened.launches[0].exit_code, None, "health does not invent a lost child's outcome");
+}
+
+#[test]
+fn delayed_callbacks_cannot_revive_an_exit_or_erase_its_exact_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let monitor = Arc::new(Monitor { directory: directory.path().into() });
+    let ticket = monitor.begin("tab:a", "generation", None).unwrap();
+    ticket.exited(Some(23));
+    ticket.spawned(Some(42));
+    ticket.ready();
+    ticket.exited(None);
+    let state: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(state.launches[0].phase, Phase::Exited);
+    assert_eq!(state.launches[0].exit_code, Some(23));
+    assert_eq!(state.launches[0].pid, None);
+}
+
+#[test]
+fn spawn_is_progress_and_repeated_readiness_is_not_new_progress() {
+    let directory = tempfile::tempdir().unwrap();
+    let monitor = Arc::new(Monitor { directory: directory.path().into() });
+    let ticket = monitor.begin("tab:a", "generation", None).unwrap();
+    update_at(directory.path(), |state| { state.launches[0].last_progress_at = 1; Ok(()) }).unwrap();
+    ticket.spawned(Some(42));
+    let state: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert!(state.launches[0].last_progress_at > 1);
+    ticket.ready();
+    update_at(directory.path(), |state| { state.launches[0].last_progress_at = 2; Ok(()) }).unwrap();
+    ticket.spawned(Some(42));
+    ticket.ready();
+    let state: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(state.launches[0].phase, Phase::Running);
+    assert_eq!(state.launches[0].last_progress_at, 2);
+}
+
+#[test]
+fn permission_observation_is_not_progress_and_dismissal_keeps_startup_proven() {
+    let directory = tempfile::tempdir().unwrap();
+    let monitor = Monitor { directory: directory.path().into() };
+    let state = Snapshot { launches: vec![launch("tab:a", Phase::PermissionPrompt)], ..Snapshot::default() };
+    crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
+    let terminals = crate::pty::Terminals::new();
+    monitor.poll(&terminals, Some(&["tab:a".into()])).unwrap();
+    let state: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(state.launches[0].last_progress_at, 0);
+    monitor.poll(&terminals, Some(&[])).unwrap();
+    let state: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(state.launches[0].phase, Phase::Running);
+}
+
+fn completed_health(state: &mut Snapshot, started_at: i64, finished_at: i64) {
+    let shell = probe::Captured { exit_code: Some(0), signal: None, spawn_failed: false,
+        stdout: String::new(), stderr: String::new(), stdout_truncated: false, stderr_truncated: false };
+    state.incidents[0].probe = Some(probe::Probe { id: uuid::Uuid::new_v4().to_string(), started_at,
+        observation_timed_out: false, shell: Some(shell.clone()), owner: None,
+        owner_exit: Some(recorder_exit(0, finished_at + 1)),
+        result: Some(probe::ProbeResult { finished_at, native: probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..shell.clone() }, shell }) });
+}
+
+#[test]
+fn new_overdue_launch_joins_before_health_can_recover_the_host_incident() {
+    let directory = tempfile::tempdir().unwrap();
+    let monitor = Monitor { directory: directory.path().into() };
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    let incident = state.active().unwrap().id.clone();
+    state.launches[0].phase = Phase::Exited;
+    state.launches.push(launch("tab:b", Phase::Spawning));
+    completed_health(&mut state, 130_000, 140_000);
+    crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
+    monitor.poll(&crate::pty::Terminals::new(), Some(&[])).unwrap();
+    let restored: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+    assert_eq!(restored.active().unwrap().id, incident);
+    assert_eq!(restored.incidents.len(), 1);
+    assert_eq!(restored.active().unwrap().launches.len(), 2);
+}
+
+#[test]
+fn any_pending_human_prompt_prevents_host_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    state.launches[0].phase = Phase::Exited;
+    state.launches.push(launch("tab:human", Phase::PermissionPrompt));
+    completed_health(&mut state, 130_000, 140_000);
+    probe::refresh(directory.path(), &mut state, 140_002).unwrap();
+    assert!(state.active().is_some());
+    state.launches[1].phase = Phase::Running;
+    state.launches[1].last_progress_at = 150_000;
+    probe::refresh(directory.path(), &mut state, 150_001).unwrap();
+    // The existing health predates this human interaction. A new probe is
+    // required, even though the prompt was outside the affected launch set.
+    assert!(state.active().is_some());
+}
+
+#[test]
+fn durable_wait_finishing_after_observation_window_is_late_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    completed_health(&mut state, 130_000, 130_010);
+    state.incidents[0].probe.as_mut().unwrap().owner_exit = Some(recorder_exit(0, 150_000));
+    probe::refresh(directory.path(), &mut state, 150_001).unwrap();
+    let restored: Snapshot = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+    assert_eq!(probe::export(restored.active().unwrap().probe.as_ref().unwrap())["status"], "lateSuccess");
+}
+
+#[test]
+fn shell_signal_is_exported_while_native_probe_is_still_pending() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    completed_health(&mut state, 130_000, 140_000);
+    let health = state.incidents[0].probe.as_mut().unwrap();
+    health.result = None;
+    health.owner_exit = None;
+    let shell = health.shell.as_mut().unwrap();
+    shell.exit_code = None;
+    shell.signal = Some(15);
+    shell.stderr = "token=secret /Users/alice/account".into();
+    probe::refresh(directory.path(), &mut state, 160_000).unwrap();
+    let report = probe::export(state.active().unwrap().probe.as_ref().unwrap());
+    assert_eq!(report["shellSignal"], 15);
+    assert_eq!(report["status"], "unresolvedStall");
+    assert!(!report.to_string().contains("secret"));
+    assert!(!report.to_string().contains("alice"));
+}
+
+#[test]
+fn health_must_be_strictly_newer_than_the_latest_affected_progress() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    state.launches[0].phase = Phase::Exited;
+    state.launches[0].last_progress_at = 140_000;
+    completed_health(&mut state, 130_000, 140_000);
+    probe::refresh(directory.path(), &mut state, 140_002).unwrap();
+    assert!(state.active().is_some(), "equal timestamps cannot establish event ordering");
+    completed_health(&mut state, 150_000, 160_000);
+    probe::refresh(directory.path(), &mut state, 160_002).unwrap();
+    assert!(state.active().is_none());
+}
+
+#[test]
+fn health_started_before_or_during_progress_cannot_recover_after_reopening() {
+    for phase in [Phase::Running, Phase::Exited] {
+        for progress_at in [130_000, 135_000, 140_000] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+            state.tick(120_000);
+            let incident_id = state.active().unwrap().id.clone();
+            completed_health(&mut state, 130_000, 140_000);
+            state.launches[0].phase = phase;
+            state.launches[0].last_progress_at = progress_at;
+            crate::store::write_json(&directory.path().join("incidents.json"), &state).unwrap();
+            update_at(directory.path(), |state| probe::refresh(directory.path(), state, 150_000)).unwrap();
+            let mut reopened: Snapshot = crate::store::read_json(&directory.path().join("incidents.json")).unwrap().unwrap();
+            assert_eq!(reopened.active().map(|incident| &incident.id), Some(&incident_id),
+                "probe started before or at {progress_at} cannot prove health after {phase:?}");
+            // Only a new two-step probe whose entire run follows progress
+            // can release the same incident. Exit 23 remains an app failure.
+            reopened.launches[0].exit_code = (phase == Phase::Exited).then_some(23);
+            completed_health(&mut reopened, 150_000, 160_000);
+            probe::refresh(directory.path(), &mut reopened, 160_002).unwrap();
+            assert!(reopened.active().is_none());
+            assert_eq!(reopened.launches[0].exit_code, (phase == Phase::Exited).then_some(23));
+        }
+    }
+}
+
+#[test]
+fn probe_refresh_cannot_recover_before_joining_another_overdue_launch() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    let incident = state.active().unwrap().id.clone();
+    state.launches[0].phase = Phase::Exited;
+    state.launches.push(launch("tab:b", Phase::Spawning));
+    completed_health(&mut state, 130_000, 140_000);
+    // The health-start path calls refresh directly, without Monitor::poll.
+    probe::refresh(directory.path(), &mut state, 140_002).unwrap();
+    assert_eq!(state.active().unwrap().id, incident);
+    assert_eq!(state.incidents.len(), 1);
+    assert_eq!(state.active().unwrap().launches.len(), 2);
 }

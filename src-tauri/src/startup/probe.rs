@@ -61,7 +61,9 @@ fn drain(mut input: impl Read) -> (String, bool) {
     let mut truncated = false;
     loop {
         match input.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => { truncated = true; break; }
             Ok(count) => {
                 let keep = count.min((OUTPUT_LIMIT as usize).saturating_sub(kept.len()));
                 kept.extend_from_slice(&buffer[..keep]);
@@ -173,7 +175,15 @@ pub(super) fn start(directory: &Path) -> Result<()> {
 }
 
 pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result<()> {
+    // Probe requests also refresh outside the monitor tick. Join newly overdue
+    // launches before any caller can recover the existing host incident.
+    state.tick(at);
     let Some(incident) = state.incidents.iter_mut().rev().find(|incident| incident.recovered_at.is_none()) else { return Ok(()) };
+    // Human waits anywhere on this host block recovery. Retain their progress
+    // boundary after dismissal so an older probe cannot clear that wait.
+    for launch in state.launches.iter().filter(|launch| launch.phase == Phase::PermissionPrompt) {
+        if !incident.launches.contains(&launch.id) { incident.launches.push(launch.id.clone()); }
+    }
     let Some(probe) = &mut incident.probe else { return Ok(()) };
     // Treat ids from disk as data, not a path capability.
     let id = uuid::Uuid::parse_str(&probe.id)?;
@@ -181,14 +191,21 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     if probe.shell.is_none() { probe.shell = crate::store::read_json(&directory.join(id.to_string()).join("shell.json"))?; }
     if probe.result.is_none() {
         probe.result = crate::store::read_json(&directory.join(id.to_string()).join("result.json"))?;
-        probe.observation_timed_out |= probe.result.as_ref().map_or(at, |result| result.finished_at).saturating_sub(probe.started_at) >= OBSERVE_MS;
     }
-    let still_stalled = state.launches.iter().any(|launch| incident.launches.contains(&launch.id)
-        && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt));
+    // Completion includes the supervisor's durable wait, not merely child
+    // output. A late owner outcome must remain late after reopening too.
+    let completed_at = probe.result.as_ref().zip(probe.owner_exit.as_ref())
+        .map_or(at, |(result, exit)| result.finished_at.max(exit.finished_at));
+    probe.observation_timed_out |= completed_at.saturating_sub(probe.started_at) >= OBSERVE_MS;
+    let still_stalled = state.launches.iter().any(|launch| launch.phase == Phase::PermissionPrompt
+        || incident.launches.contains(&launch.id) && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady));
     let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| launch.last_progress_at).max().unwrap_or(incident.detected_at);
-    let fresh_observation = !state.census_incomplete && state.observation_lost_at.is_none_or(|lost| probe.started_at > lost);
+    // Both health steps must follow progress. A later completion alone can
+    // contain a shell result from before readiness, exit or a human wait.
+    let fresh_observation = !state.census_incomplete && probe.started_at > last_progress
+        && state.observation_lost_at.is_none_or(|lost| probe.started_at > lost);
     let recorder_succeeded = probe.owner_exit.as_ref().is_some_and(|exit| !exit.failed());
-    if fresh_observation && !still_stalled && recorder_succeeded && probe.result.as_ref().is_some_and(|result| healthy(result) && result.finished_at >= last_progress) {
+    if fresh_observation && !still_stalled && recorder_succeeded && probe.result.as_ref().is_some_and(|result| healthy(result) && result.finished_at > last_progress) {
         incident.recovered_at = Some(at);
     }
     Ok(())
@@ -216,6 +233,7 @@ pub(super) fn export(probe: &Probe) -> serde_json::Value {
     serde_json::json!({ "startedAt": probe.started_at, "observationTimedOut": probe.observation_timed_out, "status": status,
         "ownerExit": probe.owner_exit.as_ref().map(recorder::export),
         "shellExitCode": probe.shell.as_ref().and_then(|shell| shell.exit_code),
+        "shellSignal": probe.shell.as_ref().and_then(|shell| shell.signal),
         "result": probe.result.as_ref().map(|result| serde_json::json!({ "finishedAt": result.finished_at,
             "shellExitCode": result.shell.exit_code, "shellSignal": result.shell.signal,
             "nativeExitCode": result.native.exit_code, "nativeSignal": result.native.signal,
@@ -244,5 +262,32 @@ mod tests {
         let (kept, truncated) = drain(&vec![b'x'; 100_000][..]);
         assert_eq!(kept.len(), OUTPUT_LIMIT as usize);
         assert!(truncated);
+    }
+
+    #[test]
+    fn interrupted_output_is_retried_and_unread_output_is_marked_incomplete() {
+        struct Interrupted(bool);
+        impl Read for Interrupted {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                READY.as_bytes().read(bytes)
+            }
+        }
+        // A finite interrupted stream must preserve its eventual exact bytes.
+        let (output, truncated) = drain(Interrupted(false).take(READY.len() as u64));
+        assert_eq!(output, READY);
+        assert!(!truncated);
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::Other.into())
+            }
+        }
+        let (output, truncated) = drain(READY.as_bytes().chain(Failed));
+        assert_eq!(output, READY);
+        assert!(truncated, "a read failure cannot prove the complete readiness stream");
     }
 }

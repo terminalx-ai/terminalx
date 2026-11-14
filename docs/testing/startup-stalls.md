@@ -91,7 +91,9 @@ exit without a complete validation result retains checkout ownership.
 Recovery requires both probe steps and the recorder owner to succeed, the native
 readiness marker, a complete census, and no still-observed stalled launch or
 pending human prompt. The probe must start after the latest loss of observation,
-and its result must be newer than the last affected progress. An interrupted/unobserved launch
+and after the last affected progress, including readiness, exit or dismissal of
+a human wait. Finishing a probe after progress is insufficient if either health
+step may have preceded that progress. An interrupted/unobserved launch
 still has an unknown exit, even when fresh launch health permits a retry.
 Review, security, local checks and CI keep their existing gates. The monitor
 does not change a prior failed check into a pass.
@@ -99,6 +101,23 @@ does not change a prior failed check into a pass.
 Preserve work and quiesce jobs before considering a coordinated restart.
 Restart is a recovery experiment, not an established fix. Preserve PRO-166's
 clean local merge `c2940ea4`; do not reset or replace it to obtain a checkmark.
+
+Lifecycle callbacks preserve a completed launch's exact exit even if spawning
+or readiness arrives late. A returned PID advances startup progress once;
+repeated readiness or observation of the same permission card does not refresh
+that clock. Dismissing a known application permission card preserves its proven
+startup. Any pending human wait holds host recovery, including one outside the
+original stalled launch set; its dismissal requires newer health evidence.
+For the same process birth, a later smaller image or quiet period does not undo
+recorded startup already proven by readiness or a grown image. That proof is
+persisted independently of the current phase, including when the image first
+grows during a permission wait and the app restarts before dismissal. A pane's permission
+card holds its children in human wait; it does not prove every descendant started.
+Newly overdue launches join the existing incident before recovery is considered.
+The health observation window includes the supervisor's durable wait: an early
+child result with a late owner outcome is still late success. Interrupted output
+reads are retried, and unread output is marked incomplete rather than treated as
+a complete readiness stream.
 
 ## Reporting and optional investigation
 
