@@ -186,3 +186,18 @@ test("retention does not trust symlinked completion markers", async (t) => {
   await symlink(outside, join(run.directory, "result.json"));
   assert.deepEqual(await retainRuns(root, { now: Date.now() + 30 * 86_400_000 }), []);
 });
+
+test("artifact redaction catches API key names and credential values under ordinary keys", async (t) => {
+  const { directory } = await createRun(await temporary(t));
+  const value = { apiKey: "named-one", api_key: "named-two", secret: "named-three", password: "named-four", authorization: "named-five", nested: [{ text: "sk-proj-Abc_123 ghp_Abc123 gho_Abc123", harmless: "tool version 24.2" }] };
+  await saveJson(directory, "secrets.json", value);
+  const saved = await readFile(join(directory, "secrets.json"), "utf8");
+  for (const secret of ["named-one", "named-two", "named-three", "named-four", "named-five", "sk-proj-Abc_123", "ghp_Abc123", "gho_Abc123"]) assert.equal(saved.includes(secret), false);
+  assert.ok(saved.includes("tool version 24.2"));
+});
+test("nightly collector actions use immutable commit pins", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/team-e2e-nightly.yml", import.meta.url), "utf8");
+  const uses = [...workflow.matchAll(/uses:\s+(actions\/[a-z-]+)@([^\s]+)/g)];
+  assert.equal(uses.length, 3);
+  for (const [, action, ref] of uses) assert.match(ref, /^[a-f0-9]{40}$/, action);
+});

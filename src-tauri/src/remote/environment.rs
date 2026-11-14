@@ -78,20 +78,42 @@ fn version(tool: &Tool<'_>, output: &[u8]) -> Option<String> {
 }
 
 struct Process(tokio::process::Child);
-impl Drop for Process {
-    fn drop(&mut self) {
+impl Process {
+    fn kill_unreaped(&mut self) -> bool {
         if let Some(id) = self.0.id() {
             #[cfg(unix)]
             unsafe { libc::kill(-(id as i32), libc::SIGKILL); }
             let _ = self.0.start_kill();
+            return true;
         }
+        false
     }
 }
+impl Drop for Process {
+    fn drop(&mut self) { self.kill_unreaped(); }
+}
 
+#[cfg(target_os = "macos")]
+async fn developer_tools_available() -> bool {
+    if std::path::Path::new("/Library/Developer/CommandLineTools").is_dir() { return true; }
+    let mut command = tokio::process::Command::new("/usr/bin/xcode-select");
+    command.arg("-p").env_clear().current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+    matches!(tokio::time::timeout(Duration::from_millis(500), command.status()).await, Ok(Ok(status)) if status.success())
+}
+#[cfg(not(target_os = "macos"))]
+async fn developer_tools_available() -> bool { true }
+
+#[cfg(test)]
 async fn probe(tool: &Tool<'_>, allowed: &impl Fn() -> bool) -> Value {
+    probe_with_developer_tools(tool, allowed, developer_tools_available().await).await
+}
+
+async fn probe_with_developer_tools(tool: &Tool<'_>, allowed: &impl Fn() -> bool, developer_tools: bool) -> Value {
     if !allowed() { return json!({ "id": tool.id, "status": "error" }); }
     let mut spawned = None;
     for executable in tool.executables {
+        // Apple stubs may launch a separate installer outside this process group.
+        if cfg!(target_os = "macos") && !developer_tools && matches!(*executable, "/usr/bin/python3" | "/usr/bin/git") { continue; }
         if !allowed() { return json!({ "id": tool.id, "status": "error" }); }
         // ENOENT from exec can also mean a present script's interpreter (or
         // binary's loader) is missing. Only skip an absent directory entry;
@@ -117,7 +139,6 @@ async fn probe(tool: &Tool<'_>, allowed: &impl Fn() -> bool) -> Value {
     }
     let Some(child) = spawned else { return json!({ "id": tool.id, "status": "missing" }); };
     let mut child = Process(child);
-    let group = child.0.id();
     let stdout = child.0.stdout.take().expect("piped stdout");
     let work = async {
         let mut output = Vec::new();
@@ -140,11 +161,11 @@ async fn probe(tool: &Tool<'_>, allowed: &impl Fn() -> bool) -> Value {
         },
         _ = cancellation => json!({ "id": tool.id, "status": "error" }),
     };
-    // A wrapper may leave descendants after it exits or closes stdout.
-    #[cfg(unix)]
-    if let Some(id) = group { unsafe { libc::kill(-(id as i32), libc::SIGKILL); } }
-    let _ = child.0.start_kill();
-    let _ = tokio::time::timeout(Duration::from_millis(250), child.0.wait()).await;
+    // Child::id becomes None after wait reaps it. Never signal a cached PID:
+    // its process group id could already belong to an unrelated new process.
+    if child.kill_unreaped() {
+        let _ = tokio::time::timeout(Duration::from_millis(250), child.0.wait()).await;
+    }
     result
 }
 
@@ -154,8 +175,12 @@ impl Drop for Registration {
 }
 
 pub(super) async fn report(peer: u64, params: &Value, authorized: impl Fn() -> bool) -> Result<Value, RpcError> {
+    report_with_slot(peer, params, authorized, &RUNNING, TOOLS).await
+}
+
+async fn report_with_slot(peer: u64, params: &Value, authorized: impl Fn() -> bool, slot: &tokio::sync::Semaphore, inventory: &[Tool<'_>]) -> Result<Value, RpcError> {
     let id = request_id(params)?;
-    let _permit = RUNNING.try_acquire().map_err(|_| RpcError::new("environment_busy", "Another report is running"))?;
+    if !authorized() { return Err(RpcError::new("cancelled", "Environment report cancelled")); }
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let mut requests = REQUESTS.lock().unwrap();
@@ -164,14 +189,30 @@ pub(super) async fn report(peer: u64, params: &Value, authorized: impl Fn() -> b
         if early.iter().any(|(owner, request, _)| *owner == peer && request == &id) {
             return Err(RpcError::new("cancelled", "Environment report cancelled"));
         }
+        // A caller gets one live request and at most one cancelled request
+        // still cleaning up. It cannot fill an unbounded global wait queue.
+        let own: Vec<_> = requests.iter().filter(|((owner, _), _)| *owner == peer).collect();
+        if requests.contains_key(&(peer, id.clone())) || own.len() >= 2 || own.iter().any(|(_, flag)| !flag.load(Ordering::SeqCst)) {
+            return Err(RpcError::new("environment_busy", "This caller already has a report pending"));
+        }
         requests.insert((peer, id.clone()), cancelled.clone());
     }
     let _registration = Registration((peer, id));
     let allowed = || authorized() && !cancelled.load(Ordering::SeqCst);
+    let wait_cancel = async {
+        while allowed() { tokio::time::sleep(Duration::from_millis(25)).await; }
+    };
+    let _permit = tokio::select! {
+        permit = tokio::time::timeout(Duration::from_secs(1), slot.acquire()) =>
+            permit.map_err(|_| RpcError::new("environment_busy", "Another report is running"))?
+                .map_err(|_| RpcError::new("environment_busy", "Environment reports unavailable"))?,
+        _ = wait_cancel => return Err(RpcError::new("cancelled", "Environment report cancelled")),
+    };
+    let developer_tools = developer_tools_available().await;
     let mut tools = Vec::new();
-    for tool in TOOLS {
+    for tool in inventory {
         if !allowed() { return Err(RpcError::new("cancelled", "Environment report cancelled")); }
-        tools.push(probe(tool, &allowed).await);
+        tools.push(probe_with_developer_tools(tool, &allowed, developer_tools).await);
     }
     if !allowed() { return Err(RpcError::new("cancelled", "Environment report cancelled")); }
     Ok(json!({ "version": 1, "observedAt": crate::cloud_agents::now_ms(), "tools": tools }))
@@ -265,6 +306,73 @@ mod tests {
         assert!(!cancelled.load(Ordering::SeqCst));
         cancel(900, &json!({"requestId": id})).unwrap();
         assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_report_reopen_waits_for_cleanup_and_limits_each_caller() {
+        let slot = tokio::sync::Semaphore::new(1);
+        let permit = slot.acquire().await.unwrap();
+        let first = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        let second = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        let first_run = report_with_slot(4001, &first, || true, &slot, &[]);
+        let reopen = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let third = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+            assert_eq!(report_with_slot(4001, &third, || true, &slot, &[]).await.unwrap_err().code, "environment_busy");
+            cancel(4001, &first).unwrap();
+            let second_run = report_with_slot(4001, &second, || true, &slot, &[]);
+            let cleanup = async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                drop(permit);
+            };
+            let (result, ()) = tokio::join!(second_run, cleanup);
+            result.unwrap()
+        };
+        let (old, new) = tokio::join!(first_run, reopen);
+        assert_eq!(old.unwrap_err().code, "cancelled");
+        assert_eq!(new["tools"], json!([]));
+        assert!(!REQUESTS.lock().unwrap().keys().any(|(peer, _)| *peer == 4001));
+    }
+
+    #[tokio::test]
+    async fn two_callers_wait_for_the_same_slot_without_a_false_busy_error() {
+        let slot = tokio::sync::Semaphore::new(1);
+        let permit = slot.acquire().await.unwrap();
+        let a = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        let b = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        let release = async { tokio::time::sleep(Duration::from_millis(100)).await; drop(permit); };
+        let (a, b, ()) = tokio::join!(report_with_slot(4002, &a, || true, &slot, &[]), report_with_slot(4003, &b, || true, &slot, &[]), release);
+        assert!(a.is_ok());
+        assert!(b.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn missing_developer_tools_skip_apple_stubs_without_launching_them() {
+        for executable in ["/usr/bin/git", "/usr/bin/python3"] {
+            let executables = [executable, "/bin/sh"];
+            let tool = Tool { id: "node", executables: &executables, args: &["-c", "printf 'v24.22.1\\n'"], prefix: "v" };
+            assert_eq!(probe_with_developer_tools(&tool, &|| true, false).await["version"], "24.22.1");
+            let stub = [executable];
+            let tool = Tool { executables: &stub, ..tool };
+            assert_eq!(probe_with_developer_tools(&tool, &|| true, false).await["status"], "missing");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cleanup_signals_only_an_unreaped_child() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        let mut exited = Process(command.spawn().unwrap());
+        assert!(exited.0.wait().await.unwrap().success());
+        assert!(!exited.kill_unreaped(), "a reaped PID/group must never be signalled");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]).process_group(0);
+        let mut running = Process(command.spawn().unwrap());
+        assert!(running.kill_unreaped());
+        assert!(!running.0.wait().await.unwrap().success());
+        assert!(!running.kill_unreaped());
     }
 
 }

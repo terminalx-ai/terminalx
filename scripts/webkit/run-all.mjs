@@ -28,7 +28,7 @@ const checks = [
   "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
-  "dictation-edits", "environment", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar",
+  "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar",
   "machine-name", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",

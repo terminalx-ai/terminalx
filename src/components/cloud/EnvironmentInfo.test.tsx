@@ -4,12 +4,12 @@ import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/po
 import { ENVIRONMENT_TOOLS } from "@/lib/environmentInfo";
 import { EnvironmentInfo } from "./EnvironmentInfo";
 
-const connected: WorkspaceConnectionState = { state: "connected", capabilities: ["environment/1"], authority: "participate", runtimeGeneration: 1, runtimeVersion: "1" };
+const connected: WorkspaceConnectionState = { state: "connected", capabilities: ["environment/1"], authority: "manage", runtimeGeneration: 1, runtimeVersion: "1" };
 const report = { version: 1, observedAt: Date.now(), tools: ENVIRONMENT_TOOLS.map(([id]) => ({ id, status: id === "pnpm" ? "missing" : "installed", version: "24.22.1" })) };
 const client = (call: (method: string, params?: Record<string, unknown>) => Promise<unknown> = vi.fn(async () => report)) => ({ call } as unknown as WorkspaceRpcClient);
 const view = (runtime = client(), state: WorkspaceConnectionState = connected) => <EnvironmentInfo client={runtime} state={state} scopeKey="account/org/workspace" />;
 const open = () => fireEvent.click(screen.getByRole("button", { name: "Environment info" }));
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("Environment info", () => {
   it("probes only when opened, renders runtime versions and reports missing tools", async () => {
@@ -117,4 +117,50 @@ describe("Environment info", () => {
     expect(screen.getByText("Workspace access is unavailable.")).toBeTruthy();
     expect(runtime.call).toHaveBeenCalledWith("environment.cancel", expect.anything());
   });
+  it("does not let listed viewers or drivers start manager probes", () => {
+    for (const role of ["viewer", "driver"] as const) {
+      const runtime = client();
+      const rendered = render(view(runtime, { ...connected, authority: "participate", you: { userId: "peer", role, canApprove: false } }));
+      open();
+      expect(screen.getByText("Only workspace managers can read installed tools.")).toBeTruthy();
+      expect(runtime.call).not.toHaveBeenCalled();
+      rendered.unmount();
+    }
+  });
+  it("retries a busy report once before showing an error, using a fresh request ID", async () => {
+    vi.useFakeTimers();
+    const busy = Object.assign(new Error("busy"), { code: "environment_busy" });
+    const call = vi.fn().mockRejectedValueOnce(busy).mockResolvedValue(report);
+    render(view(client(call))); open();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByText(/Could not read/)).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+    expect(screen.getByText("Not found")).toBeTruthy();
+    expect(call.mock.calls.filter(([method]) => method === "environment.report")).toHaveLength(2);
+    expect(call.mock.calls[0][1].requestId).not.toBe(call.mock.calls[1][1].requestId);
+  });
+  it("does not retry forever or restart a cancelled retry after closing", async () => {
+    vi.useFakeTimers();
+    const busy = Object.assign(new Error("secret"), { code: "environment_busy" });
+    const call = vi.fn().mockRejectedValue(busy);
+    render(view(client(call))); open();
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+    expect(screen.getByText(/Could not read/)).toBeTruthy();
+    expect(call.mock.calls.filter(([method]) => method === "environment.report")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    open();
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    const before = call.mock.calls.filter(([method]) => method === "environment.report").length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(call.mock.calls.filter(([method]) => method === "environment.report")).toHaveLength(before);
+  });
+  it("uses the shared named popover and menu-layer token", async () => {
+    render(view()); open(); await screen.findByText("Not found");
+    const panel = screen.getByRole("dialog", { name: "Environment info" });
+    expect(panel.classList.contains("z-(--z-menu)")).toBe(true);
+    expect(panel.classList.contains("z-50")).toBe(false);
+    expect(screen.getByRole("button", { name: "Close Environment info" })).toBeTruthy();
+  });
+
 });

@@ -3,12 +3,13 @@ import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:f
 import { join, relative, resolve } from "node:path";
 
 const OWNER = "terminalx-two-account-v1";
-const SECRET_KEY = /token|password|authorization|credential|secret|cookie|verifier|challenge|private.?key/i;
+const SECRET_KEY = /api.?key|token|password|authorization|credential|secret|cookie|verifier|challenge|private.?key/i;
 
 export function redact(value) {
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SECRET_KEY.test(key) ? "[redacted]" : redact(item)]));
   if (typeof value === "string") return value
+    .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_]+)\b/g, "[redacted]")
     .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
     .replace(/([?&](?:code|token|state|key|secret|password)=)[^&#\s"']*/gi, "$1[redacted]")
     .replace(/(postgres(?:ql)?:\/\/)[^@\s/]+@/gi, "$1[redacted]@");

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Popover } from "radix-ui";
+import { Popover, PopoverTrigger, PopoverContent, PopoverClose } from "@/components/ui/popover";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { ENVIRONMENT_STALE_MS, ENVIRONMENT_TOOLS, environmentReport, type EnvironmentReport } from "@/lib/environmentInfo";
@@ -19,7 +19,8 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
   const [failed, setFailed] = useState(false);
   const [now, setNow] = useState(Date.now);
   const connected = state.state === "connected";
-  const readable = !connected || !state.you || (state.you.listed !== false && state.you.role !== "none");
+  const manager = connected && state.authority === "manage";
+  const readable = !connected || (manager && (!state.you || (state.you.listed !== false && state.you.role !== "none")));
   const supported = connected && readable && state.capabilities.includes("environment/1");
   const epoch = connected ? state.runtimeEpoch : undefined;
   const generation = connected ? state.runtimeGeneration : -1;
@@ -33,7 +34,7 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
   useEffect(() => {
     if (!open || !supported) return;
     let active = true;
-    const requestId = crypto.randomUUID();
+    let requestId = crypto.randomUUID();
     const cancel = () => {
       if (!active) return;
       active = false;
@@ -41,8 +42,20 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
     };
     setLoading(true);
     setFailed(false);
-    void client.call<unknown>("environment.report", { requestId }).then(environmentReport).then((report) => {
-      if (!active) return;
+    const load = async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { return environmentReport(await client.call<unknown>("environment.report", { requestId })); }
+        catch (error) {
+          if (attempt || !error || typeof error !== "object" || !("code" in error) || error.code !== "environment_busy") throw error;
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          if (!active) return null;
+          requestId = crypto.randomUUID();
+        }
+      }
+      return null;
+    };
+    void load().then((report) => {
+      if (!active || !report) return;
       const receivedAt = Date.now();
       setResult({ client, generation, epoch, report, receivedAt });
       setNow(receivedAt);
@@ -57,14 +70,12 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
   }, [open]);
 
   return (
-    <Popover.Root modal={false} open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild><Button size="sm" variant="ghost">Environment info</Button></Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content align="end" sideOffset={6} aria-label="Environment info" className="z-50 w-80 max-h-[70vh] overflow-y-auto rounded-lg border border-hairline bg-popover p-3 text-sm text-popover-foreground shadow-lg">
-          <h2 className="font-medium">Environment info</h2>
+    <Popover modal={false} open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild><Button size="sm" variant="ghost">Environment info</Button></PopoverTrigger>
+      <PopoverContent align="end" sideOffset={6} label="Environment info" className="max-h-[70vh] text-sm">
           <p className="mt-1 text-xs text-muted-foreground">Versions reported by this workspace’s runtime.</p>
           <div role="status" className="my-2 text-xs text-muted-foreground">
-            {!connected ? "Connect to the running workspace to read its tools." : !readable ? "Workspace access is unavailable." : !supported ? "This runtime does not support environment reports." : loading ? "Reading installed tools…" : failed ? "Could not read installed tools. Try again." : null}
+            {!connected ? "Connect to the running workspace to read its tools." : !manager ? "Only workspace managers can read installed tools." : !readable ? "Workspace access is unavailable." : !supported ? "This runtime does not support environment reports." : loading ? "Reading installed tools…" : failed ? "Could not read installed tools. Try again." : null}
             {stale && <p>Previous report — may be out of date.</p>}
           </div>
           {current && <dl className="space-y-1" aria-label="Installed tools">
@@ -75,9 +86,8 @@ function EnvironmentInfoReport({ client, state }: { client: WorkspaceRpcClient; 
             })}
           </dl>}
           {supported && <Button className="mt-3" size="sm" variant="secondary" disabled={loading} onClick={() => setRefresh((value) => value + 1)}>Refresh</Button>}
-          <Popover.Close asChild><Button className="ml-2 mt-3" size="sm" variant="ghost">Close</Button></Popover.Close>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+          <PopoverClose asChild><Button className="ml-2 mt-3" size="sm" variant="ghost">Close</Button></PopoverClose>
+      </PopoverContent>
+    </Popover>
   );
 }

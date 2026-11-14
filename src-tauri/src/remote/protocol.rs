@@ -122,8 +122,8 @@ const fn method(name: &'static str, capability: &'static str, authority: Authori
 use Authority::{Manage, Participate};
 
 pub const METHODS: &[Method] = &[
-    method("environment.report", "environment/1", Participate, false),
-    method("environment.cancel", "environment/1", Participate, false),
+    method("environment.report", "environment/1", Manage, false),
+    method("environment.cancel", "environment/1", Manage, false),
     method("session.list", "session/1", Participate, false),
     method("session.get", "session/1", Participate, false),
     method("session.create", "session/1", Manage, true),
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));
         for name in ["environment.report", "environment.cancel"] {
             let method = find_method(name).unwrap();
-            assert_eq!((method.capability, method.authority, method.idempotent), ("environment/1", Participate, false));
+            assert_eq!((method.capability, method.authority, method.idempotent), ("environment/1", Manage, false));
         }
         assert!(find_method("environment.exec").is_none());
         // The mailbox's other commands, live for a runtime without one:

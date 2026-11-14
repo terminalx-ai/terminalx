@@ -1042,10 +1042,9 @@ impl WorkspaceRpc {
         if method == "environment.report" {
             // Retain admission until every probe and its I/O have ended.
             let _privacy = ticket.enter().map_err(|_| RpcError::forbidden("Environment report is unavailable"))?;
-            let spec = protocol::find_method(method).expect("registered method");
             return super::environment::report(peer.id(), &params, || {
                 ticket.valid() && !peer.hung_up() && peer.granted("environment/1") &&
-                    (self.authority(peer) == Authority::Manage || self.authorize_participant(peer, spec).is_ok())
+                    self.authority(peer) == Authority::Manage
             }).await;
         }
         // Sockets, not blocking work: answered on the async runtime.
@@ -3730,8 +3729,17 @@ mod environment_tests {
         call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]})).await;
         assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden");
         rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": "viewer"}]})).unwrap()));
-        assert_eq!(call("environment.cancel", params.clone()).await["ok"], true);
-        assert_eq!(call("environment.report", json!({"requestId": "bad", "command": "env"})).await["error"]["code"], "invalid_params");
+        for role in ["viewer", "driver", "manager"] {
+            rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": role}]})).unwrap()));
+            assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden", "a listed {role} cannot consume the manager probe slot");
+            assert_eq!(call("environment.cancel", params.clone()).await["error"]["code"], "forbidden");
+        }
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "owner", "role": "manager"}]})).unwrap()));
+        let (manager, _events) = Peer::for_user("environment-owner".into(), Authority::Manage, Some("owner".into()));
+        let invoke = |method: &str, params: Value| json!({"id": "owner-env", "method": method, "params": params});
+        rpc.handle(&manager, &invoke("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]}))).await;
+        assert_eq!(rpc.handle(&manager, &invoke("environment.cancel", params.clone())).await["ok"], true);
+        assert_eq!(rpc.handle(&manager, &invoke("environment.report", json!({"requestId": "bad", "command": "env"}))).await["error"]["code"], "invalid_params");
         rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": []})).unwrap()));
         assert_eq!(call("environment.report", params).await["error"]["code"], "forbidden");
     }

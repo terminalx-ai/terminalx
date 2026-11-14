@@ -20,16 +20,16 @@ jobs:
     runs-on: [self-hosted, macOS, terminalx-team-e2e]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           clean: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .nvmrc
       - name: Collect pending prerequisites (exit 2 is expected and remains non-green)
         run: node scripts/team-e2e/run.mjs --preflight --artifacts artifacts/team-e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: two-account-foundation-${{ github.run_id }}-${{ github.run_attempt }}
