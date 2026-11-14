@@ -30,14 +30,24 @@ describe("deriveCloudActivity", () => {
 
   it("2: a failed first prompt stops needing attention once an agent runs in the workspace (#499)", () => {
     const failed = { launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 0 } } };
-    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "in_progress" }], connection: "connected" }).label).toBe("Working");
-    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "idle" }] }).label).toBe("Idle");
+    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "in_progress", created: new Date(1).toISOString() }], connection: "connected" }).label).toBe("Working");
+    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "idle", created: new Date(1).toISOString() }] }).label).toBe("Idle");
     expect(deriveCloudActivity(item(failed), { agentRan: true }).label).toBe("Ready");
     // The list alone: a runtime that reports a turn has an agent working.
     expect(deriveCloudActivity(item({ ...failed, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 1, pendingApprovals: 0 } })).label).toBe("Working");
     // Nothing has run since: it still needs attention, and a workspace the server flags always does.
     expect(deriveCloudActivity(item(failed), { tabs: [] }).label).toBe("Needs attention");
     expect(deriveCloudActivity(item({ state: "attention-required" }), { tabs: [{ status: "idle" }] }).label).toBe("Needs attention");
+  });
+
+  it.each([undefined, false, true])("does not hide a newer failure behind old live tabs (fromCache=%s)", (fromCache) => {
+    const row = item({ launch: { phase: "failed", state: "failed", category: "runtime-interrupted", timings: { failedAt: 100 } } });
+    for (const live of [undefined, true]) {
+      const tabs = [{ status: "in_progress" as const, live, created: new Date(90).toISOString(), lastMessageAt: new Date(99).toISOString() }];
+      expect(deriveCloudActivity(row, { connection: "connected", fromCache, tabs }).label).toBe("Needs attention");
+      expect(deriveCloudActivity(row, { connection: "connected", fromCache, tabs, agentRan: true }).label).toBe("Working");
+      expect(deriveCloudActivity(row, { connection: "connected", fromCache, tabs: [{ ...tabs[0], lastMessageAt: new Date(101).toISOString() }] }).label).toBe("Working");
+    }
   });
 
   it("shows failed lifecycle operations and clears them when their target state is reached", () => {

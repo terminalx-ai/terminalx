@@ -87,14 +87,14 @@ function tabAfterFailure(item: CloudWorkspaceListItem, tab: { created?: string; 
 }
 
 /**
- * Preserve explicit caller evidence for this read: agentRan or live tabs can
- * suppress a historical failure without changing the item. Cached tabs require
- * dated evidence. Only reconcileCloudAttention records durable recovery, using
+ * Preserve explicit agentRan assertions for this read without changing the item.
+ * All tabs require dated evidence, including live tabs: connection liveness does
+ * not establish when an agent ran. Only reconciliation records durable recovery, using
  * dated activity after the failure or current runtime activity when failedAt is
  * absent; these caller hints never set its marker.
  */
 export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<CloudAttentionInput, "tabs" | "agentRan" | "agentActivityAt" | "fromCache"> = {}): boolean {
-  if (input.agentRan || input.tabs?.some((tab) => tab.live || !input.fromCache)) return false;
+  if (input.agentRan) return false;
   if (afterFailure(item, input.agentActivityAt) || input.tabs?.some((tab) => tabAfterFailure(item, tab))) return false;
   if ((item as ObservedItem).resolvedLaunchFailure === launchFailureKey(item)) return false;
   return !runtimeAgentRan(item);

@@ -41,7 +41,7 @@ describe("shared attention and recovery", () => {
     row.workspace.runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
     expect(resolveCloudAttention(row)?.code).toBe("agent-sign-in-required");
     expect(resolveCloudAttention(row, { agentRan: true })).toBeNull();
-    expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }] })).toBeNull();
+    expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }] })?.code).toBe("agent-sign-in-required");
     row.workspace.runtimeActivity.activeTurns = 1;
     expect(resolveCloudAttention(row)).toBeNull();
     row.workspace.runtimeActivity.stale = true;
@@ -135,7 +135,7 @@ describe("shared attention and recovery", () => {
     row.workspace.launch!.timings = { failedAt: 100 } as NonNullable<typeof row.workspace.launch>["timings"];
     const before = JSON.stringify(row);
     expect(resolveCloudAttention(row, { agentRan: true })).toBeNull();
-    expect(resolveCloudAttention(row, { tabs: [{ status: "idle", live: true }], fromCache: true })).toBeNull();
+    expect(resolveCloudAttention(row, { tabs: [{ status: "idle", live: true }], fromCache: true })?.code).toBe("runtime-interrupted");
     expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }], fromCache: true })?.code).toBe("runtime-interrupted");
     expect(JSON.stringify(row)).toBe(before);
     const reconciled = reconcileCloudAttention(row, undefined, [{ tabs: [{ status: "idle" }] }] as never);
@@ -151,6 +151,21 @@ describe("shared attention and recovery", () => {
     expect(reconciled).toHaveProperty("resolvedLaunchFailure");
     reconciled.workspace.runtimeActivity = null;
     expect(resolveCloudAttention(reconciled)).toBeNull();
+  });
+
+
+  it.each([undefined, false, true])("requires tab evidence after failure regardless of fromCache=%s", (fromCache) => {
+    const row = failed("runtime-interrupted");
+    row.workspace.launch!.timings = { failedAt: 100 } as NonNullable<typeof row.workspace.launch>["timings"];
+    for (const live of [undefined, false, true]) {
+      for (const at of [undefined, 99, 100]) {
+        const time = at === undefined ? undefined : new Date(at).toISOString();
+        const tabs = [{ status: "in_progress" as const, live, created: time, lastMessageAt: time }];
+        expect(resolveCloudAttention(row, { fromCache, tabs })?.code).toBe("runtime-interrupted");
+        expect(resolveCloudAttention(row, { fromCache, tabs, agentRan: true })).toBeNull();
+        expect(resolveCloudAttention(row, { fromCache, tabs: [{ ...tabs[0], lastMessageAt: new Date(101).toISOString() }] })).toBeNull();
+      }
+    }
   });
 
 });
