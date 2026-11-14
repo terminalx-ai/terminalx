@@ -105,8 +105,10 @@ def validate(header, observed):
     require(set(intent) == {"binding", "profileId", "sourceCommit", "runtimeSha256", "protocol", "bytes"},
             "Unknown artifact intent")
     binding = intent["binding"]
-    require(set(binding) == {"target", "environmentId", "generation", "architecture", "account"},
+    require(set(binding) == {"target", "environmentId", "generation", "architecture", "account", "hostKeySha256"},
             "Invalid installation binding")
+    require(isinstance(binding["hostKeySha256"], str) and len(binding["hostKeySha256"]) == 64
+            and all(c in "0123456789abcdef" for c in binding["hostKeySha256"]), "Invalid host key digest")
     require(binding["account"] == observed and binding["architecture"] == observed["architecture"],
             "Guest account or architecture changed")
     for key in ("environmentId", "generation"):
@@ -126,7 +128,8 @@ def installed(home, intent):
     for directory in (base, base / "bin", base / "runtime"):
         private_directory(directory)
     binding = intent["binding"]
-    identity = {"environmentId": binding["environmentId"], "generation": binding["generation"], "protocol": 1, "account": binding["account"]}
+    identity = {"environmentId": binding["environmentId"], "generation": binding["generation"], "protocol": 1,
+                "account": binding["account"], "hostKeySha256": binding["hostKeySha256"]}
     require(json.loads(read(base / "identity.json", 4096)) == identity, "Installed timeline changed")
     require(json.loads(read(base / "account-binding.json", 4096)) == binding["account"], "Installed account changed")
     data = read(base / "bin/terminalx-serve", intent["bytes"])
@@ -178,7 +181,8 @@ def transact(home, observed, header, binary=None, after_intent=lambda: None):
             for name in ("bin", "runtime"):
                 (base / name).mkdir(mode=0o700)
             identity = {"environmentId": intent["binding"]["environmentId"],
-                        "generation": intent["binding"]["generation"], "protocol": 1, "account": observed}
+                        "generation": intent["binding"]["generation"], "protocol": 1, "account": observed,
+                        "hostKeySha256": intent["binding"]["hostKeySha256"]}
             write_new(base / "identity.json", canonical(identity))
             write_new(base / "account-binding.json", canonical(observed))
             write_new(base / "bin/terminalx-serve", binary, 0o700)

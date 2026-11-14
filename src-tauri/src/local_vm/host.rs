@@ -508,7 +508,8 @@ pub(super) fn guest_rpc_ready(
     }
     params["environmentId"] = json!(env.id);
     params["generation"] = json!(env.generation);
-    let request = serde_json::to_vec(&json!({"method":method,"params":params}))?;
+    let key = super::guest_key::read(&root()?, &env.id)?;
+    let request = zeroize::Zeroizing::new(serde_json::to_vec(&json!({"method":method,"params":params,"hostKey":key.as_str()}))?);
     // -i uses argv and authenticated Cua guest transport, not an HTTP endpoint
     // exposed to the LAN. The guest helper reads its own owner-only token.
     let bytes = cua(
@@ -1136,7 +1137,8 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
     journal::atomic_private_write(
         &identity_path,
         &serde_json::to_vec(
-            &json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL}),
+            &json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL,
+                "hostKeySha256":super::guest_key::verifier(&super::guest_key::ensure(&root()?, &env.id)?)}),
         )?,
     )?;
     cua(

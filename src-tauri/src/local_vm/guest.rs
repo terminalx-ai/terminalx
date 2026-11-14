@@ -114,6 +114,8 @@ pub struct Identity {
     pub environment_id: String,
     pub generation: String,
     pub protocol: u32,
+    /// The SHA-256 of the key only the installing host holds (`guest_key.rs`).
+    pub host_key_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<super::linux_profile::Account>,
 }
@@ -139,10 +141,22 @@ impl Identity {
         if let Some(account)=&identity.account { account.check_current()?; }
         validate_id(&identity.environment_id)?;
         validate_id(&identity.generation)?;
+        if identity.host_key_sha256.len() != 64 || !identity.host_key_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("Guest identity has no host key; install the runtime again from the host");
+        }
         if identity.protocol != PROTOCOL {
             bail!("Incompatible local guest protocol");
         }
         Ok(identity)
+    }
+
+    /// Only the installing host holds the key; a worker, which runs as this
+    /// account and can read everything the runtime reads, cannot answer it.
+    fn check_host(&self, offered: &str) -> Result<()> {
+        if !super::guest_key::matches(&self.host_key_sha256, offered) {
+            bail!("This request does not carry the installing host's key; no operation was routed");
+        }
+        Ok(())
     }
 
     fn check(&self, params: &Value) -> Result<()> {
@@ -167,6 +181,9 @@ fn check_runtime(expected: Option<&str>, actual: &str) -> Result<()> {
 pub struct Request {
     #[serde(default, rename = "expectedRuntimeSha256")]
     pub expected_runtime_sha256: Option<String>,
+    /// The installing host's key (`guest_key.rs`); never logged or stored.
+    #[serde(rename = "hostKey")]
+    pub host_key: String,
     pub method: String,
     pub params: Value,
 }
@@ -461,6 +478,7 @@ impl Guest {
         // Re-read the installation identity so an in-place rollback/reinstall
         // invalidates even a process that is still running.
         let identity = Identity::load(&self.base)?;
+        identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
         if identity != self.state.lock().unwrap().identity {
             bail!("Guest identity changed; restart/reconcile required");
@@ -2618,6 +2636,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         let request: Request = serde_json::from_slice(&bytes)?;
         check_runtime(request.expected_runtime_sha256.as_deref(), &super::bootstrap::owner_runtime_sha256()?)?;
         let (base, identity) = installed_identity()?;
+        identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
         std::env::set_var("TERMINALX_HOME", base.join("runtime"));
         for name in [
@@ -2630,7 +2649,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         }
         crate::control::call(
             "local_vm.guest",
-            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256}),
+            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256,"hostKey":request.host_key}),
             Duration::from_secs(40),
         )
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
@@ -2658,6 +2677,9 @@ mod tests {
     use super::super::journal::{new_id, InputFile, Journal, TaskInput};
     use super::*;
 
+    /// The key the test host installed its guest with.
+    pub(super) const HOST_KEY: &str = "5f3c0e7a9b1d2f4e6a8c0b2d4f6e8a1c3b5d7f9e1a3c5e7b9d1f3a5c7e9b1d3f";
+
     fn setup() -> (crate::store::TempHome, Guest, Task) {
         let home = crate::store::temp_home();
         let root = crate::store::root().unwrap();
@@ -2670,6 +2692,7 @@ mod tests {
             environment_id: env.id.clone(),
             generation: env.generation.clone(),
             protocol: PROTOCOL,
+            host_key_sha256: super::super::guest_key::verifier(HOST_KEY),
         };
         atomic_private_write(
             &base.join("identity.json"),
@@ -3430,6 +3453,7 @@ mod tests {
     fn installed_guest_guard_precedes_all_generic_owner_window_mobile_and_sharing_routes() {
         let (_home, guest, task) = setup();
         let req = request(&guest, "desktop.state", json!({}));
+        let digest = Identity::load(&guest.base).unwrap().host_key_sha256;
         let endpoint = crate::hooks::prepare_control().unwrap();
         let service = crate::control::ControlService::headless(
             guest.sink.clone(),
@@ -3460,11 +3484,26 @@ mod tests {
             assert!(!response.ok, "{command}");
             assert_eq!(response.error.unwrap().code, "unsupported", "{command}");
         }
+        // What a worker can read is not enough to drive the guest: the
+        // control token, and in identity.json only the digest of the host's
+        // key. Without the key itself nothing is routed (review 2: a waiting
+        // task must not grant itself approval).
+        for offered in [json!(null), json!(""), json!(digest), json!("0".repeat(64))] {
+            let mut params = json!({"method":"task.permission","params":req.params});
+            if !offered.is_null() { params["hostKey"] = offered.clone(); }
+            let response = service.handle(crate::control::ControlRequest {
+                id: new_id(),
+                token: String::new(),
+                command: "local_vm.guest".into(),
+                params,
+            });
+            assert!(!response.ok, "{offered}");
+        }
         let response = service.handle(crate::control::ControlRequest {
             id: new_id(),
             token: String::new(),
             command: "local_vm.guest".into(),
-            params: json!({"method":req.method,"params":req.params}),
+            params: json!({"method":req.method,"params":req.params,"hostKey":req.host_key}),
         });
         assert!(response.ok);
         assert_eq!(
@@ -3645,6 +3684,7 @@ mod tests {
         params["generation"] = json!(identity.generation);
         Request {
             expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
             method: method.into(),
             params,
         }
@@ -3769,6 +3809,7 @@ mod tests {
                 guest
                     .dispatch(Request {
                 expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
                         method: req.method.clone(),
                         params: req.params.clone(),
                     })
@@ -3795,6 +3836,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: changed
             })
@@ -3806,6 +3848,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
                 method: req.method,
                 params: wrong
             })
@@ -3831,6 +3874,7 @@ mod tests {
         guest
             .dispatch(Request {
                 expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone(),
             })
@@ -3886,6 +3930,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone()
             })

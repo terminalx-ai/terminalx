@@ -98,6 +98,7 @@ mod tests {
                 environment_id: params.environment_id.clone(),
                 generation: params.generation.clone(),
                 protocol: 1,
+                host_key_sha256: "0".repeat(64),
             },
             records: Default::default(),
             canceled_targets: Default::default(),

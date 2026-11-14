@@ -232,6 +232,8 @@ pub struct InstallBinding {
     pub architecture: Architecture,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<Account>,
+    /// What the installed identity keeps of the host's key (`guest_key.rs`).
+    pub host_key_sha256: String,
 }
 pub(super) fn directory(root: &Path, key: &str) -> Result<std::path::PathBuf> {
     if key.is_empty() || key.len() > 200 {
@@ -391,7 +393,7 @@ pub(super) fn validate_receipt(key: &str, record: &Value, observed: &Value) -> R
         || observed["runtimeSha256"] != intent["runtimeSha256"]
         || observed["protocol"] != journal::PROTOCOL
         || observed["identity"]
-            != json!({"environmentId":binding["environmentId"],"generation":binding["generation"],"protocol":journal::PROTOCOL,"account":binding["account"]})
+            != json!({"environmentId":binding["environmentId"],"generation":binding["generation"],"protocol":journal::PROTOCOL,"account":binding["account"],"hostKeySha256":binding["hostKeySha256"]})
         || observed["exitProof"]
             != json!({"kind":"terminalReceiptUnderExclusiveLock","requestDigest":request,"inputDigest":record["inputDigest"]})
     {
@@ -463,7 +465,7 @@ mod tests {
         let input = journal::digest(&serde_json::to_vec(intent).unwrap());
         json!({"receipt":{"version":1,"status":"installed","intent":intent,"requestDigest":request,"inputDigest":input},
             "account":intent["binding"]["account"],"runtimeSha256":intent["runtimeSha256"],"protocol":1,
-            "identity":{"environmentId":intent["binding"]["environmentId"],"generation":intent["binding"]["generation"],"protocol":1,"account":intent["binding"]["account"]},
+            "identity":{"environmentId":intent["binding"]["environmentId"],"generation":intent["binding"]["generation"],"protocol":1,"account":intent["binding"]["account"],"hostKeySha256":intent["binding"]["hostKeySha256"]},
             "exitProof":{"kind":"terminalReceiptUnderExclusiveLock","requestDigest":request,"inputDigest":input}})
     }
     fn artifact(dir: &Path, architecture: Architecture) -> (String, std::path::PathBuf) {
@@ -499,6 +501,7 @@ mod tests {
                 home_inode: 2,
                 architecture: Architecture::Arm64,
             }),
+            host_key_sha256: "c".repeat(64),
         }
     }
     #[test]

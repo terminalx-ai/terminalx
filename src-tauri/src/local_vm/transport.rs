@@ -124,7 +124,8 @@ fn linux_rpc_at(path: &Path, env: &Environment, method: &str, mut params: Value,
     let object = params.as_object_mut().context("Guest RPC parameters must be an object")?;
     object.insert("environmentId".into(), json!(env.id));
     object.insert("generation".into(), json!(env.generation));
-    let input = serde_json::to_vec(&json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha256}))?;
+    let key = super::guest_key::read(&super::host::root()?, &env.id)?;
+    let input = zeroize::Zeroizing::new(serde_json::to_vec(&json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha256,"hostKey":key.as_str()}))?);
     if input.len() > super::guest::MAX_RPC_BYTES { bail!("Guest RPC exceeds the request limit"); }
     let mut command = std::process::Command::new(path);
     // No -e NAME, env-file, mounts, shell interpolation, root or host tokens.
@@ -160,11 +161,13 @@ mod tests {
 
     #[test]
     fn actual_linux_rpc_routes_exact_id_and_retains_receipts_across_replacement() {
+        let _home = crate::store::temp_home();
         for runtime in [Runtime::Docker, Runtime::Podman] {
             let dir = tempfile::tempdir().unwrap();
             let journal = Journal::open(&dir.path().join("journal")).unwrap();
             let target = Target::LinuxGuest { runtime, id: "a".repeat(64), environment_id: new_id(), generation: new_id() };
             let env = journal.enroll_container("Linux fixture", &target, &"e".repeat(64)).unwrap();
+            let key = super::super::guest_key::ensure(&super::super::host::root().unwrap(), &env.id).unwrap();
             let task = journal.submit_selected("once", input(&env.id), Some(&target)).unwrap();
             assert!(task.guest_cwd.starts_with("/home/cua/.terminalx-local/workspaces/"));
             assert_eq!(task.computer.as_ref(), Some(&target));
@@ -193,6 +196,8 @@ else: sys.exit(72)
             assert_eq!(result, serde_json::to_value(&task).unwrap());
             let request: Value = serde_json::from_slice(&std::fs::read(dir.path().join("request.json")).unwrap()).unwrap();
             assert_eq!(request["expectedRuntimeSha256"], "e".repeat(64));
+            // The host's key goes on stdin; argv is checked exactly above.
+            assert_eq!(request["hostKey"], key.as_str());
             assert_eq!(request["params"]["environmentId"], env.id);
             assert_eq!(request["params"]["generation"], env.generation);
             assert_eq!(request["params"]["task"]["computer"], serde_json::to_value(&target).unwrap());

@@ -74,6 +74,7 @@ print(json.dumps({'ok':True,'result':result}))
             generation: journal::new_id(),
             architecture: Architecture::Arm64,
             account: Some(account),
+            host_key_sha256: "c".repeat(64),
         };
         let journal = Journal::open(&dir.path().join("host")).unwrap();
         Self {
@@ -140,7 +141,7 @@ fn serving_enrollment_requires_original_account_artifact_and_exclusive_ownership
         .unwrap();
     let observed = json!({"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"platform":"linux",
         "runtimeSha256":installed["intent"]["runtimeSha256"],"taskMode":"shellFiles","manualControl":false,
-        "identity":{"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"account":f.binding.account}});
+        "identity":{"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"account":f.binding.account,"hostKeySha256":f.binding.host_key_sha256}});
     for field in ["generation", "runtimeSha256", "identity", "manualControl"] {
         let mut changed = observed.clone();
         changed[field] = if field == "manualControl" {

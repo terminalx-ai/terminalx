@@ -162,12 +162,15 @@ fn prepare(
     if account.architecture != architecture {
         bail!("Trusted artifact does not match the dedicated guest architecture");
     }
+    let environment_id = journal::new_id();
+    let host_key_sha256 = super::guest_key::verifier(&super::guest_key::ensure(root, &environment_id)?);
     let binding = InstallBinding {
         target: target.clone(),
-        environment_id: journal::new_id(),
+        environment_id,
         generation: journal::new_id(),
         architecture,
         account: Some(account),
+        host_key_sha256,
     };
     linux_profile::prepare(root, key, &binding, &artifact)
 }
@@ -271,6 +274,7 @@ pub(super) fn enroll_serving_using(
         || observed["identity"]["generation"] != env.generation
         || observed["identity"]["protocol"] != journal::PROTOCOL
         || observed["identity"]["account"] != json!(account)
+        || observed["identity"]["hostKeySha256"] != binding.host_key_sha256
         || observed["manualControl"] != false
     {
         bail!("Serving guest account/identity differs from the original installed runtime");

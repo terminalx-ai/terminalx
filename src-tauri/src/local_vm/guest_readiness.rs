@@ -975,6 +975,7 @@ mod tests {
             environment_id: super::super::super::journal::new_id(),
             generation: super::super::super::journal::new_id(),
             protocol: 1,
+            host_key_sha256: "0".repeat(64),
         };
         let binding = AccountBinding {
             executable_sha256: "a".repeat(64),
@@ -1070,6 +1071,7 @@ mod tests {
             environment_id: "env-1".into(),
             generation: "gen-1".into(),
             protocol: 1,
+            host_key_sha256: "0".repeat(64),
         };
         let state = State {
             attachments: Default::default(),

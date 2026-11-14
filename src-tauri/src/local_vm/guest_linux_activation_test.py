@@ -16,7 +16,8 @@ class ActivationFixtures(unittest.TestCase):
         binary[16], binary[18], binary[20], binary[52] = 3, 183, 1, 64
         self.intent = {"binding": {"target": {"kind": "linuxContainer", "runtime": "docker", "id": "a" * 64},
                        "environmentId": str(uuid.uuid4()), "generation": str(uuid.uuid4()),
-                       "architecture": "arm64", "account": self.observed}, "profileId": "fixture",
+                       "architecture": "arm64", "account": self.observed, "hostKeySha256": "c" * 64},
+                       "profileId": "fixture",
                        "sourceCommit": "a" * 40, "runtimeSha256": digest(binary), "protocol": 1, "bytes": 64}
         install = {"action": "install", "requestDigest": "b" * 64,
                    "inputDigest": digest(canonical(self.intent)), "intent": self.intent}
