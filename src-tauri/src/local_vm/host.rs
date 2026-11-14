@@ -164,8 +164,12 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
         "environment.install" => {
+            // The owner's own runtime only, never a path a caller names (review 2).
+            if params.get("runtimePath").is_some() {
+                bail!("The guest runtime is always this owner's own; no other binary is installed");
+            }
             let env = environment(&journal, &params)?;
-            install_guest(&env, Path::new(field(&params, "runtimePath")?))?;
+            install_current_guest(&env)?;
             Ok(json!({"installed":true,"credentialsCopied":false}))
         }
         "environment.releaseDesktop" => {
@@ -561,18 +565,7 @@ pub(super) fn guest_rpc_ready(
         &request,
         budget,
     )?;
-    let response: Value = serde_json::from_slice(&bytes).context("Invalid guest response")?;
-    if response.get("ok") == Some(&Value::Bool(false)) {
-        bail!(
-            "Guest request refused: {}",
-            response
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("guest unavailable")
-        );
-    }
-    Ok(response.get("result").cloned().unwrap_or(response))
+    super::transport::decode(&bytes)
 }
 
 fn compatible() -> Result<()> {
@@ -879,8 +872,14 @@ pub fn export_files(source: &Path, manifest: &[journal::InputFile]) -> Result<Va
     Ok(json!(files))
 }
 
+/// Installs this owner's own executable, and only while it still has the
+/// bytes this owner started with: a replaced file is never installed.
 pub(crate) fn install_current_guest(env: &Environment) -> Result<()> {
-    install_guest(env, &std::env::current_exe()?)
+    let runtime = std::env::current_exe()?;
+    if journal::digest(&fs::read(&runtime)?) != super::bootstrap::owner_runtime_sha256()? {
+        bail!("This app's runtime changed on disk since it started; restart TerminalX before installing the guest runtime");
+    }
+    install_guest(env, &runtime)
 }
 
 pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {

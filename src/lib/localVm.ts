@@ -51,7 +51,7 @@ interface Requests {
   "environment.cancelProvision": { params: { environmentId: string }; result: LocalVmJson };
   "environment.start": { params: { environmentId: string }; result: LocalVmJson };
   "environment.stop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
-  "environment.install": { params: { environmentId: string; runtimePath: string }; result: LocalVmJson };
+  "environment.install": { params: { environmentId: string }; result: LocalVmJson };
   "environment.awake": { params: { environmentId: string; enabled: boolean }; result: LocalVmJson };
   "environment.desktop": { params: { environmentId: string; target?: LocalVmTaskTarget }; result: LocalVmJson };
   "environment.releaseDesktop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
