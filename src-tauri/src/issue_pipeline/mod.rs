@@ -183,6 +183,13 @@ pub struct Pipeline {
     pub resolver: Option<SessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    /// Pinned inputs retained for an explicit restart after ownership was released.
+    /// This is history, not a checkout reservation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_resolution: Option<Resolution>,
+    /// A restarted merge may contain manual edits and must not be aborted automatically.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preserve_resolution_edits: bool,
     /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
     /// the merge is a person's, made from their computer with their own `gh`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

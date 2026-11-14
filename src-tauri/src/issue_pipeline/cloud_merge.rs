@@ -181,6 +181,8 @@ mod tests {
             auto_merge: false,
             resolver: None,
             resolution: None,
+            interrupted_resolution: None,
+            preserve_resolution_edits: false,
             resolutions: 0,
             resolve_conflicts: false,
             cloud: true,

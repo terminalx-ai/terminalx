@@ -47,6 +47,17 @@ Do not rebase, reset, force-push, push, open a PR or merge a PR. TerminalX verif
 End with a terminalx-status block: {{\"status\":\"done\",\"checks\":\"passed\",\"summary\":\"...\"}}. Otherwise report status blocked, checks failed or none as appropriate, and a specific reason.")
 }
 
+/// Restart an interrupted merge without erasing edits made by a person.
+pub fn continue_resolution(resolution: &super::Resolution) -> String {
+    resolve(resolution).replace(
+        "First verify HEAD is the original head and the checkout is clean.",
+        "This is an interrupted merge. Verify HEAD is the original head and MERGE_HEAD is exactly the pinned base. Preserve all existing resolution edits, including edits made by a person. The checkout is expected to have changes. Do not abort or reset them.",
+    ).replace(
+        &format!("1. Merge that exact base commit with `git merge --no-ff --no-edit {}`.", resolution.base_commit),
+        "1. Continue the existing merge; do not start another merge. Inspect the current index and working tree before editing.",
+    )
+}
+
 /// To a conflict resolver still at work when its pull request was merged or
 /// closed: its merge can no longer land. `why` says how the pipeline ended.
 pub fn resolver_ended(why: &str) -> String {

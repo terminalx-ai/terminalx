@@ -4200,6 +4200,7 @@ impl SessionManager {
             self.sink.emit("pty_closed", &pane);
         }
         crate::session_ops::close_tab_entry(session_id, tab_id).map_err(anyhow::Error::msg)?;
+        self.observer.automation_failed(session_id, tab_id, "Its tab was closed.");
         self.sink.emit("session_updated", &index::get(session_id)?);
         self.sink.emit("tab_state_changed", &index::tab_state()?);
         Ok(())
