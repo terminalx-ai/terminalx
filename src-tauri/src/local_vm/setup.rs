@@ -260,6 +260,7 @@ fn record_readiness(
         let Some(report)=env.setup.as_mut() else { return Ok(()) };
         if report["harness"]!=harness { bail!("Setup provider differs from the retained request"); }
         report["readiness"]=readiness.clone();report["lastCheckedAt"]=json!(journal::now());
+        if let Some(fields)=report.as_object_mut() { fields.remove("readinessError"); }
         if !matches!(report["status"].as_str(),Some("outcomeUnknown"|"failed")) {
             report["status"]=json!("needsAttention");
         }
@@ -646,12 +647,26 @@ pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
     }
     let fresh = journal.read()?.environments[&current.id].clone();
     let harness = host::field(fresh.setup.as_ref().context("Setup missing")?, "harness")?;
-    let readiness = host::guest_rpc(
-        &fresh,
-        "environment.setupReadiness",
-        json!({"harness":harness}),
-    )?;
+    let readiness = match host::guest_rpc(&fresh, "environment.setupReadiness", json!({"harness":harness})) {
+        Ok(readiness) => readiness,
+        // A passive check of a guest that is stopped or unreachable is not an
+        // interrupted setup step (review 2): nothing was being installed or
+        // approved, so the setup keeps its state and is checked again later.
+        Err(error) => return unreachable(journal, &fresh, &error),
+    };
     record_readiness(journal, &fresh, harness, &readiness)
+}
+
+/// Records that the last passive readiness check could not reach the guest.
+fn unreachable(journal: &Journal, target: &Environment, error: &anyhow::Error) -> Result<()> {
+    journal.transaction(|state| {
+        let report = state.environments.get_mut(&target.id)
+            .filter(|e| e.generation == target.generation && e.deleted_at.is_none())
+            .and_then(|e| e.setup.as_mut()).context("Setup timeline changed")?;
+        report["lastCheckedAt"] = json!(journal::now());
+        report["readinessError"] = json!(crate::remote::protocol::redact(&format!("{error:#}")));
+        Ok(())
+    })
 }
 
 fn refresh_actions(journal: &Journal, target: &Environment) -> Result<()> {
@@ -1041,6 +1056,30 @@ mod tests {
         );
         assert_eq!(journal.read().unwrap().environments.len(), 1);
         assert!(journal.read().unwrap().tasks.is_empty());
+    }
+
+    /// Review 2: once set up, a VM that was stopped, or a host reboot, failed
+    /// the passive readiness check, which marked the setup outcomeUnknown for
+    /// good, and Delete VM and desktop attachments were refused from then on.
+    #[test]
+    fn an_unreachable_guest_keeps_its_completed_setup() {
+        let _home = crate::store::temp_home();
+        let journal = host::journal().unwrap();
+        let env = journal.enroll("Guest", "local:stopped").unwrap();
+        let mut report = initial(&env, "codex", "key").unwrap();
+        report["status"] = json!("ready");
+        for step in report["steps"].as_array_mut().unwrap() {
+            step["state"] = json!("complete");
+        }
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().setup = Some(report.clone()); Ok(()) }).unwrap();
+        let env = journal.read().unwrap().environments[&env.id].clone();
+        // The guest cannot be reached: here, no pinned Cua to reach it with.
+        advance(&journal, &env).unwrap();
+        let kept = journal.read().unwrap().environments[&env.id].setup.clone().unwrap();
+        assert_eq!(kept["status"], "ready", "the setup keeps its state");
+        assert!(kept["readinessError"].is_string());
+        assert!(kept["lastCheckedAt"].is_string(), "and is checked again later, not every tick");
+        assert_eq!(kept["steps"], report["steps"]);
     }
 
     #[test]
