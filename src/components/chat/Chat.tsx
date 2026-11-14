@@ -86,6 +86,7 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  */
 export function Chat({
   sessionId,
+  checkpointTabId,
   transcript,
   stream,
   cwd,
@@ -104,6 +105,7 @@ export function Chat({
   onReset,
 }: {
   sessionId: string;
+  checkpointTabId?: string;
   transcript: Transcript;
   stream: StreamBlock[];
   cwd?: string;
@@ -438,6 +440,7 @@ export function Chat({
                 turn={t}
                 cwd={cwd}
                 sessionId={sessionId}
+                checkpointTabId={checkpointTabId}
                 stream={isLast && live ? stream : NO_STREAM}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}

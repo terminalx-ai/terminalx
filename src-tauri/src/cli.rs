@@ -1057,7 +1057,7 @@ fn rpc(command: &str, params: Value, tokens: &mut Tokens) -> Result<Action, Cont
     Ok(Action::Rpc {
         command: command.into(),
         params,
-        timeout: Duration::from_secs(30),
+        timeout: Duration::from_secs(if command == "worktrees.delete" { 480 } else { 30 }),
     })
 }
 

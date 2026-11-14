@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
@@ -82,6 +83,7 @@ mod media;
 mod media_types;
 mod branch_overview;
 mod git;
+mod checkpoints;
 mod git_media;
 mod github;
 mod unfinished_merge;
@@ -681,6 +683,10 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::turn_checkpoint,
+            commands::keep_turn,
+            commands::undo_turn,
+            commands::restore_undo,
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
