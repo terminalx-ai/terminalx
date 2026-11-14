@@ -185,8 +185,10 @@ pub fn prepare_stop() -> Result<Exclusive> {
 /// handover is off. Local VM work is not carried over: the replacement starts
 /// its own supervisor from the journal. So none may be in flight or under way,
 /// and none is admitted meanwhile.
-pub fn prepare_handover() -> Result<Exclusive> {
-    let tick = tick_within(TICK_WAIT)?;
+/// A tick still running after `settle` makes the handover unsettled, to be
+/// tried again, as anything else that has not settled does.
+pub fn prepare_handover(settle: Duration) -> Result<Exclusive> {
+    let tick = tick_within(settle)?;
     let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
     if has_work() {
         bail!("Local VM work is under way");
@@ -940,14 +942,14 @@ mod tests {
         let _home = crate::store::temp_home();
         let life = Lifetime::new(Duration::ZERO);
         let operation = admit(&life).unwrap();
-        assert!(format!("{:#}", prepare_handover().unwrap_err()).contains("in flight"));
+        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("in flight"));
         drop(operation);
         let journal = host::journal().unwrap();
         let env = journal.enroll("held guest", "local:test").unwrap();
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
-        assert!(format!("{:#}", prepare_handover().unwrap_err()).contains("under way"));
+        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("under way"));
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = false; Ok(()) }).unwrap();
-        let handover = prepare_handover().unwrap();
+        let handover = prepare_handover(Duration::from_secs(1)).unwrap();
         assert!(ADMISSION.try_read().is_err(), "no VM operation starts during a handover");
         drop(handover);
         drop(admit(&life).unwrap());
