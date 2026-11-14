@@ -39,6 +39,25 @@ describe("durable local VM task actions", () => {
     expect(calls("task.abandon")[0][1].params).toEqual({ target: task().target, confirm: true });
   });
 
+  it("answers an open guest question from the task card, and offers nothing once it is answered (review 2)", async () => {
+    const asked = { seq: 1, timestamp: "2026-10-24T00:00:01Z", payload: { type: "questions_asked", requestId: "question-1", toolUseId: "", questions: [
+      { question: "Which file?", header: "Target", multiSelect: false, freeText: false, options: [{ label: "main.rs" }, { label: "lib.rs" }] },
+      { question: "Why?", header: null, multiSelect: false, freeText: true, options: [] },
+    ] } };
+    const record = task({ status: "waiting", events: [asked] });
+    const view = render(<LocalVmTaskCard task={record} destinationRoot="/project" readOnly={false} />);
+    const section = screen.getByRole("region", { name: "Guest question" });
+    const send = within(section).getByRole("button", { name: "Send answers" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.click(within(section).getByLabelText("lib.rs"));
+    fireEvent.change(within(section).getByLabelText("Your answer"), { target: { value: "It holds the parser" } });
+    fireEvent.click(send);
+    await waitFor(() => expect(calls("task.answer")).toHaveLength(1));
+    expect(calls("task.answer")[0][1].params).toMatchObject({ target: record.target, requestId: "question-1", answers: { "Which file?": "lib.rs", "Why?": "It holds the parser" } });
+    view.rerender(<LocalVmTaskCard task={{ ...record, events: [asked, { seq: 2, timestamp: "2026-10-24T00:00:02Z", payload: { type: "permission_decided", requestId: "question-1", allowed: true, label: "Answered" } }] }} destinationRoot="/project" readOnly={false} />);
+    expect(screen.queryByRole("region", { name: "Guest question" })).toBeNull();
+  });
+
   it("offers Cancel for a shell-only Linux task too (review 2)", async () => {
     const shell = task({ input: { ...task().input, desktop: false } });
     render(<LocalVmTaskCard task={shell} destinationRoot="/project" readOnly={false} />);

@@ -260,7 +260,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             record_manual_control(&journal, &env, &response)?;
             Ok(response)
         }
-        "task.cancel" | "task.followup" | "task.permission" | "task.recover" => {
+        "task.cancel" | "task.followup" | "task.permission" | "task.answer" | "task.recover" => {
             let target: TaskTarget =
                 serde_json::from_value(params.get("target").cloned().context("target required")?)?;
             let (task, env) = bound_environment(&journal, &target)?;

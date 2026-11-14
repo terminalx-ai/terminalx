@@ -62,6 +62,7 @@ interface Requests {
   "task.recover": { params: LocalVmRecoveryRequest; result: LocalVmJson };
   "task.takeover": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmTakeoverResult };
   "task.permission": { params: { target: LocalVmTaskTarget; requestId: string; optionId: string; idempotencyKey: string }; result: LocalVmJson };
+  "task.answer": { params: { target: LocalVmTaskTarget; requestId: string; answers: Record<string, string>; idempotencyKey: string }; result: LocalVmJson };
   "task.artifact": { params: { target: LocalVmTaskTarget; artifactId: string }; result: LocalVmArtifactContent };
   "task.applyPatch": { params: { target: LocalVmTaskTarget; artifactId: string; destinationRoot: string; confirm: true }; result: LocalVmPatchResult };
 }
@@ -157,6 +158,33 @@ export async function contextManifest(sourceRoot: string, paths: string[]): Prom
     manifest.push({ path, bytes: bytes.byteLength, sha256: Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, "0")).join("") });
   }
   return manifest;
+}
+
+/** A question the guest worker asked (AskUserQuestion), still open. */
+export interface LocalVmQuestion {
+  requestId: string;
+  questions: { question: string; header: string | null; multiSelect: boolean; freeText: boolean; options: string[] }[];
+}
+
+/** Open guest questions: asked and not yet answered or denied (review 2). */
+export function pendingTaskQuestions(task: LocalVmTask): LocalVmQuestion[] {
+  if (taskFinished(task.status)) return [];
+  const pending = new Map<string, LocalVmQuestion>();
+  for (const event of task.events) {
+    const payload = taskEventPayload(event.payload);
+    if (!payload || typeof payload.requestId !== "string") continue;
+    if (payload.type === "permission_decided") pending.delete(payload.requestId);
+    if (payload.type !== "questions_asked" || !Array.isArray(payload.questions)) continue;
+    const questions = payload.questions.flatMap((item) => record(item) && typeof item.question === "string" ? [{
+      question: item.question,
+      header: typeof item.header === "string" ? item.header : null,
+      multiSelect: item.multiSelect === true,
+      freeText: item.freeText === true || !Array.isArray(item.options) || item.options.length === 0,
+      options: Array.isArray(item.options) ? item.options.flatMap((option) => record(option) && typeof option.label === "string" ? [option.label] : []) : [],
+    }] : []);
+    if (questions.length) pending.set(payload.requestId, { requestId: payload.requestId, questions });
+  }
+  return [...pending.values()];
 }
 
 export interface LocalVmApproval {

@@ -2,12 +2,13 @@ import { useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { errorMessage } from "@/lib/api";
-import { LOCAL_VM_STATUS, latestTaskProgress, localVmModelLabel, localVmRequest, pendingTaskApprovals, taskFinished } from "@/lib/localVm";
+import { LOCAL_VM_STATUS, latestTaskProgress, localVmModelLabel, localVmRequest, pendingTaskApprovals, pendingTaskQuestions, taskFinished } from "@/lib/localVm";
 import { assertLocal, guestTaskPath } from "@/types/target";
 import type { LocalVmArtifact, LocalVmArtifactContent, LocalVmJson, LocalVmPatchResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 import { localVmFieldClass } from "./fields";
 import { reconcileLocalVmState } from "./useLocalVmState";
 import { LocalVmTaskRecovery } from "./LocalVmTaskRecovery";
+import { LocalVmTaskQuestion } from "./LocalVmTaskQuestion";
 import { recoveryStorageKey } from "./recovery";
 
 export function artifactHref(artifact: LocalVmArtifactContent): string | null {
@@ -57,6 +58,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const finished = taskFinished(task.status);
   const canReply = !readOnly && !finished && task.status !== "canceling" && task.status !== "outcomeUnknown";
   const approvals = pendingTaskApprovals(task);
+  const questions = pendingTaskQuestions(task);
   const progress = latestTaskProgress(task);
   const href = useMemo(() => artifact ? artifactHref(artifact) : null, [artifact]);
 
@@ -99,6 +101,12 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
           setResult(await localVmRequest("task.permission", { target: task.target, requestId: approval.requestId, optionId: option.id, idempotencyKey }));
         })}>{option.label}</Button>)}</div>
       </section>)}
+      {questions.map((question) => <LocalVmTaskQuestion key={question.requestId} question={question} disabled={!!busy || !canReply} onAnswer={(answers) => void run("Sending answers to the guest", async () => {
+        const key = JSON.stringify([question.requestId, answers]);
+        let idempotencyKey = permissionKeys.current.get(key);
+        if (!idempotencyKey) { idempotencyKey = crypto.randomUUID(); permissionKeys.current.set(key, idempotencyKey); }
+        setResult(await localVmRequest("task.answer", { target: task.target, requestId: question.requestId, answers, idempotencyKey }));
+      })} />)}
       {!finished ? <form className="space-y-1" onSubmit={(event) => {
         event.preventDefault();
         if (!canReply || !followup.trim()) return;

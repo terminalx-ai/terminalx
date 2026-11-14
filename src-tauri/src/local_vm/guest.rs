@@ -526,7 +526,7 @@ impl Guest {
             }
             "task.cancel" => self.cancel(&target(&request.params)?),
             "task.recover" => self.recover(&request.params),
-            "task.followup" | "task.permission" => self.mutate(&request.method, &request.params),
+            "task.followup" | "task.permission" | "task.answer" => self.mutate(&request.method, &request.params),
             "task.artifact" => self.artifact(&request.params),
             _ => bail!("Unsupported bounded guest method"),
         }
@@ -1572,6 +1572,17 @@ impl Guest {
                     .context("A bounded follow-up text is required")?
                     .to_owned(),
             )
+        } else if method == "task.answer" {
+            // A guest question (AskUserQuestion), answered from the task card
+            // (review 2): only while that worker's question is still open.
+            let request = params["requestId"].as_str().context("requestId is required")?;
+            answers(params)?;
+            if !self.manager.pending_permissions().iter().any(|p| {
+                p.session_id == session && p.tab_id == tab && p.request_id == request && p.tool_name == "AskUserQuestion"
+            }) {
+                bail!("This question is not open for this task");
+            }
+            None
         } else {
             let request = params["requestId"]
                 .as_str()
@@ -1607,6 +1618,8 @@ impl Guest {
         self.save(&state)?;
         let result = if let Some(text) = text {
             self.manager.send(&session, &tab, text, vec![]).map(|_| ())
+        } else if method == "task.answer" {
+            self.manager.answer_questions(&session, &tab, params["requestId"].as_str().unwrap(), answers(params)?)
         } else {
             self.manager.respond_permission(
                 &session,
@@ -2048,6 +2061,17 @@ fn validate_target(identity: &Identity, target: &TaskTarget) -> Result<()> {
         bail!("Wrong guest environment/generation binding");
     }
     Ok(())
+}
+
+/// A question's answers, by question, each bounded.
+fn answers(params: &Value) -> Result<std::collections::HashMap<String, String>> {
+    let answers: std::collections::HashMap<String, String> =
+        serde_json::from_value(params["answers"].clone()).context("Answers by question are required")?;
+    if answers.is_empty() || answers.len() > 16
+        || answers.iter().any(|(question, answer)| question.len() > 4096 || answer.trim().is_empty() || answer.len() > 16 * 1024) {
+        bail!("Answer each question with bounded text");
+    }
+    Ok(answers)
 }
 
 fn worker(task: &Task) -> Result<(String, String)> {
@@ -4674,6 +4698,24 @@ mod tests {
             .task
             .status
             .holds_desktop());
+    }
+
+    /// Review 2: a guest question could not be answered from the task card.
+    #[test]
+    fn a_guest_question_is_answered_only_while_open_and_with_bounded_answers() {
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        seed(&guest, record(task.clone()));
+        let ask = |answers: Value| guest.dispatch(request(&guest, "task.answer",
+            json!({"target":task.target,"requestId":"question-1","answers":answers,"idempotencyKey":new_id()})));
+        for invalid in [json!({}), json!({"Which?":"  "}), json!(["a"])] {
+            let error = format!("{:#}", ask(invalid.clone()).unwrap_err());
+            assert!(error.contains("Answer each question") || error.contains("Answers by question are required"), "{invalid}: {error}");
+        }
+        assert!(format!("{:#}", ask(json!({"Which file?":"main.rs"})).unwrap_err()).contains("not open"));
+        assert_eq!(guest.state.lock().unwrap().records[&task.target.task_id].task.status, TaskStatus::Waiting, "nothing was sent");
     }
 
     /// Review 2: cancelling a task that waits for guest login, whose worker
