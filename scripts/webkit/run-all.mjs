@@ -8,14 +8,16 @@
 //
 //   pnpm build && pnpm exec playwright install webkit && pnpm test:webkit-layout
 //   node scripts/webkit/run-all.mjs chat-find run-menu     only these checks
-//   WEBKIT_JOBS=1 pnpm test:webkit-layout                   one at a time
+//   pnpm test:webkit-layout --jobs 1                        one at a time (or WEBKIT_JOBS=1)
 //
-// Every check runs even when an earlier one fails; the failures are listed at
-// the end and the exit status is 1.
+// Every check runs even when an earlier one fails. A check's output is printed
+// in one piece when it ends; what failed is printed again at the end, and the
+// exit status is 1.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 
 /** The checks CI requires, in the order they were added. */
 const checks = [
@@ -35,56 +37,69 @@ const checks = [
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's
 // dependency optimiser rewrites node_modules/.vite when it starts, and two of
-// them ask for the same port, so those take turns. They are found by what
-// they import, so a new one needs no entry here.
+// them end up asking for Vite's default port, so those take turns. They are
+// found by what they import, so a new one needs no entry here.
 const script = (name) => fileURLToPath(new URL(`./${name}.mjs`, import.meta.url));
 const startsVite = (name) => /(from\s+|import\()\s*["']vite["']/.test(readFileSync(script(name), "utf8"));
 
-// Measures frame times while a list scrolls. Other checks competing for the
-// processor would be what it measured, so it runs after the rest, by itself.
-const alone = new Set(["pr-conversation"]);
+// These measure against the clock, so other checks competing for the processor
+// would be what they measured: they run after the rest, one at a time.
+// pr-conversation samples frame times while a list scrolls. cloud-history must
+// see a loading line that its fixture replaces 2.5 s after the page subscribes.
+const alone = new Set(["pr-conversation", "cloud-history"]);
 
 const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
-const limit = Number(process.env.WEBKIT_CHECK_TIMEOUT_MS ?? 15 * 60_000);
+// The slowest check takes about five minutes on a slow runner. Past this one
+// is hung, and two hung in a row still end inside the job's own limit.
+const limit = 10 * 60_000;
 
 /** Run one check to its end. Its output is kept and printed in one piece. */
 function run(name) {
   return new Promise((resolve) => {
     const started = Date.now();
+    // Said at once, so a log that stops short shows which checks never ended.
+    console.log(`start ${name}`);
     const child = spawn(process.execPath, [script(name)], { stdio: ["ignore", "pipe", "pipe"] });
     const output = [];
-    child.stdout.on("data", (chunk) => output.push(chunk));
-    child.stderr.on("data", (chunk) => output.push(chunk));
-    // A check that hangs would otherwise say nothing until the job's own limit.
+    child.stdout?.on("data", (chunk) => output.push(chunk));
+    child.stderr?.on("data", (chunk) => output.push(chunk));
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, limit);
+    let finished = false;
+    // A check that cannot start gives both "error" and "close": report it once.
     const finish = (status) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       const ms = Date.now() - started;
       const ok = status === 0 && !timedOut;
-      const text = Buffer.concat(output).toString("utf8").trimEnd();
       const state = ok ? "ok" : timedOut ? `FAILED: no result after ${seconds(limit)}` : `FAILED: ${status}`;
-      console.log(`\n── ${name} (${seconds(ms)}) ${state}${text ? `\n${text}` : ""}`);
-      resolve({ name, ms, ok });
+      const text = Buffer.concat(output).toString("utf8").trimEnd();
+      const report = `\n── ${name} (${seconds(ms)}) ${state}${text ? `\n${text}` : ""}`;
+      console.log(report);
+      resolve({ name, ms, ok, report });
     };
     child.on("error", (error) => { output.push(Buffer.from(`${error.stack ?? error}\n`)); finish("could not start"); });
     child.on("close", (code, signal) => finish(code ?? signal));
   });
 }
 
-const args = process.argv.slice(2);
-const jobsFlag = args.indexOf("--jobs");
-const jobsValue = jobsFlag >= 0 ? args.splice(jobsFlag, 2)[1] : process.env.WEBKIT_JOBS;
+const usage = (message) => {
+  console.error(`${message}\nUsage: node scripts/webkit/run-all.mjs [--jobs <number>] [check ...]`);
+  process.exit(2);
+};
+let parsed;
+try {
+  parsed = parseArgs({ options: { jobs: { type: "string" } }, allowPositionals: true });
+} catch (error) {
+  usage(error.message);
+}
+const args = parsed.positionals;
+const jobsValue = parsed.values.jobs ?? process.env.WEBKIT_JOBS;
 const jobs = jobsValue === undefined ? Math.min(4, availableParallelism()) : Number(jobsValue);
-if (!Number.isInteger(jobs) || jobs < 1) {
-  console.error(`The number of checks to run at once must be a whole number above 0, not ${JSON.stringify(jobsValue)}.`);
-  process.exit(2);
-}
+if (!Number.isInteger(jobs) || jobs < 1) usage(`The number of checks to run at once must be a whole number above 0, not ${JSON.stringify(jobsValue)}.`);
 const unknown = args.filter((name) => !checks.includes(name));
-if (unknown.length) {
-  console.error(`Not a check of this suite: ${unknown.join(", ")}.`);
-  process.exit(2);
-}
+if (unknown.length) usage(`Not a check of this suite: ${unknown.join(", ")}.`);
 const selected = args.length ? checks.filter((name) => args.includes(name)) : checks;
 
 // A queue entry is one check, or a list of checks that take turns.
@@ -105,6 +120,8 @@ const slowest = [...results].sort((a, b) => b.ms - a.ms).slice(0, 10);
 console.log(`\n${results.length - failed.length} of ${results.length} checks passed in ${seconds(Date.now() - started)} (${seconds(results.reduce((sum, result) => sum + result.ms, 0))} of checks).`);
 console.log(`Slowest: ${slowest.map((result) => `${result.name} ${seconds(result.ms)}`).join(", ")}`);
 if (failed.length) {
-  console.log(`FAILED: ${failed.map((result) => result.name).join(", ")}`);
+  // Again, last: whoever reads only the end of the log finds the cause there.
+  for (const result of failed) console.log(result.report);
+  console.log(`\nFAILED: ${failed.map((result) => result.name).join(", ")}`);
   process.exit(1);
 }
