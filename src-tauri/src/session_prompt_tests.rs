@@ -2884,3 +2884,25 @@ fn a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed() {
 #[cfg(unix)]
 #[path = "session_privacy_tests.rs"]
 mod privacy;
+
+/// #960: refusing an in-flight writer releases the handover's locks, so
+/// delivery can settle and the next attempt can carry the same live tab.
+#[cfg(unix)]
+#[test]
+fn handover_busy_prompt_can_settle_and_the_same_tab_is_carried() {
+    let rig = Rig::with_live_pane();
+    let writer = rig.manager.writers.lock().unwrap().entry(rig.pane.clone()).or_default().clone();
+    let ticket = writer.ticket();
+    let before = rig.events();
+    let error = rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).unwrap_err();
+    assert!(error.to_string().contains("A prompt is on its way into an agent"));
+    // Taking the reserved turn would deadlock if the refused handover kept
+    // its writer lock. Finishing it clears the pending-delivery condition.
+    drop(ticket.take());
+    drop(ticket);
+    let held = rig.manager.hold_tabs(Duration::from_secs(1), |held| held).unwrap();
+    assert_eq!(held.tabs.len(), 1);
+    assert_eq!(held.tabs[0].tab_id, TAB);
+    assert!(held.tabs[0].cli.is_some());
+    assert_eq!(rig.events(), before, "no work was stopped or replayed");
+}
