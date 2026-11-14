@@ -115,7 +115,7 @@ it("names what an older runtime's handover cannot carry, and Restart now stops o
   await mounted();
   await changed(outdated(null, null, false, true));
   const popover = await details();
-  expect(popover.textContent).toContain("It hands its agents and terminals over to 0.2.24 in a moment; they keep running.");
+  expect(popover.textContent).toContain("It hands its agents and terminals over to 0.2.24 when ready; they keep running. If the runtime is busy, TerminalX retries automatically.");
   expect(popover.textContent).toContain("Restarting now keeps its agents and terminals running.");
   await changed(outdated(["Gemini in “Docs”, in the middle of a turn"], null, false, true));
   expect(item().textContent).toBe("Runtime 0.2.23 · waiting for 1");
