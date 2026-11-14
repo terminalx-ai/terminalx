@@ -705,6 +705,53 @@ describe("creating a session", () => {
     expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("uses checkpoint-only recovery when starting a session (issue: %s)", async (withIssue) => {
+    const workspaceId = "ws-checkpoint-recovered";
+    const scope = { organizationId: ORG, workspaceId };
+    const failed = item(workspaceId, ORG, { state: "ready",
+      launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } },
+    });
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ code: "cloud_workspace_needs_attention" });
+
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (args.workspaceId === workspaceId && command === "cloud_agent_checkpoints") return [{ tabId: "recovered-tab", epoch: 1, version: 1 }];
+      if (args.workspaceId === workspaceId && command === "cloud_agent_checkpoint") return {
+        epoch: 1, version: 1, projection: {
+          v: 1, sessionId: "recovered", tabId: "recovered-tab", title: "Recovered task", harness: "claude",
+          model: "opus", effort: null, permissionMode: "default", status: "idle", process: "stopped",
+          created: new Date(20).toISOString(), lastMessageAt: new Date(30).toISOString(),
+          events: [], truncated: false, followUps: [], updatedAt: 30,
+        },
+      };
+      return base(command, args);
+    });
+    const agents = await import("@/lib/cloudAgents");
+    await agents.loadCloudAgents(scope);
+    await agents.refreshFromCheckpoint(scope, "recovered-tab");
+    expect(agents.getCloudAgents(scope).tabs[0]).toMatchObject({ source: "checkpoint", live: false });
+    // A catalog refresh alone does not learn the loaded checkpoint's recovery evidence.
+    await list(ORG, [failed]);
+    const catalogItem = catalog.findCloudWorkspace(catalog.getCloudCatalog(), ORG, workspaceId)!;
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    expect(catalog.getCloudCatalog().orgs[ORG].sessions[workspaceId]).toBeUndefined();
+    expect(resolveCloudAttention(catalogItem)?.code).toBe("agent-sign-in-required");
+
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", ...(withIssue ? { issue } : {}) })).toMatchObject({
+      created: "session", workspace: `cloud:${ORG}:${workspaceId}`, resumed: false,
+    });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[0][0]).toMatchObject({ kind: "reuse" });
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+
+    // Post-launch activity does not clear a separate provider failure.
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace, state: "attention-required" }, latestOperation: { id: "later-op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem]);
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ code: "cloud_workspace_needs_attention" });
+    expect(newSession.startInWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves ambiguous workspace selection when one needs attention", async () => {
     await list(ORG, [item("ws-failed", ORG, { state: "attention-required" }), item("ws-healthy", ORG)]);
     const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };

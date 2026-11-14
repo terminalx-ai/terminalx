@@ -29,6 +29,7 @@ import { cloudPipelineSettings, pipelineLaunchDefaults } from "@/lib/issuePipeli
 import { issueWorktreeName } from "@/lib/issueSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
+import { cloudAgentRan } from "@/lib/cloudSessions";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
@@ -863,7 +864,7 @@ async function sessionsCreate(params: Params) {
     const item = project.workspaces[0].item;
     const { workspace } = item;
     const manages = workspace.you ? workspace.you.role === "manager" : workspace.authority !== "participate";
-    const attention = manages ? resolveCloudAttention(item) : null;
+    const attention = manages ? resolveCloudAttention(item, { agentRan: cloudAgentRan(item) }) : null;
     if (attention) throw new CloudControlError("cloud_workspace_needs_attention", attention.message, attention.recovery.instructions);
   }
   if (plan.kind === "reuse" || plan.kind === "wake") {
