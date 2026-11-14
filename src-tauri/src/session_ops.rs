@@ -240,11 +240,12 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 pub(crate) fn create_session_blocking(sink: &dyn EventSink, req: NewSession) -> Result<SessionEntry> {
-    let entry = create_session_entry(req)?;
-    sink.emit("session_created", &entry);
+    let (entry, workspace_created) = create_session_workspace(req, None).map_err(err)?;
+    emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
 
+#[cfg(test)]
 pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
     create_session_entry_with_name(req, None).map_err(err)
 }
@@ -252,12 +253,22 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
 /// CLI creation keeps an explicit `--name` distinct from the automatically
 /// uniquified worktree-name hints used by the issue view and automations.
 pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    let entry = create_session_entry_with_name(req, name)?;
-    sink.emit("session_created", &entry);
+    let (entry, workspace_created) = create_session_workspace(req, name)?;
+    emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
 
+fn emit_created(sink: &dyn EventSink, entry: &SessionEntry, workspace_created: bool) {
+    sink.emit("session_created", entry);
+    if workspace_created { sink.emit(crate::workspace_setup::CREATED_EVENT, entry); }
+}
+
+#[cfg(test)]
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    create_session_workspace(req, name).map(|(entry, _)| entry)
+}
+
+fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
     let _request = crate::github_process::scope();
     if crate::git::is_repo(Path::new(&req.project_path)) {
         crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
@@ -317,6 +328,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         entry.mark_orchestrate_start();
     }
 
+    let mut workspace_created = false;
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
         projects::refuse_mirror(&cwd).map_err(err)?;
@@ -345,6 +357,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         entry.branch = Some(wt.branch);
         entry.base_ref = Some(wt.base_tree);
         entry.worktree_base = wt.worktree_base;
+        workspace_created = true;
     }
 
     entry.title = requested_title.unwrap_or_else(|| {
@@ -364,10 +377,12 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     }
     // The checkout and index entry already exist. Setup bookkeeping must not
     // turn a successful creation into an error that invites a duplicate retry.
-    if let Err(error) = crate::workspace_setup::prepare(&entry) {
-        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+    if workspace_created {
+        if let Err(error) = crate::workspace_setup::prepare(&entry) {
+            log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+        }
     }
-    Ok(entry)
+    Ok((entry, workspace_created))
 }
 
 /// Attach to an existing checkout only when Git says it belongs to this

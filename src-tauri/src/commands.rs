@@ -2567,6 +2567,8 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         })
         .map_err(err)?;
         let _ = app.emit("session_created", &entry);
+        // A fork with a worktree always creates it above; other forks share a checkout.
+        if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
         Ok(entry)
     })
     .await

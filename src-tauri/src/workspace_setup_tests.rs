@@ -114,7 +114,7 @@ fn creation_events_start_a_prepared_attempt_without_blocking_admission() {
         // Creation can emit while its caller still holds admission. Dispatch
         // must return immediately and let the worker acquire it afterwards.
         let _admission = crate::issue_pipeline::admission::lock();
-        rig.manager.sink().emit("session_created", &entry);
+        rig.manager.sink().emit(CREATED_EVENT, &entry);
     }
     rig.wait(&entry.id, Status::Succeeded);
     assert_eq!(std::fs::read_to_string(Path::new(&entry.cwd).join("marker")).unwrap(), "automatic");
@@ -288,7 +288,7 @@ fn run_after_setup_actions_start_when_a_new_workspace_has_no_setup_script() {
     let entry = rig.entry("plain");
     prepare(&entry).unwrap();
     assert!(read(&entry.id).unwrap().is_none(), "no setup script, so no setup attempt");
-    rig.manager.sink().emit("session_created", &entry);
+    rig.manager.sink().emit(CREATED_EVENT, &entry);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !Path::new(&entry.cwd).join("ready").exists() {
         assert!(Instant::now() < deadline, "the run-after-setup action never started");
@@ -296,4 +296,64 @@ fn run_after_setup_actions_start_when_a_new_workspace_has_no_setup_script() {
     }
     let runs = crate::action_runner::states(&rig.manager, &entry.id).unwrap();
     assert_eq!(runs.iter().map(|r| (r.action_id.as_str(), r.state)).collect::<Vec<_>>(), vec![("dev", State::Running)]);
+}
+
+#[test]
+fn adopting_a_dirty_worktree_does_not_initialize_it_or_run_after_setup_actions() {
+    let mut rig = Rig::new();
+    crate::git::run(&rig.root, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "initial"]).unwrap();
+    let workspace = crate::git::create_worktree(&rig.root, "existing", None).unwrap();
+    let dirty = Path::new(&workspace.path).join("dirty.txt");
+    std::fs::write(&dirty, "uncommitted work").unwrap();
+    projects::update(rig.root.to_str().unwrap(), ProjectPatch { actions: Some(vec![projects::RepositoryActionEntry {
+        id: "automatic".into(), name: "automatic".into(), command: "printf action > action-ran".into(), run_after_setup: true, ..Default::default()
+    }]), ..Default::default() }).unwrap();
+    crate::action_runner::observe(rig.manager.sink().clone());
+    follow_creations(&rig.manager);
+    let created = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let heard = created.clone();
+    rig.manager.sink().listen(CREATED_EVENT, Box::new(move |payload| {
+        heard.lock().unwrap().push(serde_json::from_str::<SessionEntry>(payload).unwrap().id);
+    }));
+    // Cover both creation entry points, with and without a configured script:
+    // after-setup actions must not run in either adoption case.
+    for script in ["printf overwritten > dirty.txt", ""] {
+        rig.script(script);
+        for named in [false, true] {
+            let req = serde_json::from_value(json!({
+                "projectPath": rig.root, "cwd": workspace.path, "useWorktree": true,
+                "tab": { "harness": "claude", "model": "" },
+            })).unwrap();
+            let entry = if named {
+                crate::session_ops::create_named_session_blocking(rig.manager.sink().as_ref(), req, None).unwrap()
+            } else {
+                crate::session_ops::create_session_blocking(rig.manager.sink().as_ref(), req).unwrap()
+            };
+            rig.ids.push(entry.id.clone());
+            assert_eq!(entry.worktree_name.as_deref(), Some("existing"));
+            assert!(read(&entry.id).unwrap().is_none(), "adoption must not prepare setup");
+            assert!(created.lock().unwrap().is_empty(), "adoption must not dispatch workspace initialization");
+            assert!(crate::action_runner::states(&rig.manager, &entry.id).unwrap().is_empty());
+            assert_eq!(std::fs::read_to_string(&dirty).unwrap(), "uncommitted work");
+            assert!(!Path::new(&workspace.path).join("action-ran").exists());
+        }
+    }
+    // The same production path still prepares and dispatches setup for an
+    // actually new worktree, followed by its automatic actions.
+    rig.script("printf initialized > initialized");
+    let req = serde_json::from_value(json!({
+        "projectPath": rig.root, "useWorktree": true,
+        "tab": { "harness": "claude", "model": "" },
+    })).unwrap();
+    let fresh = crate::session_ops::create_session_blocking(rig.manager.sink().as_ref(), req).unwrap();
+    rig.ids.push(fresh.id.clone());
+    assert_eq!(*created.lock().unwrap(), vec![fresh.id.clone()]);
+    rig.wait(&fresh.id, Status::Succeeded);
+    assert!(Path::new(&fresh.cwd).join("initialized").exists());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !Path::new(&fresh.cwd).join("action-ran").exists() {
+        assert!(Instant::now() < deadline, "new workspace's after-setup action never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&dirty).unwrap(), "uncommitted work");
 }
