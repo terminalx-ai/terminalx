@@ -292,6 +292,19 @@ describe("listing", () => {
     expectNoWake();
   });
 
+  it("reports shared attention and recovery, and clears it when the catalog refreshes", async () => {
+    const failed = item("ws-failed", ORG, { launch: { state: "failed", phase: "failed", category: "repository-access-denied" } });
+    const operation = { ...item("ws-operation", ORG, { state: "attention-required" }), latestOperation: { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem;
+    await list(ORG, [failed, operation]);
+    const read = async () => ((await handleCloudControl("projects.list", { org: ORG })) as { projects: { workspaces: { id: string; status: string; attention: unknown }[] }[] }).projects.flatMap((project) => project.workspaces);
+    const rows = await read();
+    expect(rows.find((row) => row.id === "ws-failed")).toMatchObject({ status: "Needs attention", attention: { code: "repository-access-denied", message: expect.any(String), recovery: { action: "check-github-access", label: expect.any(String), instructions: expect.any(String) } } });
+    expect(rows.find((row) => row.id === "ws-operation")).toMatchObject({ status: "Needs attention", attention: { code: "cloud_provider_credential_invalid", recovery: { action: "open-provider-settings", instructions: expect.any(String) } } });
+    await list(ORG, [item("ws-failed", ORG), item("ws-operation", ORG)]);
+    expect((await read()).map((row) => row.attention)).toEqual([null, null]);
+    expectNoWake();
+  });
+
   it("lists sessions across organizations, or one project's, without attaching to or waking anything", async () => {
     const all = (await handleCloudControl("sessions.list")) as { sessions: { key: string; title: string; stopped: boolean; tabs: { id: string; agent: string }[] }[] };
     expect(all.sessions.map((entry) => [entry.key, entry.title, entry.stopped]).sort()).toEqual(
@@ -659,6 +672,34 @@ describe("why a wait ends (#668)", () => {
 });
 
 describe("creating a session", () => {
+  it.each(["ready", "attention-required"])("explains the only %s workspace's failed first task when starting an issue", async (state) => {
+    const failed = item("ws-failed", ORG, { state, launch: { state: "failed", phase: "failed", category: "repository-access-denied" } });
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    const attention = resolveCloudAttention(failed)!;
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toEqual({ code: "cloud_workspace_needs_attention", message: attention.message, recovery: attention.recovery.instructions });
+    expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    await list(ORG, [item("ws-failed", ORG)]);
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ created: "session" });
+  });
+
+  it("preserves ambiguous workspace selection when one needs attention", async () => {
+    await list(ORG, [item("ws-failed", ORG, { state: "attention-required" }), item("ws-healthy", ORG)]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ workspace: `cloud:${ORG}:ws-healthy` });
+  });
+
+  it("returns operation recovery when the only workspace has a failed operation", async () => {
+    const failed = { ...item("ws-failed", ORG, { state: "attention-required" }), latestOperation: { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem;
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    const attention = resolveCloudAttention(failed)!;
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toEqual({ code: "cloud_workspace_needs_attention", message: attention.message, recovery: attention.recovery.instructions });
+    expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+  });
   describe.each(["saved", "explicit"] as const)("%s permission modes", (source) => {
     it.each([
       ["default", "manual"],
