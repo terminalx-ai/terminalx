@@ -49,7 +49,7 @@ import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEnt
 import { interruptUnanswered } from "@/types/events";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
-import { useSignInReadiness } from "@/lib/agentReadiness";
+import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -717,6 +717,18 @@ export function TabView({
     if (!signInAgent || !loginCurrent(incident) || recoveryLock.current) return;
     if (incident.opening) return;
     if (incident.loginPane && !getTerminalState().panes.some(pane => pane.id === incident.loginPane && !pane.exited)) {
+      // Login commands exit on success too. Verify credentials before deciding
+      // that this terminal needs to be opened again.
+      incident.opening = true;
+      const readiness = await checkAgentReadiness(tab.harness);
+      incident.opening = false;
+      if (!loginCurrent(incident) || recoveryLock.current) return;
+      if (readiness.state !== "signed_out") {
+        incident.consumed = false;
+        if (loginPending === incident) await refreshLogin();
+        else setLoginPending(incident);
+        return;
+      }
       incident.loginPane = null;
       incident.launched = false;
       incident.consumed = false;

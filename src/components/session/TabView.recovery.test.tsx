@@ -377,6 +377,28 @@ describe("TabView recovery lifecycle", () => {
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])("reuses successful login after the terminal exits (prior delivery failed: %s)", async failed => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "send_message" && failed
+      ? Promise.reject(new Error("Agent is signed out")) : original(command, args));
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    if (failed) {
+      await signedIn();
+      await waitFor(() => expect(sends()).toHaveLength(1));
+      await act(async () => {});
+    }
+    mocks.loginPanes[0].exited = true;
+    const sending = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: "ready", checkedAt: null, version: null }) : sending(command, args));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(sends()).toHaveLength(failed ? 2 : 1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
   it.each(["closed", "exited"])("reopens a login terminal that %s before sign-in finished", async ended => {
     render(<Harness />);
     emit({ type: "recovery", kind: "signed_out" });
