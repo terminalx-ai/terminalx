@@ -184,7 +184,10 @@ fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
     }))
 }
 
-fn resolution_needed(cwd: &Path, branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
+/// `required`: GitHub asks for the merge, the branch behind or in conflict,
+/// whatever `git merge-tree` says. The two can differ: with more than one
+/// merge base, git merges the bases into one first and GitHub does not.
+fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
     crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
     let base_ref = format!("refs/remotes/origin/{base}");
     let base_commit = crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string();
@@ -199,8 +202,8 @@ fn resolution_needed(cwd: &Path, branch: &str, base: &str, behind: bool) -> Resu
         Some(1) => true,
         _ => bail!("Could not compare the branch with its base: {}", String::from_utf8_lossy(&output.stderr)),
     };
-    if !conflicting && !behind { return Ok(None); }
-    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work }))
+    if !conflicting && !required { return Ok(None); }
+    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work, waiting_since: None }))
 }
 
 impl Host for LocalHost {
@@ -238,6 +241,10 @@ impl Host for LocalHost {
         matches!(status, Some(index::TabStatus::InProgress | index::TabStatus::Waiting)) || !self.manager.pipeline_idle(&who.session_id, &who.tab_id)
     }
 
+    fn background_work(&self, who: &SessionRef) -> Option<String> {
+        self.manager.background_work(&who.session_id, &who.tab_id)
+    }
+
     /// A terminal, or an agent a person started in one by hand, is theirs and
     /// never stopped; an idle one is stopped at once, however briefly it has
     /// been idle, and opening its tab later does not start it again.
@@ -273,8 +280,8 @@ impl Host for LocalHost {
         Ok(true)
     }
 
-    fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
-        resolution_needed(cwd, branch, base, behind)
+    fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
+        resolution_needed(cwd, branch, base, required)
     }
 
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
@@ -513,6 +520,53 @@ mod tests {
         git(root, &["add", "extra.txt"]);
         git(root, &["commit", "-qm", "another writer"]);
         assert!(verify_resolution(root, &resolution, &git(root, &["rev-parse", "HEAD"]), "raccoon/433-work").is_err());
+    }
+
+    /// #748: the branch merged another pull request's branch before main
+    /// did, so the two have two merge bases. git merges them cleanly; GitHub,
+    /// from one base, finds a conflict and asks for the merge.
+    #[test]
+    fn a_merge_github_asks_for_is_pinned_even_where_git_finds_no_conflict() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        let commit_file = |file: &str, text: &str, message: &str| {
+            std::fs::write(root.join(file), text).unwrap();
+            git(root, &["add", file]);
+            git(root, &["commit", "-qm", message]);
+        };
+        git(root, &["checkout", "-q", "main"]);
+        commit_file("usage.txt", "a\nb\n", "usage");
+        git(root, &["checkout", "-q", "-b", "other"]);
+        commit_file("usage.txt", "a\nother\nb\n", "the other pull request");
+        git(root, &["checkout", "-q", "main"]);
+        commit_file("base.txt", "base\n", "the base moves on");
+        let base_then = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["branch", "-q", "-f", "raccoon/433-work", "main"]);
+        git(root, &["checkout", "-q", "raccoon/433-work"]);
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "other"]);
+        commit_file("usage.txt", "a\nother\nwork\nb\n", "work next to the other change");
+        push(root).unwrap();
+        git(root, &["checkout", "-q", "main"]);
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "other"]);
+        git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["checkout", "-q", "raccoon/433-work"]);
+        assert_eq!(git(root, &["merge-base", "--all", "main", "HEAD"]).lines().count(), 2);
+        let from_one_base = |base: &str| std::process::Command::new("git").current_dir(root).args(["merge-tree", "--write-tree", &format!("--merge-base={base}"), "origin/main", "HEAD"]).output().unwrap().status.code();
+        assert_eq!(from_one_base(&base_then), Some(1), "GitHub's view: a conflict");
+
+        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", false).unwrap(), None, "git's view: nothing to resolve");
+        let resolution = resolution_needed(root, "raccoon/433-work", "main", true).unwrap().unwrap();
+        assert_eq!(resolution.base_commit, git(root, &["rev-parse", "origin/main"]));
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", &resolution.base_commit]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        verify_resolution(root, &resolution, &head, "raccoon/433-work").unwrap();
+        assert_eq!(git(root, &["merge-base", "--all", "origin/main", "HEAD"]), resolution.base_commit, "one merge base left");
+        assert_eq!(std::fs::read_to_string(root.join("usage.txt")).unwrap(), "a\nother\nwork\nb\n");
+        // With the base merged in, nothing more is asked for.
+        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", true).unwrap(), None);
     }
 
     #[test]

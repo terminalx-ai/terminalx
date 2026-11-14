@@ -1829,10 +1829,13 @@ pub async fn app_activity_summary(state: State<'_, AppState>) -> CmdResult<crate
         .await.map_err(err)?
 }
 
+/// Activity comes from its one writer, the runtime (#767); without it, Stats
+/// shows the saved counters and offers Retry.
 #[tauri::command]
 pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
-    tauri::async_runtime::spawn_blocking(move || stats.read().map_err(err))
+    let sessions = state.sessions();
+    tauri::async_runtime::spawn_blocking(move || stats.read(move || sessions?.activity_summary()).map_err(err))
         .await
         .map_err(err)?
 }
@@ -1840,7 +1843,8 @@ pub async fn stats_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate
 #[tauri::command]
 pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, generation: u64) -> CmdResult<crate::stats::StatsUsageState> {
     let stats = state.stats_usage.clone();
-    tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation).map_err(err))
+    let sessions = state.sessions();
+    tauri::async_runtime::spawn_blocking(move || stats.refresh(&scope, generation, move || sessions?.activity_summary()).map_err(err))
         .await
         .map_err(err)?
 }
@@ -1985,7 +1989,94 @@ pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn set_session_archived(app: AppHandle, session_id: String, archived: bool) -> CmdResult<()> {
-    patch_session(&app, &session_id, crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() })
+    set_sessions_archived(app, vec![session_id], archived).map(drop)
+}
+
+/// Archive or bring back several sessions at once (the sidebar's bulk bar):
+/// all of them, or none when one is not a session (#718).
+#[tauri::command]
+pub fn set_sessions_archived(app: AppHandle, session_ids: Vec<String>, archived: bool) -> CmdResult<Vec<SessionEntry>> {
+    crate::session_archive::set_archived(&app, &session_ids, archived, crate::session_archive::By::Person).map_err(err)
+}
+
+/// The session each window shows, by the window's label: the idle sweep
+/// leaves them in the list (#718).
+static SHOWN_SESSIONS: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// A window shows `session_id` now, or no session.
+#[tauri::command]
+pub fn set_shown_session(window: tauri::Window, session_id: Option<String>) {
+    let mut shown = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match session_id {
+        Some(id) => shown.insert(window.label().to_string(), id),
+        None => shown.remove(window.label()),
+    };
+}
+
+/// What the windows show that a reader can see: `window` says of a label
+/// whether that window is visible, or `None` once it is closed. A closed
+/// window is forgotten. A hidden one (the floating window put away) keeps its
+/// session for when it is shown again, but shows it to nobody meanwhile.
+fn shown_in_windows(by_window: &mut BTreeMap<String, String>, window: impl Fn(&str) -> Option<bool>) -> Vec<String> {
+    let mut shown = Vec::new();
+    by_window.retain(|label, session| match window(label) {
+        None => false,
+        Some(visible) => {
+            if visible {
+                shown.push(session.clone());
+            }
+            true
+        }
+    });
+    shown
+}
+
+/// Archive the sessions nobody has written in for the limit in Settings
+/// (#718), in the runtime that knows what each one is doing. `keep`: what the
+/// asking window shows, besides what every window still open and visible
+/// said it shows. Returns the ids archived.
+#[tauri::command]
+pub async fn archive_idle_sessions(app: AppHandle, state: State<'_, AppState>, keep: Vec<String>) -> CmdResult<Vec<String>> {
+    let sessions = state.sessions().map_err(err)?;
+    // Each window is asked with nothing held: its answer comes from the main
+    // thread, where `set_shown_session` waits for this lock.
+    let labels: Vec<String> = SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).keys().cloned().collect();
+    // Minimized still shows it (macOS says a minimized window is not
+    // visible), and unknown counts as visible: not knowing is not put away.
+    let windows: BTreeMap<String, Option<bool>> = labels
+        .into_iter()
+        .map(|label| {
+            let visible = app.get_webview_window(&label).map(|window| window.is_visible().unwrap_or(true) || window.is_minimized().unwrap_or(false));
+            (label, visible)
+        })
+        .collect();
+    // A window that said what it shows since was there to say it.
+    let mut shown = shown_in_windows(&mut SHOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), |label| windows.get(label).copied().unwrap_or(Some(true)));
+    shown.extend(keep);
+    tauri::async_runtime::spawn_blocking(move || {
+        let swept: serde_json::Value = sessions.workspace("archiveIdle", serde_json::json!({ "shown": shown })).map_err(err)?;
+        serde_json::from_value(swept["archived"].clone()).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// When a finished conversation is archived (#718).
+#[tauri::command]
+pub fn conversation_settings() -> crate::store::settings::ConversationSettings {
+    store::settings::load().conversations
+}
+
+/// The runtime reads the limit again at its next sweep.
+#[tauri::command]
+pub fn set_archive_idle_days(days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
+    if !crate::store::settings::ARCHIVE_IDLE_DAYS.contains(&days) {
+        return Err(format!("{days} days is not one of the idle limits offered."));
+    }
+    let mut settings = store::settings::load();
+    settings.conversations.archive_idle_days = days;
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.conversations)
 }
 
 #[tauri::command]
@@ -2205,6 +2296,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             created: now.clone(),
             modified: now,
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
@@ -3184,8 +3276,8 @@ pub async fn dictation_start(app: AppHandle, state: State<'_, AppState>, persona
 
 #[tauri::command]
 pub async fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let (dictation, transcription) = (state.dictation.clone(), state.transcription.clone());
-    tauri::async_runtime::spawn_blocking(move || dictation.stop(app, transcription)).await.map_err(err)?
+    let dictation = state.dictation.clone();
+    tauri::async_runtime::spawn_blocking(move || dictation.stop(app)).await.map_err(err)?
 }
 
 // ------------------------------------------------------------------ transcription models
@@ -3492,6 +3584,22 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    /// The idle sweep spares what a reader can see (#718): not what a closed
+    /// window last showed, nor the floating window's session while it is put away.
+    #[test]
+    fn only_open_visible_windows_keep_their_session_from_the_idle_sweep() {
+        let mut by_window: std::collections::BTreeMap<String, String> =
+            [("main", "a"), ("floating", "b"), ("closed", "c")].into_iter().map(|(label, id)| (label.to_string(), id.to_string())).collect();
+        let windows = |hidden: &'static str| move |label: &str| match label {
+            "closed" => None,
+            label => Some(label != hidden),
+        };
+        assert_eq!(super::shown_in_windows(&mut by_window, windows("floating")), ["a"]);
+        assert_eq!(by_window.keys().collect::<Vec<_>>(), ["floating", "main"], "a closed window is forgotten, a hidden one kept");
+        // Shown again, the floating window's session is spared again.
+        assert_eq!(super::shown_in_windows(&mut by_window, windows("")), ["b", "a"]);
+    }
+
     #[test]
     fn only_the_agree_button_agrees_to_a_cloud_request() {
         use tauri_plugin_dialog::MessageDialogResult;
@@ -4053,6 +4161,7 @@ mod command_tests {
             created: "now".into(),
             modified: "now".into(),
             archived: false,
+            archive: Default::default(),
             pinned: false,
             tabs: Vec::new(),
             link: None,

@@ -17,7 +17,10 @@
 // - the same holds once the mic has closed, and after a message is sent;
 // - Undo brings the deleted text back, and what is said next goes after it;
 // - a key pressed while holding Right Option to talk edits the draft, and the
-//   result that settles afterwards does not undo the edit.
+//   result that settles afterwards does not undo the edit;
+// - a local model that streams (#754): a word deleted while its words stream
+//   in stays deleted through the partials and the final after it, and a model
+//   that cannot stream says its words appear when the reader stops.
 //
 // Since the chat-first sidebar (#484) a local session is opened from its
 // conversation row and its tabs from the title bar's strip; a cloud session is
@@ -46,7 +49,7 @@ async function app(fixture, viewport = VIEWPORT) {
     // Stopping delivers the last utterance as it settled (empty when it had settled already), then the stop itself.
     answers.dictation_stop = () => {
       setTimeout(() => {
-        emit("dictation", { kind: "final", text: window.__settled ?? "", segment: 0 });
+        emit("dictation", { kind: "final", text: window.__settled ?? "", raw: window.__settledRaw, segment: 0 });
         emit("dictation", { kind: "stopped" });
       }, 0);
       return null;
@@ -103,6 +106,10 @@ const sessionComposer = SURFACES["a session's composer"];
 
 const hear = (page, text, segment = 0, kind = "partial") =>
   page.evaluate(([kind, text, segment]) => window.__PW_STUB__.emit("dictation", { kind, text, segment }), [kind, text, segment]);
+
+/** A local model's streamed words, as Rust sends them: one utterance, with the raw recognition beside the text. */
+const hearStreamed = (page, text) =>
+  page.evaluate((text) => window.__PW_STUB__.emit("dictation", { kind: "partial", text, raw: text, segment: 0 }), text);
 
 /** The field's text once nothing more is on its way to it. */
 async function settled(page, field) {
@@ -356,6 +363,64 @@ for (const close of [false, true]) {
       "the edit is kept when the dictation it ended settles": afterDelete === "Fix the ",
     },
     { dictated, afterDelete },
+  );
+  await page.close();
+}
+
+// A local model that streams (#754): the deleted word stays deleted through
+// the partials after it and the final that replaces them all.
+{
+  const { page, field } = await sessionComposer();
+  await openMic(page);
+  await hearStreamed(page, "Please add a settings");
+  await hearStreamed(page, "Please add a settings page for notifications");
+  const dictated = await settled(page, field);
+  await selectBack(page, " notifications".length);
+  await page.keyboard.press("Delete");
+  const afterDelete = await settled(page, field);
+  await hearStreamed(page, "Please add a settings page for notifications, then write the unit tests");
+  const afterSpeech = await settled(page, field);
+  const final = "Please add a settings page for notifications, then write the unit tests for it.";
+  await page.evaluate((final) => {
+    window.__settledRaw = final;
+  }, final);
+  await closeMic(page, final);
+  const afterFinal = await settled(page, field);
+  failed += report(
+    "a word deleted while a local model streams",
+    {
+      "the streamed words are in the composer while listening": dictated === "Please add a settings page for notifications",
+      "the word is removed": afterDelete === "Please add a settings page for",
+      "the next partial adds only the new words": afterSpeech === "Please add a settings page for then write the unit tests",
+      "the final adds its last words and brings nothing back": afterFinal === "Please add a settings page for then write the unit tests for it.",
+    },
+    { dictated, afterDelete, afterSpeech, afterFinal },
+  );
+  await page.close();
+}
+
+// A local model that cannot stream says when its words will come, then delivers them.
+{
+  const { page, field } = await sessionComposer();
+  await page.evaluate(() => {
+    const { answers, emit } = window.__PW_STUB__;
+    answers.dictation_start = () => {
+      setTimeout(() => emit("dictation", { kind: "listening", live: false }), 0);
+      return null;
+    };
+  });
+  await page.keyboard.press("Meta+Shift+D");
+  await page.getByText("Listening. Words appear when you stop.", { exact: true }).waitFor();
+  const listening = await settled(page, field);
+  await closeMic(page, "Fix the build.");
+  const afterFinal = await settled(page, field);
+  failed += report(
+    "a local model that cannot stream",
+    {
+      "nothing is written while listening": listening === "",
+      "its words arrive when the mic closes": afterFinal === "Fix the build.",
+    },
+    { listening, afterFinal },
   );
   await page.close();
 }

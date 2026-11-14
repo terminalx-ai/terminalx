@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { errorMessage, localRuntime, type LocalRuntimeState } from "@/lib/api";
+import { errorMessage, localRuntime, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeState, type LocalRuntimeWorkItem } from "@/lib/api";
 import { reattachLocalTerminals } from "@/lib/terminal";
 
 /**
@@ -80,30 +80,35 @@ export async function reconnectLocalRuntime(): Promise<void> {
 }
 
 /**
- * Stop a runtime that stopped answering, with its agents and terminals (#661).
- * The desktop attaches a fresh one, and terminals attach again in place as
- * after any reconnect. `epoch` is the runtime this window found not
- * responding: one another window already replaced is left alone. Throws why
- * it could not be stopped.
+ * Restart a runtime that stopped answering (#661). The desktop attaches a
+ * fresh one, and terminals attach again in place as after any reconnect. One
+ * that can be handed over keeps its agents and terminals running unless `how`
+ * says otherwise (#765); any other is stopped with them. `epoch` is the
+ * runtime this window found not responding: one another window already
+ * replaced is left alone. Throws why it was not restarted, with nothing
+ * stopped: a `LocalRuntimeRestartRefused` when it could have been. `stop`,
+ * with `stoppingUnkept`, is what that refusal showed: only that stops.
  */
-export async function restartLocalRuntime(epoch: string | null): Promise<void> {
+export async function restartLocalRuntime(epoch: string | null, how?: LocalRuntimeRestart, stop: LocalRuntimeWorkItem[] = []): Promise<void> {
   try {
-    await localRuntime.restart(epoch);
+    await localRuntime.restart(epoch, how, stop);
   } finally {
     await refreshLocalRuntime();
   }
 }
 
 /**
- * "Restart now" for a runtime older than this app (#730): the desktop
- * replaces it with the app's own without waiting for its agents' turns, which
- * stop with it, and terminals attach again in place. `epoch` is the runtime
- * this window was told about: one already replaced is left alone. Throws why
- * it could not be replaced.
+ * "Restart now" for a runtime older than this app (#730), and terminals
+ * attach again in place. One that can be handed over keeps its agents and
+ * terminals running but what of `stop`, what the window showed, its handover
+ * cannot carry (#765): anything else it cannot carry is refused, to be shown
+ * in turn. Any other is replaced without waiting for its agents' turns,
+ * which stop with it. `epoch` is the runtime this window was told about: one
+ * already replaced is left alone. Throws why it could not be replaced.
  */
-export async function replaceLocalRuntime(epoch: string): Promise<void> {
+export async function replaceLocalRuntime(epoch: string, stop: LocalRuntimeWorkItem[] = []): Promise<void> {
   try {
-    await localRuntime.replace(epoch);
+    await localRuntime.replace(epoch, stop);
   } finally {
     await refreshLocalRuntime();
   }
@@ -118,4 +123,23 @@ export function useLocalRuntime(): LocalRuntimeView {
     () => current,
     () => current,
   );
+}
+
+/**
+ * The runtime the app came with, while it is not yet the one running (#766):
+ * an older runtime waiting to be replaced (or failed to be), or one being
+ * replaced. The status bar shows it, in place of a card in every window.
+ */
+export type RuntimeSwitch =
+  | { kind: "waiting"; epoch: string; outdated: LocalRuntimeOutdated }
+  | { kind: "updating"; from: string | null; to: string };
+
+export function runtimeSwitchOf(state: LocalRuntimeState | null): RuntimeSwitch | null {
+  if (state?.state === "updating") return { kind: "updating", from: state.from, to: state.to };
+  if (state?.state === "connected" && state.outdated) return { kind: "waiting", epoch: state.epoch, outdated: state.outdated };
+  return null;
+}
+
+export function useRuntimeSwitch(): RuntimeSwitch | null {
+  return runtimeSwitchOf(useLocalRuntime().state);
 }

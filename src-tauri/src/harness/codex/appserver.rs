@@ -36,7 +36,7 @@ pub fn ask(place: Where<'_>, method: &str, params: Value) -> Result<Value> {
 /// Ask one method with a caller-owned deadline. Interactive mutations can
 /// take longer than the short reads used by model and usage refreshes.
 pub fn ask_with_timeout(place: Where<'_>, method: &str, params: Value, timeout: Duration) -> Result<Value> {
-    let program = crate::binpath::resolve("codex").context("codex is not installed")?;
+    let program = super::pty::program().context("codex is not installed")?;
     let mut cmd = Command::new(&program);
     cmd.arg("app-server")
         .env("PATH", crate::binpath::login_path())

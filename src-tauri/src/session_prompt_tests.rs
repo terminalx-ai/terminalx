@@ -211,7 +211,7 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
     // No share survives: this is the delayed writer after the kill switch.
     let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
-        mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
+        mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)), stops: 0,
     });
     let deadline = Instant::now() + Duration::from_secs(2);
     while rig.delivery_pending() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
@@ -608,13 +608,13 @@ impl Rig {
     /// Type the newest composer prompt into the pane as `send` would, its
     /// CLI having said it is up.
     fn type_composed(&self, text: &str) -> u64 {
-        let (ready, seq) = {
+        let (ready, seq, stops) = {
             let rt = self.rt.lock().unwrap();
             let Engine::Cli(cli) = &rt.engine else { unreachable!() };
-            (cli.ready.clone(), cli.awaiting_delivery.unwrap())
+            (cli.ready.clone(), cli.awaiting_delivery.unwrap(), cli.input.stops)
         };
         ready.mark();
-        self.manager.type_prompt(&self.rt, &self.pane, text.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
+        self.manager.type_prompt(&self.rt, &self.pane, text.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None, stops });
         seq
     }
 
@@ -731,7 +731,7 @@ fn a_continuations_enter_is_nudged_but_the_tab_sets_it_no_deadline() {
         let rig = Rig::of(CliKind::Claude, "");
         let _receipt = if receipted { Some(rig.compose_confirmed("continue work")) } else { rig.compose("continue work", 0); None };
         let seq = rig.awaited();
-        SessionManager::submit_composer_prompt(&rig.rt, Some(seq), receipted.then_some(seq), true, || Ok(())).unwrap();
+        SessionManager::submit_composer_prompt(&rig.rt, Some(seq), receipted.then_some(seq), true, |_| false, || Ok(())).unwrap();
         let rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &rt.engine else { unreachable!() };
         assert_eq!((p.accept_by.is_some(), p.nudge_by.is_some(), p.nudges_left, p.entered_at.is_some()), (deadline, true, tui::NUDGES, true), "receipted: {receipted}");
@@ -1356,10 +1356,10 @@ fn codex_batch_acceptance_cannot_overtake_enter_publication() {
             Ok(())
         };
         if atomic {
-            SessionManager::submit_composer_prompt(&rig.rt, Some(second), None, false, write).unwrap();
+            SessionManager::submit_composer_prompt(&rig.rt, Some(second), None, false, |_| false, write).unwrap();
         } else {
             write().unwrap();
-            SessionManager::submit_composer_prompt(&rig.rt, Some(second), None, false, || Ok(())).unwrap();
+            SessionManager::submit_composer_prompt(&rig.rt, Some(second), None, false, |_| false, || Ok(())).unwrap();
         }
         reader.join().unwrap();
         let events = rig.events();
@@ -1390,10 +1390,10 @@ fn failed_enter_never_arms_delivery_and_receipt_only_enter_keeps_its_identity() 
         };
         let before = snapshot();
         assert_eq!(before.0, seq);
-        assert!(SessionManager::submit_composer_prompt(&rig.rt, Some(seq), Some(seq), true, || Err(anyhow!("synthetic Enter failure"))).is_err());
+        assert!(SessionManager::submit_composer_prompt(&rig.rt, Some(seq), Some(seq), true, |_| false, || Err(anyhow!("synthetic Enter failure"))).is_err());
         assert_eq!(snapshot(), before, "failed Enter leaves identities and deadlines unarmed");
         assert!(matches!(receipt.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
-        SessionManager::submit_composer_prompt(&rig.rt, None, Some(seq), false, || Ok(())).unwrap();
+        SessionManager::submit_composer_prompt(&rig.rt, None, Some(seq), false, |_| false, || Ok(())).unwrap();
         assert!(snapshot().1, "a receipt-only constructor still arms its own identity");
         rig.cli_takes("continue work");
         assert_eq!(receipt.try_recv().unwrap(), Ok(()));
@@ -2474,7 +2474,7 @@ sleep 600
         _ => unreachable!(),
     };
     ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(seq), queued: true, receipt: None, shared: None });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
 
     // The chat says the message is waiting, and why.
     rig.chat_says(&format!("waiting: {QUEUED}"));
@@ -2483,7 +2483,7 @@ sleep 600
     assert!(rig.compose(LATER, 0));
     assert!(rig.said().ends_with(&[format!("queued: {LATER}"), format!("waiting: {LATER}")]), "{:?}", rig.said());
     let later = rig.queued_seq(LATER);
-    rig.manager.type_prompt(&rig.rt, &rig.pane, LATER.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(later), queued: true, receipt: None, shared: None });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, LATER.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(later), queued: true, receipt: None, shared: None, stops: 0 });
     std::fs::write(&told, b"").unwrap();
     assert_eq!(rig.pane_says(&["BOX-EMPTIED", "TYPED-INTO-RESTORED"]), "BOX-EMPTIED", "nothing is typed into a box that holds a prompt");
     assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "CLEARED-A-ROW"]), "PROMPT-SUBMITTED", "an empty box needs no Ctrl+U");
@@ -2683,7 +2683,7 @@ fn a_message_waiting_on_the_input_box_is_withdrawn_when_the_reader_stops() {
         _ => unreachable!(),
     };
     ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: true, receipt: None, shared: None });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
     rig.chat_says(&format!("waiting: {QUEUED}"));
 
     assert!(rig.manager.interrupt(SESSION, TAB).unwrap(), "Escape went to the agent");
@@ -2695,6 +2695,40 @@ fn a_message_waiting_on_the_input_box_is_withdrawn_when_the_reader_stops() {
     rig.pane_says(&["BOX-EMPTIED"]);
     std::thread::sleep(Duration::from_millis(1500));
     assert!(!rig.pane_has_said("TYPED"), "a withdrawn message is never typed");
+}
+
+/// #746: the reader stops the turn while its prompt is being typed, between
+/// the paste and the Enter. The Escape goes to the CLI after the paste, and
+/// the Enter is not written after it: what was typed stays in the input box,
+/// unsent, and the prompt is withdrawn with its turn ended as stopped. Sent,
+/// it would have started the very turn the reader had just stopped.
+#[cfg(unix)]
+#[test]
+fn a_stop_while_a_prompt_is_typed_holds_back_its_enter() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let read = rig._dir.path().join("read");
+        // Reads what it is typed and draws nothing after starting up, so the
+        // Enter waits on a drawing that never comes (`PASTE_DRAW_TIMEOUT`).
+        rig.run_in_pane_sized(&format!("stty raw -echo\nprintf '\\033]0;CLI-IS-UP\\007'\nexec cat > '{}'\n", read.display()), 80, 24);
+        let has_read = |bytes: &[u8]| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !std::fs::read(&read).unwrap_or_default().ends_with(bytes) {
+                assert!(Instant::now() < deadline, "{kind:?}: never read {bytes:?}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert!(!rig.compose("go", 0));
+        rig.type_composed("go");
+        has_read(b"go\x1b[201~");
+
+        assert!(rig.manager.interrupt(SESSION, TAB).unwrap(), "{kind:?}");
+        rig.chat_says("withdrawn: go");
+        assert!(!rig.turn_open(), "{kind:?}");
+        assert_eq!(rig.status(), TabStatus::Idle, "{kind:?}");
+        has_read(b"\x1b");
+        assert_eq!(std::fs::read(&read).unwrap(), b"\x1b[200~go\x1b[201~\x1b", "{kind:?}: the paste, then the Escape, and no Enter");
+    }
 }
 
 /// Review of #722: a wait the log leaves open, with no delivery waiting on

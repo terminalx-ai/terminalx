@@ -32,6 +32,11 @@ pub const CHECKS_WAIT_MINUTES: u32 = 60;
 /// for before it is asked for its verdict on what it has.
 pub const REVIEW_CHECKS_MINUTES: u32 = 20;
 
+/// How long a conflict resolver that ended its turn while work it started
+/// was still running (its checks, most often) is waited for before it is
+/// asked for its report (#753).
+pub const RESOLVE_CHECKS_MINUTES: u32 = 30;
+
 /// How many times a pull request is read again while it still shows the head
 /// from before a push.
 const HEAD_CATCH_UP_TRIES: u32 = 5;
@@ -94,6 +99,13 @@ pub trait Host: Send + Sync {
     fn stop_agent(&self, _who: &SessionRef, _note: &str) -> Result<AgentStop> {
         Ok(AgentStop::NotRunning)
     }
+    /// What a conversation's agent left running that will wake it for
+    /// another turn: a background command, monitor or agent it has not heard
+    /// back from, a wakeup, a process it left behind (#696). `None` when it
+    /// left nothing, or is not running.
+    fn background_work(&self, _who: &SessionRef) -> Option<String> {
+        None
+    }
     /// A tab's last finished turn: when it ended and its last reply. For a
     /// runtime that restarted between a turn's end and the step it started.
     fn last_reply(&self, _session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
@@ -105,7 +117,10 @@ pub trait Host: Send + Sync {
         Ok([Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().all(|who|
             self.session(&who.session_id).is_ok_and(|session| session.tab(&who.tab_id).is_some_and(|tab| matches!(tab.status, crate::store::index::TabStatus::Idle | crate::store::index::TabStatus::Completed)))))
     }
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _behind: bool) -> Result<Option<super::Resolution>> { Ok(None) }
+    /// The base pinned for a merge into the branch, if one is due: where git
+    /// finds a conflict, or wherever `required`, GitHub asking for the merge
+    /// whatever git finds. `None` once the branch contains its base.
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool) -> Result<Option<super::Resolution>> { Ok(None) }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
     /// `git merge --abort`, only while HEAD is `head` and the merge in
@@ -161,11 +176,45 @@ static STEPS: AtomicUsize = AtomicUsize::new(0);
 
 struct Running;
 
+/// Set while the runtime is handed to its successor (#765): no step starts,
+/// since a step's thread would not go over with the runtime.
+static PAUSED: Mutex<bool> = Mutex::new(false);
+static RESUMED: std::sync::Condvar = std::sync::Condvar::new();
+
 impl Running {
     fn start() -> Self {
+        let mut paused = PAUSED.lock().unwrap_or_else(|error| error.into_inner());
+        while *paused {
+            paused = RESUMED.wait(paused).unwrap_or_else(|error| error.into_inner());
+        }
         STEPS.fetch_add(1, Ordering::Relaxed);
         Running
     }
+}
+
+/// No step starts until this is dropped (#765).
+pub(crate) struct PausedSteps(());
+
+impl Drop for PausedSteps {
+    fn drop(&mut self) {
+        *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = false;
+        RESUMED.notify_all();
+    }
+}
+
+/// Hold back every step that would start, once none is running: `None` when
+/// one is still running after `within`, and then nothing is held back.
+pub(crate) fn pause_steps(within: std::time::Duration) -> Option<PausedSteps> {
+    *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = true;
+    let paused = PausedSteps(());
+    let deadline = std::time::Instant::now() + within;
+    while STEPS.load(Ordering::Relaxed) != 0 {
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Some(paused)
 }
 
 impl Drop for Running {
@@ -176,8 +225,9 @@ impl Drop for Running {
 
 /// Pipelines that are doing something with nobody's turn to show for it: a
 /// stage's step in flight (a push, a pull request being opened, a review
-/// being started), a pull request whose checks are being waited for, or a
-/// reviewer's own checks that it said are still running. A
+/// being started), a pull request whose checks are being waited for, a
+/// reviewer's own checks that it said are still running, or work a conflict
+/// resolver left running when it ended its turn. A
 /// cloud workspace counts them as running turns, so it is not put to sleep
 /// halfway (`cloud_activity`). A look at a pipeline parked on a person is not
 /// counted: it would keep an idle workspace awake. A wait counts for
@@ -233,6 +283,19 @@ fn ending_of(pipeline: &Pipeline) -> Option<Ending> {
     ending_at(pipeline.state, pipeline.reason.as_ref())
 }
 
+/// Whether a pipeline still waits on its pull request: it has not merged
+/// and was not closed. One stopped is over, but the pull request it opened
+/// may still be open, so it waits as long as it has one; stopped before it
+/// opened one, it waits on nothing. Its sessions are not archived while it
+/// waits (#718).
+pub fn waits_on_pull_request(pipeline: &Pipeline) -> bool {
+    match ending_of(pipeline) {
+        Some(Ending::Merged | Ending::Closed) => false,
+        Some(Ending::Stopped) => pipeline.pr.is_some(),
+        None => true,
+    }
+}
+
 /// When a conversation's turn ended, for the record: "after the merge".
 fn after(ending: Ending) -> &'static str {
     match ending {
@@ -280,6 +343,15 @@ fn review_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {
         && pipeline.state == State::Working
         && !pipeline.reminded
         && pipeline.review_pending_since.as_deref().and_then(|since| DateTime::parse_from_rfc3339(since).ok()).is_some_and(|since| (now - since.with_timezone(&Utc)).num_minutes() >= i64::from(REVIEW_CHECKS_MINUTES))
+}
+
+/// Whether a conflict resolver has waited on work it left running for as
+/// long as it is given, without being asked for its report since.
+fn resolution_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {
+    pipeline.stage == Stage::Resolve
+        && pipeline.state == State::Working
+        && !pipeline.reminded
+        && pipeline.resolution.as_ref().and_then(|resolution| resolution.waiting_since.as_deref()).and_then(|since| DateTime::parse_from_rfc3339(since).ok()).is_some_and(|since| (now - since.with_timezone(&Utc)).num_minutes() >= i64::from(RESOLVE_CHECKS_MINUTES))
 }
 
 /// What a step that failed does about it.
@@ -609,7 +681,9 @@ impl Step<'_> {
     /// still in a turn is told to wind down, and stopped when that turn ends
     /// ([`Step::late_reply`]); a resolver's unfinished merge is aborted then.
     /// One a person stopped part way through its merge is not told, and the
-    /// checkout is theirs once it finishes. The author's conversation is a
+    /// checkout is theirs once it finishes; one that sits idle waiting on its
+    /// own checks is stopped with them, and the checkout is theirs at once,
+    /// its merge as it is. The author's conversation is a
     /// person's own again: it is stopped only if it sits idle, and never told
     /// anything, so a follow-up someone is having with it is not cut short. A
     /// stop leaves the author alone altogether: the work goes on, only
@@ -634,7 +708,10 @@ impl Step<'_> {
                     if stop == AgentStop::Stopped {
                         stopped.push(the);
                     }
-                    if role == Role::Resolver && ending != Ending::Stopped {
+                    // One stopped here, waiting on its own checks (#753),
+                    // has no turn left to end: after Stop too, the checkout
+                    // is the person's now.
+                    if role == Role::Resolver && (ending != Ending::Stopped || stop == AgentStop::Stopped) {
                         idle_resolution = self.p.resolution.take();
                     }
                 }
@@ -681,7 +758,7 @@ impl Step<'_> {
             self.record("participantsReleased", format!("{why} {}", lines.join(" ")));
         }
         if let Some(resolution) = idle_resolution {
-            self.unfinished_merge(&resolution, true);
+            self.unfinished_merge(&resolution, ending != Ending::Stopped);
         }
     }
 
@@ -860,13 +937,19 @@ impl Step<'_> {
         if self.p.state == State::NeedsYou && !matches!(self.p.reason, Some(StopReason::Conflicts | StopReason::Behind)) { return Ok(false); }
         let workspace = self.host.workspace(&self.cwd)?;
         if workspace.branch.as_deref() != Some(self.p.branch.as_str()) || workspace.ahead_of_base == 0 { return Ok(false); }
-        let (base, behind, remote) = if let Some(link) = &self.p.pr {
+        // `required`: whether a merge of the base is due whatever git finds here.
+        let (base, required, remote) = if let Some(link) = &self.p.pr {
             let pr = self.host.pull_request(&self.cwd, link.number)?;
             if pr.state != "OPEN" { self.notice_outcome()?; return Ok(true); }
             let conflict = pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY";
             let behind = pr.merge_state == "BEHIND";
             if !conflict && !behind { return Ok(false); }
-            (pr.base, behind, Some(pr.head_sha))
+            // GitHub's conflict is the one the gate stops on, so it is the one
+            // resolved, even where git merges cleanly here. With criss-crossed
+            // history (two merge bases) git merges the bases first and GitHub
+            // does not. Merging the base in leaves one merge base, and GitHub
+            // then agrees.
+            (pr.base, true, Some(pr.head_sha))
         } else {
             let Some(base) = workspace.default_branch else { return Ok(false) };
             (base, false, None)
@@ -880,11 +963,20 @@ impl Step<'_> {
             self.needs_you(StopReason::UncommittedChanges { files: workspace.dirty });
             return Ok(true);
         }
-        let Some(mut resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, behind)? else { return Ok(false) };
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, required)? else { return Ok(false) };
         if remote.as_ref().is_some_and(|head| !same_commit(head, &resolution.head)) {
             self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap() });
             return Ok(true);
         }
+        self.start_resolution(resolution)
+    }
+
+    /// Reserve the checkout for `resolution` and hand it to the conflict
+    /// resolver. `Ok(false)`, with nothing reserved, when a conversation
+    /// became active in the checkout, the checkout moved, the switch was
+    /// turned off or the pipeline was stopped meanwhile.
+    fn start_resolution(&mut self, mut resolution: super::Resolution) -> Result<bool> {
+        let base = resolution.base.clone();
         if self.p.resolutions >= self.settings.max_resolutions {
             self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: format!("The limit of {} resolutions has been reached. Review this branch manually.", self.settings.max_resolutions) });
             return Ok(true);
@@ -921,9 +1013,13 @@ impl Step<'_> {
     fn resolver_turn(&mut self, message: &str) -> Result<()> {
         if self.p.stage != Stage::Resolve { return Ok(()); }
         let Some(resolution) = self.p.resolution.clone() else { return Ok(()) };
+        let at_work = self.resolver_at_work(message);
+        if matches!(at_work, Ok(true)) {
+            return Ok(());
+        }
         // The resolver has ended: release admission even if verification fails.
         self.p.resolution = None;
-        let pushed = match self.take_resolution(&resolution, message) {
+        let pushed = match at_work.and_then(|_| self.take_resolution(&resolution, message)) {
             Ok(pushed) => pushed,
             // As `run` would, but before the unfinished merge is looked at, so the record reads in order.
             Err(error) => {
@@ -932,6 +1028,89 @@ impl Step<'_> {
             }
         };
         if !pushed {
+            self.unfinished_merge(&resolution, true);
+        }
+        Ok(())
+    }
+
+    /// Whether a resolver whose turn ended without its report is still at
+    /// work on it, so that turn is not its report (#753). One that left work
+    /// running, its own checks most often, reports from the turn that work
+    /// wakes, and is waited for up to [`RESOLVE_CHECKS_MINUTES`]; one with
+    /// nothing running is asked once for its report, as the author and the
+    /// reviewer are. Its turn is over for good, and judged, once that was
+    /// asked, or when the pipeline was stopped.
+    fn resolver_at_work(&mut self, message: &str) -> Result<bool> {
+        if verdict::author_report(message) != AuthorReport::Missing {
+            return Ok(false);
+        }
+        let (_, stopped) = self.switches();
+        if stopped {
+            return Ok(false);
+        }
+        let resolver = self.p.resolver.clone().context("the pipeline has no resolver")?;
+        let waited = self.p.resolution.as_ref().and_then(|resolution| resolution.waiting_since.clone()).and_then(|since| self.seconds_since(&since));
+        let overdue = waited.is_some_and(|waited| waited >= i64::from(RESOLVE_CHECKS_MINUTES) * 60);
+        if !overdue {
+            if let Some(what) = self.host.background_work(&resolver) {
+                self.resolution_pending(&resolver, &what);
+                return Ok(true);
+            }
+        }
+        if self.p.reminded {
+            return Ok(false);
+        }
+        let prompt = if overdue { prompts::resolver_deadline(RESOLVE_CHECKS_MINUTES) } else { prompts::resolver_reminder() };
+        self.ask_resolver_again(&resolver, &prompt)?;
+        Ok(true)
+    }
+
+    /// The resolver ended its turn waiting on `what`, work it left running:
+    /// the checkout stays reserved for it, and the turn that work wakes is
+    /// the one listened to.
+    fn resolution_pending(&mut self, resolver: &SessionRef, what: &str) {
+        let minutes = RESOLVE_CHECKS_MINUTES;
+        let at = self.stamp();
+        let Some(resolution) = self.p.resolution.as_mut() else { return };
+        // Not the missing block it may have been reminded of: the reminder is spent.
+        self.p.reminded = false;
+        if resolution.waiting_since.is_none() {
+            resolution.waiting_since = Some(at);
+            self.record("resolutionPending", format!("The conflict resolver ended its turn waiting on {what}. Its report is waited for up to {minutes} minutes.")).session_id = Some(resolver.session_id.clone());
+        }
+        self.settle(State::Working, None, format!("The conflict resolver is waiting on {what}; its report is due within {minutes} minutes."));
+    }
+
+    /// Ask the resolver once for the report its turn ended without. Written
+    /// before the prompt goes out, with the checkout still reserved: the
+    /// answer may come before this step ends.
+    fn ask_resolver_again(&mut self, resolver: &SessionRef, prompt: &str) -> Result<()> {
+        self.doing = "Asking the session again";
+        self.p.reminded = true;
+        self.settle(State::Working, None, "Asked the conflict resolver session again for its report.");
+        self.save()?;
+        self.host.send(resolver, prompt)?;
+        let waited = self.p.resolution.as_ref().is_some_and(|resolution| resolution.waiting_since.is_some());
+        let why = if waited { format!("it has waited {RESOLVE_CHECKS_MINUTES} minutes on work it started, and gave no report.") } else { "it ended its turn without a status block, with nothing it started still running.".into() };
+        self.record("reminder", format!("Asked the conflict resolver session again: {why}")).session_id = Some(resolver.session_id.clone());
+        Ok(())
+    }
+
+    /// From the poller: a resolver that has waited on its own work for as
+    /// long as it is given, and has said nothing since, is asked for its
+    /// report. One at work is not interrupted; the turn it is in ends with
+    /// its report.
+    fn look_at_overdue_resolution(&mut self) -> Result<()> {
+        let resolver = self.p.resolver.clone().context("the pipeline has no resolver")?;
+        let Some(resolution) = self.p.resolution.clone() else { return Ok(()) };
+        if self.host.agent_busy(&resolver) || self.halted() {
+            return Ok(());
+        }
+        if let Err(error) = self.ask_resolver_again(&resolver, &prompts::resolver_deadline(RESOLVE_CHECKS_MINUTES)) {
+            // Nothing else would look at this resolution again: a request
+            // that did not reach the resolver releases the checkout to a person.
+            self.p.resolution = None;
+            self.needs_you(StopReason::Failed { step: self.doing.to_string(), message: format!("{error:#}") });
             self.unfinished_merge(&resolution, true);
         }
         Ok(())
@@ -997,6 +1176,11 @@ impl Step<'_> {
         let (_, stopped) = self.switches();
         if !abort || stopped {
             self.record("mergeLeft", format!("The conflict resolver's merge of {base} is unfinished. It is left as it is for you to inspect: commit or abort it from the Changes panel."));
+            return;
+        }
+        // Its own checks may still be running on the merge (#753).
+        if let Some(what) = self.p.resolver.as_ref().and_then(|resolver| self.host.background_work(resolver)) {
+            self.record("mergeLeft", format!("The conflict resolver's merge of {base} is unfinished, and the resolver is still waiting on {what}. It is left as it is."));
             return;
         }
         // The same lock as prompt admission: nobody starts a turn here while the merge is undone.
@@ -1200,6 +1384,40 @@ impl Step<'_> {
         self.p.findings_sent_round = verdict.round;
         let open = verdict.findings.len();
         self.record("findingsSent", format!("Sent {open} finding{} to the author session ({blocking} of medium severity or higher).", if open == 1 { "" } else { "s" })).session_id = Some(author.session_id);
+        Ok(())
+    }
+
+    /// A person carries a pipeline on from a resolution that did not finish.
+    /// It may have sat for hours while the base moved on, so the head is
+    /// compared with the base as it is now before anything is pushed (#753):
+    /// one that no longer merges with it is resolved again, or stops for a
+    /// person with the switch off, rather than sent for a review of a commit
+    /// the merge gate would refuse.
+    fn leave_resolution(&mut self) -> Result<()> {
+        let link = self.p.pr.clone().context("There is no pull request yet.")?;
+        let Some(workspace) = self.clean_workspace()? else {
+            return Ok(());
+        };
+        self.doing = "Reading the pull request";
+        let pr = self.host.pull_request(&self.cwd, link.number)?;
+        if pr.state != "OPEN" {
+            return self.evaluate_snapshot(pr, Merger::Pipeline);
+        }
+        self.doing = "Comparing the branch with its base";
+        // GitHub's conflict is the gate's, so it decides as it does in
+        // `watch_conflicts` (#748), but only while it is about this head: a
+        // merge made here and not pushed yet is git's to judge.
+        let required = same_commit(&workspace.head, &pr.head_sha) && (pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY");
+        let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required)? else {
+            return self.push_and_review();
+        };
+        if !store::get(&self.p.id)?.resolve_conflicts {
+            self.needs_you(StopReason::Conflicts);
+            return Ok(());
+        }
+        if !self.start_resolution(resolution)? && self.p.state != State::Stopped {
+            bail!("A conversation is at work in this checkout, or it changed while it was compared with {}. Nothing was pushed; try again once it is quiet.", pr.base);
+        }
         Ok(())
     }
 
@@ -1521,7 +1739,7 @@ impl Step<'_> {
             }
             Stage::Resolve => {
                 if self.p.resolution.is_some() { bail!("The conflict resolver is still running."); }
-                if self.p.pr.is_some() { self.push_and_review() } else { self.open_pull_request() }
+                if self.p.pr.is_some() { self.leave_resolution() } else { self.open_pull_request() }
             },
             Stage::Merge => {
                 // A person asking is reason to put a refused merge to GitHub once more.
@@ -2056,7 +2274,12 @@ pub fn poll(host: &dyn Host) {
             if step.p.answered.is_some() && step.host.agent_busy(&step.p.author) {
                 return if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) };
             }
-            if step.watch_conflicts()? { return Ok(()); }
+            if step.watch_conflicts()? {
+                // A resolver whose pull request is still open, and that has
+                // waited on its own work for as long as it is given.
+                if resolution_overdue(&step.p, step.host.now()) { step.look_at_overdue_resolution()?; }
+                return Ok(());
+            }
             if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) }
             else if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) }
         };
@@ -2116,6 +2339,32 @@ pub fn recover(host: &dyn Host) {
         });
         if let Err(error) = result {
             log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+        }
+    }
+}
+
+/// After the runtime took over from the one it replaced, in the same process
+/// (#765). Nothing was stopped: every turn went on, and so does every
+/// pipeline, waiting where it was. What lived only in the replaced runtime
+/// is made again: the reservations, and a report a session gave just before
+/// the handover, which no step started on, since none starts during one.
+pub fn handed_over(host: &dyn Host) {
+    let Ok(pipelines) = store::list() else {
+        return;
+    };
+    recover_reservations(host, &pipelines);
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
+        let waits_on = match pipeline.stage {
+            _ if pipeline.answered.is_some() => Some(pipeline.author.clone()),
+            Stage::Work | Stage::Address => Some(pipeline.author.clone()),
+            Stage::Review => pipeline.reviewer.clone(),
+            Stage::Resolve => pipeline.resolver.clone(),
+            Stage::PullRequest | Stage::Merge => None,
+        };
+        let Some(session) = waits_on else { continue };
+        let changed = DateTime::parse_from_rfc3339(&pipeline.modified).ok().map(|at| at.with_timezone(&Utc));
+        if let Some((_, reply)) = host.last_reply(&session).filter(|(at, _)| changed.is_some_and(|changed| *at > changed)) {
+            turn_completed(host, &session.session_id, &session.tab_id, Some(&reply));
         }
     }
 }

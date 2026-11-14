@@ -1596,7 +1596,11 @@ fn evaluate(app: &impl AutomationHost) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn recover_open_runs(app: &impl AutomationHost) {
+/// Fail every run a runtime that is gone left open: nothing will end it now.
+/// The exception is a run in one of `going_on`'s sessions, whose agent the
+/// runtime this one replaced handed over still working (#765): it ends with
+/// its turn, as it would have.
+pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std::collections::HashSet<String>) {
     let Ok(automations) = automation_store::list() else {
         return;
     };
@@ -1604,7 +1608,8 @@ pub(crate) fn recover_open_runs(app: &impl AutomationHost) {
         let Ok(runs) = automation_store::list_runs(&automation.id) else {
             continue;
         };
-        for open in runs.into_iter().filter(|run| !run.status.is_terminal()) {
+        let ended = |run: &AutomationRun| !run.status.is_terminal() && !run.session_id.as_ref().is_some_and(|session| going_on.contains(session));
+        for open in runs.into_iter().filter(ended) {
             let Ok(run) = automation_store::replace_run(&automation.id, &open.run_id, |run| {
                 run.status = AutomationRunStatus::Failed;
                 run.ended_at = Some(index::now());

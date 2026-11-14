@@ -30,6 +30,9 @@ export function StatsUsageView() {
   );
   const activity = currentActivity ?? snapshot?.app;
   const activityNotice = activityError ?? activity?.accountingError;
+  // Reading again can fix a failed read, never an accounting notice: the
+  // runtime takes back a held lease, or retries a save, by itself (#767).
+  const retryable = Boolean(error || activityError);
   const load = statsUsageStore.refresh;
   useEffect(() => { void load(); }, [load]);
 
@@ -63,7 +66,7 @@ export function StatsUsageView() {
           <div role="alert" className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             {error && <p>Could not refresh local usage: {error}</p>}
             {activityNotice && <p>{activityNotice}</p>}
-            <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>
+            {retryable && <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>}
           </div>
         )}
         {(activity || snapshot) && (

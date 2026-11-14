@@ -188,13 +188,23 @@ pub struct Claimed {
 
 /// The tab a claimed launch starts. A launch that names no mode (or a blank
 /// one) starts in the default launch mode, bypass, like any other session.
+///
+/// A launch created with the desktop's Native Codex setting on (#745) goes
+/// through Codex's app server under the rules of a workspace's
+/// `session.create`: Codex only, in a mode the app server can serve. A Codex
+/// older than its minimum still falls back to the terminal engine at the
+/// tab's first launch.
 pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
-    crate::session_ops::NewTab { transport: Default::default(),
+    let mut tab = crate::session_ops::NewTab { transport: Default::default(),
         harness: claim.agent.clone(),
         model: claim.model.clone().unwrap_or_default(),
         effort: claim.effort.clone(),
         permission_mode: crate::store::index::requested_mode(claim.mode.clone()),
+    };
+    if claim.native_codex {
+        crate::session_ops::native_codex(&mut tab, false);
     }
+    tab
 }
 
 /// `launch` of a claim response.
@@ -221,6 +231,11 @@ pub struct Claim {
     pub prompt: Option<String>,
     #[serde(default)]
     pub repositories: Vec<Repository>,
+    /// The desktop's Settings → Experimental → Native Codex when it created
+    /// the workspace (§19.1, #745). Absent from a server or desktop from
+    /// before it: a terminal tab, as before.
+    #[serde(default)]
+    pub native_codex: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -568,7 +583,10 @@ impl Launcher {
         let deadline = std::time::Instant::now() + CLONE_BUDGET;
         let mut results = Vec::new();
         for repository in pending {
-            if let Err(error) = validate_repository(repository, &self.root) {
+            // Set up at the root's own spelling; reported and remembered at
+            // the server's, the only one it knows.
+            let local = at_root(repository, &self.root);
+            if let Err(error) = validate_repository(&local, &self.root) {
                 log::warn!("checkout plan: {}/{} refused: {error:#}", repository.owner, repository.name);
                 results.push(CheckoutResult::failed(repository, "payload-invalid"));
                 continue;
@@ -576,9 +594,9 @@ impl Launcher {
             // A checkout from before this runtime kept a record (or made by
             // a launch on an older runtime) is adopted as it is: its branch
             // is the person's by now.
-            if !Path::new(&repository.path).join(".git").exists() {
+            if !Path::new(&local.path).join(".git").exists() {
                 let within = deadline.saturating_duration_since(std::time::Instant::now());
-                match self.checkout.clone_missing(repository, within, &|| false) {
+                match self.checkout.clone_missing(&local, within, &|| false) {
                     Ok(()) => {}
                     Err(CloneError::Canceled) => continue,
                     Err(CloneError::Failed { category, detail }) => {
@@ -588,7 +606,7 @@ impl Launcher {
                         continue;
                     }
                 }
-                if let Err(error) = self.checkout.prepare(repository, &plan.work_branch) {
+                if let Err(error) = self.checkout.prepare(&local, &plan.work_branch) {
                     log::warn!("checkout {}/{}: work branch: {error:#}", repository.owner, repository.name);
                     results.push(CheckoutResult::failed(repository, "branch-create-failed"));
                     continue;
@@ -607,7 +625,9 @@ impl Launcher {
         // window with nobody attached, and a suspend in the middle would
         // leave the launch `outcome-unknown` with nothing cloned.
         let _launching = crate::cloud_activity::launching();
-        if let Err(error) = validate(claim, &self.root) {
+        // Set up at the root's own spelling (`at_root`); reported at the server's.
+        let local: Vec<Repository> = claim.repositories.iter().map(|repository| at_root(repository, &self.root)).collect();
+        if let Err(error) = validate(claim, &local, &self.root) {
             log::warn!("launch intent {}: {error:#}", claim.launch_id);
             return Ok(self.finish(claim, Outcome::failed("payload-invalid", Vec::new())));
         }
@@ -647,7 +667,7 @@ impl Launcher {
                 _ => false,
             }
         };
-        for repository in claim.repositories.iter().filter(|repository| repository.clone.is_some()) {
+        for repository in local.iter().filter(|repository| repository.clone.is_some()) {
             let within = clone_deadline.saturating_duration_since(std::time::Instant::now());
             match self.checkout.clone_missing(repository, within, &canceled) {
                 Ok(()) => {}
@@ -661,9 +681,9 @@ impl Launcher {
                 }
             }
         }
-        for repository in &claim.repositories {
+        for (repository, named) in local.iter().zip(&claim.repositories) {
             match self.checkout.prepare(repository, &claim.work_branch) {
-                Ok(branch) => branches.push(branch),
+                Ok(branch) => branches.push(Branch { path: named.path.clone(), ..branch }),
                 Err(error) => {
                     log::warn!("prepare {}/{}: {error:#}", repository.owner, repository.name);
                     return Ok(self.finish(claim, Outcome::failed("repository-sync-failed", branches)));
@@ -688,7 +708,7 @@ impl Launcher {
         if claim.prompt.is_some() && self.starter.sign_in_required(&claim.agent) {
             return Ok(self.finish(claim, Outcome::failed("agent-sign-in-required", branches)));
         }
-        let cwd = claim.repositories.first().map(|repository| PathBuf::from(&repository.path)).unwrap_or_else(|| self.root.clone());
+        let cwd = local.first().map(|repository| PathBuf::from(&repository.path)).unwrap_or_else(|| self.root.clone());
         if let Err(error) = self.store.put(&Record::Applying { launch_id: claim.launch_id.clone() }) {
             // Without the durable mark a restart could send the prompt again,
             // so the agent is not touched.
@@ -734,14 +754,15 @@ fn checkout_retry_delay(attempt: usize) -> Duration {
     CHECKOUT_RETRY[attempt.min(CHECKOUT_RETRY.len() - 1)]
 }
 
-fn validate(claim: &Claim, root: &Path) -> Result<()> {
+/// `repositories` are the claim's, each at the root's own spelling (`at_root`).
+fn validate(claim: &Claim, repositories: &[Repository], root: &Path) -> Result<()> {
     if !valid_branch(&claim.work_branch) {
         bail!("invalid work branch");
     }
-    if claim.repositories.len() > MAX_REPOSITORIES {
+    if repositories.len() > MAX_REPOSITORIES {
         bail!("too many repositories");
     }
-    for repository in &claim.repositories {
+    for repository in repositories {
         validate_repository(repository, root)?;
     }
     if claim.prompt.as_ref().is_some_and(|prompt| prompt.len() > MAX_PROMPT_BYTES || prompt.contains('\0')) {
@@ -751,6 +772,26 @@ fn validate(claim: &Claim, root: &Path) -> Result<()> {
         bail!("invalid agent");
     }
     Ok(())
+}
+
+/// `repository` as this runtime keeps it. The server names a checkout
+/// `<workspace root>/<directory>` in its own spelling of the root, while the
+/// runtime's root is the folder it registered, links resolved. Where the root
+/// is reached through a link (a Box workspace keeps `/var/lib/terminalx` on
+/// `/srv/terminalx/state`), the two spellings name one folder, and a clone
+/// directly in it was refused as outside the project root (#461). A path whose
+/// parent resolves to the root is moved onto the root's spelling; any other is
+/// left as named, for `validate_repository` to refuse.
+fn at_root(repository: &Repository, root: &Path) -> Repository {
+    let path = Path::new(&repository.path);
+    let moved = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if parent != root && valid_repository_path(&repository.path) => {
+            let same = std::fs::canonicalize(parent).ok().zip(std::fs::canonicalize(root).ok()).is_some_and(|(parent, root)| parent == root);
+            same.then(|| root.join(name).to_string_lossy().into_owned())
+        }
+        _ => None,
+    };
+    Repository { path: moved.unwrap_or_else(|| repository.path.clone()), ..repository.clone() }
 }
 
 fn validate_repository(repository: &Repository, root: &Path) -> Result<()> {

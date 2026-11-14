@@ -2392,6 +2392,34 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     assert!(rig.manager.pending_permissions().is_empty());
 }
 
+/// #765 review: what a handover reads, every tab held, of the cards hooks
+/// wait on. A card is one from when its hook asks until it is answered, which
+/// happens under the tab's lock: answered, it is none a hook waits on, though
+/// that hook's thread may not have woken yet, so a handover does not take it.
+#[test]
+fn a_handover_reads_which_cards_hooks_still_wait_on() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let awaited = || rig.manager.hold_tabs(Duration::from_secs(5), |held| held.awaited).unwrap();
+    assert!(awaited().is_empty(), "nothing asked yet");
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"cmd": "cargo publish"}}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    assert_eq!(awaited(), std::collections::HashSet::from([request.clone()]), "its hook waits on the card");
+    rig.manager.respond_permission(SESSION, TAB, &request, "allow").unwrap();
+    assert!(awaited().is_empty(), "answered, whether or not its hook has woken to say so");
+    let reply = worker.join().unwrap();
+    assert_eq!(reply.output, Some(codex::pty::permission_decision(true)), "the answer reaches the agent");
+}
+
 /// What an issue pipeline stopped on its author's answer hears (#725): a
 /// prompt the reader typed into the CLI's own terminal, and a permission the
 /// reader answered. A turn the CLI starts itself, and an event it has only

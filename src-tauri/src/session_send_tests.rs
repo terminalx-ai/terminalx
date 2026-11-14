@@ -193,7 +193,7 @@ fn a_checkout_reserved_for_conflict_resolution_still_refuses_a_prompt() {
     let mut pipeline: Pipeline = serde_json::from_str(include_str!("fixtures/issue_pipeline.json")).unwrap();
     pipeline.author = SessionRef { session_id: IN_WORKTREE.into(), tab_id: TAB.into() };
     pipeline.resolver = Some(SessionRef { session_id: IN_WORKTREE.into(), tab_id: "resolver".into() });
-    pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work });
+    pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
     crate::issue_pipeline::store::insert(&pipeline).unwrap();
     assert!(rig.send_within(IN_WORKTREE, "edit the conflicted file", None).expect("answered").is_err());
     // The composer's send says why in the tab, as it does for any refusal.

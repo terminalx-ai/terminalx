@@ -16,6 +16,7 @@ const { ProjectRail } = await import("./ProjectRail");
 const { chatPreview } = await import("./ChatListSidebar");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
+const selection = await import("@/lib/rowSelection");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git", color: "blue" }];
@@ -37,6 +38,12 @@ beforeEach(async () => {
     if (command === "list_harnesses") return [];
     if (command === "chats_dir") return chatsPath;
     if (command === "list_workspaces") return [];
+    // As the backend answers: the sessions as they are now, archived or back.
+    if (command === "set_sessions_archived") {
+      const { sessionIds, archived } = args as unknown as { sessionIds: string[]; archived: boolean };
+      sessions = sessions.map((entry) => (sessionIds.includes(entry.id) ? { ...entry, archived } : entry));
+      return sessionIds.map((id) => sessions.find((entry) => entry.id === id)!);
+    }
     if (command === "session_summaries") {
       return (args?.sessionIds ?? []).flatMap((sessionId) => (summaries[sessionId] ? [{ sessionId, tabId: `${sessionId}-tab`, lastPrompt: null, lastReply: null, waitingOn: null, updatedAt: at(1), ...summaries[sessionId] }] : []));
     }
@@ -199,7 +206,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Archive", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });
@@ -212,5 +219,45 @@ describe("renaming a chat in the list", () => {
     await boot([session("a", "/repos/web", at(1), { branch: "dc/payments" })]);
     mount();
     expect(screen.getByTestId("chat-preview").textContent).toBe("web · Payments");
+  });
+});
+
+describe("the archive in the chat list (#718)", () => {
+  beforeEach(() => {
+    store.setShowArchived(false);
+    selection.clearPicked();
+  });
+
+  it("lists the archived chats at the end under Show archived, with their previews, and Unarchive puts one back", async () => {
+    summaries = { old: { lastReply: "Shipped in 0.2.20." } };
+    await boot([session("live", chatsPath, at(3)), session("old", chatsPath, at(5), { archived: true }), session("older", "/repos/web", at(1), { archived: true })]);
+    mount();
+    expect(rows().map(titleOf)).toEqual(["Talk live"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Show archived" }));
+    const fold = screen.getByTestId("archived-sessions");
+    expect(within(fold).getByRole("button", { name: "Archived (2)" }).getAttribute("aria-expanded")).toBe("true");
+    // Newest first, after the live ones, however new.
+    expect(screen.getAllByRole("button", { name: /^Talk/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["Talk live", "Talk old", "Talk older"]);
+    expect(await within(fold).findByText("Shipped in 0.2.20.")).toBeTruthy();
+    expect(within(fold).getByText("web")).toBeTruthy();
+
+    await act(async () => { fireEvent.click(within(fold).getByRole("button", { name: "Unarchive Talk old" })); });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived").map(([, args]) => args)).toEqual([{ sessionId: "old", archived: false }]);
+    expect(within(screen.getByTestId("archived-sessions")).getByRole("button", { name: "Archived (1)" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /^Talk/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["Talk old", "Talk live", "Talk older"]);
+  });
+
+  it("picks chats for the bulk bar as the project view does", async () => {
+    await boot([session("a", chatsPath, at(3)), session("b", chatsPath, at(2))]);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Talk a" }), { metaKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Talk b" }), { shiftKey: true });
+    const bar = screen.getByRole("toolbar", { name: "2 conversations selected" });
+    expect(store.getSessions().selectedSessionId).toBeNull();
+    await act(async () => { fireEvent.click(within(bar).getByRole("button", { name: /^Archive/ })); });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived").map(([, args]) => args)).toEqual([{ sessionIds: ["a", "b"], archived: true }]);
+    expect(screen.queryByRole("button", { name: "Talk a" })).toBeNull();
   });
 });

@@ -184,8 +184,27 @@ describe("StatsUsageView", () => {
     vi.mocked(api.statsUsageRefresh).mockResolvedValue(withError);
     render(<StatsUsageView />);
     expect((await screen.findByRole("alert")).textContent).toContain("Activity recovery is incomplete: unreadable history");
-    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    // Reading again cannot fix what the runtime accounts for itself.
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.getByText("7")).toBeTruthy();
+  });
+
+  it("names who holds activity history once, with current counters and no Retry", async () => {
+    const notice = "The TerminalX app (pid 4242) is holding activity history. New agent work and PRs are kept aside and counted once it quits.";
+    const held = saved({ activity: { ...snapshot.app, agentsSpawned: 9, accountingError: notice } });
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(held);
+    vi.mocked(api.statsUsageRefresh).mockResolvedValue(held);
+    render(<StatsUsageView />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(""));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert").textContent).toBe(notice);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByText(/Saved activity — could not refresh/)).toBeNull();
+    expect(screen.getByText("9")).toBeTruthy();
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(saved());
+    vi.mocked(api.statsUsageRefresh).mockResolvedValue(saved());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh local analytics" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("does not replace a valid snapshot with zero when a later read fails", async () => {
@@ -197,8 +216,8 @@ describe("StatsUsageView", () => {
     expect(await screen.findByText(/Activity history could not be loaded/)).toBeTruthy();
     expect(screen.getByText("7")).toBeTruthy();
   });
-  it("shows one ownership notice, stale saved counters, independent usage and retry recovery", async () => {
-    const notice = "Another TerminalX runtime is using activity history. Quit the other runtime, then select Retry.";
+  it("shows one read failure, stale saved counters, independent usage and retry recovery", async () => {
+    const notice = "Activity history unavailable: The background runtime is not attached.";
     const conflict = saved({ activityError: notice, activity: snapshot.app });
     vi.mocked(api.statsUsageSnapshot).mockResolvedValue(conflict);
     vi.mocked(api.statsUsageRefresh).mockResolvedValue(conflict);

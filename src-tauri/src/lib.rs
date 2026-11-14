@@ -119,6 +119,7 @@ mod quit;
 mod relay_e2ee;
 pub mod remote;
 mod session;
+mod session_archive;
 mod session_ops;
 mod stray_processes;
 pub mod serve;
@@ -127,6 +128,8 @@ mod recovery;
 mod continuation;
 pub mod skills;
 mod store;
+#[cfg(test)]
+mod test_log;
 mod status;
 mod stats;
 #[cfg(feature = "desktop")]
@@ -398,6 +401,8 @@ pub fn run() {
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_replace,
+            local_runtime::ui::local_runtime_work,
+            local_runtime::ui::local_runtime_plan_update,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
@@ -578,6 +583,9 @@ pub fn run() {
             commands::pane_agents,
             commands::rename_session,
             commands::set_session_archived,
+            commands::set_sessions_archived,
+            commands::set_shown_session,
+            commands::archive_idle_sessions,
             commands::set_session_pinned,
             commands::set_active_tab,
             commands::delete_session,
@@ -726,6 +734,8 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            commands::conversation_settings,
+            commands::set_archive_idle_days,
             commands::experimental_settings,
             commands::set_experimental_settings,
             commands::organization_work_status,

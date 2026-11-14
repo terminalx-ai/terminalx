@@ -90,8 +90,10 @@ pub fn start(host: Arc<LocalHost>, interrupted: Vec<(String, String)>) {
 
 /// A new local owner means the old process really ended. Reopening a window
 /// never enters this path. Preserve interrupted work for explicit recovery.
-pub(crate) fn start_local(host: Arc<LocalHost>) {
-    engine::recover(&*host);
+/// `handed_over`: this runtime took over from the one it replaced (#765), so
+/// nothing it ran was cut short and every pipeline goes on where it was.
+pub(crate) fn start_local(host: Arc<LocalHost>, handed_over: bool) {
+    if handed_over { engine::handed_over(&*host) } else { engine::recover(&*host) }
     let spawned = std::thread::Builder::new().name("local-issue-pipeline-poll".into()).spawn(move || loop {
         std::thread::sleep(engine::POLL_EVERY);
         engine::poll(&*host);

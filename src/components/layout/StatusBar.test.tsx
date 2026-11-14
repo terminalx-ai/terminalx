@@ -40,6 +40,12 @@ vi.mock("@/lib/sessions", () => ({
   }),
 }));
 vi.mock("@/lib/statusPolling", () => ({ useResourceSampling: vi.fn() }));
+const runtimeSwitch = vi.hoisted(() => ({ current: null as import("@/lib/localRuntime").RuntimeSwitch | null }));
+vi.mock("@/lib/localRuntime", () => ({
+  bootLocalRuntime: vi.fn(async () => {}),
+  replaceLocalRuntime: vi.fn(async () => {}),
+  useRuntimeSwitch: () => runtimeSwitch.current,
+}));
 
 const { StatusBar } = await import("./StatusBar");
 
@@ -60,6 +66,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   statusBarWidth = 1_000;
+  runtimeSwitch.current = null;
+  statusState.settings.visible = true;
   statusState.settings.percent = "used";
   statusState.settings.resources = false;
   statusState.resourcesAvailable = true;
@@ -506,6 +514,40 @@ describe("status bar usage", () => {
       expect(notice()).toBeNull();
     });
 
+    // #738: the reply came 30 s past the 5h deadline and still had that window.
+    it("says a check that saw the window that just expired changed nothing, not that it refreshed just now", () => {
+      const now = Date.now();
+      for (const window of statusState.usage.windows) if (window.agent === "claude") window.updatedAt = now - 10 * 60_000;
+      Object.assign(claudeWindow("five_hour"), { resetsAt: now - 30_000, stale: true, source: "oauth" });
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: now + 30_000, error: null,
+        lastSuccessAt: now - 1_000,
+        lastUpdatedAt: now - 10 * 60_000,
+        refused: [{ key: "five_hour", label: "5h", reason: "endedWindow" }],
+      };
+      render(<StatusBar />);
+      const detail = openDetail("Claude");
+      const session = within(detail).getByText("Session").parentElement as HTMLElement;
+      expect(session.textContent).toContain("Window expired — awaiting update");
+      expect((detail.querySelector("[data-usage-freshness]") as HTMLElement).textContent).toBe(
+        "Last refreshed 10m ago"
+        + "Checked just now · no newer usage"
+        + "5h kept: the reply still had the window that just expired",
+      );
+    });
+
+    it("says a tab whose Claude account wasn't known at launch was refused for that, not for another account", () => {
+      const now = Date.now();
+      statusState.usage.claude = {
+        retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now, lastUpdatedAt: now,
+        liveRefused: { at: now - 60_000, reason: "launchUnknown" },
+      };
+      render(<StatusBar />);
+      const notice = openDetail("Claude").querySelector("[data-usage-live-refused]") as HTMLElement;
+      expect(notice.textContent).toBe("Live usage from a turn was refused 1m ago: the tab's Claude account wasn't known when it started.");
+      expect(notice.textContent).not.toContain("different Claude account");
+    });
+
     it("says when Codex was last refreshed when its button is inside the debounce, until it can fetch again", async () => {
       const now = Date.now();
       for (const window of statusState.usage.windows) if (window.agent === "codex") window.updatedAt = now - 2 * 60_000;
@@ -699,4 +741,37 @@ it("rejects confirmation clicks invalidated before React renders and ignores lat
   await act(async () => confirmed.resolve({ killed: false, confirmation: "Late resampled confirmation" }));
   expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
   expect(rpc.mock.calls).toEqual([["shell", false], ["shell", false]]);
+});
+
+describe("the runtime the app is moving to (#766)", () => {
+  const waiting = (): import("@/lib/localRuntime").RuntimeSwitch => ({
+    kind: "waiting", epoch: "owner",
+    outdated: { running: "0.2.23", app: "0.2.24", work: ["Codex in “Web”, in the middle of a turn"], problem: null, failed: false, keeps: false, unkept: [] },
+  });
+
+  it("sits beside usage while a switch waits, and goes once it is done", () => {
+    runtimeSwitch.current = waiting();
+    const view = render(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector('[data-usage-agent="claude"]')).not.toBeNull();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(screen.queryByTestId("runtime-status")).toBeNull();
+  });
+
+  it("a hidden status bar still shows it, and only it, until the switch is done", () => {
+    statusState.settings.visible = false;
+    const view = render(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+    runtimeSwitch.current = waiting();
+    view.rerender(<StatusBar />);
+    expect(screen.getByTestId("runtime-status").textContent).toBe("Runtime 0.2.23 · waiting for 1");
+    expect(view.container.querySelector("[data-usage-agent]")).toBeNull();
+    runtimeSwitch.current = { kind: "updating", from: "0.2.23", to: "0.2.24" };
+    view.rerender(<StatusBar />);
+    expect(screen.getByRole("status", { name: "Updating the runtime to 0.2.24" })).toBeTruthy();
+    runtimeSwitch.current = null;
+    view.rerender(<StatusBar />);
+    expect(view.container.querySelector("[data-status-bar]")).toBeNull();
+  });
 });

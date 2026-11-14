@@ -29,6 +29,8 @@ export interface PaletteSessionItem extends PaletteEntityBase {
   modified: string;
   /** A cloud session's key (`cloud:<orgId>:<workspaceId>:<sessionId>`); opening it selects it and never wakes it. */
   cloudKey?: string;
+  /** Archived (#718): found by what is typed, never among the recent ones, and said so on its row. */
+  archived?: boolean;
 }
 
 export interface PaletteWorkspaceItem extends PaletteEntityBase {
@@ -127,8 +129,8 @@ export function buildPaletteIndex(
     for (const workspace of list) workspaceByPath.set(cleanPath(workspace.path), workspace);
   }
 
+  // Archived sessions are indexed too (#718), so one can be found by its title; `searchPaletteIndex` keeps them out of the recent list.
   const indexedSessions = sessions
-    .filter((session) => !session.archived)
     .map((session): PaletteSessionItem => {
       const project = projectByPath.get(session.projectPath);
       // A quick chat has no project; its path ends in its own id, which names nothing.
@@ -149,7 +151,7 @@ export function buildPaletteIndex(
         : quick && cleanPath(session.cwd) === cleanPath(session.projectPath)
           ? "Scratch folder"
           : (branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd);
-      const secondary = `${projectName} · ${location}${session.worktreeRemoved ? " (removed)" : ""} · ${agentLabel}`;
+      const secondary = `${projectName} · ${location}${session.worktreeRemoved ? " (removed)" : ""} · ${agentLabel}${session.archived ? " · Archived" : ""}`;
       return {
         id: `session:${session.id}`,
         group: "sessions",
@@ -162,6 +164,7 @@ export function buildPaletteIndex(
         primary: session.title,
         secondary,
         recentAt: parseDate(session.modified),
+        ...(session.archived ? { archived: true } : {}),
         searchFields: searchFields(session.title, secondary, [session.cwd, removedWorkspace?.path ?? "", removedWorkspace?.branch ?? "", session.issue?.identifier ?? "", session.issue?.title ?? ""]),
       };
     });
@@ -392,9 +395,19 @@ export function rankPaletteItems<T extends PaletteEntityBase>(items: T[], query:
   );
 }
 
+/** How far an archived session sits behind a live one that matches as well (#718). */
+const ARCHIVED_PENALTY = 24;
+
 export function searchPaletteIndex(index: PaletteIndex, query: string): PaletteSearchGroups {
+  // With nothing typed the list is the recent sessions, and an archived one is not among them; typed for, it is found.
+  const searched = query.trim();
+  const sessions = searched
+    ? rankPaletteItems(index.sessions, query)
+        .map((match) => (match.item.archived ? { ...match, score: match.score + ARCHIVED_PENALTY } : match))
+        .sort((a, b) => a.score - b.score || b.item.recentAt - a.item.recentAt || a.item.primary.localeCompare(b.item.primary))
+    : rankPaletteItems(index.sessions.filter((item) => !item.archived), query);
   return {
-    sessions: rankPaletteItems(index.sessions, query),
+    sessions,
     workspaces: rankPaletteItems(index.workspaces, query),
     projects: rankPaletteItems(index.projects, query),
   };

@@ -1117,7 +1117,10 @@ mod open_terminal_tests {
     use std::time::{Duration, Instant};
 
     const CHILD: &str = "TERMINALX_TEST_MOBILE_OPEN_TERMINAL_CHILD";
-    const STAND_IN: &str = "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '  --no-daemon  Run without the shared daemon\\n'; exit 0; fi\nprintf 'stand-in codex %s\\n' \"$*\"\nexec sleep 30\n";
+    /// Serves no app server: asked to, it exits at once, so preparing its
+    /// home finds the hooks untrusted straight away instead of waiting out
+    /// the app server's timeout, and the tab still starts.
+    const STAND_IN: &str = "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '  --no-daemon  Run without the shared daemon\\n'; exit 0; fi\nif [ \"$1\" = \"app-server\" ]; then exit 1; fi\nprintf 'stand-in codex %s\\n' \"$*\"\nexec sleep 30\n";
 
     #[test]
     fn a_driving_phone_opens_a_native_codex_tab_in_codexs_terminal() {
@@ -1167,6 +1170,19 @@ mod open_terminal_tests {
             Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
         let lifetime = Lifetime::new(Duration::from_secs(60));
         let lease = lifetime.command("runtime.attach",json!({"protocol":1})).unwrap();
+        // The window renews its attachment as the runtime asks, and the
+        // phone's grants last only while it does: without this, a slow run
+        // outlives the lease and the phone is refused partway through.
+        let (stop_heartbeat, heartbeat_stopped) = std::sync::mpsc::channel::<()>();
+        let heartbeat = {
+            let (lifetime, lease) = (lifetime.clone(), lease.clone());
+            let every = Duration::from_secs(lease["heartbeatSeconds"].as_u64().unwrap());
+            std::thread::spawn(move || {
+                while matches!(heartbeat_stopped.recv_timeout(every), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                    lifetime.command("runtime.heartbeat",lease.clone()).unwrap();
+                }
+            })
+        };
         let actor: Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
         manager.mobile.register(&lifetime,actor.clone(),"phone","driver").unwrap();
         manager.mobile.register(&lifetime,actor.clone(),"watch","viewer").unwrap();
@@ -1198,6 +1214,8 @@ mod open_terminal_tests {
         assert_eq!(manager.terminals().panes().len(), 1);
 
         manager.terminals().kill_all();
+        drop(stop_heartbeat);
+        heartbeat.join().unwrap();
         lifetime.command("runtime.detach",lease).unwrap();
     }
 }

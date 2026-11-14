@@ -280,6 +280,90 @@ follows the attached runtime, not the app ([MOBILE.md](./MOBILE.md), "What the
 phone is offered"). Validate keychain access under the helper signing identity and
 notification authorization on macOS; these are not established by a shell test.
 
+### Handing the runtime over (#765)
+
+From 0.2.24 a runtime is replaced in place and stops nothing. Every agent and
+terminal belongs to the runtime process (it holds each PTY master, each agent
+is its child, each agent's hooks dial `hooks-<pid>.sock` with a per-launch
+token), so the runtime is not stopped and restarted: asked to hand over
+(`runtime.handover`, pinned to its epoch), it holds everything still and execs
+the newer runtime's binary in its own process (`local_runtime/handover.rs`).
+The pid does not change: the agents stay its children, their hooks reach the
+same socket with the same tokens, and every terminal stays open. The status
+says which handover record a runtime writes (`localRuntime.handover`, a format
+number; absent before 0.2.24).
+
+- **What is held still, in order.** The hook and control sockets stop
+  answering once the frames under way are answered (`hooks::Bridge::freeze`).
+  A frame that waits on a person (a permission card) or only waits and reads
+  (`terminalx wait`) does not hold this up: it goes over with its connection.
+  New connections wait in the listening socket's queue, which goes over too,
+  so a hook that fires mid-swap is answered by the new runtime, never refused.
+  Then no issue pipeline step starts and none runs, nothing is admitted, each
+  PTY's reader stops with all it read in the scrollback (`pty::handover`:
+  output written meanwhile stays in the terminal for the next reader, and an
+  exit meanwhile stays unreaped for it), and every agent tab is held with no
+  prompt being typed into it and no transcript being read
+  (`session::handover`). What is about to settle (a CLI starting or stopping,
+  a prompt on its way, a phone's prompt) refuses the handover as
+  `handover_busy`, with nothing stopped, to be tried again.
+- **The record** (`run/handover-<pid>.json`, owner-only, removed once read)
+  names each descriptor kept open across the exec (the ownership lock, the
+  sockets and their lock, each PTY master, each connection still waiting) and
+  carries each terminal's scrollback, screen and process group, each agent
+  tab's transcript position, open turn, queued prompts, cards and hook token,
+  and the log's `seq`. The new runtime (`--adopt <record>`) takes all of it
+  over before it answers anything, makes every descriptor close-on-exec again,
+  serves its sockets frozen until it is ready, then answers what queued up.
+  An agent's background-command ledger is read again from where its CLI
+  began. A CLI started by hand is found in front of its terminal again and
+  followed on from where it was read to. Startup recovery leaves alone what
+  was handed over: its turns, panes, automation runs and pipelines go on.
+- **Versioned.** A runtime reads every format its `handover-formats`
+  subcommand names. Before holding anything, the runtime being replaced asks
+  the binary taking over which it reads, and refuses (`handover_unsupported`)
+  one that reads none of its own, or that is not a runtime installed in this
+  home as `launch::install` installs one (in this home's private runtime
+  directory, under the digest of its contents, private to this user), signed
+  by the same team on macOS, at this version or newer. It checks the binary
+  again just before the exec, after everything was held still: the same file,
+  with the same contents. On Linux it execs the very descriptor it checked;
+  on macOS, which cannot exec one, it execs the path a moment after the check.
+  On macOS, whoever holds the control token therefore cannot put a program of
+  their own in the runtime's place. Linux has no code signature to require:
+  there a program of this user's own, installed in this home's runtime
+  directory under its digest and claiming a newer version, would pass, which
+  gains nothing over what the control token already allows (every terminal
+  and session).
+- **Waiting hooks.** The hook bridge stops answering before anything else
+  comes to rest, and is taken (its sockets, and the frames not yet answered)
+  only once every tab is held, when no waiting hook can be answered any more,
+  since an answer is given under its tab's lock. A permission answered in
+  between is answered here, and the handover is tried again
+  (`handover_busy`). That includes one whose hook has yet to wake when the
+  bridge is taken: it is still waiting, on a card no held tab waits on any
+  more, and the runtime taking over would find no card for it.
+- **What it cannot carry** in format 1 is an agent driven over its standard
+  input and output (experimental Codex stdio, ACP agents, OpenCode) while its
+  process runs. `runtime.handover.plan` names it; the handover refuses
+  (`handover_unadoptable`) unless the request names it in `stop`, and then
+  stops only that, as Stop does, and hands the rest over. Every window sends
+  back exactly what it showed (Restart now, Try again, Restart runtime, and
+  Update now through the update plan): an agent started since is refused
+  (`handover_unadoptable`), with nothing stopped, and shown in turn.
+
+A desktop newer than a runtime that can be handed over replaces it at once,
+mid-turn or not (`replace.rs`): windows say the runtime is being updated and
+that its agents and terminals keep running. What the handover cannot carry is
+never stopped by itself: every window names it, and **Restart now** hands
+everything else over, stopping only that. A bundled runtime that cannot take
+the runtime over falls back to replacing it as above, once nothing would be cut
+short. **Restart runtime**, for one that stopped answering, hands it over first
+too; when that cannot be done, nothing is stopped, and the window says why and
+offers to stop only what cannot be kept, or everything. A runtime from before
+0.2.24 cannot hand over, so the first update to 0.2.24 still replaces it as
+above.
+
 ## Integration release request and reviewable stages
 
 The coordinator released `session.rs`, `session_follow.rs`,

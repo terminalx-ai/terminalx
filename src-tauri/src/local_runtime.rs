@@ -43,6 +43,8 @@ pub mod sessions;
 #[cfg(unix)]
 pub mod launch;
 #[cfg(unix)]
+pub mod handover;
+#[cfg(unix)]
 pub mod log_file;
 #[cfg(unix)]
 pub mod bridge;
@@ -57,8 +59,19 @@ pub(crate) mod supervisor;
 pub mod ui;
 #[cfg(all(unix, feature = "desktop"))]
 pub(crate) mod replace;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod update_plan;
 
 pub const PROTOCOL: u64 = 1;
+
+/// The handover record this runtime writes (#765), which a desktop needs to
+/// hand it over rather than stop it; `None` where it cannot be handed over.
+fn handover_format() -> Option<u32> {
+    #[cfg(unix)]
+    { Some(handover::FORMAT) }
+    #[cfg(not(unix))]
+    { None }
+}
 /// What the event socket understands within [`PROTOCOL`], so a desktop and a
 /// runtime of different builds still attach. 2 (#716): a hello names the one
 /// stream its connection carries, and the runtime says when a terminal view
@@ -113,6 +126,28 @@ impl Owner {
             bail!("another TerminalX process is serving this data directory; attach to it or close it first");
         }
         Ok(Self { _file: file })
+    }
+
+    /// The ownership the runtime this process was held, handed over with
+    /// its descriptor (#765). The lock is the open file's, so it was never let go.
+    #[cfg(unix)]
+    pub fn adopt(lock: std::os::fd::OwnedFd) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::from(lock);
+        // Taking a lock this open file already holds succeeds at once; one
+        // it does not hold is someone else's, and refused.
+        // SAFETY: the descriptor belongs to `file`, which stays open in Owner.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("the handed-over ownership lock is not held");
+        }
+        Ok(Self { _file: file })
+    }
+
+    /// The descriptor that holds the lock, which a handover keeps open.
+    #[cfg(unix)]
+    pub(crate) fn descriptor(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self._file.as_raw_fd()
     }
 
     #[cfg(not(unix))]
@@ -258,7 +293,7 @@ impl Lifetime {
         json!({ "protocol": PROTOCOL, "epoch": self.epoch, "attachedClients": state.leases.len(),
             "stopping": state.stop_requested || state.exiting, "idleGraceSeconds": self.grace.as_secs(),
             "eventSocket": self.stream_socket.get(), "streamVersion": STREAM_VERSION, "nativeTray": native_tray(), "loopAgeMs": loop_age,
-            "version": env!("CARGO_PKG_VERSION"), "mobileFeatures": mobile::features() })
+            "version": env!("CARGO_PKG_VERSION"), "mobileFeatures": mobile::features(), "handover": handover_format() })
     }
 
     pub(crate) fn attachment(&self, epoch: &str, lease: &str) -> anyhow::Result<Arc<Attachment>> {

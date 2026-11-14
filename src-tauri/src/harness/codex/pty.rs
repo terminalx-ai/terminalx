@@ -142,6 +142,43 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// The program a test's sessions run as Codex (`codex_program_for_tests`).
+#[cfg(test)]
+static TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// While it is held, sessions launch `program` as Codex, and it is what
+/// they ask Codex's app server: a stand-in, whether or not a real CLI is
+/// installed where the tests run. Process-wide, so the tests that hold one
+/// take turns.
+#[cfg(test)]
+pub(crate) struct TestProgram {
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn codex_program_for_tests(program: PathBuf) -> TestProgram {
+    static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = Some(program);
+    TestProgram { _turn: turn }
+}
+
+#[cfg(test)]
+impl Drop for TestProgram {
+    fn drop(&mut self) {
+        *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// The `codex` the app runs, for a session and for its app server.
+pub(crate) fn program() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(program) = TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(program);
+    }
+    crate::binpath::resolve("codex")
+}
+
 /// A resolved CLI admitted for an isolated session launch.
 pub struct Launcher {
     program: PathBuf,
@@ -149,7 +186,7 @@ pub struct Launcher {
 
 impl Launcher {
     pub fn resolve() -> anyhow::Result<Self> {
-        let program = crate::binpath::resolve("codex")
+        let program = program()
             .ok_or_else(|| anyhow::anyhow!("Codex is not installed. Install it and log in, then try again."))?;
         Self::inspect(program, Duration::from_secs(5))
     }

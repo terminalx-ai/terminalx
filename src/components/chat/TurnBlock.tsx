@@ -291,12 +291,12 @@ function InputOccupiedNote() {
   );
 }
 
-/** A message stopped while it waited on the agent's input box (#722): never typed, and offered again. */
+/** A message stopped before the agent took it (#722, #746): not sent, and offered again. */
 function WithdrawnNote({ seq, onSendAgain }: { seq?: number; onSendAgain?: (seq: number) => void }) {
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-withdrawn">
       <CircleAlert className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">Not sent: the agent was stopped while its input box had text in it, so this message was never typed.</span>
+      <span className="min-w-0 flex-1">Not sent: the agent was stopped before it took this message.</span>
       {onSendAgain && seq !== undefined && (
         <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendAgain(seq)}>
           <Send /> Send again

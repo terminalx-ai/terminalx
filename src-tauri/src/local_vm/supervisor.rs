@@ -154,6 +154,18 @@ pub fn prepare_stop() -> Result<RwLockWriteGuard<'static, ()>> {
     Ok(guard)
 }
 
+/// Held through a runtime handover (#765) until the exec, or until the
+/// handover is off. Local VM work is not carried over: the replacement starts
+/// its own supervisor from the journal. So none may be in flight or under way,
+/// and none is admitted meanwhile.
+pub fn prepare_handover() -> Result<RwLockWriteGuard<'static, ()>> {
+    let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
+    if has_work() {
+        bail!("Local VM work is under way");
+    }
+    Ok(guard)
+}
+
 pub struct Supervisor {
     stopped: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -840,6 +852,24 @@ mod tests {
         assert!(admit(&life).is_err());
         assert!(admit_exclusive(&life).is_err());
         assert!(ensure_running(&AtomicBool::new(true)).is_err());
+    }
+
+    #[test]
+    fn a_handover_waits_for_vm_work_and_holds_off_new_work_until_it_is_off() {
+        let _home = crate::store::temp_home();
+        let life = Lifetime::new(Duration::ZERO);
+        let operation = admit(&life).unwrap();
+        assert!(format!("{:#}", prepare_handover().unwrap_err()).contains("in flight"));
+        drop(operation);
+        let journal = host::journal().unwrap();
+        let env = journal.enroll("held guest", "local:test").unwrap();
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
+        assert!(format!("{:#}", prepare_handover().unwrap_err()).contains("under way"));
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = false; Ok(()) }).unwrap();
+        let handover = prepare_handover().unwrap();
+        assert!(ADMISSION.try_read().is_err(), "no VM operation starts during a handover");
+        drop(handover);
+        drop(admit(&life).unwrap());
     }
 
     #[cfg(target_os = "macos")]

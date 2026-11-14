@@ -30,7 +30,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn digest(file: &mut File) -> Result<String> {
+pub(crate) fn digest(file: &mut File) -> Result<String> {
     let mut sha = Sha256::new();
     let mut buffer = [0; 64 * 1024];
     loop {
@@ -85,6 +85,18 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// The bundled helper, installed in `home` ([`install`]) and checked to be
+/// signed: what a runtime is started from, or handed over to (#765).
+pub fn installed(source: &Path, home: &Path) -> Result<PathBuf> {
+    let executable = install(source, home)?;
+    #[cfg(target_os = "macos")]
+    {
+        let verified = Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&executable).output()?;
+        if !verified.status.success() { bail!("the installed runtime's code signature could not be verified"); }
+    }
+    Ok(executable)
+}
+
 pub fn connect_or_start(source: &Path, home: &Path) -> Result<Arc<Client>> {
     launch(source,home,None,None)
 }
@@ -129,12 +141,7 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
     if std::os::unix::net::UnixStream::connect(home.join("run/hooks.sock")).is_ok() {
         return Client::connect(&home);
     }
-    let executable = install(source, &home)?;
-    #[cfg(target_os = "macos")]
-    {
-        let verified = Command::new("/usr/bin/codesign").args(["--verify", "--strict"]).arg(&executable).output()?;
-        if !verified.status.success() { bail!("the installed runtime's code signature could not be verified"); }
-    }
+    let executable = installed(source, &home)?;
     let mut command = Command::new(executable);
     if let Some(application) = application {
         command.env("TERMINALX_LOCAL_DESKTOP","1").env("TERMINALX_LOCAL_APPLICATION",application);
@@ -303,6 +310,32 @@ fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: F
     Ok(())
 }
 
+/// Wait until the runtime that replaced runtime `epoch` in its own process
+/// answers on `home`'s socket (#765): the same process, under another epoch.
+pub fn taken_over(home: &Path, epoch: &str, within: Duration) -> Result<()> {
+    let deadline = Instant::now() + within;
+    let socket = home.join("run/hooks.sock");
+    let pid = listener(&socket);
+    loop {
+        match Client::connect(home) {
+            Ok(client) if client.epoch() != epoch => {
+                let now = listener(&socket);
+                if pid.is_some() && now != pid {
+                    bail!("another runtime took the socket while the TerminalX runtime was being handed over");
+                }
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) if Instant::now() >= deadline => {
+                return Err(error.context("the updated TerminalX runtime did not answer after the handover"));
+            }
+            Err(_) => {}
+        }
+        if Instant::now() >= deadline { bail!("the TerminalX runtime did not hand over within {} seconds", within.as_secs()); }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Whether the runtime refused with `code`, anywhere in `error`'s chain.
 pub fn refused(error: &anyhow::Error, code: &str) -> bool {
     error.chain().any(|cause| cause.downcast_ref::<super::client::Refused>().is_some_and(|refused| refused.code == code))
@@ -350,7 +383,7 @@ fn listener(socket: &Path) -> Option<libc::pid_t> {
 }
 
 /// The executable a process is running.
-fn executable(pid: libc::pid_t) -> Result<PathBuf> {
+pub(crate) fn executable(pid: libc::pid_t) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -367,7 +400,7 @@ fn executable(pid: libc::pid_t) -> Result<PathBuf> {
 }
 
 /// The processes `pid` started that are still its children.
-fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+pub(crate) fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
     #[cfg(target_os = "macos")]
     {
         let mut pids = vec![0 as libc::pid_t; 4096];

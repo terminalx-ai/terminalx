@@ -615,6 +615,16 @@ export const api = {
   projectOverview: (projectPath: string) => invoke<ProjectOverview>("project_overview", { projectPath }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
+  /** Archive or bring back several sessions at once: all of them, or none when one is not a session (#718). */
+  setSessionsArchived: (sessionIds: string[], archived: boolean) =>
+    invoke<SessionEntry[]>("set_sessions_archived", { sessionIds, archived }),
+  /** This window shows `sessionId` now (or none): the idle sweep leaves it in the list. */
+  setShownSession: (sessionId: string | null) => invoke<void>("set_shown_session", { sessionId }),
+  /**
+   * Archive the sessions nobody has written in for the limit in Settings, in the runtime that knows what each is
+   * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
+   */
+  archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */
@@ -1434,6 +1444,8 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+  /** Settings → Experimental → Native Codex for a Codex launch (#745): the runtime starts the first tab on Codex's app server where it can. */
+  nativeCodex?: boolean;
 }
 
 /** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
@@ -1670,7 +1682,7 @@ export interface UsageWindow {
 }
 
 /** Why a received window did not replace the one shown under its key. */
-export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline";
+export type UsageRefusal = "earlierWindow" | "olderObservation" | "noDeadline" | "notYetStarted" | "endedWindow";
 
 /** A manual refresh that did not reach the provider, and when the button will. */
 export interface UsageRefreshSkip {
@@ -1682,7 +1694,7 @@ export interface UsageRefreshSkip {
 /** Live usage from a Claude turn that was not used, newer than any that was. */
 export interface LiveUsageRefused {
   at: number;
-  reason: "unidentified" | "launchMismatch" | "statuslineMismatch";
+  reason: "unidentified" | "launchUnknown" | "launchMismatch" | "statuslineMismatch";
 }
 
 // The fields marked optional below are absent from a background runtime older than #729.
@@ -1780,30 +1792,68 @@ export interface KillResult {
  */
 export type LocalRuntimeState =
   | { state: "inProcess" }
-  /** `outdated`: the runtime is older than this app, and is replaced with the app's own once none of its agents is mid-turn (#730). */
+  /** `outdated`: the runtime is older than this app, and is replaced with the app's own (#730): handed over at once when it `keeps` what it runs (#765), otherwise once none of its agents is mid-turn. */
   | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. */
   | { state: "unavailable"; message: string }
-  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
-  | { state: "unresponsive"; message: string; epoch: string | null }
-  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. */
-  | { state: "updating"; from: string | null; to: string };
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). `keeps`: restarting it hands what it runs to a fresh runtime first (#765). */
+  | { state: "unresponsive"; message: string; epoch: string | null; keeps: boolean }
+  /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
+  | { state: "updating"; from: string | null; to: string; keeping: boolean };
 
-/** A runtime older than this app, while its replacement waits until nothing it runs would be cut short (#730). */
+/**
+ * A runtime older than this app, until it is replaced (#730): at once, keeping what it runs, when it can be handed over
+ * (#765); otherwise once nothing it runs would be cut short, or as was chosen before the update (#766). The status bar
+ * shows the wait; a switch that failed gets a notice of its own.
+ */
 export interface LocalRuntimeOutdated {
   /** Its version, when it said. */
   running: string | null;
   /** This app's, which the runtime that replaces it shares. */
   app: string;
-  /** What restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for; null until read. */
+  /** When it `keeps` what it runs: what its handover cannot carry, which is never stopped by itself and stops with Restart now. Otherwise what restarting it now would cut short (agents mid-turn or with prompts waiting, terminals, processes), which the switch waits for. Null until read. */
   work: string[] | null;
   /** Why that could not be read, or why the last switch failed. */
   problem: string | null;
-  /** The last switch failed: it is tried again only when asked (Restart now). */
+  /** The last switch failed: it is tried again only when asked (Try again, or Restart now in the status bar). */
   failed: boolean;
+  /** It is handed over to the app's own runtime, keeping its agents and terminals running (#765). */
+  keeps: boolean;
+  /** When it `keeps`: what `work` names, as the runtime names it. Restart now sends it back, so that only what was shown stops. */
+  unkept: LocalRuntimeWorkItem[];
 }
+
+/** One thing a runtime runs, as it names it (`session::retire::Work`). Sent back as it came, never built here. */
+export interface LocalRuntimeWorkItem { kind: string; sessionId?: string; tabId?: string; harness?: string; title?: string }
+
+/** How a runtime that stopped answering is restarted (#765): keeping what it runs, stopping only what its handover cannot carry, or stopping all of it. */
+export type LocalRuntimeRestart = "keeping" | "stoppingUnkept" | "stoppingAll";
+
+/** Why a restart that would have kept what the runtime runs did not happen: nothing was stopped (#765). */
+export interface LocalRuntimeRestartRefused {
+  message: string;
+  /** What its handover cannot carry, by name. */
+  unkept: string[];
+  /** The same, as the runtime names it: sent back with `stoppingUnkept`, which stops only that. */
+  stop: LocalRuntimeWorkItem[];
+}
+
+/** What replacing the attached runtime now would cut short, read before an update installs (#766). */
+export interface LocalRuntimeWork {
+  /** The runtime it was read from. */
+  epoch: string;
+  /** By name; empty when nothing would be cut short. */
+  work: string[];
+  /** When the runtime can be handed over (#765): the same, as it names it. Update now sends it back, so that only what was listed stops. */
+  unkept: LocalRuntimeWorkItem[];
+  /** When it was read, in milliseconds since the Unix epoch. */
+  readAt: number;
+}
+
+/** What the app an update relaunches into does with runtime `epoch` (#766, `update_plan.rs`). */
+export interface LocalRuntimeUpdatePlan { epoch: string; forced: boolean; quietSince: number | null; madeAt: number; madeBy: number; stop: LocalRuntimeWorkItem[] }
 
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
@@ -1811,10 +1861,20 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
-  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
-  restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
-  /** Replace runtime `epoch`, older than this app, with the app's own now, stopping its agents and terminals (#730). */
-  replace: (epoch: string) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch }),
+  /** Restart a runtime that stopped answering; the desktop attaches a fresh one. One that can be handed over keeps what it runs unless `how` says otherwise (#765); a refusal is a `LocalRuntimeRestartRefused`, with nothing stopped. */
+  restart: (epoch: string | null, how: LocalRuntimeRestart = "keeping", stop: LocalRuntimeWorkItem[] = []) =>
+    invoke<LocalRuntimeState>("local_runtime_restart", { epoch, how, stop }),
+  /** Replace runtime `epoch`, older than this app, with the app's own now (#730): handed over, stopping only what of `stop` (what the window showed) it cannot carry (#765), or else stopping its agents and terminals. */
+  replace: (epoch: string, stop: LocalRuntimeWorkItem[] = []) => invoke<LocalRuntimeState>("local_runtime_replace", { epoch, stop }),
+  /** What replacing the attached runtime now would cut short; throws when it cannot tell. */
+  work: () => invoke<LocalRuntimeWork>("local_runtime_work"),
+  /**
+   * Just before an update relaunches: replace runtime `epoch` at once (`forced`), or once nothing it runs would be
+   * cut short. `quietSince` is when a reading found nothing under way; it counts only if nothing is under way now.
+   * `stop`, with Update now, is what the card listed that a handover cannot carry: only that stops (#765).
+   */
+  planUpdate: (epoch: string, forced: boolean, quietSince: number | null, stop: LocalRuntimeWorkItem[] = []) =>
+    invoke<LocalRuntimeUpdatePlan>("local_runtime_plan_update", { epoch, forced, quietSince, stop }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };
@@ -2377,6 +2437,20 @@ export const agentSettings = {
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 
+/** When a finished conversation is archived (#718). */
+export interface ConversationSettings {
+  /** Days a conversation may go without a message before it is archived; 0 is never. */
+  archiveIdleDays: number;
+}
+
+/** The idle limits Settings offers for archiving, as the Rust side accepts them; 0 is never. */
+export const ARCHIVE_IDLE_DAYS = [0, 1, 3, 7, 14, 30] as const;
+
+export const conversationSettings = {
+  get: () => invoke<ConversationSettings>("conversation_settings"),
+  setArchiveIdleDays: (days: number) => invoke<ConversationSettings>("set_archive_idle_days", { days }),
+};
+
 export interface WorkStatusSettings {
   /** Teammates in an organization that connected the repository see what this person works on. */
   shareWithTeam: boolean;
@@ -2478,6 +2552,8 @@ export interface TranscriptionModel {
   speed: number;
   accuracy: number;
   recommended: boolean;
+  /** These weights give words while the reader speaks. */
+  liveWords: boolean;
   installed: boolean;
   downloading: boolean;
   progress?: DownloadProgress;

@@ -21,7 +21,7 @@
     "./workspaceMirror": "./src/workspaceMirror.ts"
   },
   "dependencies": {
-    "linkify-it": "5.0.0"
+    "linkify-it": "5.0.2"
   },
   "devDependencies": {
     "@types/linkify-it": "5.0.0"

@@ -235,7 +235,7 @@ struct Settled {
     known: bool,
 }
 
-fn decoders(kind: CliKind) -> (tui::Decoder, tui::Marker) {
+pub(super) fn decoders(kind: CliKind) -> (tui::Decoder, tui::Marker) {
     match kind {
         CliKind::Claude => (claude::transcript::decode_line, claude::transcript::decode_marked),
         CliKind::Codex => (codex::rollout::decode_line, codex::rollout::decode_marked),

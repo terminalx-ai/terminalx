@@ -50,6 +50,9 @@ pub struct Settings {
     /// When an agent nobody is using is stopped (`idle_agents.rs`). The
     /// runtime that owns the agents reads it for itself.
     pub agents: AgentSettings,
+    /// When a finished conversation is archived (`session_archive.rs`). The
+    /// runtime that knows what each session is doing reads it for itself.
+    pub conversations: ConversationSettings,
     /// Settings → Experimental. Tabs are made by the Rust side, which reads
     /// these when it makes one, so they live here.
     pub experimental: ExperimentalSettings,
@@ -89,6 +92,45 @@ impl AgentSettings {
     /// How long an agent may sit idle, or `None` when it may for ever.
     pub fn idle_limit(&self) -> Option<std::time::Duration> {
         (self.idle_stop_minutes > 0).then(|| std::time::Duration::from_secs(u64::from(self.idle_stop_minutes) * 60))
+    }
+}
+
+/// Conversations nobody has written in for a while are archived (#718): out
+/// of the sidebar's list, under its Show archived, and back at their next
+/// message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConversationSettings {
+    /// Days a conversation may go without a message before it is archived;
+    /// 0 never archives one by itself.
+    #[serde(deserialize_with = "archive_idle_days")]
+    pub archive_idle_days: u32,
+}
+
+/// The idle limits the settings control offers; 0 is "never".
+pub const ARCHIVE_IDLE_DAYS: [u32; 6] = [0, 1, 3, 7, 14, 30];
+/// A week: on 2026-11-01, 57 of 89 sessions were finished, idle for 2 to 58
+/// days (median 7), and nothing had taken any of them out of the list.
+const DEFAULT_ARCHIVE_IDLE_DAYS: u32 = 7;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// archiving at a pace nobody chose.
+fn archive_idle_days<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let days = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(days.filter(|value| ARCHIVE_IDLE_DAYS.contains(value)).unwrap_or(DEFAULT_ARCHIVE_IDLE_DAYS))
+}
+
+impl Default for ConversationSettings {
+    fn default() -> Self {
+        Self { archive_idle_days: DEFAULT_ARCHIVE_IDLE_DAYS }
+    }
+}
+
+impl ConversationSettings {
+    /// How long a conversation may go without a message, or `None` when it
+    /// is never archived for that.
+    pub fn archive_after(&self) -> Option<chrono::Duration> {
+        (self.archive_idle_days > 0).then(|| chrono::Duration::days(i64::from(self.archive_idle_days)))
     }
 }
 
@@ -272,6 +314,7 @@ impl Default for Settings {
             work_status: WorkStatusSettings::default(),
             machine_name: None,
             agents: AgentSettings::default(),
+            conversations: ConversationSettings::default(),
             experimental: ExperimentalSettings::default(),
         }
     }
@@ -395,6 +438,28 @@ mod tests {
 
         for invalid in ["1", "-30", "59.5", "\"60\"", "null", "99999999999"] {
             assert_eq!(read(&format!(r#"{{"agents":{{"idleStopMinutes":{invalid}}}}}"#)).idle_stop_minutes, 60, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn idle_conversations_are_archived_after_a_week_unless_another_offered_limit_is_chosen() {
+        let read = |raw: &str| serde_json::from_str::<Settings>(raw).unwrap().conversations;
+        // A settings file written before the limit existed.
+        let older = read(r#"{"notifications":true}"#);
+        assert_eq!(older.archive_idle_days, 7);
+        assert_eq!(older.archive_after(), Some(chrono::Duration::days(7)));
+
+        for days in ARCHIVE_IDLE_DAYS {
+            let chosen = read(&format!(r#"{{"conversations":{{"archiveIdleDays":{days}}}}}"#));
+            assert_eq!(chosen.archive_idle_days, days);
+            let written = serde_json::to_value(&Settings { conversations: chosen.clone(), ..Settings::default() }).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(written).unwrap().conversations, chosen);
+        }
+        assert_eq!(read(r#"{"conversations":{"archiveIdleDays":0}}"#).archive_after(), None, "Never");
+        assert_eq!(read(r#"{"conversations":{"archiveIdleDays":30}}"#).archive_after(), Some(chrono::Duration::days(30)));
+
+        for invalid in ["2", "-7", "7.5", "\"7\"", "null", "99999999999"] {
+            assert_eq!(read(&format!(r#"{{"conversations":{{"archiveIdleDays":{invalid}}}}}"#)).archive_idle_days, 7, "{invalid}");
         }
     }
 
