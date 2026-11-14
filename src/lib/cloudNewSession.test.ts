@@ -274,7 +274,7 @@ describe("new session in a cloud project", () => {
 
   it("reuses a workspace whose first prompt failed once an agent has run there, as Open workspace does (PRO-23 Q3, #499)", async () => {
     // A failed launch starts no session; the machine is Ready.
-    const failedLaunch = { launch: { phase: "failed", state: "failed", agent: "claude" } };
+    const failedLaunch = { launch: { phase: "failed", state: "failed", agent: "claude", timings: { failedAt: 0 } } };
     const quiet = { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } };
     await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch, ...quiet })]);
     // Nothing has run since: the failure stands, and the workspace is neither reused nor openable.
@@ -290,6 +290,31 @@ describe("new session in a cloud project", () => {
     expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse" });
     // A workspace that needs attention is never a home for a new session.
     await place([item("alpha", { repositories: [api], state: "attention-required", lastActivityAt: 50 })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+  });
+
+  it("reuses a recovered workspace while the server still says attention-required", async () => {
+    const failed = item("alpha", { repositories: [api], state: "attention-required",
+      launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } },
+    });
+    await place([failed]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    await place([{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 1, pendingApprovals: 0, reportedAt: 20 },
+    } }]);
+    await place([{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 0, pendingApprovals: 0, reportedAt: 30 },
+    } }]);
+    const plan = flow.planCloudStart(project("github.com/acme/api"));
+    expect(plan).toMatchObject({ kind: "reuse", node: { item: { workspace: { state: "attention-required" } } } });
+    const key = await flow.startInWorkspace(plan as never, request);
+    expect(key).toBe(`cloud:${ORG}:alpha:alpha-s1`);
+    expect(runtimes.get("alpha")!.created).toHaveLength(1);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+
+    // Recovery of the launch does not authorize reuse through a separate provider failure.
+    await place([{ ...failed, latestOperation: { id: "new-failure", action: "resume", state: "failed", errorCode: "cloud_provider_unavailable" } } as CloudWorkspaceListItem]);
     expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
   });
 

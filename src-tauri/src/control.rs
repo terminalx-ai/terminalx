@@ -834,7 +834,12 @@ impl ControlService {
             "runs.start" => {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
-                Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+                let mut started = json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed});
+                // A `planned` run the person changed before the lead started it (PRO-365).
+                if let Some(edited) = start.edited {
+                    started["edited"] = json!(edited);
+                }
+                Ok(started)
             }
             "runs.checkFailed" => {
                 if from_worker {
