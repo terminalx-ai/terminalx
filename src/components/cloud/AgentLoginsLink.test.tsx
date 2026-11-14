@@ -20,6 +20,7 @@ describe("the way to Agent logins from a message that names them (#450)", () => 
     expect(takeAgentLoginsRequest("org-b")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Open Agent logins" }));
     expect(opened).toHaveBeenCalledTimes(1);
+    expect(opened).toHaveBeenCalledWith("organizations.agentLogins");
     // The Organizations section takes the page it asks for, and the logins section the request to come into view, once each.
     expect(takeOrganizationRequest()).toBe("org-b");
     expect(takeOrganizationRequest()).toBeUndefined();
@@ -49,5 +50,13 @@ describe("the way to Agent logins from a message that names them (#450)", () => 
     fireEvent.click(screen.getByRole("button", { name: "Open Agent logins" }));
     expect(takeOrganizationRequest()).toBeNull();
     expect(takeAgentLoginsRequest("org-a")).toBe(true);
+  });
+
+  it("does not open its containing workspace row when repairing a login", () => {
+    const selectWorkspace = vi.fn();
+    render(<div onClick={selectWorkspace}><AgentLoginsLink message={createErrorMessage("cloud_workspace_agent_credential_required")} organizationId="org-b" /></div>);
+    fireEvent.click(screen.getByRole("button", { name: "Open Agent logins" }));
+    expect(selectWorkspace).not.toHaveBeenCalled();
+    expect(takeOrganizationRequest()).toBe("org-b");
   });
 });

@@ -23,8 +23,9 @@ import { parseArgs } from "node:util";
 const checks = [
   "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "orchestration", "run-limits", "run-sidebar",
   "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras",
-  "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-sections", "local-sections", "session-status",
-  "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup", "dialog-lists",
+  "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "local-sections",
+  "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
+  "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
   "dictation-edits", "environment", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar",
