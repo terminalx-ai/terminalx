@@ -887,10 +887,10 @@ impl Run {
 
     /// The workers whose try is finished: accepted, failed with no further try
     /// to come, superseded by a later try, stopped with the run, or of a skipped
-    /// piece. A try still under way is not: one with no outcome yet, or the
-    /// last try of a piece that is running, being checked, with the lead, or
-    /// blocked waiting for a person's word to its worker. Never the lead's own
-    /// session (the worker of a try it took over), and never a session that also
+    /// piece. Earlier tries are finished even without a recorded outcome.
+    /// A try still under way is not: the last try of a piece running, being
+    /// checked, with the lead, or blocked waiting for a person's word to its
+    /// worker. Never the lead's own session (the worker of a try it took over), and never a session that also
     /// holds a try under way.
     pub fn finished_workers(&self) -> Vec<&SessionRef> {
         let mut finished: Vec<&SessionRef> = Vec::new();
@@ -900,7 +900,7 @@ impl Run {
             for (index, attempt) in piece.tries.iter().enumerate() {
                 let Some(worker) = attempt.worker.as_ref() else { continue };
                 let last = index + 1 == piece.tries.len();
-                if attempt.outcome.is_some() && (!last || last_over) {
+                if !last || (last_over && (attempt.outcome.is_some() || self.state.ended())) {
                     finished.push(worker);
                 } else {
                     at_work.push(&worker.session_id);
@@ -925,6 +925,43 @@ impl Run {
         finished
     }
 
+    /// Workers replaced by a later try, including interrupted tries with no outcome.
+    /// A session reused by any final try or legacy worker, and the lead, stays visible.
+    pub fn superseded_workers(&self) -> Vec<&SessionRef> {
+        let mut protected = vec![self.lead.session_id.as_str()];
+        for piece in &self.pieces {
+            if let Some(worker) = piece.tries.last().and_then(|attempt| attempt.worker.as_ref()) {
+                protected.push(&worker.session_id);
+            }
+            if let Some(worker) = piece.worker.as_ref().filter(|_| piece.tries.is_empty()) {
+                protected.push(&worker.session_id);
+            }
+        }
+        let mut workers = Vec::new();
+        let mut seen = Vec::new();
+        for piece in &self.pieces {
+            for attempt in piece.tries.iter().take(piece.tries.len().saturating_sub(1)) {
+                if let Some(worker) = &attempt.worker {
+                    if !protected.contains(&worker.session_id.as_str()) && !seen.contains(&worker.session_id.as_str()) {
+                        seen.push(worker.session_id.as_str());
+                        workers.push(worker);
+                    }
+                }
+            }
+        }
+        workers
+    }
+
+    /// Successful runs retain their final conversations; unsuccessful ended runs
+    /// archive finished conversations while keeping their worktrees recoverable.
+    pub fn archival_workers(&self) -> Vec<&SessionRef> {
+        match self.state {
+            RunState::Done => self.superseded_workers(),
+            RunState::Failed | RunState::Stopped => self.finished_workers(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The summed estimate of the pieces that carry one, and how many do not.
     pub fn estimate(&self) -> (Option<Estimate>, usize) {
         let known: Vec<Estimate> = self.pieces.iter().filter_map(|piece| piece.estimate).collect();
@@ -937,8 +974,8 @@ impl Run {
 /// workers whose try is finished ([`Run::finished_workers`]), as
 /// `sessions stop --children-of` does: a finished try's idle agent no longer
 /// holds its worktree from `runs cleanup`. A worker still under way is left as
-/// it is, and so is every run that has not ended. Asked again it stops nothing
-/// more: only an agent that is running is stopped. Returns the sessions whose
+/// it is, and so is every run that has not ended. The hook is called on every
+/// retry, including idle sessions whose UI state may be stale. Returns the sessions whose
 /// agent was stopped; one that would not stop is logged and does not keep the
 /// rest running.
 pub(crate) fn stop_finished(run: &Run, stop: &dyn Fn(&SessionRef) -> anyhow::Result<bool>) -> Vec<String> {
@@ -950,8 +987,40 @@ pub(crate) fn stop_finished(run: &Run, stop: &dyn Fn(&SessionRef) -> anyhow::Res
         match stop(worker) {
             Ok(true) => stopped.push(worker.session_id.clone()),
             Ok(false) => {}
-            Err(error) => log::warn!("stop the finished worker {} of run {}: {error:#}", worker.session_id, run.id),
+            Err(error) => log::warn!("finish worker {} of run {}: {error:#}", worker.session_id, run.id),
         }
     }
     stopped
+}
+
+/// Stop through normal session handling before preserving and archiving. Each hook
+/// must be retryable. Preservation or stop failure always leaves the session visible.
+/// Archival never removes a worktree; deletion needs a separate verified merge gate.
+/// Returns failures by session so explicit cleanup cannot delete a conversation
+/// whose stop, preservation or archival failed in this pass.
+pub(crate) fn end_workers(
+    run: &Run,
+    stop: &dyn Fn(&SessionRef) -> anyhow::Result<bool>,
+    preserve: &dyn Fn(&SessionRef) -> anyhow::Result<()>,
+    archive: &dyn Fn(&SessionRef) -> anyhow::Result<()>,
+) -> std::collections::BTreeMap<String, String> {
+    use anyhow::Context;
+
+    let archival = run.archival_workers();
+    let failures = std::cell::RefCell::new(std::collections::BTreeMap::new());
+    stop_finished(run, &|worker| {
+        let result: anyhow::Result<bool> = (|| {
+            let stopped = stop(worker).context("Its agents could not be stopped")?;
+            if archival.iter().any(|candidate| candidate.session_id == worker.session_id) {
+                preserve(worker).context("Its worker state could not be preserved")?;
+                archive(worker).context("Its conversation could not be archived")?;
+            }
+            Ok(stopped)
+        })();
+        if let Err(error) = &result {
+            failures.borrow_mut().insert(worker.session_id.clone(), format!("{error:#}"));
+        }
+        result
+    });
+    failures.into_inner()
 }
