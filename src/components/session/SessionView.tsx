@@ -1,9 +1,8 @@
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { SessionPipelineControls } from "./SessionPipelineControls";
 import { LocalShareButton } from "./ShareSessionDialog";
+import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Server, Terminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -201,6 +200,10 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  *    placeholder ("not available here") is left out. A switch that works
  *    stays, and the location chip is left out instead: the sidebar row says
  *    where the session runs and has the same workspace menu.
+ * 6. In that same narrow header the icon buttons on the right are 32 px
+ *    instead of 40 px wide, still the bar's full height
+ *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
+ *    title's first characters either.
  *
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
@@ -212,6 +215,7 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+const HEADER_TIGHT_BUTTONS = "@max-[360px]/session-header:[&_button:has(>svg:only-child)]:w-8";
 
 /** GitHub's mark (the Octicons `mark-github` outline, MIT), since the icon set carries no brand marks. */
 function GithubMark({ className }: { className?: string }) {
@@ -407,7 +411,6 @@ export function SessionView({
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
   const isGit = useSessionIsGit(session);
   const quick = isQuickChat(session);
-  const [pipelineOpen, setPipelineOpen] = useState(false);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
@@ -532,7 +535,7 @@ export function SessionView({
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
-          className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
+          className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && !compact && (
@@ -564,7 +567,6 @@ export function SessionView({
                 <span className="truncate text-foreground" title={[`On ${own.branch}, a name drawn for the workspace`, workspaceTitle].join("\n")} data-testid="session-title">
                   {session.title}
                 </span>
-                <BranchSize additions={own.branchAdditions ?? 0} deletions={own.branchDeletions ?? 0} />
                 <WorkspaceMenu session={session} branch={own.branch} folder={session.worktreeName ?? null} base={baseNote} onContinue={continueTab} />
               </>
             ) : local && workspaceLabel ? (
@@ -598,7 +600,6 @@ export function SessionView({
                 )}
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
               </span>
-              {own && <BranchSize additions={own.branchAdditions ?? 0} deletions={own.branchDeletions ?? 0} />}
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
             ) : (
@@ -620,14 +621,13 @@ export function SessionView({
             )}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
-            {/* It gives way first, like the chips: at a narrow header it ran under Share. */}
-            {!pipelineRole && !cloud && !quick && isGit && <button type="button" className={cn("ml-1 min-w-0 shrink-[1000] truncate whitespace-nowrap text-xs text-muted-foreground", HEADER_TIGHT)} onClick={() => setPipelineOpen(true)}>Automation</button>}
+            {/* Autopilot is set up in the Branch tab; the header shows it only while it runs (docs/AUTOPILOT-PLACEMENT.md). */}
             {pipelineRole && (
               // The issue pipeline this session is part of, as its author or its reviewer.
               <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${(pipelineRole.pipeline.issue?.identifier ?? pipelineRole.pipeline.branch)} · ${pipelineRole.pipeline.note ?? (pipelineRole.pipeline.issue?.title ?? pipelineRole.pipeline.branch)}`}>
                 <button
                   type="button"
-                  onClick={() => setPipelineOpen(true)}
+                  onClick={() => showPanelTab("branch")}
                   // It gives way like the other chips, down to the dot that says where the pipeline stands (#584 left it rigid, and it ran under the actions).
                   className={cn("ml-1 flex max-w-48 items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground", HEADER_CHIP_YIELDS, HEADER_TIGHT, "gap-x-1.5")}
                   data-testid="session-pipeline"
@@ -712,13 +712,15 @@ export function SessionView({
           )}
 
           {/* At the right edge whatever the width. */}
-          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && "max-w-[70%]")}>
+          {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
+              20px in a 40px-wide button; one beside a label (Share) stays at the label's scale. */}
+          <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={continueTab}>
-                  <MessageSquarePlus />
+                  <SessionContinue />
                 </Button>
               </WithTooltip>
             )}
@@ -735,7 +737,7 @@ export function SessionView({
                   onClick={() => void toggleTabView(session, activeTab, viewPlace)}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
-                  {activeInTerminal ? <MessageSquare /> : <Terminal />}
+                  {activeInTerminal ? <MessageSquare /> : <SquareTerminal />}
                 </Button>
               </WithTooltip>
             )}
@@ -752,7 +754,7 @@ export function SessionView({
                   className={cn("cursor-not-allowed opacity-40 hover:bg-transparent", cloud && HEADER_TIGHT)}
                   onClick={(event) => event.preventDefault()}
                 >
-                  <Terminal />
+                  <SquareTerminal />
                 </Button>
               </WithTooltip>
             )}
@@ -783,7 +785,6 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
-        {(pipelineRole || (!cloud && !quick && isGit)) && <Dialog open={pipelineOpen} onOpenChange={setPipelineOpen}><DialogContent><DialogHeader><DialogTitle>Session pipeline</DialogTitle></DialogHeader><SessionPipelineControls session={session} tabId={activeTab?.id} project={store.projects.find((project) => project.path === session.projectPath)} pipeline={pipelineRole?.pipeline} /></DialogContent></Dialog>}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
@@ -903,6 +904,7 @@ export function SessionView({
         </section>
       </div>
 
+      <PanelPresence side="right" open={!compact && prefs.panelOpen}>
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
       {!compact && prefs.panelOpen && !cloud &&
         (activeTab ? (
@@ -925,6 +927,7 @@ export function SessionView({
             browser
           />
         ))}
+      </PanelPresence>
       {cloud ? (
         cloud.fileSource && (
           <>
@@ -939,17 +942,6 @@ export function SessionView({
         </>
       )}
     </div>
-  );
-}
-
-/** What the branch changes against the default branch, as its pull request would count it. Nothing for a branch that changes nothing. */
-function BranchSize({ additions, deletions }: { additions: number; deletions: number }) {
-  if (!additions && !deletions) return null;
-  return (
-    <span className="ml-1 flex shrink-0 items-center gap-1 font-mono text-[12px] tabular-nums" title="Lines changed on this branch against the default branch, committed or not" data-testid="session-branch-size">
-      {additions > 0 && <span className="text-add">+{additions}</span>}
-      {deletions > 0 && <span className="text-destructive">−{deletions}</span>}
-    </span>
   );
 }
 
@@ -986,7 +978,7 @@ function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session:
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onContinue}>
-              <MessageSquarePlus /> Continue in New Session…
+              <SessionContinue /> Continue in New Session…
             </DropdownMenuItem>
           </>
         )}

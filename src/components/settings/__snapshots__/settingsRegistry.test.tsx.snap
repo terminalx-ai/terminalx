@@ -2,6 +2,7 @@
 
 exports[`settings registry > keeps a reviewable inventory of stable, unique row ids 1`] = `
 [
+  "general.settingsFile",
   "about.updates",
   "about.version",
   "about.checkUpdates",
@@ -77,6 +78,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "storage.projects",
   "storage.removed",
   "storage.leftovers",
+  "storage.recoveryIncidents",
   "transcription.microphone",
   "transcription.mute",
   "transcription.model",

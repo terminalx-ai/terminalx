@@ -232,6 +232,7 @@ pub fn main() -> i32 {
 
 /// Everything a running runtime owns; dropped in `shutdown`.
 struct Runtime {
+    _settings_watcher: crate::store::settings::file::Watcher,
     lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
     sink: Arc<BroadcastSink>,
     host: Arc<crate::harness::host::Host>,
@@ -576,6 +577,7 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     // local history before hooks can publish live activity.
     crate::store::activity::claim();
     let sink = Arc::new(BroadcastSink::new(1024));
+    let settings_watcher = crate::store::settings::file::Watcher::start(sink.clone())?;
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
     #[cfg(unix)]
@@ -725,7 +727,7 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     if adopted.is_some() {
         bridge.thaw();
     }
-    Ok(Runtime { lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines,
+    Ok(Runtime { _settings_watcher: settings_watcher, lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines,
         #[cfg(unix)] guest, #[cfg(unix)] vm_supervisor })
 }
 

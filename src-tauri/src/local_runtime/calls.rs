@@ -146,6 +146,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let session = string(&params, "sessionId")?;
     let tab = string(&params, "tabId")?;
     let value = match method {
+        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
@@ -164,6 +165,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+        "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }
         "interrupt" => json!(manager.interrupt(session, tab)?),
         "stop" => { manager.stop(session, tab)?; Value::Null }

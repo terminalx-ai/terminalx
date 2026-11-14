@@ -24,4 +24,9 @@ describe("settings section search", () => {
     expect(searchSettingsSections("local vms")[0].item.tab).toBe("localVms");
     expect(searchSettingsSections("zzzz-no-such-setting")).toEqual([]);
   });
+
+  it("finds the user settings file in General", () => {
+    expect(searchSettingsSections("json")[0].item.tab).toBe("general");
+    expect(searchSettingsSections("settings file")[0].item.tab).toBe("general");
+  });
 });

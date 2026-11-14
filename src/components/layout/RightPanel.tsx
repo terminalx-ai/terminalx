@@ -22,13 +22,18 @@ import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type Pa
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
-  // Branch holds the pull request; Changes holds committing and history.
+  // Branch holds Overview (the pull request, the next step) and Changes (committing and history) as its two views.
   { id: "branch", label: "Branch", shortcut: "panel.repository" },
-  { id: "changes", label: "Changes", shortcut: "panel.changes" },
   { id: "files", label: "Files", shortcut: "panel.files" },
   { id: "browser", label: "Browser" },
   { id: "ports", label: "Ports" },
   { id: "computer", label: "Computer" },
+];
+
+/** Branch's two views: where it stands, and what is in it. */
+const BRANCH_VIEWS: { id: "branch" | "changes"; label: string; shortcut: ShortcutId }[] = [
+  { id: "branch", label: "Overview", shortcut: "panel.repository" },
+  { id: "changes", label: "Changes", shortcut: "panel.changes" },
 ];
 
 /**
@@ -143,6 +148,13 @@ export function RightPanel({
         : isGit
           ? selectedTab
           : "files";
+  // Branch's two views keep their own tab ids, so every link and shortcut to "changes" lands on that view.
+  const onBranch = tab === "branch" || tab === "changes";
+  // The view Branch reopens on: the one last shown.
+  const [branchView, setBranchView] = useState<"branch" | "changes">(tab === "changes" ? "changes" : "branch");
+  useEffect(() => {
+    if (onBranch) setBranchView(tab);
+  }, [onBranch, tab]);
   const dragging = useRef<{ x: number; w: number } | null>(null);
 
   useEffect(() => {
@@ -201,15 +213,18 @@ export function RightPanel({
         onPointerUp={onUp}
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
-      <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
+      <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 border-b border-hairline px-2">
         {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
           <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
             <button
               type="button"
-              onClick={() => setTab(t.id)}
+              onClick={() => setTab(t.id === "branch" ? branchView : t.id)}
               className={cn(
-                "rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                tab === t.id ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:text-foreground",
+                // Tabs, like the chat's: the open one is underlined on the hairline below.
+                "relative flex h-full items-center px-2 text-xs font-medium transition-colors",
+                (t.id === "branch" ? onBranch : tab === t.id)
+                  ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               {t.label}
@@ -227,6 +242,29 @@ export function RightPanel({
           </Button>
         </WithTooltip>
       </div>
+      {isGit && onBranch && (
+        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs.
+        <div role="tablist" aria-label="Branch" className="flex h-9 shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
+          {BRANCH_VIEWS.map((view) => (
+            <WithTooltip key={view.id} label={view.label} shortcut={view.shortcut}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === view.id}
+                onClick={() => setTab(view.id)}
+                className={cn(
+                  "relative flex items-center px-2 transition-colors",
+                  tab === view.id
+                    ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {view.label}
+              </button>
+            </WithTooltip>
+          ))}
+        </div>
+      )}
       {repositories && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-2 py-1">
           <select

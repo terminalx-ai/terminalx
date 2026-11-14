@@ -43,6 +43,52 @@ selectors accept an attached project's exact path, exact name, or an unambiguous
 
 When automation passes ids between commands, copy the full ids from JSON output.
 
+## User settings
+
+The user file is `~/.raccoon/settings.json`, or `$TERMINALX_HOME/settings.json`
+when that home is set (`RACCOON_HOME` is the legacy fallback). Settings → General
+shows the actual location and offers **Create settings file** when it is absent.
+Keep the file private: it can contain a Linear API key. Do not print or copy the
+whole file into a conversation.
+
+The current precedence is user file → app defaults. A missing key inherits its
+default; removing a key resets it. Repository and organization layers are not
+available yet. The layered resolver and schema follow-up will supply the schema
+and source badges once those features land.
+
+User-facing webview choices are under `preferences`, for example:
+
+```json
+{
+  "preferences": {
+    "sounds": false,
+    "fontScale": "lg",
+    "theme": "slate",
+    "mode": "system"
+  },
+  "agents": { "idleStopMinutes": 60 },
+  "experimental": { "nativeCodex": false }
+}
+```
+
+The first window migrates existing localStorage preferences once, without
+overwriting choices already in the file. Navigation state and pane sizes stay
+local to the webview. Leave `preferencesMigrated` alone.
+
+Edits reload automatically, including editor saves that replace the file.
+Unknown keys and `$schema` are allowed and preserved when Settings saves.
+An invalid type or option produces one error with its key and line in Settings.
+Every valid field still applies, including on a cold start. Only invalid fields
+use their previous value (or their default if none was loaded). Settings refuses
+to overwrite a file containing invalid entries; fix those entries in the editor
+before saving through the UI. Malformed JSON retains the running process's
+previous settings; a process with no readable object uses defaults.
+
+Deleting the file resets all settings to defaults, including clearing the Linear
+credential. Migration removes the old localStorage copies: downgrading to a
+build without settings-file preferences will use that build's defaults for
+those choices. The migrated values remain in `settings.json`.
+
 ## Commands
 
 ### App and discovery

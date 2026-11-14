@@ -5,7 +5,7 @@ import { fileName, shortPath } from "@/lib/paths";
 import { DiffBlock, UnifiedBlock } from "./DiffBlock";
 import { LinkedText } from "./LinkedText";
 import type { ChatLinkContext } from "@/lib/chatLinks";
-import { useDisclosure } from "./disclosures";
+import { useDisclosure, useSearchRevealed, useSearchSection } from "./disclosures";
 import { editLineCounts } from "@/lib/turnChanges";
 
 function iconFor(toolType: string) {
@@ -74,6 +74,9 @@ function targetOf(call: ToolCall, cwd?: string): string {
 
 export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: ToolCall; cwd?: string; defaultOpen?: boolean; linkContext?: ChatLinkContext }) {
   const [open, setOpen] = useDisclosure(`call:${call.callId}`, defaultOpen ?? false);
+  const outputSection = useSearchSection(`output:${call.callId}`);
+  const commandSection = useSearchSection(`command:${call.callId}`);
+  const searching = useSearchRevealed(`call:${call.callId}`);
   const done = !!call.result || !!call.abandoned;
   const pending = !done;
   const failed = call.result?.isError;
@@ -136,8 +139,8 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
           {(call.name === "Bash" || call.name === "shell") && (
             <pre className="mt-1 max-h-72 overflow-auto scrollbar-thin rounded-md bg-well px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap select-text">
               <span className="text-faint">$ </span>
-              <LinkedText text={callTarget(call) ?? ""} context={linkContext} />
-              {call.result?.text ? <><br /><LinkedText text={call.result.text} context={linkContext} /></> : null}
+              <span {...commandSection} data-chat-search-tool><LinkedText text={callTarget(call) ?? ""} context={linkContext} /></span>
+              {call.result?.text ? <><br /><span {...outputSection} data-chat-search-tool><LinkedText text={call.result.text} context={linkContext} /></span></> : null}
             </pre>
           )}
           {call.name !== "Bash" && call.name !== "shell" && call.result?.text && (
@@ -147,7 +150,7 @@ export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: Too
                 failed && "text-destructive",
               )}
             >
-              <LinkedText text={call.result.text.slice(0, 20000)} context={linkContext} />
+              <span {...outputSection} data-chat-search-tool><LinkedText text={searching ? call.result.text : call.result.text.slice(0, 20000)} context={linkContext} /></span>
             </pre>
           )}
         </div>

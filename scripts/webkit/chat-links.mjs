@@ -63,7 +63,7 @@ try {
   await chooser.waitFor({ state: "hidden" });
   assert.deepEqual(await opened(), { system: ["https://example.test/docs"], terminalx: [] });
   assert.equal(await browserTabs.count(), 0, "system browser creates no browser tab");
-  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")).linkBrowser), "system");
+  assert.equal(await page.evaluate(() => window.__PW_STUB__.settingsFile.preferences.linkBrowser), "system");
   await link.click();
   assert.equal(await chooser.count(), 0);
   assert.equal((await opened()).system.length, 2);
@@ -99,7 +99,7 @@ try {
   console.log("ok  context menu still opens the system browser; choosing TerminalX creates its workspace browser page and its tab in the strip");
   await page.reload();
   await sidebar(page);
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")));
+  const saved = await page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   assert.equal(saved.linkBrowser, "terminalx");
   assert.equal(saved.linkBrowserChosen, true);
   console.log("ok  a remembered TerminalX choice survives reloading and the legacy preference migration");

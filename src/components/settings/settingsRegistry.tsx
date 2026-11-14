@@ -63,10 +63,16 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
 
 export const SETTINGS_ROWS = [
   defineSetting({
+    id: "general.settingsFile", section: "general", title: "User settings file",
+    description: "The user settings file reloads when edited. Create it here when absent.",
+    searchTerms: ["settings", "file", "json", "config", "preferences", "reload"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json" },
+  }),
+  defineSetting({
     id: "about.updates", section: "about", title: "Updates",
     description: "Beta gets builds earlier. Either way nothing installs without your say-so.",
     searchTerms: ["about", "updates"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#updateChannel" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.updateChannel" },
   }),
   defineSetting({
     id: "about.version", section: "about", title: "About TerminalX",
@@ -156,37 +162,37 @@ export const SETTINGS_ROWS = [
     id: "appearance.theme", hideDescription: true, section: "appearance", title: "Theme",
     description: "Choose the application color palette.",
     searchTerms: ["appearance", "theme"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.theme" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.theme" },
   }),
   defineSetting({
     id: "appearance.mode", section: "appearance", title: "Mode",
     description: "System follows macOS and switches with it.",
     searchTerms: ["appearance", "mode"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.mode" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),
   defineSetting({
     id: "appearance.textSize", section: "appearance", title: "Text size",
     description: "Scales the transcript and composer. Chrome stays the same size.",
     searchTerms: ["appearance", "text", "size"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#fontScale" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.fontScale" },
   }),
   defineSetting({
     id: "appearance.transcriptLayout", section: "appearance", title: "Transcript layout",
     description: "Wide puts your prompt as a full-width card. Chat right-aligns it like a message.",
     searchTerms: ["appearance", "transcript", "layout"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#transcriptLayout" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.transcriptLayout" },
   }),
   defineSetting({
     id: "appearance.tabBar", section: "appearance", title: "Tab bar",
     description: "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
     searchTerms: ["appearance", "tab", "bar"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#tabStrip" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.tabStrip" },
   }),
   defineSetting({
     id: "appearance.branchSessions", section: "appearance", title: "Sessions on a branch",
     description: "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
     searchTerms: ["appearance", "sessions", "on", "a", "branch"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#branchSessions" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.branchSessions" },
   }),
   defineSetting({
     id: "appearance.openUsage", section: "appearance", title: "Usage",
@@ -246,13 +252,13 @@ export const SETTINGS_ROWS = [
     id: "general.websiteLinks", section: "general", title: "Website links",
     description: "Choose a browser for website links, or ask each time.",
     searchTerms: ["general", "website", "links"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#linkBrowser, linkBrowserChosen" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.linkBrowser, preferences.linkBrowserChosen" },
   }),
   defineSetting({
     id: "general.linkActions", section: "general", title: "Link actions",
     description: "Show both browser destinations in the link action menu.",
     searchTerms: ["general", "link", "actions"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#linkActions" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.linkActions" },
   }),
   defineSetting({
     id: "general.cloudControl", section: "general", title: "Let agents in local sessions control cloud workspaces",
@@ -270,43 +276,43 @@ export const SETTINGS_ROWS = [
     id: "general.sounds", section: "general", title: "Sounds",
     description: "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
     searchTerms: ["general", "sounds"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#sounds" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.sounds" },
   }),
   defineSetting({
     id: "general.animations", section: "general", title: "Pixel raccoon",
     description: "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
     searchTerms: ["general", "pixel", "raccoon"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#animations" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.animations" },
   }),
   defineSetting({
     id: "general.foldToolCalls", section: "general", title: "Fold tool calls",
     description: "Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded.",
     searchTerms: ["general", "fold", "tool", "calls"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#foldToolCalls" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.foldToolCalls" },
   }),
   defineSetting({
     id: "general.turnChanges", section: "general", title: "Show files changed",
     description: "Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it.",
     searchTerms: ["general", "show", "files", "changed"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#turnChanges" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.turnChanges" },
   }),
   defineSetting({
     id: "general.promptMap", section: "general", title: "Prompt map",
     description: "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
     searchTerms: ["general", "prompt", "map"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#promptMap" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.promptMap" },
   }),
   defineSetting({
     id: "general.autocorrect", section: "general", title: "Autocorrect",
     description: "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
     searchTerms: ["general", "autocorrect"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#autocorrect" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.autocorrect" },
   }),
   defineSetting({
     id: "general.useWorktree", section: "general", title: "New sessions use a worktree",
     description: "Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout.",
     searchTerms: ["general", "new", "sessions", "use", "a", "worktree"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#useWorktree" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.useWorktree" },
   }),
   defineSetting({
     id: "general.browser", section: "general", title: "Built-in browser",
@@ -364,13 +370,13 @@ export const SETTINGS_ROWS = [
     id: "organizations.sidebar", section: "organizations", title: "Organizations in sidebar",
     description: "Local is always shown. These display preferences are saved on this desktop. Showing or switching organizations never wakes a workspace.",
     searchTerms: ["organizations", "in", "sidebar"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#organizationDisplay, selectedOrganization" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.organizationDisplay, preferences.selectedOrganization" },
   }),
   defineSetting({
     id: "organizations.organization", section: "organizations", title: "Organization",
     description: "Open an organization’s settings and choose whether it appears in the sidebar.",
     searchTerms: ["organizations", "organization"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#hiddenOrganizations" },
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.hiddenOrganizations" },
   }),
   defineSetting({
     id: "organizations.members", section: "organizations", title: "Members",
@@ -472,7 +478,7 @@ export const SETTINGS_ROWS = [
     id: "shortcuts.reset", section: "shortcuts", title: "Reset shortcuts",
     description: "Restore every app shortcut to its default.",
     searchTerms: ["shortcuts", "reset", "shortcuts"], scope: "user",
-    storage: { kind: "localStorage", location: "raccoon.prefs#shortcuts" }, layout: "content",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.shortcuts" }, layout: "content",
   }),
   defineSetting({
     id: "storage.mergedCleanup", section: "storage", title: "Delete the workspace when its pull request is merged",
@@ -509,6 +515,12 @@ export const SETTINGS_ROWS = [
     description: "Review and remove safe leftover worktrees, branches and agent data.",
     searchTerms: ["storage", "leftovers"], scope: "user",
     storage: { kind: "action", location: "Local repositories and agent conversation stores" }, layout: "content",
+  }),
+  defineSetting({
+    id: "storage.recoveryIncidents", section: "storage", title: "Record recovery incidents",
+    description: "When a session warns that it needs attention, TerminalX notes on this Mac when the warning was raised, how long it was on screen, what you pressed and what became of the turn, so a false warning can be reported with evidence. Only labels, counts and times are kept: never a message, code, a command's output or a file path. Export it to attach to a report; sessions are named by codes that change with every export.",
+    searchTerms: ["storage", "record", "recovery", "incidents", "diagnostics", "needs attention", "warnings", "privacy", "export"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#diagnostics.recoveryIncidents, $TERMINALX_HOME/diagnostics/recovery-incidents.jsonl" },
   }),
   defineSetting({
     id: "transcription.microphone", hideDescription: true, section: "transcription", title: "Microphone",
@@ -685,7 +697,7 @@ export const SETTINGS_ROWS = [
   ...SHORTCUT_ACTIONS.map((action) => defineSetting({
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
     description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys"],
-    scope: "user", storage: { kind: "localStorage", location: `raccoon.prefs#shortcuts.${action.id}` }, layout: "content",
+    scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
   } as const)),
 ] as const;
 export type SettingId = (typeof SETTINGS_ROWS)[number]["id"];
