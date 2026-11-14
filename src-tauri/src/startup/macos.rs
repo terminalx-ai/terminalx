@@ -97,10 +97,14 @@ pub(super) fn observe(state: &mut Snapshot, census: Census, permissions: &[Strin
         if launch.phase == Phase::Running { launch.startup_proven = true; }
         if !matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) { continue; }
         if launch.evidence == Evidence::SmallUnchangingImage && !children.iter().any(|child| child.birth == launch.generation) {
-            // The process vanished or became unreadable. Neither is an exit
-            // status. Keep unknown distinct, and require a fresh health probe.
+            // Disappearance never proves an exit. Only an unproven startup or
+            // an incident's affected launch invalidates health evidence; normal
+            // healthy child churn must not perpetually postpone recovery.
             launch.phase = Phase::Unobserved;
-            state.observation_lost_at = Some(at);
+            if !launch.startup_proven || state.incidents.iter().any(|incident|
+                incident.recovered_at.is_none() && incident.launches.contains(&launch.id)) {
+                state.observation_lost_at = Some(at);
+            }
         }
     }
     for child in children {
@@ -191,6 +195,34 @@ mod tests {
         observe(&mut state, vec![child(40 * 1024 * 1024, 11)], &[], 250_000);
         assert_eq!(state.launches[0].phase, Phase::Running);
     }
+    #[test]
+    fn healthy_child_disappearance_preserves_recovery_boundary_after_restart() {
+        let mut state = Snapshot::default();
+        observe(&mut state, vec![child(96 * 1024, 10)], &[], 0);
+        state.tick(120_000);
+        let mut healthy = child(40 * 1024 * 1024, 20);
+        healthy.pid = 2;
+        healthy.birth = "2:3:4".into();
+        observe(&mut state, vec![child(96 * 1024, 10), healthy], &[], 130_000);
+        let mut state: Snapshot = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        observe(&mut state, vec![child(96 * 1024, 10)], &[], 140_000);
+        assert_eq!(state.observation_lost_at, None, "unrelated healthy churn is not lost startup evidence");
+        let healthy = state.launches.iter().find(|launch| launch.pid == Some(2)).unwrap();
+        assert_eq!(healthy.phase, Phase::Unobserved);
+        assert_eq!(healthy.exit_code, None, "disappearance cannot invent success");
+        observe(&mut state, vec![], &[], 150_000);
+        assert_eq!(state.observation_lost_at, Some(150_000), "losing an affected child still requires fresh health");
+    }
+
+    #[test]
+    fn incomplete_census_still_invalidates_health_for_proven_children() {
+        let mut state = Snapshot::default();
+        observe(&mut state, vec![child(40 * 1024 * 1024, 10)], &[], 0);
+        super::observe(&mut state, Census { children: vec![], complete: false }, &[], 1_000);
+        assert_eq!(state.observation_lost_at, Some(1_000));
+        assert!(state.census_incomplete);
+    }
+
     #[test]
     fn kernel_reads_our_own_identity_and_versions() {
         assert_eq!(bsd(std::process::id()).unwrap().pbi_pid, std::process::id());

@@ -25,8 +25,11 @@ not exit zero. Enumeration is bounded to 2,048 processes and 256 children per
 parent per pass; it is not an exhaustive host-wide process scanner.
 An unreadable root/task or a reached enumeration bound marks the census
 incomplete. An incomplete census cannot release an incident. Losing sight of
-a child records a separate recovery boundary, without inventing progress;
-a previously successful health probe cannot later clear that unknown state.
+an unproven or incident-affected child records a separate recovery boundary,
+without inventing progress; a previously successful health probe cannot later
+clear that unknown state. Unrelated children with proven startup may disappear
+without invalidating health evidence. Their exits remain unknown, and an
+incomplete census still requires fresh health evidence.
 
 This heuristic is intentionally specific to the observed small-image failure.
 It is not proof of a dyld, security, or resource-pressure cause, and it does not
