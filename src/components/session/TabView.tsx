@@ -28,7 +28,7 @@ import { History, MessageSquare, Play, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { openTerminal, useTerminals } from "@/lib/terminal";
+import { getTerminalState, openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
@@ -235,7 +235,7 @@ export function TabView({
 
   // One login terminal and one automatic authenticated retry belong to this turn.
   // Replacing or unmounting its view revokes even work already awaiting Stop.
-  const loginIncident = useMemo(() => ({ launched: false, opening: false, consumed: false, cancelled: false, paused: false }),
+  const loginIncident = useMemo(() => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false }),
     [backend.key, backend.generation, session.id, tab.id, tab.harness, conversation, tab.front, loginTurn]);
   const currentLogin = useRef(loginIncident);
   currentLogin.current = loginIncident;
@@ -691,7 +691,10 @@ export function TabView({
           await pty.write(paneId, "\r");
         }
       : tab.harness === "codex"
-        ? () => openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" })
+        ? async () => {
+            const pane = await openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" });
+            loginIncident.loginPane = pane.id;
+          }
         : undefined;
 
   const loginAllowed = useRef(false);
@@ -699,7 +702,7 @@ export function TabView({
   const loginCurrent = (incident: typeof loginIncident) => currentLogin.current === incident && !incident.cancelled && !incident.paused && loginAllowed.current;
   const refreshLogin = useSignInReadiness(loginPending === loginIncident && loginCurrent(loginIncident) && !recovering ? tab.harness : null, () => {
     const incident = loginIncident;
-    if (!loginCurrent(incident) || incident.consumed || recovery !== "signed_out" || recoveryLock.current) return;
+    if (!loginCurrent(incident) || incident.opening || incident.consumed || recovery !== "signed_out" || recoveryLock.current) return;
     setLoginPending(null);
     void recover("retry", "banner", async () => {
       await backend.stop(tab.id);
@@ -712,8 +715,14 @@ export function TabView({
   async function requestSignIn() {
     const incident = loginIncident;
     if (!signInAgent || !loginCurrent(incident) || recoveryLock.current) return;
+    if (incident.opening) return;
+    if (incident.loginPane && !getTerminalState().panes.some(pane => pane.id === incident.loginPane && !pane.exited)) {
+      incident.loginPane = null;
+      incident.launched = false;
+      incident.consumed = false;
+      setLoginPending(null);
+    }
     if (incident.launched) {
-      if (incident.opening) return;
       // An explicit retry may recover a failed delivery; readiness events
       // alone never re-arm a consumed automatic attempt.
       incident.consumed = false;

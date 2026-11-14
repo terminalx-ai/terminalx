@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openTerminal: vi.fn(), enterTerminalView: vi.fn(), answerPermission: (_request: string, _option: string): void => {}, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
+const mocks = vi.hoisted(() => ({ loginPanes: [] as { id: string; exited: boolean }[], invoke: vi.fn(), openTerminal: vi.fn(), enterTerminalView: vi.fn(), answerPermission: (_request: string, _option: string): void => {}, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -14,9 +14,12 @@ vi.mock("@/lib/tabViews", () => ({
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
   enterTerminalView: mocks.enterTerminalView,
 }));
-vi.mock("@/lib/terminal", async importOriginal => ({
-  ...await importOriginal<typeof import("@/lib/terminal")>(), openTerminal: mocks.openTerminal,
-}));
+vi.mock("@/lib/terminal", async importOriginal => {
+  const original = await importOriginal<typeof import("@/lib/terminal")>();
+  return { ...original, openTerminal: mocks.openTerminal,
+    getTerminalState: () => ({ ...original.getTerminalState(), panes: mocks.loginPanes }),
+  };
+});
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => <div>Terminal output</div> }));
 vi.mock("@/components/chat/Chat", async importOriginal => {
   const { Chat } = await importOriginal<typeof import("@/components/chat/Chat")>();
@@ -64,7 +67,12 @@ beforeEach(() => {
     tabs: [{ id: `tab${seq}`, harness: "codex", model: "original", permissionMode: "default", status: "in_progress", created: "", modified: "" }] };
   mocks.views.views = { [session.tabs[0].id]: "terminal" };
   mocks.invoke.mockReset();
-  mocks.openTerminal.mockReset().mockResolvedValue({ id: "login" });
+  mocks.loginPanes = [];
+  mocks.openTerminal.mockReset().mockImplementation(async () => {
+    const pane = { id: `login-${mocks.loginPanes.length}`, exited: false };
+    mocks.loginPanes.push(pane);
+    return pane;
+  });
   mocks.enterTerminalView.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "load_tab_events" || command === "list_workspaces") return [];
@@ -367,6 +375,22 @@ describe("TabView recovery lifecycle", () => {
     await signedIn();
     await waitFor(() => expect(sends()).toHaveLength(2));
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it.each(["closed", "exited"])("reopens a login terminal that %s before sign-in finished", async ended => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    if (ended === "closed") mocks.loginPanes = [];
+    else mocks.loginPanes[0].exited = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(mocks.openTerminal).toHaveBeenCalledTimes(2));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(mocks.openTerminal).toHaveBeenCalledTimes(2);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
   });
 
   it("allows another explicit attempt when the login terminal failed to open", async () => {
