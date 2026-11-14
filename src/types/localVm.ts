@@ -60,6 +60,8 @@ export interface LocalVmTask {
   createdAt: string;
   updatedAt: string;
   lastEventSeq: number;
+  /** Recorded before the guest was first asked to start it. */
+  dispatchStarted?: boolean;
   /** Guest events past the host's per-task budget: counted, not kept. */
   eventsDropped?: number;
   events: LocalVmTaskEvent[];

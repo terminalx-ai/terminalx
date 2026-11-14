@@ -36,6 +36,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const [patchRoot, setPatchRoot] = useState(destinationRoot);
   const [patchResult, setPatchResult] = useState<LocalVmPatchResult | null>(null);
   const [takeoverOpen, setTakeoverOpen] = useState(false);
+  const [abandonOpen, setAbandonOpen] = useState(false);
   const lock = useRef(false);
   const finished = taskFinished(task.status);
   const canReply = !readOnly && !finished && task.status !== "canceling" && task.status !== "outcomeUnknown";
@@ -67,6 +68,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         {task.input.desktop && !finished ? <Button size="xs" variant="outline" disabled={!!busy || readOnly || task.status === "canceling"} onClick={() => setTakeoverOpen(true)}>Take over desktop…</Button> : null}
         {manualControl ? <Button size="xs" variant="outline" disabled={!!busy || readOnly} onClick={() => void run("Returning desktop control to queued tasks", async () => { setResult(await localVmRequest("environment.releaseDesktop", { environmentId: task.target.environmentId, confirm: true })); })}>Return control to queued tasks</Button> : null}
         {task.input.desktop && !finished ? <Button size="xs" variant="outline" disabled={!!busy || readOnly || task.status === "canceling"} onClick={() => void run("Requesting cancellation", async () => { setResult(await localVmRequest("task.cancel", { target: task.target })); })}>Cancel task</Button> : null}
+        {!finished && task.dispatchStarted ? <Button size="xs" variant="ghost" disabled={!!busy || readOnly} onClick={() => setAbandonOpen(true)}>Abandon task…</Button> : null}
       </div>
       {task.input.desktop ? <p className="text-muted-foreground">Open desktop opens an interactive viewer. The workflow may still control it; take over before changing apps. Closing the viewer never stops a task. Other workflows sharing this VM may also use its desktop.</p> : <p className="text-muted-foreground">This task uses the Linux guest shell and files. Attached desktop tools wait until this workflow releases the container.</p>}
       {manualControl ? <p role="status" aria-label="Manual desktop control" className="text-warning">Manual desktop control is held. Queued tasks in this VM wait until you return control. Closing the viewer does not release this hold, and returning control does not resume the canceled task.</p> : null}
@@ -116,6 +118,13 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
             setResult(await localVmRequest("environment.desktop", { environmentId: task.target.environmentId, target: task.target }));
           });
         }}>Stop task and take over</Button></DialogFooter>
+      </DialogContent></Dialog>
+      <Dialog open={abandonOpen} onOpenChange={setAbandonOpen}><DialogContent>
+        <DialogHeader><DialogTitle>Abandon this task?</DialogTitle><DialogDescription>Only when its guest can no longer answer, because the VM is gone or will not start. The task ends as failed with an unknown outcome: whatever its worker was doing is not undone or replayed, and the guest keeps its own record. Stop all and Delete VM then stop waiting for it. If the guest answers, cancel the task instead.</DialogDescription></DialogHeader>
+        <DialogFooter><Button variant="ghost" onClick={() => setAbandonOpen(false)}>Keep waiting</Button><Button variant="destructive" disabled={!!busy || readOnly} onClick={() => {
+          setAbandonOpen(false);
+          void run("Abandoning task", async () => { setResult(await localVmRequest("task.abandon", { target: task.target, confirm: true })); });
+        }}>Abandon task</Button></DialogFooter>
       </DialogContent></Dialog>
       <Dialog open={!!patch} onOpenChange={(open) => { if (!open) setPatch(null); }}><DialogContent>
         <DialogHeader><DialogTitle>Import patch into this Mac?</DialogTitle><DialogDescription>This explicitly changes files and the Git index in the destination below. The backend checks the patch against the destination and reports conflicts. Inspect the artifact first; a conflict requires manual resolution. Guest files are never opened as host paths.</DialogDescription></DialogHeader>

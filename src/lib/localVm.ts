@@ -57,6 +57,7 @@ interface Requests {
   "environment.releaseDesktop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
   "task.submit": { params: LocalVmSubmission; result: LocalVmTask };
   "task.cancel": { params: { target: LocalVmTaskTarget }; result: LocalVmJson };
+  "task.abandon": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmJson };
   "task.followup": { params: { target: LocalVmTaskTarget; text: string; idempotencyKey: string }; result: LocalVmJson };
   "task.recover": { params: LocalVmRecoveryRequest; result: LocalVmJson };
   "task.takeover": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmTakeoverResult };

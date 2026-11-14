@@ -24,6 +24,21 @@ describe("durable local VM task actions", () => {
     expect(screen.getByRole("status", { name: "Latest task progress" }).textContent).toBe("Latest progress: Checking the loaded page");
   });
 
+  it("abandons a dispatched task only on confirmation, and never one not yet sent to its guest", async () => {
+    const view = render(<LocalVmTaskCard task={task({ status: "queued", dispatchStarted: false })} destinationRoot="/project" readOnly={false} />);
+    expect(screen.queryByRole("button", { name: "Abandon task…" })).toBeNull();
+    view.rerender(<LocalVmTaskCard task={task({ status: "outcomeUnknown", dispatchStarted: true })} destinationRoot="/project" readOnly={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Abandon task…" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toMatch(/can no longer answer/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Keep waiting" }));
+    expect(calls("task.abandon")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Abandon task…" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Abandon task" }));
+    await waitFor(() => expect(calls("task.abandon")).toHaveLength(1));
+    expect(calls("task.abandon")[0][1].params).toEqual({ target: task().target, confirm: true });
+  });
+
   it("states when no readable task progress has been received", () => {
     render(<LocalVmTaskCard task={task()} destinationRoot="/project" readOnly={false} />);
     expect(screen.getByRole("status", { name: "Latest task progress" }).textContent).toContain("No status, tool activity or text received yet.");

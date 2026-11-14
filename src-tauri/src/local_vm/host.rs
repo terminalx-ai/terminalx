@@ -312,10 +312,44 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             }
             Ok(result)
         }
+        "task.abandon" => abandon(&journal, &params),
         "task.artifact" => artifact(&journal, &params),
         "task.applyPatch" => apply_patch(&journal, &params),
         _ => bail!("Unknown local VM method"),
     }
+}
+
+/// Ends a task whose guest can no longer answer (review 2): a VM that is gone
+/// or will not boot otherwise held Stop all and Delete VM refused for good.
+/// Only on the person's confirmation, only while the guest cannot be reached
+/// (one that answers is cancelled as usual), and the task ends failed with its
+/// outcome unknown: nothing is replayed and the guest keeps its own record,
+/// whose lease still keeps a later task from starting beside a live worker.
+fn abandon(journal: &Journal, params: &Value) -> Result<Value> {
+    confirm(params)?;
+    let target: TaskTarget = serde_json::from_value(params.get("target").cloned().context("target required")?)?;
+    let (task, env) = bound_environment(journal, &target)?;
+    if task.status.terminal() {
+        return Ok(serde_json::to_value(task)?);
+    }
+    abandon_using(journal, &target, guest_rpc(&env, "describe", json!({})))
+}
+
+fn abandon_using(journal: &Journal, target: &TaskTarget, reached: Result<Value>) -> Result<Value> {
+    let error = match reached {
+        Ok(_) => bail!("The guest answered, so cancel this task instead; it was not abandoned"),
+        Err(error) => crate::remote::protocol::redact(&format!("{error:#}")),
+    };
+    let task = journal.transaction(|state| {
+        let task = journal::bound(state, target)?;
+        if !task.status.terminal() {
+            task.status = journal::TaskStatus::Failed;
+            task.detail = Some(format!("Abandoned: the guest could not be reached ({error}). Whatever its worker was doing has an unknown outcome; nothing was replayed, and the guest keeps its own record."));
+            task.updated_at = journal::now();
+        }
+        Ok(task.clone())
+    })?;
+    Ok(serde_json::to_value(task)?)
 }
 
 pub(super) fn retain_cancellation(task: &mut Task, response: &Value) {
@@ -1570,6 +1604,24 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_task_whose_guest_cannot_answer_can_be_abandoned_and_one_that_answers_cannot() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Guest", "local:gone").unwrap();
+        let input = journal::TaskInput { parent_session_id: journal::new_id(), parent_tab_id: journal::new_id(), parent_message_id: journal::new_id(),
+            environment_id: env.id.clone(), prompt: "p".into(), harness: "codex".into(), model: String::new(), effort: None,
+            permission_mode: "manual".into(), files: vec![], desktop: true };
+        let task = journal.submit("gone", input).unwrap();
+        journal.transaction(|s| { let t = journal::bound(s, &task.target)?; t.status = journal::TaskStatus::OutcomeUnknown; t.dispatch_started = true; Ok(()) }).unwrap();
+        assert!(abandon_using(&journal, &task.target, Ok(json!({}))).is_err(), "a guest that answers is cancelled instead");
+        assert_eq!(journal.read().unwrap().tasks[&task.target.task_id].status, journal::TaskStatus::OutcomeUnknown);
+        let ended: Task = serde_json::from_value(abandon_using(&journal, &task.target, Err(anyhow::anyhow!("VM is gone"))).unwrap()).unwrap();
+        assert_eq!(ended.status, journal::TaskStatus::Failed);
+        assert!(ended.detail.unwrap().contains("unknown outcome"));
+        assert!(!super::super::supervisor::state_busy(&journal.read().unwrap()), "Stop all and Delete VM are no longer held");
+        assert!(abandon(&journal, &json!({"target":task.target})).is_err(), "only on confirmation");
+    }
     /// Review 2: a stock Cua VM's shared account has a published password, so
     /// it is neither enrolled nor signed in to a provider, before any Cua call.
     #[test]
