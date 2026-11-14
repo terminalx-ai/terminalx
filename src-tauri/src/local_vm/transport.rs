@@ -56,11 +56,12 @@ pub(super) fn validate_description(env: &Environment, description: &Value) -> Re
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+// camelCase fields, as the journal and the web view have always read them.
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Transport {
     #[default]
     MacosLume,
-    LinuxContainer { runtime: Runtime, id: String, #[serde(rename = "runtimeSha256")] runtime_sha256: String },
+    LinuxContainer { runtime: Runtime, id: String, runtime_sha256: String },
 }
 
 impl Transport {
@@ -156,6 +157,18 @@ mod tests {
     use super::*;
     use super::super::journal::{new_id, Journal, TaskInput, TaskStatus};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_transport_keeps_the_shape_journals_already_hold() {
+        let stored = json!({"kind":"linuxContainer","runtime":"docker","id":"a".repeat(64),"runtimeSha256":"b".repeat(64)});
+        let transport = Transport::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64), runtime_sha256: "b".repeat(64) };
+        assert_eq!(serde_json::to_value(&transport).unwrap(), stored);
+        assert_eq!(serde_json::from_value::<Transport>(stored.clone()).unwrap(), transport);
+        assert_eq!(serde_json::to_value(Transport::MacosLume).unwrap(), json!({"kind":"macosLume"}));
+        let mut snake = stored;
+        snake["runtime_sha256"] = snake.as_object_mut().unwrap().remove("runtimeSha256").unwrap();
+        assert!(serde_json::from_value::<Transport>(snake).is_err(), "unknown fields stay refused");
+    }
 
     fn input(environment_id: &str) -> TaskInput {
         TaskInput { parent_session_id: new_id(), parent_tab_id: new_id(), parent_message_id: "selected".into(),
