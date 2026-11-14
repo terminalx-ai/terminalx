@@ -226,7 +226,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(async () => {});
     expect(mocks.enterTerminalView).toHaveBeenCalledOnce();
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]));
     expect(mocks.openTerminal).not.toHaveBeenCalled();
     expect(sends()).toHaveLength(0);
     await signedIn("claude");
@@ -248,7 +248,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByText(/After sign-in is verified/);
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]));
     await signedIn("claude");
     await waitFor(() => expect(sends()).toHaveLength(1));
   });
@@ -302,6 +302,31 @@ describe("TabView recovery lifecycle", () => {
     await act(async () => settle());
     expect(sends()).toHaveLength(0);
     if (change !== "write admission") expect(screen.queryByText("Needs attention")).toBeNull();
+  });
+
+  it("allows an explicit retry after authenticated recovery cannot confirm exit", async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    let failStop = true;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => {
+      if (command === "stop_tab" && failStop) {
+        failStop = false;
+        return Promise.reject(new Error("Could not confirm process exit"));
+      }
+      return original(command, args);
+    });
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(sends()).toHaveLength(0);
+    // A failed stop must not loop automatically or require another login.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
 
   it("allows another explicit attempt when the login terminal failed to open", async () => {

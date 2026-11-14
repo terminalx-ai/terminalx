@@ -235,7 +235,7 @@ export function TabView({
 
   // One login terminal and one authenticated retry belong to this turn.
   // Replacing or unmounting its view revokes even work already awaiting Stop.
-  const loginIncident = useMemo(() => ({ launched: false, consumed: false, cancelled: false, paused: false }),
+  const loginIncident = useMemo(() => ({ launched: false, opening: false, consumed: false, cancelled: false, paused: false }),
     [backend.key, backend.generation, session.id, tab.id, tab.harness, conversation, tab.front, loginTurn]);
   const currentLogin = useRef(loginIncident);
   currentLogin.current = loginIncident;
@@ -696,11 +696,11 @@ export function TabView({
   const refreshLogin = useSignInReadiness(loginPending === loginIncident && loginCurrent(loginIncident) && !recovering ? tab.harness : null, () => {
     const incident = loginIncident;
     if (!loginCurrent(incident) || incident.consumed || recovery !== "signed_out" || recoveryLock.current) return;
-    incident.consumed = true;
     setLoginPending(null);
     void recover("retry", "banner", async () => {
       await backend.stop(tab.id);
       if (!loginCurrent(incident)) return null;
+      incident.consumed = true;
       return backend.send(tab.id, RECOVERY_PROMPT, []);
     });
   });
@@ -709,10 +709,13 @@ export function TabView({
     const incident = loginIncident;
     if (!signInAgent || !loginCurrent(incident) || incident.consumed || recoveryLock.current) return;
     if (incident.launched) {
+      if (incident.opening) return;
       if (loginPending === incident) await refreshLogin();
+      else setLoginPending(incident);
       return;
     }
     incident.launched = true;
+    incident.opening = true;
     const done = actions.start("sign_in");
     try {
       await signInAgent();
@@ -724,7 +727,7 @@ export function TabView({
       incident.launched = false;
       if (loginCurrent(incident)) setError(safeError(e));
       done("failed", failure(e));
-    }
+    } finally { incident.opening = false; }
   }
 
   // Pending requests and recovery sit with the composer in the chat, where the
