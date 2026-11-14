@@ -124,7 +124,7 @@ try {
       if (shots) await page.screenshot({ path: join(shots, `01-header-${mode}-${width}.png`) });
 
       // ⌘R (Ctrl+Alt+R elsewhere) with three visible actions: the menu opens as a picker, nothing runs.
-      await page.getByTestId("composer").first().click().catch(() => undefined);
+      await page.locator("[data-composer]:visible").first().click();
       await page.keyboard.press(process.platform === "darwin" ? "Meta+r" : "Control+Alt+r");
       const menu = page.getByTestId("run-menu");
       await menu.waitFor();
