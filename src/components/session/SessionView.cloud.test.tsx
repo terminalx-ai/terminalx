@@ -435,6 +435,7 @@ afterEach(() => {
   resetPanelTabs();
   resetPurged();
   client.close();
+  vi.useRealTimers();
 });
 
 const composer = () => screen.getByTestId("composer");
@@ -467,6 +468,7 @@ describe("the same SessionView for local and cloud sessions", () => {
   });
 
   it("renders a local session and a cloud session with one component", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     guard.handlers.session_share_status = () => ({ active: false, links: [], people: [], leases: [], notes: [], activity: [], queue: [] });
     guard.strict = false;
     guard.local = () => [];
@@ -507,6 +509,8 @@ describe("the same SessionView for local and cloud sessions", () => {
     expect(screen.getByText("acme/api")).toBeTruthy();
     // A VM path never becomes a local cwd.
     expect(composer().dataset.cwd).toBe("");
+    // Closing the local view must stop its branch polling before cloud takes over.
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(guard.violations).toEqual([]);
   });
 

@@ -777,7 +777,7 @@ export function SessionView({
             {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
-            {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={session.id} session={session} tabId={activeTab?.id} />}
+            {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
