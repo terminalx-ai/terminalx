@@ -87,7 +87,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("TabView recovery lifecycle", () => {
-  const signedIn = (harness = "codex") => act(() => announceReadiness(harness, { state: "ready", checkedAt: new Date().toISOString(), version: null }));
+  const signedIn = async (harness = "codex") => {
+    // A visible pending banner can precede its passive readiness subscription.
+    // Finish mounting that observer before simulating an external login result.
+    await act(async () => {});
+    await act(async () => announceReadiness(harness, { state: "ready", checkedAt: new Date().toISOString(), version: null }));
+  };
   const sends = () => mocks.invoke.mock.calls.filter(([command]) => command === "send_message");
 
   it("opens one login for repeated sign-in and retry clicks, and retries once only after verified authentication", async () => {
@@ -104,15 +109,15 @@ describe("TabView recovery lifecycle", () => {
     await act(async () => {});
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
     expect(sends()).toHaveLength(0);
-    signedIn("claude");
+    await signedIn("claude");
     expect(sends()).toHaveLength(0);
-    signedIn();
-    signedIn();
+    await signedIn();
+    await signedIn();
     await waitFor(() => expect(sends()).toHaveLength(1));
     expect(sends()[0][1]).toEqual(expect.objectContaining({ text: RECOVERY_PROMPT, images: [] }));
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "stop_tab")).toHaveLength(1);
     expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
-    signedIn();
+    await signedIn();
     expect(sends()).toHaveLength(1);
   });
 
@@ -141,7 +146,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText(/After sign-in is verified/);
-    signedIn();
+    await signedIn();
     await waitFor(() => expect(sends()).toHaveLength(1));
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
@@ -153,13 +158,13 @@ describe("TabView recovery lifecycle", () => {
     await screen.findByText(/After sign-in is verified/);
     fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
     await screen.findByRole("dialog", { name: "Continue dialog" });
-    signedIn();
+    await signedIn();
     await act(async () => {});
     expect(sends()).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
     await screen.findByText(/After sign-in is verified/);
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    signedIn();
+    await signedIn();
     await waitFor(() => expect(sends()).toHaveLength(1));
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
@@ -172,7 +177,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
     await screen.findByRole("dialog", { name: "Continue dialog" });
     fireEvent.click(screen.getByRole("button", { name: "Deliver continuation" }));
-    signedIn();
+    await signedIn();
     await act(async () => {});
     expect(sends()).toHaveLength(0);
   });
@@ -199,7 +204,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText(/After sign-in is verified/);
     mounted.rerender(<Harness backend={{ ...backend, caps: { ...backend.caps, write: false } }} />);
-    signedIn();
+    await signedIn();
     await act(async () => {});
     expect(sends()).toHaveLength(0);
     const original = mocks.invoke.getMockImplementation()!;
@@ -224,7 +229,7 @@ describe("TabView recovery lifecycle", () => {
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
     expect(mocks.openTerminal).not.toHaveBeenCalled();
     expect(sends()).toHaveLength(0);
-    signedIn("claude");
+    await signedIn("claude");
     await waitFor(() => expect(sends()).toHaveLength(1));
   });
 
@@ -244,7 +249,7 @@ describe("TabView recovery lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByText(/After sign-in is verified/);
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
-    signedIn("claude");
+    await signedIn("claude");
     await waitFor(() => expect(sends()).toHaveLength(1));
   });
 
@@ -257,7 +262,7 @@ describe("TabView recovery lifecycle", () => {
     if (cancellation === "unmount") mounted.unmount();
     if (cancellation === "replacement") act(() => upsertSession({ ...session, tabs: [{ ...session.tabs[0], conversation: "replacement" }] }));
     if (cancellation === "new turn") emit({ type: "user_message", text: "A new task", queued: false });
-    signedIn();
+    await signedIn();
     await act(async () => {});
     expect(sends()).toHaveLength(0);
   });
@@ -271,13 +276,14 @@ describe("TabView recovery lifecycle", () => {
     emit({ type: "recovery", kind: "signed_out" });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText(/After sign-in is verified/);
-    signedIn();
+    await signedIn();
+    await waitFor(() => expect(settle).toBeTypeOf("function"));
     mounted.unmount();
     await act(async () => settle());
     expect(sends()).toHaveLength(0);
   });
 
-  it.each(["replacement", "new turn", "write admission"])("does not replay after %s changes while awaiting confirmed exit", async change => {
+  it.each(["replacement", "backend replacement", "new turn", "write admission"])("does not replay after %s changes while awaiting confirmed exit", async change => {
     let settle!: () => void;
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command: string, args: unknown) => command === "stop_tab"
@@ -287,10 +293,11 @@ describe("TabView recovery lifecycle", () => {
     emit({ type: "recovery", kind: "signed_out" });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText(/After sign-in is verified/);
-    signedIn();
-    expect(settle).toBeTypeOf("function");
+    await signedIn();
+    await waitFor(() => expect(settle).toBeTypeOf("function"));
     if (change === "replacement") act(() => upsertSession({ ...session, tabs: [{ ...session.tabs[0], conversation: "replacement" }] }));
     if (change === "new turn") emit({ type: "user_message", text: "A new task", queued: false });
+    if (change === "backend replacement") mounted.rerender(<Harness backend={{ ...backend, generation: "replacement" }} />);
     if (change === "write admission") mounted.rerender(<Harness backend={{ ...backend, caps: { ...backend.caps, write: false } }} />);
     await act(async () => settle());
     expect(sends()).toHaveLength(0);
@@ -317,10 +324,10 @@ describe("TabView recovery lifecycle", () => {
     emit({ type: "recovery", kind: "signed_out" });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await screen.findByText(/After sign-in is verified/);
-    signedIn();
+    await signedIn();
     await waitFor(() => expect(sends()).toHaveLength(1));
     await act(async () => {});
-    signedIn();
+    await signedIn();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(async () => {});
     expect(sends()).toHaveLength(1);
