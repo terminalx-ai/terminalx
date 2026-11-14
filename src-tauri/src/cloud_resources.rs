@@ -172,6 +172,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn phase2_desktop_contract_resources_keep_bytes_ms_and_cpu_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = observe(dir.path());
+        assert_eq!(value["v"], 1);
+        assert!(value["observedAt"].as_i64().unwrap() > 1_000_000_000_000);
+        assert!(value.get("cpu").is_none(), "v1 does not negotiate CPU telemetry");
+        assert_eq!(memory("MemTotal: 42 kB\nMemAvailable: 20 kB\n"), Some((42 * 1024, 20 * 1024)));
+        assert_eq!(observe(&dir.path().join("absent"))["storage"], Value::Null);
+        assert_eq!(within_limit(None, None), None);
+    }
+
+    #[test]
     fn memory_is_read_in_bytes_and_never_guessed() {
         let meminfo = "MemTotal:        4000000 kB\nMemFree:          100000 kB\nMemAvailable:     300000 kB\nBuffers: 1 kB\n";
         assert_eq!(memory(meminfo), Some((4_000_000 * 1024, 300_000 * 1024)));

@@ -59,6 +59,8 @@ mod codex_device_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
+mod desktop_inbox;
+#[cfg(feature = "desktop")]
 mod organization_github_app;
 #[cfg(feature = "desktop")]
 mod organization_members;
@@ -631,6 +633,13 @@ pub fn run() {
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
+            commands::phase2_desktop_contracts_available,
+            commands::desktop_inbox,
+            commands::desktop_inbox_stream,
+            commands::desktop_inbox_receipts,
+            commands::cloud_workspace_read_marker,
+            commands::cloud_workspace_restart,
+            commands::cloud_workspace_details,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
