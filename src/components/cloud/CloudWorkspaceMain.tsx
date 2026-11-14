@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Cloud, Loader2, PanelLeft, Play } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,8 @@ import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { accessLostReason, clearCollabAccess } from "@/lib/cloudCollab";
 import { closeCloudConnection, retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { CloudWorkspaceAttention, takeAttentionSessionRequest, useAttentionSessionRequest } from "./CloudWorkspaceAttention";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { useCloudAgentRan } from "@/lib/cloudSessions";
@@ -23,9 +25,10 @@ import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 
-/** What selecting a workspace may do: connect to one that is running or stopped, never wake it; nothing while it starts, is deleted or needs attention. */
+/** Connect to a running or stopped workspace without waking it, including a recovered launch whose server state still lags. */
 function openable(item: CloudWorkspaceListItem): boolean {
-  return ["ready", "suspended", "archived"].includes(item.workspace.state) && !deletion(item) && !archiving(item);
+  const recovered = item.workspace.state === "attention-required" && !resolveCloudAttention(item);
+  return (["ready", "suspended", "archived"].includes(item.workspace.state) || recovered) && !deletion(item) && !archiving(item);
 }
 
 /**
@@ -61,7 +64,12 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const listedRole = item?.workspace.you?.role;
   const sharedAgain = !!refusal && !refusal.autoSpent && !!listedRole && listedRole !== "none" && listRequestedAt !== null && listRequestedAt > refusal.at;
   const locked = !!refusal && !sharedAgain;
-  const canOpen = !!item && openable(item) && !locked;
+  const [inspection, setInspection] = useState<string | null>(null);
+  const sessionRequest = useAttentionSessionRequest();
+  const requestedInspection = sessionRequest?.key === workspaceKey;
+  const inspecting = inspection === workspaceKey || requestedInspection;
+  const canOpen = !!item && !locked && (openable(item)
+    || (inspecting && item.workspace.state === "attention-required" && !deletion(item) && !archiving(item)));
   // A stopped workspace that was resumed is reconnected, so the view follows it to running.
   const running = item?.workspace.state === "ready";
   // The lease, and through it the workspace's connection of now: the manager
@@ -152,7 +160,18 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   };
 
   const agentRan = useCloudAgentRan(item);
+  const attention = item ? resolveCloudAttention(item, { agentRan, connection: state.state }) : null;
   const rowState = item ? workspaceRowState(item, agentRan) : null;
+  const [agentRequest, setAgentRequest] = useState({ key: workspaceKey, revision: 0 });
+  const inspect = useCallback(() => {
+    setInspection(workspaceKey);
+    setAgentRequest((value) => ({ key: workspaceKey, revision: value.key === workspaceKey ? value.revision + 1 : 1 }));
+  }, [workspaceKey]);
+  useEffect(() => {
+    if (!requestedInspection || !sessionRequest) return;
+    inspect();
+    takeAttentionSessionRequest(sessionRequest);
+  }, [sessionRequest, requestedInspection, inspect]);
   const stopped = item?.workspace.state === "suspended";
   const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
@@ -184,6 +203,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           </Button>
         )}
       </header>
+      {item && attention && canOpen && !locked && <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} />}
       {stopped && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.
@@ -215,9 +235,9 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           {forcing && <WorkspaceLifecycleDialog request={{ item, action: "delete" }} onClose={() => setForcing(false)} />}
         </div>
       ) : !canOpen ? (
-        <Centered>{describeWorkspace(item)}</Centered>
+        <Centered>{attention ? <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} /> : describeWorkspace(item)}</Centered>
       ) : opened ? (
-        <WorkspaceView key={workspaceTargetKey(opened.connection.target)} opened={opened} state={state} />
+        <WorkspaceView key={workspaceTargetKey(opened.connection.target)} opened={opened} state={state} agentRequest={agentRequest.key === workspaceKey ? agentRequest.revision : 0} initialAgent={!!attention} />
       ) : (
         !error && (
           <Centered>
