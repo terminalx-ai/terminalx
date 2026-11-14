@@ -10,7 +10,7 @@ import { useExperimentalSettings } from "@/lib/experimentalSettings";
 
 /** What the lead is asked when a person presses Plan a run, or starts with Orchestrate. The lead decides whether splitting helps at all. */
 export const PLAN_A_RUN_PROMPT =
-  "Plan an orchestration run for the task we are working on. First decide whether splitting it helps: do not split work whose steps each need the one before, or that fits in one session. If it does help, write the plan as a JSON file and store it with `terminalx runs create --from <plan.json> --json` (the plan's fields and rules are under \"Orchestration runs\" in `terminalx skills get terminalx-cli`). Then tell me the plan is ready and stop: I approve it in the Run view before any worker starts. If splitting does not help, say why and go on in this session.";
+  "Plan an orchestration run for the task we are working on. First decide whether splitting it helps: do not split work whose steps each need the one before, or that fits in one session. If it does help, write the plan as a JSON file and store it with `terminalx runs create --from <plan.json> --json` (the plan's fields and rules are under \"Orchestration runs\" in `terminalx skills get terminalx-cli`). Then tell me the plan is ready and stop: no worker starts until I start it from the Run view, or ask you to start it with `terminalx runs start` where this project asks for no approval. If splitting does not help, say why and go on in this session.";
 
 /** The Orchestrate button's tooltip: what it does, and that the run asks first. */
 export const ORCHESTRATE_TITLE =

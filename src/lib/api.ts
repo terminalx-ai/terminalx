@@ -2835,6 +2835,8 @@ export const orchestration = {
   /** The model each tier of the routing table runs on today, per agent. */
   tierModels: (refresh = false) => invoke<TierModels>("orchestrator_tier_models", { refresh }),
   approve: (id: string) => invoke<RunStart>("orchestration_approve", { id }),
+  /** Start a `planned` run, of a project that asks for no approval, as the person (PRO-365); the lead is told. */
+  start: (id: string) => invoke<RunStart>("orchestration_start", { id }),
   /** Stop a run, or discard a plan nobody approved. */
   stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),
   updatePlan: (id: string, plan: RunPlan) => invoke<Run>("orchestration_update_plan", { id, plan }),

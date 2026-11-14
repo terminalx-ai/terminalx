@@ -64,9 +64,6 @@ use crate::AppState;
 
 /// How often an older runtime is asked what it is running.
 const CHECK_EVERY: Duration = Duration::from_secs(5);
-/// A stuck old runtime cannot receive a lifecycle fix until it upgrades.
-/// Bound its busy retries, then leave recovery to the reader (#818).
-const BUSY_ATTEMPTS: u8 = 6;
 /// How long nothing may be found under way before an older runtime is
 /// replaced by itself. A CLI starts the follow-up typed during a turn only
 /// once that turn has ended, and until then neither the runtime nor the
@@ -128,7 +125,6 @@ struct Inner {
     /// The runtime whose handover to this app's runtime has been found
     /// possible once: it is not checked again each time it is read.
     verified: Option<String>,
-    busy_attempts: u8,
     /// An older runtime was just handed over or stopped, and the next one
     /// attached should be the runtime bundled with this app.
     switched: bool,
@@ -217,7 +213,6 @@ impl Replacement {
         let plan = plan.filter(|plan| plan.epoch == epoch && plan.current(clock));
         // A new attachment to the same older runtime keeps what was found.
         if inner.pending.as_ref().is_none_or(|(pending, _)| pending != epoch) {
-            inner.busy_attempts = 0;
             // The runtime bundled with this app reads the record it writes.
             let keeps = keeps(build);
             let running = build.version.as_ref().map_or_else(|| "a version it would not say".to_string(), ToString::to_string);
@@ -292,7 +287,6 @@ impl Replacement {
         let mut inner = self.inner.lock().unwrap();
         if let Some(outdated) = inner.outdated(epoch) {
             outdated.failed = false;
-            inner.busy_attempts = 0;
         }
         drop(inner);
         // A manual retry can make a failed replacement checkable again
@@ -300,34 +294,22 @@ impl Replacement {
         self.wake.notify_all();
     }
 
-    /// A stop may already have succeeded before collecting the handover
-    /// failed. Never claim nothing stopped, or turn that consent into a
-    /// stop-all. Give transitions time, then show the exact blocker and the
-    /// existing explicit recovery action instead of looping indefinitely.
+    /// Busy is a temporary refusal, even after a long wait (#960). Keep
+    /// checking without broadening stop consent: an approved stop may already
+    /// have happened, but a retry never gains permission to stop other work.
     fn handover_busy(&self, epoch: &str, problem: String) {
         let mut inner = self.inner.lock().unwrap();
-        if inner.outdated(epoch).is_none() { return; }
+        let Some(outdated) = inner.outdated(epoch) else { return };
+        outdated.failed = false;
+        outdated.problem = Some(format!("Waiting to update the runtime: {problem}. TerminalX retries automatically while keeping agents and terminals running."));
         inner.switching = None;
         inner.stopping = false;
         inner.quiet_since = None;
         inner.due = false;
-        inner.busy_attempts = inner.busy_attempts.saturating_add(1);
-        if inner.busy_attempts >= BUSY_ATTEMPTS {
-            let outdated = inner.outdated(epoch).expect("checked above");
-            outdated.failed = true;
-            outdated.problem = Some(format!("The runtime update is still blocked: {problem}. Try again after the agent settles. If it remains blocked, choose TerminalX → Stop all and quit, then reopen TerminalX. That action stops all agents and terminal commands; no full stop has been performed automatically."));
-        } else {
-            inner.outdated(epoch).expect("checked above").failed = false;
-        }
         drop(inner);
-        // Resume the watcher's timed checks after a refused manual retry;
-        // due stays false, so the normal busy retry interval still applies.
+        // A manual retry can resume a watcher parked after a real failure.
+        // Preserve the interval so a busy runtime has time to settle.
         self.wake.notify_all();
-    }
-
-    fn retry_requested(&self, epoch: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.outdated(epoch).is_some() { inner.busy_attempts = 0; }
     }
 
     /// Runtime `epoch` cannot be handed over to this app's after all, for
@@ -491,7 +473,6 @@ pub(crate) trait Host {
 pub(crate) fn switch(replacement: &Replacement, host: &impl Host, epoch: &str, forced: bool, stop: &[Work]) -> Result<(), String> {
     let keeps = replacement.keeps(epoch);
     if !replacement.begin(epoch) { return Ok(()); }
-    if forced { replacement.retry_requested(epoch); }
     host.changed();
     // Handed over, it keeps what it runs; stopped, Restart now stops all of it.
     let result = if keeps { host.hand_over(epoch, if forced { stop } else { &[] }) } else { host.retire(epoch, forced) };
@@ -1117,31 +1098,28 @@ mod tests {
         assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again, to be shown");
     }
 
-    /// #818: an already-running old runtime cannot receive the cleanup fix
-    /// until it upgrades. Do not hammer that runtime or broaden stop consent
-    /// when its lifecycle state never settles.
+    /// #960: a prompt may take longer than six checks to settle. The
+    /// periodic watcher must still be able to hand over without consent.
     #[test]
-    fn repeated_busy_handovers_pause_with_recovery_and_allow_an_explicit_retry() {
+    fn repeated_busy_handovers_keep_retrying_and_complete_after_settling() {
         let replacement = Replacement::default();
         replacement.attached("old", &handing(&older()), None);
         let busy = Supervisor::new(&replacement, |_| Err(Refused {
-            code: "handover_busy".into(), message: "The agent in session/tab is starting or stopping".into(),
+            code: "handover_busy".into(), message: "A prompt is on its way into an agent".into(),
         }.into()));
-        for attempt in 1..=6 {
+        for _ in 0..12 {
             switch(&replacement, &busy, "old", false, &[]).unwrap();
-            assert_eq!(replacement.next_now(), None, "busy attempts wait for the periodic check, never immediately retry");
-            assert_eq!(replacement.outdated("old").unwrap().failed, attempt == 6);
+            assert_eq!(replacement.next_now(), None, "wait for the periodic check");
+            assert_eq!(replacement.inner.lock().unwrap().checkable(), Some("old"));
+            let outdated = replacement.outdated("old").unwrap();
+            assert!(!outdated.failed && outdated.keeps);
+            assert!(outdated.problem.unwrap().contains("retries automatically"));
         }
-        let outdated = replacement.outdated("old").unwrap();
-        assert!(outdated.keeps, "a busy handover never authorizes a full stop");
-        let problem = outdated.problem.unwrap();
-        assert!(problem.contains("session/tab") && problem.contains("Stop all and quit"), "{problem}");
-        replacement.attached("old", &handing(&older()), None);
-        assert_eq!(replacement.next_now(), None, "reattaching the same runtime does not restart the loop");
         assert!(busy.steps.borrow().iter().all(|step| !step.starts_with("retire")));
         let retry = Supervisor::new(&replacement, |_| Ok(()));
-        switch(&replacement, &retry, "old", true, &[]).unwrap();
-        assert!(replacement.outdated("old").is_none(), "an explicit retry can still hand over safely");
+        switch(&replacement, &retry, "old", false, &[]).unwrap();
+        assert!(replacement.outdated("old").is_none(), "the bundled version attached automatically");
+        assert_eq!(*retry.stopped.borrow(), [Vec::<Work>::new()]);
     }
 
     fn refused_manual_retry_wakes_the_waiting_loop(code: &'static str) {
@@ -1149,8 +1127,8 @@ mod tests {
         let replacement = Arc::new(Replacement::default());
         replacement.attached("old", &handing(&older()), None);
         let refusal = |code: &'static str| move |_| Err(Refused { code: code.into(), message: "still blocked".into() }.into());
-        let busy = Supervisor::new(&replacement, refusal("handover_busy"));
-        for _ in 0..BUSY_ATTEMPTS { switch(&replacement, &busy, "old", false, &[]).unwrap(); }
+        let failing = Supervisor::new(&replacement, |_| anyhow::bail!("handover failed"));
+        assert!(switch(&replacement, &failing, "old", false, &[]).is_err());
         assert!(replacement.outdated("old").unwrap().failed);
 
         let (waiting, parked) = mpsc::channel();
@@ -1205,7 +1183,7 @@ mod tests {
             assert_eq!(switch(&replacement, &busy, "old", false, &[]), Ok(()), "{code}");
             assert_eq!(busy.steps.borrow().last().map(String::as_str), Some("changed: outdated"), "{code}: never reattached");
             let outdated = replacement.outdated("old").unwrap();
-            assert!(!outdated.failed && outdated.keeps && outdated.problem.is_none(), "{code}: {outdated:?}");
+            assert!(!outdated.failed && outdated.keeps && (outdated.problem.is_some() == (code == "handover_busy")), "{code}: {outdated:?}");
             let next = if code == "handover_busy" { None } else { Some(Due::Check("old".into())) };
             assert_eq!(replacement.next_now(), next, "{code}: busy waits for the periodic check");
         }

@@ -11,10 +11,10 @@ The latency target and both ten-run comparisons remain unproven; see
 | Job | Runner | Checks |
 | --- | --- | --- |
 | `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, full Vitest, frontend build, portable icon tests, CI policy/selector/measurement tests. |
-| `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks and permission-details check, after the frontend build. |
+| `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks, permission-details among them, after the frontend build. `scripts/webkit/run-all.mjs` runs several at once. |
 | `linux-rust` | GitHub-hosted Ubuntu on **every PR** | Full default-feature `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
 | `macos-native` | GitHub-hosted macOS | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and selected full macOS Rust suite below. |
-| `desktop-platforms` | GitHub-hosted Ubuntu | Existing platform build, computer contract, input safety, local UI control, Linux renderer/launcher tests. Disabled Windows steps retained. |
+| `desktop-platforms` | GitHub-hosted Ubuntu | Off-macOS helper build, local UI control, Linux renderer/launcher tests. The platform build, computer contract and input safety steps run off Linux only: on Linux they are `linux-rust`'s Clippy and full suite and `frontend`'s Vitest run. Disabled Windows steps retained. |
 | `headless-serve` | GitHub-hosted Ubuntu | Existing headless build, dependency exclusions, Clippy, integration tests and self-test. |
 | `legacy-runtime-probe` | GitHub-hosted Ubuntu/macOS | Existing legacy AppImage diagnostics. |
 | `macos-rust-changes` / `check` | GitHub-hosted Ubuntu | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or any skipped dependency fails `check`. |

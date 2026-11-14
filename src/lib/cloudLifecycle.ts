@@ -65,6 +65,36 @@ export function deletion(item: CloudWorkspaceListItem): "running" | "failed" | n
   return null;
 }
 
+/** Exact failed create revision; codes alone never identify a recovered operation. */
+export function provisioningFailureKey(item: CloudWorkspaceListItem): string | null {
+  const operation = item.latestOperation;
+  if (!operation?.id || operation.type !== "create" || operation.action !== null || operation.state !== "failed"
+    || operation.workspaceId !== item.workspace.id || operation.errorCode === PROVISIONING_TIMEOUT_CODE) return null;
+  return JSON.stringify([operation.id, operation.workspaceId, operation.createdAt, operation.updatedAt, operation.errorCode, operation.detailCode, operation.providerErrorCode]);
+}
+
+/**
+ * A failed operation still needs recovery until the catalog reports its target
+ * state, or catalog evidence identifies this exact create failure as recovered
+ * with its associated launch. The operation can remain latest after recovery;
+ * credentials alone, or an online runtime, do not establish that recovery.
+ * Deletion is unresolved until the workspace is actually destroyed.
+ */
+export function operationFailureStands(item: CloudWorkspaceListItem, recoveredProvisioningOperation?: string): boolean {
+  const operation = item.latestOperation;
+  if (operation?.state !== "failed") return false;
+  if (recoveredProvisioningOperation && recoveredProvisioningOperation === provisioningFailureKey(item)) return false;
+  const state = item.workspace.state;
+  if (state === "attention-required") return true;
+  switch (operation.action) {
+    case "suspend": return state !== "suspended" && state !== "archived" && state !== "destroyed";
+    case "resume": return state !== "ready" && state !== "archived" && state !== "destroyed";
+    case "archive": return state !== "archived" && state !== "destroyed";
+    case "delete": return state !== "destroyed";
+    default: return state !== "ready" && state !== "suspended" && state !== "archived" && state !== "destroyed";
+  }
+}
+
 /** An archive still quiescing, checkpointing or suspending. */
 export function archiving(item: CloudWorkspaceListItem): boolean {
   return item.latestOperation?.action === "archive" && isOpen(item.latestOperation);

@@ -516,13 +516,29 @@ const FAILURES: Record<string, string> = {
   "runtime-unsupported": "This workspace's runtime cannot start agents from a first prompt, so it was not sent. Open the session to start the agent yourself.",
 };
 
+/** A launch's own failure, independent of a later lifecycle operation. */
+export function launchFailed(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot): boolean {
+  const launch = item.workspace.launch;
+  return !!launch && (launch.phase === "failed" || launch.state === "failed" || launch.state === "expired");
+}
+
+/** Agent login categories from both runtime launch reports and service errors. */
+export function agentLoginFailure(code: string): boolean {
+  return code === "agent-sign-in-required" || /agent[-_]credential|^credential[-_](required|missing|invalid|expired|revoked|reauth)/.test(code);
+}
+
 /** Why a launch failed, from the operation or the launch category. */
 export function failureMessage(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot): string {
   const category = item.workspace.launch?.category;
-  if (category) return FAILURES[category] ?? `The agent did not start (${category}).`;
+  if (category) {
+    if (agentLoginFailure(category)) return FAILURES["agent-sign-in-required"];
+    return FAILURES[category] ?? `The agent did not start (${category}).`;
+  }
   if (item.workspace.launch?.state === "expired") return "The workspace took too long to start, and its first prompt expired.";
   const operation = "operation" in item ? item.operation : item.latestOperation;
   const code = operation?.errorCode;
   if (code === PROVISIONING_TIMEOUT_CODE) return PROVISIONING_TIMEOUT_MESSAGE;
+  if (code && agentLoginFailure(code)) return createErrorMessage(code);
+  if (!code && launchFailed(item)) return "The agent did not start. Open the session to inspect the failure before starting it yourself.";
   return code ? `Provisioning failed (${code}).` : "Provisioning failed.";
 }
