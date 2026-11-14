@@ -239,4 +239,25 @@ describe("shared attention and recovery", () => {
     });
   });
 
+
+  it.each([
+    { name: "related create", patch: {}, resolved: true },
+    { name: "created after launch request", patch: { createdAt: 21 }, resolved: false },
+    { name: "failed before launch request", patch: { updatedAt: 19 }, resolved: false },
+    { name: "failed after launch failure", patch: { updatedAt: 101 }, resolved: false },
+    { name: "missing operation ordering", patch: { createdAt: undefined, updatedAt: undefined }, resolved: false },
+    { name: "different workspace", patch: { workspaceId: "other" }, resolved: false },
+    { name: "missing identity", patch: { id: undefined }, resolved: false },
+    { name: "lifecycle delete", patch: { action: "delete" }, resolved: false },
+    { name: "deleted provisioning timeout", patch: { errorCode: "cloud_workspace_provisioning_timeout" }, resolved: false },
+  ])("correlates provisioning through identity and ordering: $name", ({ patch, resolved }) => {
+    const row = item({ state: "attention-required", launch: { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { requestedAt: 20, failedAt: 100 } }, runtimeActivity: { online: true, reportedAt: 101, activeTurns: 1, pendingApprovals: 0 } }, { id: "create", workspaceId: "w", type: "create", action: null, state: "failed", createdAt: 10, updatedAt: 90, errorCode: "cloud_provider_unavailable", ...patch });
+    const recovered = reconcileCloudAttention(row);
+    expect(resolveCloudAttention(recovered) === null).toBe(resolved);
+    const newFailure = structuredClone(row);
+    newFailure.workspace.launch!.launchId = "next";
+    newFailure.workspace.launch!.timings.failedAt = 200;
+    expect(resolveCloudAttention(reconcileCloudAttention(newFailure, recovered))).not.toBeNull();
+  });
+
 });

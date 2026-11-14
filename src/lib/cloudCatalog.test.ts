@@ -1637,4 +1637,39 @@ describe("attention across catalog refreshes (#934)", () => {
     expect(resolveCloudAttention(savedNew.orgs[ORG].workspaces[0])?.code).toBe("cloud_workspace_attention_required");
   });
 
+
+  it.each([100, undefined])("clears correlated provisioning after launch recovery with failedAt=%s while keeping independent operations", async (failedAt) => {
+    signIn();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { requestedAt: 20, failedAt } };
+    const operation = { id: "original-create", workspaceId: "w", type: "create", action: null, state: "failed", createdAt: 10, updatedAt: 90, errorCode: "cloud_provider_unavailable" };
+    const idle = { online: true, reportedAt: 90, activeTurns: 0, pendingApprovals: 0 };
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    let at = 99;
+    const refresh = async (op: unknown, runtimeActivity = idle) => {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state: "attention-required", launch, runtimeActivity }, op)] });
+      const now = ++at;
+      await refreshCloudCatalog(ORG, () => now);
+    };
+    await refresh(operation);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    await refresh(operation, { ...idle, reportedAt: 101, activeTurns: 1 });
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Working");
+    await refresh(operation);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Ready");
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])).toBeNull();
+    applyCloudSnapshot({ workspace: read().workspace, operation } as never, ++at);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // The same code in a different operation or revision is not recovery.
+    for (const patch of [{ id: "independent", createdAt: 102, updatedAt: 103 }, { id: "different-id" }, { updatedAt: 104 }, { action: "suspend" }, { action: "delete" }]) {
+      await refresh({ ...operation, ...patch });
+      expect(resolveCloudAttention(read())?.code).toBe("cloud_provider_unavailable");
+      expect(deriveCloudActivity(read()).label).toBe("Needs attention");
+    }
+    await refresh(operation);
+    expect(resolveCloudAttention(read())).toBeNull();
+  });
+
 });

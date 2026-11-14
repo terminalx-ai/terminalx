@@ -21,6 +21,7 @@ import { cloudConnectionInfo, resetCloudConnections, retainCloudConnection } fro
 import {
   checkRuntime,
   operationFailureStands,
+  provisioningFailureKey,
   cleanupStateText,
   dateTimeText,
   deadlineText,
@@ -309,5 +310,19 @@ describe("resolved operation failures", () => {
 
   it("keeps unresolved deletes even while the machine is ready and online", () => {
     expect(operationFailureStands({ workspace: { state: "ready", runtimeActivity: { online: true } }, latestOperation: { action: "delete", state: "failed" } } as Parameters<typeof operationFailureStands>[0])).toBe(true);
+  });
+});
+
+
+describe("recovered provisioning revision", () => {
+  it("ignores only the exact failed create revision and keeps later or lifecycle failures", () => {
+    const row = { workspace: { id: "w", state: "attention-required" }, latestOperation: { id: "create", workspaceId: "w", type: "create", action: null, state: "failed", createdAt: 10, updatedAt: 90, errorCode: "cloud_provider_unavailable" } } as Parameters<typeof operationFailureStands>[0];
+    const key = provisioningFailureKey(row)!;
+    expect(operationFailureStands(row)).toBe(true);
+    expect(operationFailureStands(row, key)).toBe(false);
+    for (const patch of [{ id: "next" }, { updatedAt: 110 }, { action: "delete" }, { action: "suspend" }, { workspaceId: "other" }, { errorCode: "cloud_workspace_provisioning_timeout" }]) {
+      const next = { ...row, latestOperation: { ...row.latestOperation, ...patch } } as typeof row;
+      expect(operationFailureStands(next, key)).toBe(true);
+    }
   });
 });

@@ -1,7 +1,7 @@
 import type { RuntimeSession, WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { agentLoginFailure, createErrorMessage, failureMessage, launchFailed, PROVISIONING_TIMEOUT_CODE } from "@/lib/cloudCreate";
-import { archiving, deleteFailure, deletion, operationFailureStands, workspaceFailureText } from "@/lib/cloudLifecycle";
+import { archiving, deleteFailure, deletion, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
 import type { TabStatus } from "@/types/session";
 
 export interface CloudAttentionInput {
@@ -40,6 +40,8 @@ export interface CloudAttention {
 /** Local catalog evidence; saved with the row, never sent as authority to a runtime. */
 type ObservedItem = CloudWorkspaceListItem & {
   resolvedLaunchFailure?: string;
+  /** Exact correlated create failure revision, never a lifecycle action. */
+  resolvedLaunchOperation?: string;
   /** Suppress only the uninterrupted attention episode in which recovery was observed. */
   resolvedLaunchAttention?: string;
   launchFailureObservation?: { key: string; at: number };
@@ -88,7 +90,7 @@ function runtimeAgentRan(item: CloudWorkspaceListItem): boolean {
  */
 export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?: CloudWorkspaceListItem, sessions: readonly RuntimeSession[] = [], observedAt = Date.now()): CloudWorkspaceListItem {
   const key = launchFailureKey(item);
-  const { resolvedLaunchFailure: _old, resolvedLaunchAttention: _attention, launchFailureObservation: _observation, ...clean } = item as ObservedItem;
+  const { resolvedLaunchFailure: _old, resolvedLaunchOperation: _operation, resolvedLaunchAttention: _attention, launchFailureObservation: _observation, ...clean } = item as ObservedItem;
   if (!launchFailed(item)) return clean;
   const boundary = finiteTime(item.workspace.launch?.timings?.failedAt) ? undefined
     : observation(item, key) ?? observation(previous, key) ?? {
@@ -113,7 +115,26 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
   const staleAttention = item.workspace.state === "attention-required" && (
     !previouslyResolved || (prior.workspace.state === "attention-required" && prior.resolvedLaunchAttention === key)
   );
-  return { ...candidate, resolvedLaunchFailure: key, ...(staleAttention ? { resolvedLaunchAttention: key } : {}) } as ObservedItem;
+  // Capture correlation when recovery is first proved. Never apply that proof
+  // to a later operation, even if it repeats the same generic error code.
+  const recoveredOperation = previouslyResolved ? prior.resolvedLaunchOperation : correlatedProvisioningFailure(candidate);
+  return { ...candidate, resolvedLaunchFailure: key,
+    ...(staleAttention ? { resolvedLaunchAttention: key } : {}),
+    ...(recoveredOperation ? { resolvedLaunchOperation: recoveredOperation } : {}),
+  } as ObservedItem;
+}
+
+/** The original create spans the launch request and failed before its recovery boundary. */
+function correlatedProvisioningFailure(item: CloudWorkspaceListItem): string | null {
+  const key = provisioningFailureKey(item);
+  const operation = item.latestOperation;
+  const launch = item.workspace.launch;
+  const requestedAt = launch?.timings?.requestedAt;
+  const failedAt = launch?.timings?.failedAt;
+  const boundary = finiteTime(failedAt) ? failedAt : observation(item, launchFailureKey(item))?.at;
+  if (!key || !operation || !launch?.launchId || !finiteTime(requestedAt) || !finiteTime(boundary)
+    || !finiteTime(operation.createdAt) || !finiteTime(operation.updatedAt)) return null;
+  return operation.createdAt <= requestedAt && requestedAt <= operation.updatedAt && operation.updatedAt <= boundary ? key : null;
 }
 
 /** Dated activity must follow the authoritative failure or its stable observation boundary. */
@@ -194,7 +215,9 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
   // Prefer the specific launch reason while it stands. Once recovered, a failed
   // operation must still be evaluated independently of that historical reason.
   const launchHasReason = launchNeedsAttention && (workspace.launch?.category || workspace.launch?.state === "expired");
-  if (operationFailureStands(item) && operation && (operation.action || !launchHasReason || operation.errorCode === PROVISIONING_TIMEOUT_CODE)) {
+  const recoveredOperation = (item as ObservedItem).resolvedLaunchFailure === launchFailureKey(item)
+    ? (item as ObservedItem).resolvedLaunchOperation : undefined;
+  if (operationFailureStands(item, recoveredOperation) && operation && (operation.action || !launchHasReason || operation.errorCode === PROVISIONING_TIMEOUT_CODE)) {
     const code = operation.errorCode ?? "cloud_workspace_operation_failed";
     let next: CloudRecovery;
     if (code === PROVISIONING_TIMEOUT_CODE) next = recovery("create-workspace", "Create workspace again", "The timed-out machine was deleted. Create a new workspace after reviewing the provider and spend confirmation.");
