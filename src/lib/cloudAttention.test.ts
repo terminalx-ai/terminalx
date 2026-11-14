@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { reconcileCloudAttention, resolveCloudAttention } from "./cloudAttention";
+import { reconcileCloudAttention, resolveCloudAttention, type CloudAttentionInput } from "./cloudAttention";
 import { deriveCloudActivity } from "./cloudRowState";
 
 function item(fields: Record<string, unknown> = {}, operation: unknown = null): CloudWorkspaceListItem {
@@ -186,6 +186,48 @@ describe("shared attention and recovery", () => {
     expect(dated).not.toHaveProperty("launchFailureObservation");
     expect(resolveCloudAttention(dated, { agentActivityAt: 399 })?.code).toBe("runtime-interrupted");
     expect(resolveCloudAttention(dated, { agentActivityAt: 401 })).toBeNull();
+  });
+
+
+  describe.each(["ready", "attention-required"])("launch recovery with workspace state %s", (state) => {
+    const cases = [
+      { name: "no operation", operation: null, before: "runtime-interrupted", after: null },
+      { name: "successful operation", operation: { state: "succeeded", action: "resume" }, before: "runtime-interrupted", after: null },
+      ...["suspend", "resume", "archive", "delete"].map((action) => ({
+        name: `failed ${action}`, operation: { state: "failed", action, errorCode: "cloud_provider_unavailable" },
+        before: state === "ready" && action === "resume" ? "runtime-interrupted" : "cloud_provider_unavailable",
+        after: state === "ready" && action === "resume" ? null : "cloud_provider_unavailable",
+      })),
+      { name: "failed provisioning", operation: { state: "failed", action: null, errorCode: "cloud_workspace_runtime_bootstrap_failed" }, before: "runtime-interrupted", after: state === "ready" ? null : "cloud_workspace_runtime_bootstrap_failed" },
+      { name: "timed out provisioning", operation: { state: "failed", action: null, errorCode: "cloud_workspace_provisioning_timeout" }, before: state === "ready" ? "runtime-interrupted" : "cloud_workspace_provisioning_timeout", after: state === "ready" ? null : "cloud_workspace_provisioning_timeout" },
+    ];
+    it.each(cases)("preserves independent errors: $name", ({ operation, before, after }) => {
+      const row = item({ state, launch: { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { failedAt: 100 } } }, operation);
+      expect(resolveCloudAttention(row)?.code ?? null).toBe(before);
+      const runtime = { ...row, workspace: { ...row.workspace, runtimeActivity: { online: true, reportedAt: 101, activeTurns: 1, pendingApprovals: 0 } } };
+      const durable = reconcileCloudAttention(structuredClone(runtime));
+      durable.workspace.runtimeActivity = null;
+      const recoveries: [CloudWorkspaceListItem, CloudAttentionInput][] = [
+        [row, { agentRan: true }],
+        [row, { agentActivityAt: 101 }],
+        [row, { tabs: [{ status: "completed", lastMessageAt: new Date(101).toISOString() }] }],
+        [durable, {}],
+        [runtime, {}],
+      ];
+      for (const [recovered, input] of recoveries) {
+        expect(resolveCloudAttention(recovered, input)?.code ?? null).toBe(after);
+        expect(deriveCloudActivity(recovered, input).tone === "attention").toBe(after !== null);
+        // Runtime incompatibility remains independently actionable, except
+        // failed deletion retains its existing higher recovery precedence.
+        expect(resolveCloudAttention(recovered, { ...input, connection: "updateRequired" })?.code).toBe(operation?.action === "delete" ? "cloud_provider_unavailable" : "runtime-update-required");
+      }
+    });
+
+    it("retains a genuine generic attention state without a failed launch", () => {
+      for (const launch of [null, { state: "running", phase: "running" }]) {
+        expect(resolveCloudAttention(item({ state, launch }), { agentRan: true })?.code ?? null).toBe(state === "attention-required" ? "cloud_workspace_attention_required" : null);
+      }
+    });
   });
 
 });

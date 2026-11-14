@@ -1513,4 +1513,35 @@ describe("attention across catalog refreshes (#934)", () => {
     expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
   });
 
+
+  it.each(["ready", "attention-required"])("clears recovered launch attention across refreshes while preserving independent errors (%s)", async (state) => {
+    signIn();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 50 } };
+    const runtimeActivity = { online: true, reportedAt: 100, activeTurns: 0, pendingApprovals: 0 };
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 100);
+    expect(resolveCloudAttention(read())?.code).toBe("agent-sign-in-required");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch, runtimeActivity: { ...runtimeActivity, reportedAt: 200, activeTurns: 1 } })] });
+    await refreshCloudCatalog(ORG, () => 200);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Working");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch, runtimeActivity: { ...runtimeActivity, reportedAt: 300 } })] });
+    await refreshCloudCatalog(ORG, () => 300);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Ready");
+    const operation = { action: "delete", state: "failed", errorCode: "cloud_provider_unavailable" };
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch, runtimeActivity }, operation)] });
+    await refreshCloudCatalog(ORG, () => 400);
+    expect(resolveCloudAttention(read())?.recovery.action).toBe("retry-operation");
+    expect(deriveCloudActivity(read()).label).toBe("Needs attention");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 500);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(resolveCloudAttention(read(), { connection: "updateRequired" })?.code).toBe("runtime-update-required");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch: { ...launch, launchId: "next", timings: { failedAt: 600 } }, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 600);
+    expect(resolveCloudAttention(read())?.code).toBe("agent-sign-in-required");
+  });
+
 });

@@ -178,7 +178,11 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
     message: "The app and workspace runtime versions are incompatible. Update TerminalX before reconnecting.",
     recovery: recovery("update-runtime", "Update runtime", "Update TerminalX to a version compatible with the workspace runtime, then reconnect to this workspace."),
   };
-  const launchHasReason = launchFailed(item) && (workspace.launch?.category || workspace.launch?.state === "expired");
+  const failedLaunch = launchFailed(item);
+  const launchNeedsAttention = failedLaunch && launchFailureStands(item, input);
+  // Prefer the specific launch reason while it stands. Once recovered, a failed
+  // operation must still be evaluated independently of that historical reason.
+  const launchHasReason = launchNeedsAttention && (workspace.launch?.category || workspace.launch?.state === "expired");
   if (operationFailureStands(item) && operation && (operation.action || !launchHasReason || operation.errorCode === PROVISIONING_TIMEOUT_CODE)) {
     const code = operation.errorCode ?? "cloud_workspace_operation_failed";
     let next: CloudRecovery;
@@ -191,12 +195,15 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
     else next = recovery("create-workspace", "Create workspace again", "Review the provisioning failure and provider connection before creating a workspace again. Check the provider for any resources left by the failed attempt.");
     return { code, message: agentLoginFailure(code) ? createErrorMessage(code) : workspaceFailureText(item, operation), recovery: next };
   }
-  if (launchFailed(item) && launchFailureStands(item, input)) {
+  if (launchNeedsAttention) {
     const loginCode = operation?.action == null && operation?.errorCode && agentLoginFailure(operation.errorCode) ? operation.errorCode : null;
     const code = workspace.launch?.category ?? (workspace.launch?.state === "expired" ? "launch-expired" : loginCode ?? "launch-failed");
     return { code, message: failureMessage(item), recovery: launchRecovery(code, input) };
   }
-  if (workspace.state === "attention-required") return {
+  // The server can retain its coarse attention state after agent recovery.
+  // Independent operation/runtime errors were handled above; do not turn a
+  // recovered failed launch back into an unexplained generic failure.
+  if (workspace.state === "attention-required" && !failedLaunch) return {
     code: "cloud_workspace_attention_required",
     message: "The workspace needs attention. Open it to inspect its runtime and provider state.",
     recovery: openSession("Open the workspace to inspect its runtime and provider state. If it cannot connect, an owner or admin can check the organization's provider connection in Settings."),
