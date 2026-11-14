@@ -2133,13 +2133,22 @@ export interface SlashCommand {
 }
 
 /** Every file the All files tree shows (hidden ones too, `.gitignore`d ones not), cut at `limit`. */
+export interface FileCount {
+  files: number;
+  truncated: boolean;
+}
+
 export interface FileList {
   paths: string[];
   truncated: boolean;
 }
 
 export const files = {
-  search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
+  /** `includeIgnored` searches the files Git ignores as well. */
+  search: (cwd: string, query: string, limit = 40, includeIgnored = false) =>
+    invoke<FileHit[]>("search_files", includeIgnored ? { cwd, query, limit, includeIgnored } : { cwd, query, limit }),
+  /** How many files `search` looks through; `truncated`: at least that many. */
+  count: (cwd: string, includeIgnored = false) => invoke<FileCount>("count_files", { cwd, includeIgnored }),
   list: (cwd: string, limit?: number) => invoke<FileList>("list_files", { cwd, limit: limit ?? null }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),

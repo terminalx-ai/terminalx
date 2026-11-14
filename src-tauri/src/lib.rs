@@ -796,6 +796,7 @@ pub fn run() {
             commands::list_models,
             commands::frontend_log,
             commands::search_files,
+            commands::count_files,
             commands::list_files,
             commands::list_slash_commands,
             commands::read_image_file,
