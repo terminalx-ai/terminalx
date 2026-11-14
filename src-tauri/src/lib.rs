@@ -843,6 +843,7 @@ pub fn run() {
             commands::resolve_merge_conflict,
             commands::mark_conflict_resolved,
             commands::git_checkout,
+            commands::git_branch_here,
             commands::working_changes,
             commands::working_change_sets,
             commands::pr_list,

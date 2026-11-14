@@ -88,6 +88,7 @@ export const Folders = icon("Folders", GLYPHS.Folders!);
 export const FileText = icon("FileText", GLYPHS.FileText!);
 export const FileCode2 = icon("FileCode2", GLYPHS.FileCode2!);
 export const GitBranch = icon("GitBranch", GLYPHS.GitBranch!);
+export const GitBranchPlus = icon("GitBranchPlus", GLYPHS.GitBranchPlus!);
 export const GitMerge = icon("GitMerge", GLYPHS.GitMerge!);
 export const GitPullRequest = icon("GitPullRequest", GLYPHS.GitPullRequest!);
 export const GitPullRequestDraft = icon("GitPullRequestDraft", GLYPHS.GitPullRequestDraft!);
