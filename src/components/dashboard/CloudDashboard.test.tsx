@@ -81,6 +81,7 @@ const session = (id: string, title: string, status: string, fields: Record<strin
   title,
   created: "2026-09-30T10:00:00.000Z",
   modified: "2026-09-30T11:00:00.000Z",
+  lastMessageAt: "2026-09-30T10:30:00.000Z",
   archived: false,
   pinned: false,
   tabs: [{ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "default", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" }],

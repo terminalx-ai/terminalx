@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { HarnessInfo } from "@/types/session";
 import { onAppResume } from "./appResume";
 
 export interface AgentReadiness {
@@ -33,24 +34,10 @@ export function readinessBlock(harness: string, value: AgentReadiness): string |
   return null;
 }
 
-export function useAgentReadiness(harness: string | null, poll = false) {
-  const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
-  const [checking, setChecking] = useState(false);
-  const generation = useRef(0);
-  const refresh = useCallback(async () => {
-    const run = ++generation.current;
-    if (!harness) { setChecking(false); return null; }
-    setChecking(true);
-    const value = await checkAgentReadiness(harness);
-    if (generation.current === run) { setAnswer({ harness, value }); setChecking(false); }
-    return value;
-  }, [harness]);
+/** Keep every local setup surface current; only Settings requests periodic checks. */
+function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll = false) {
   useEffect(() => {
-    void refresh();
-    return () => { generation.current++; };
-  }, [refresh]);
-  useEffect(() => {
-    if (!harness) return;
+    if (!enabled) return;
     const recheck = () => { void refresh(); };
     const stopResume = onAppResume(recheck);
     // An embedded login (for example the Codex sign-in shell) exits its PTY
@@ -70,6 +57,60 @@ export function useAgentReadiness(harness: string | null, poll = false) {
       stopExit?.();
       clearInterval(timer);
     };
-  }, [harness, poll, refresh]);
+  }, [enabled, poll, refresh]);
+}
+
+export function useAgentReadiness(harness: string | null, poll = false) {
+  const [answer, setAnswer] = useState<{ harness: string; value: AgentReadiness } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const run = ++generation.current;
+    if (!harness) { setChecking(false); return null; }
+    setChecking(true);
+    const value = await checkAgentReadiness(harness);
+    if (generation.current === run) { setAnswer({ harness, value }); setChecking(false); }
+    return value;
+  }, [harness]);
+  useEffect(() => {
+    void refresh();
+    return () => { generation.current++; };
+  }, [refresh]);
+  useReadinessRefresh(!!harness, refresh, poll);
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
+}
+
+export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
+
+/** Check all candidates before choosing a default, without persisting a fallback as a preference. */
+export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id" | "available" | "path">[], enabled = true) {
+  // Discovery can return a fresh array on every render. Only a changed installation needs another check.
+  const key = JSON.stringify(enabled ? harnesses.map(({ id, available, path }) => [id, available, path]) : []);
+  const [answer, setAnswer] = useState<{ key: string; values: AgentReadinessMap } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const run = ++generation.current;
+    const candidates: [string, boolean, string | null][] = JSON.parse(key);
+    setChecking(true);
+    // Installation metadata may predate a CLI installed in another terminal.
+    const entries = await Promise.all(candidates.map(async ([id]) => [id, await checkAgentReadiness(id)] as const));
+    const values: AgentReadinessMap = Object.fromEntries(entries);
+    if (run === generation.current) {
+      setAnswer({ key, values });
+      setChecking(false);
+    }
+    return values;
+  }, [key]);
+  useEffect(() => {
+    void refresh();
+    return () => { generation.current++; };
+  }, [refresh]);
+  useReadinessRefresh(enabled && harnesses.length > 0, refresh);
+  return {
+    values: answer?.key === key ? answer.values : null,
+    checking: checking || answer?.key !== key,
+    refresh,
+    refreshAgent: async (id: string) => (await refresh())[id] ?? null,
+  };
 }

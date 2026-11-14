@@ -1,6 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 import { pty } from "@/lib/api";
 import { countTerminalData, isOnScreen } from "@/lib/terminalCounters";
+import { writeTerminalOutput, type OutputSize } from "@/lib/terminalOutput";
 
 /**
  * A local pane's output into its xterm, with flow control (issue #232).
@@ -39,7 +40,7 @@ export function queuedLocalOutputBytes(): number { return queuedBytes; }
 
 export interface PaneFeed {
   /** Give it what the pane printed. */
-  data: (bytes: Uint8Array) => void;
+  data: (bytes: Uint8Array, size?: OutputSize) => void;
   /** The terminal is going away. */
   stop: () => void;
 }
@@ -77,7 +78,7 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
     }
   };
   return {
-    data: (bytes) => {
+    data: (bytes, size) => {
       if (stopped) return;
       countTerminalData("local", bytes.length);
       if (retire && document.hidden && received - parsed + bytes.length > HIDDEN_QUEUE_LIMIT) {
@@ -86,7 +87,7 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
       }
       received += bytes.length;
       queuedBytes += bytes.length;
-      term.write(bytes, () => {
+      writeTerminalOutput(term, bytes, size, () => {
         if (stopped) return;
         parsed += bytes.length;
         queuedBytes -= bytes.length;

@@ -1044,7 +1044,7 @@ impl WorkspaceRpc {
             "pipeline.resolveConflicts" => {
                 let pipeline = self.own_pipeline(&params)?;
                 let value = params.get("value").and_then(Value::as_bool).ok_or_else(|| RpcError::invalid("value must be boolean"))?;
-                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts(&self.pipeline_host()?, &pipeline.id, value).map_err(RpcError::internal)?;
+                let pipeline = crate::issue_pipeline::engine::set_resolve_conflicts_by(&self.pipeline_host()?, &pipeline.id, value, crate::issue_pipeline::SwitchActor::Person).map_err(RpcError::internal)?;
                 Ok(json!({ "pipeline": pipeline_on_the_wire(json!(pipeline)) }))
             },
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
@@ -2031,6 +2031,9 @@ impl WorkspaceRpc {
         result["truncated"] = json!(since.is_some_and(|since| since < start));
         result["runtimeGeneration"] = json!(self.generation());
         drop(ptys);
+        // Queue the snapshot at the PTY, behind unread/emitting output;
+        // publishing it here would race the producer's pending batches.
+        let _ = self.terminals.publish_size(&pty_id);
         self.subscriptions.lock().unwrap().insert(subscription_id, Subscription::Pty { peer: peer.id, pty_id });
         Ok(result)
     }
@@ -2083,9 +2086,9 @@ impl WorkspaceRpc {
                     continue;
                 }
                 peer.notify_sized(
-                    "pty.output",
-                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data }),
-                    data.data.len(),
+                    if bytes.is_empty() && data.size.is_some() { "pty.resize-complete" } else { "pty.output" },
+                    json!({ "subscriptionId": subscription_id, "ptyId": data.id, "offset": offset, "data": data.data, "size": data.size }),
+                    data.data.len().max(256), // Size-only completions also consume the slow-peer budget.
                 );
             }
             for subscription_id in &lagged {

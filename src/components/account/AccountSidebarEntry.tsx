@@ -1,32 +1,29 @@
 import { Loader2, UserRound } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
-import { usePairing } from "@/lib/pairing";
 import { AccountAvatar } from "./AccountAvatar";
+import { RelayStatus } from "./RelayStatus";
 
 export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => void }) {
   const account = useAccount();
-  const pairing = usePairing();
   const identity = account.status.identity;
   if (account.status.state === "signed-in" && identity) {
     return (
-      <Button
-        variant="ghost"
-        className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1.5"
-        onClick={onOpenAccount}
-        title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
-      >
-        <AccountAvatar identity={identity} />
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{identity.name ?? identity.email}</span>
-          <span className="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-faint">
-            <span className={pairing.status.relay.phase === "connected" ? "size-1.5 shrink-0 rounded-full bg-add" : "size-1.5 shrink-0 rounded-full bg-faint"} />
-            <span className="min-w-0 truncate">
-              {pairing.status.relay.phase === "connected" ? "Relay connected" : pairing.status.relay.phase === "connecting" ? "Relay connecting" : pairing.status.relay.phase === "offline" ? "Relay unavailable" : "Relay not configured"}
-            </span>
+      <div className="relative w-full min-w-0">
+        <Button
+          variant="ghost"
+          className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1.5"
+          onClick={onOpenAccount}
+          title={[identity.email, identity.organization].filter(Boolean).join(" · ")}
+        >
+          <AccountAvatar identity={identity} />
+          <span className="min-w-0 flex-1 text-left">
+            <span className="block truncate">{identity.name ?? identity.email}</span>
+            <span aria-hidden className="mt-0.5 block h-[15px]" />
           </span>
-        </span>
-      </Button>
+        </Button>
+        <RelayStatus />
+      </div>
     );
   }
 

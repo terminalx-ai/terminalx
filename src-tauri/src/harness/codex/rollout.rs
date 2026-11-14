@@ -42,7 +42,7 @@
 
 use serde_json::Value;
 
-use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
+use crate::events::{BlockRef, EditKind, FileEdit, ImageRef, Payload, ToolResult, ToolType, Usage};
 use crate::harness::settings::{Signal, Stance};
 use crate::harness::tui::TurnMark;
 
@@ -323,6 +323,26 @@ fn decode_item(item: &Value, out: &mut Vec<Payload>) {
                 title: Some(format!("web_search {query}")),
             });
             out.push(Payload::ToolCallCompleted { call_id: id, result: ToolResult::default() });
+        }
+        // A picture the image generator made, saved as a file the chat can draw.
+        "Extension" if item["kind"].as_str() == Some("image_gen.generation") => {
+            let prompt = item["revisedPrompt"].as_str().unwrap_or_default().to_string();
+            out.push(Payload::ToolCallStarted {
+                call_id: id.clone(),
+                name: "image_gen".into(),
+                tool_type: ToolType::Other,
+                input: serde_json::json!({"prompt": prompt}),
+                title: Some(format!("image_gen {}", first_line(&prompt))),
+            });
+            let saved = item["savedPath"].as_str().filter(|p| !p.is_empty());
+            let failure = item["failure"].as_str().filter(|f| !f.is_empty()).map(String::from);
+            let failed = failure.is_some() || item["status"].as_str().unwrap_or("completed") != "completed" || saved.is_none();
+            let images = saved
+                .map(|path| ImageRef { url: path.to_string(), media_type: crate::media_types::media_type(std::path::Path::new(path)).map(|m| m.mime.clone()), name: std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()) })
+                .into_iter()
+                .collect();
+            let text = if failed { failure.unwrap_or_else(|| "The image was not made".into()) } else { saved.unwrap_or_default().to_string() };
+            out.push(Payload::ToolCallCompleted { call_id: id, result: ToolResult { text, is_error: failed, images, ..Default::default() } });
         }
         "Error" => out.push(Payload::Error { message: item["message"].as_str().unwrap_or("Codex reported an error").to_string(), fatal: false, detail: None }),
         _ => {}
@@ -652,6 +672,27 @@ mod tests {
         assert!(done.text.contains("Wed Sep  2 15:51:33"));
         assert_eq!(done.exit_code, Some(0));
         assert!(!done.is_error);
+    }
+
+    #[test]
+    fn a_generated_image_arrives_as_its_saved_file() {
+        let line = r#"{"timestamp":"2026-10-30T09:43:41.664Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Extension","kind":"image_gen.generation","id":"exec-1","status":"completed","revisedPrompt":"A man in silhouette\nwhite background","result":"iVBORw0","failure":null,"savedPath":"/home/u/.codex/generated_images/t/exec-1.png"}}}"#;
+        let mut out = Vec::new();
+        decode_line(line, &none(), &mut out);
+        assert!(matches!(&out[0], Payload::ToolCallStarted { name, title, .. } if name == "image_gen" && title.as_deref() == Some("image_gen A man in silhouette")));
+        let Payload::ToolCallCompleted { result, .. } = &out[1] else { panic!() };
+        assert!(!result.is_error);
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].url, "/home/u/.codex/generated_images/t/exec-1.png");
+        assert_eq!(result.images[0].media_type.as_deref(), Some("image/png"));
+
+        // One that failed says why and draws nothing.
+        let failed = line.replace(r#""failure":null"#, r#""failure":"Blocked by policy""#).replace(r#""savedPath":"/home/u/.codex/generated_images/t/exec-1.png""#, r#""savedPath":null"#);
+        let mut out = Vec::new();
+        decode_line(&failed, &none(), &mut out);
+        let Payload::ToolCallCompleted { result, .. } = &out[1] else { panic!() };
+        assert!(result.is_error && result.images.is_empty());
+        assert_eq!(result.text, "Blocked by policy");
     }
 
     #[test]

@@ -8,8 +8,7 @@ vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), keycaps: () => [], useShor
 vi.mock("@/lib/dialogs", () => ({ openSettle: vi.fn(), openWorkspaceDelete: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/components/changes/ChangesPanel", () => ({ ChangesPanel: () => { gitPanelMounted(); return <div>Commit changes</div>; } }));
-vi.mock("@/components/changes/RepoPanel", () => ({ RepoPanel: () => { gitPanelMounted(); return <div>Push branch</div>; } }));
-vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => { gitPanelMounted(); return <div>Create PR</div>; } }));
+vi.mock("@/components/changes/BranchTab", () => ({ BranchTab: ({ branch }: { branch: unknown }) => { gitPanelMounted(); return <div>{branch ? "Branch overview" : "Pull request only"}</div>; } }));
 vi.mock("@/components/files/FileTree", () => ({ FileTree: (props: { active: boolean; isGit: boolean }) => { filesMounted(props); return <div>Folder files</div>; } }));
 const { RightPanel } = await import("./RightPanel");
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -17,7 +16,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 it("shows files without mounting Git panels or resolving branch labels for folders", () => {
   render(<RightPanel cwd="/tmp/folder" isGit={false} labelMode="base" />);
   expect(screen.getByRole("button", { name: "Files" })).toBeTruthy();
-  for (const name of ["Changes", "Repo", "PR"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  for (const name of ["Branch", "Changes"]) expect(screen.queryByRole("button", { name })).toBeNull();
   expect(screen.getByText("Folder")).toBeTruthy();
   expect(filesMounted).toHaveBeenLastCalledWith(expect.objectContaining({ active: true, isGit: false }));
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -28,6 +27,16 @@ it("shows files without mounting Git panels or resolving branch labels for folde
 it("preserves Git panels when switching back from a folder", () => {
   const view = render(<RightPanel cwd="/tmp/folder" isGit={false} />);
   view.rerender(<RightPanel cwd="/repo" isGit branch="main" />);
-  for (const name of ["Changes", "Repo", "PR", "Files"]) expect(screen.getByRole("button", { name })).toBeTruthy();
-  expect(gitPanelMounted).toHaveBeenCalledTimes(3);
+  // Branch holds the pull request, and Changes the commit box and history: no Repo or PR of their own.
+  expect(screen.getAllByRole("button").map((b) => b.textContent).filter(Boolean)).toEqual(["Branch", "Changes", "Files"]);
+  expect(gitPanelMounted).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("Branch overview")).toBeTruthy();
+});
+
+it("keeps a Branch tab for a cloud workspace, its pull request alone", () => {
+  const source = { cloud: true, key: "cloud:w|repo", workStatus: workStatus } as never;
+  workStatus.mockResolvedValue({ branch: "main" });
+  render(<RightPanel cwd="/w" branch="main" gitSource={source} />);
+  expect(screen.getByRole("button", { name: "Branch" })).toBeTruthy();
+  expect(screen.getByText("Pull request only")).toBeTruthy();
 });

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New chat opens the same composer from the sidebar and project menus, and
+  creates nothing until the first prompt is sent. Both use the same saved
+  agent, model, effort and permission mode, preferring an agent with a local
+  login. When neither agent is signed in, setup keeps the draft ready. (PRO-173)
 - Show the diff inside file-edit approvals. A Codex `apply_patch` request, and
   Claude Code's Edit, MultiEdit and Write, now list each file with its lines
   added and removed and the changed lines, marking new, deleted and renamed
@@ -16,7 +20,8 @@
   app, after an embedded sign-in command exits, and every two minutes while
   Settings → Agents is open. Each card's badge and setup instructions now use
   the same readiness check, so they cannot disagree about installation or
-  login. (PRO-170)
+  login. The new-chat composer also picks up installation and login changes
+  on return, even when its cached agent list still says not installed. (PRO-170)
 - Return to the welcome screen with **Home** in either sidebar layout or ⌘K,
   even after opening projects or sessions. Open local project, Open GitHub
   project and Quick start remain available there. (PRO-183)

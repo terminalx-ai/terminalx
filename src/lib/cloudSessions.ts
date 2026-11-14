@@ -52,6 +52,7 @@ export interface CloudSessionRow {
   created: string;
   modified: string;
   lastMessageAt?: string | null;
+  hasMessages?: boolean;
   pinned: boolean;
   archived: boolean;
   tabs: CloudSessionTab[];
@@ -284,6 +285,7 @@ export function buildCloudSessions(input: {
       created: session.created,
       modified: session.modified,
       lastMessageAt: newestMessageTime(session.lastMessageAt, ...session.tabs.flatMap((tab) => [agentTabs.get(tab.id)?.info.lastMessageAt, agentTabs.get(tab.id)?.info.sessionLastMessageAt])),
+      hasMessages: session.hasMessages || session.tabs.some((tab) => tab.hasMessages || agentTabs.get(tab.id)?.info.hasMessages || agentTabs.get(tab.id)?.info.sessionHasMessages),
       pinned: session.pinned,
       archived: session.archived,
       tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),
@@ -310,6 +312,7 @@ export function buildCloudSessions(input: {
           created: tab.info.sessionCreated || tab.info.created || iso(item.workspace.createdAt),
           modified: tab.info.modified || iso(item.workspace.updatedAt),
           lastMessageAt: tab.info.lastMessageAt,
+          hasMessages: tab.info.hasMessages || tab.info.sessionHasMessages,
           pinned: false,
           archived: false,
           tabs: [],
@@ -318,6 +321,7 @@ export function buildCloudSessions(input: {
         rows.set(sessionId, row);
       }
       row.lastMessageAt = newestMessageTime(row.lastMessageAt, tab.info.lastMessageAt, tab.info.sessionLastMessageAt);
+      row.hasMessages ||= tab.info.hasMessages || tab.info.sessionHasMessages;
       if (tab.info.sessionCreated) row.created = tab.info.sessionCreated;
       if (!row.tabs.some((known) => known.tabId === tab.tabId)) row.tabs.push(tabOf(tab.tabId, { harness: tab.info.harness, status: tab.info.status }));
     }
