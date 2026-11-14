@@ -13,7 +13,7 @@
 //! - Mutations are answered from the idempotency cache when resent.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -23,8 +23,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+#[cfg(test)]
 use super::files::WorkspaceFiles;
-use super::git::WorkspaceGit;
+use super::machine::{self as machine, ServedProject};
 use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
 use crate::cloud_agents::{slash, CloudAgents};
@@ -251,6 +252,8 @@ struct PtyState {
     cwd: String,
     /// The session the terminal was opened for (`pty/2`), if any.
     session_id: Option<String>,
+    /// The machine project it runs in (`machine/1`); `cwd` is relative to it.
+    project_id: Option<String>,
     created_at_ms: u64,
     pid: Option<u32>,
     cols: u16,
@@ -322,7 +325,8 @@ struct SessionSubscription {
 enum Subscription {
     Pty { peer: u64, pty_id: String },
     Session { peer: u64 },
-    Fs { peer: u64, _watcher: Box<dyn Send> },
+    /// `project` is the machine project watched (`machine/1`).
+    Fs { peer: u64, project: Option<String>, _watcher: Box<dyn Send> },
 }
 
 impl Subscription {
@@ -335,11 +339,21 @@ impl Subscription {
 
 type Gate = Arc<tokio::sync::Mutex<()>>;
 
+/// What a runtime serves (PRO-340, docs/MACHINES.md).
+enum Scope {
+    /// One root: a cloud workspace, or a runtime started with
+    /// `--project-root`. Served exactly as before `machine/1`.
+    Workspace { project: Arc<ServedProject>, mirror: super::mirror::WorkspaceMirror },
+    /// Every project of the machine, each named by its `projectId`.
+    Machine { projects: machine::Projects, identity: machine::Identity },
+}
+
+/// How often a machine looks again for a new name or project set, besides
+/// the events that say so at once.
+const MACHINE_CHANGE_POLL: Duration = Duration::from_secs(5);
+
 pub struct WorkspaceRpc {
-    root: PathBuf,
-    files: Arc<WorkspaceFiles>,
-    git: WorkspaceGit,
-    mirror: super::mirror::WorkspaceMirror,
+    scope: Scope,
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
@@ -378,6 +392,9 @@ pub struct WorkspaceRpc {
     /// Raised when a session is created, updated or deleted; the list goes
     /// out as `session.sessions` to `session/2` connections.
     sessions_changed: Arc<tokio::sync::Notify>,
+    /// Raised when a machine's projects or settings may have changed; a
+    /// change goes out as `machine.changed` to `machine/1` connections.
+    machine_changed: Arc<tokio::sync::Notify>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
@@ -390,7 +407,8 @@ pub struct WorkspaceRpc {
 }
 
 impl WorkspaceRpc {
-    /// `sessions` is absent only in tests that do not need agents.
+    /// One root (a cloud workspace, or `--project-root`). `sessions` is
+    /// absent only in tests that do not need agents.
     pub fn new(
         root: &Path,
         generation: u64,
@@ -399,12 +417,51 @@ impl WorkspaceRpc {
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
         let root = std::fs::canonicalize(root)?;
-        let files = Arc::new(WorkspaceFiles::new(root.clone()));
+        let scope = Scope::Workspace { mirror: super::mirror::WorkspaceMirror::new(root.clone()), project: Arc::new(ServedProject::workspace(root)) };
+        Ok(Self::serving(scope, generation, sink, terminals, sessions))
+    }
+
+    /// Every project of this machine (`machine/1`, PRO-340), from the
+    /// projects its store already knows. A client that does not ask for
+    /// `machine/1` is served whatever names no project.
+    pub fn machine(
+        identity: machine::Identity,
+        generation: u64,
+        sink: Arc<dyn EventSink>,
+        terminals: Arc<Terminals>,
+        sessions: Option<SessionManager>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let rpc = Self::serving(Scope::Machine { projects: machine::Projects::default(), identity }, generation, sink.clone(), terminals, sessions);
+        // A project added or removed here, and Settings (which holds the name).
+        for event in ["projects_changed", "settings_file_changed"] {
+            let notify = rpc.machine_changed.clone();
+            sink.listen(event, Box::new(move |_| notify.notify_one()));
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&rpc);
+            let notify = rpc.machine_changed.clone();
+            runtime.spawn(async move {
+                let mut last = tokio::task::spawn_blocking(machine::fingerprint).await.ok().flatten();
+                loop {
+                    tokio::select! {
+                        _ = notify.notified() => {}
+                        _ = tokio::time::sleep(MACHINE_CHANGE_POLL) => {}
+                    }
+                    let Some(rpc) = weak.upgrade() else { return };
+                    let Ok(Some(now)) = tokio::task::spawn_blocking(machine::fingerprint).await else { continue };
+                    if last.as_ref() != Some(&now) {
+                        last = Some(now);
+                        let _ = tokio::task::spawn_blocking(move || rpc.broadcast_machine()).await;
+                    }
+                }
+            });
+        }
+        Ok(rpc)
+    }
+
+    fn serving(scope: Scope, generation: u64, sink: Arc<dyn EventSink>, terminals: Arc<Terminals>, sessions: Option<SessionManager>) -> Arc<Self> {
         let rpc = Arc::new(Self {
-            git: WorkspaceGit::new(root.clone(), files.clone()),
-            mirror: super::mirror::WorkspaceMirror::new(root.clone()),
-            files,
-            root,
+            scope,
             generation: AtomicU64::new(generation),
             epoch: format!("epoch-{}", uuid::Uuid::new_v4().simple()),
             next_pty_number: AtomicU64::new(1),
@@ -424,6 +481,7 @@ impl WorkspaceRpc {
             ports: Arc::new(super::ports::Ports::default()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
+            machine_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -527,7 +585,136 @@ impl WorkspaceRpc {
                 }
             });
         }
-        Ok(rpc)
+        rpc
+    }
+
+    // ---- what this runtime serves (PRO-340) --------------------------------
+
+    fn is_machine(&self) -> bool {
+        matches!(self.scope, Scope::Machine { .. })
+    }
+
+    /// The project a call names: a workspace's one root, or on a machine the
+    /// one its `projectId` names. A client without `machine/1` names none, so
+    /// a machine refuses it the call (docs/MACHINES.md, Project scoping).
+    fn project(&self, peer: &Peer, params: &Value) -> Result<Arc<ServedProject>, RpcError> {
+        match &self.scope {
+            Scope::Workspace { project, .. } => Ok(project.clone()),
+            Scope::Machine { projects, .. } => {
+                if !peer.granted(machine::MACHINE) {
+                    return Err(RpcError::new("capability_not_granted", format!("this runtime serves several projects: the call needs {} and a projectId", machine::MACHINE)));
+                }
+                match params.get("projectId") {
+                    Some(Value::String(id)) => projects.get(id),
+                    None | Some(Value::Null) => Err(RpcError::invalid("projectId is required: this runtime serves several projects")),
+                    Some(_) => Err(RpcError::invalid("projectId must be a string")),
+                }
+            }
+        }
+    }
+
+    /// Every project served so far, where searches, uploads and watches live.
+    fn served_projects(&self) -> Vec<Arc<ServedProject>> {
+        match &self.scope {
+            Scope::Workspace { project, .. } => vec![project.clone()],
+            Scope::Machine { projects, .. } => projects.served(),
+        }
+    }
+
+    /// Whether a session or pipeline in `project_path` is this runtime's:
+    /// the workspace's own (with its nested checkouts), or one of the
+    /// machine's projects (`ids`, from [`machine::ids_by_path`]).
+    fn owns(&self, project_path: &str, ids: Option<&HashMap<String, String>>) -> bool {
+        match &self.scope {
+            Scope::Workspace { project, .. } => super::session_target::owns_project(&project.root, project_path),
+            Scope::Machine { .. } => match ids {
+                Some(ids) => ids.contains_key(project_path),
+                None => machine::ids_by_path().contains_key(project_path),
+            },
+        }
+    }
+
+    /// The machine's projects by path; `None` for a workspace runtime.
+    fn project_ids(&self) -> Option<HashMap<String, String>> {
+        self.is_machine().then(machine::ids_by_path)
+    }
+
+    /// A session as it is sent: on a machine it names its project.
+    fn session_wire(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>) -> Value {
+        let mut value = json!(session);
+        if let (Some(ids), Some(fields)) = (ids, value.as_object_mut()) {
+            fields.insert("projectId".into(), json!(ids.get(&session.project_path)));
+        }
+        value
+    }
+
+    /// A pipeline as it is sent: on a machine it names its project too.
+    fn pipeline_wire(&self, pipeline: Value, ids: Option<&HashMap<String, String>>) -> Value {
+        let mut pipeline = pipeline_on_the_wire(pipeline);
+        if let Some(ids) = ids {
+            let id = pipeline.get("projectPath").and_then(Value::as_str).and_then(|path| ids.get(path)).cloned();
+            if let Some(fields) = pipeline.as_object_mut() {
+                fields.insert("projectId".into(), json!(id));
+            }
+        }
+        pipeline
+    }
+
+    /// On a machine, a call that names a session, terminal, pipeline or
+    /// watch takes no `projectId`; one that is given must be that object's
+    /// project, or the call is refused before anything is done.
+    fn check_named_project(&self, method: &str, params: &Value) -> Result<(), RpcError> {
+        if !self.is_machine() || machine::needs_project(method, params) {
+            return Ok(());
+        }
+        let given = match params.get("projectId") {
+            None | Some(Value::Null) => return Ok(()),
+            Some(Value::String(given)) => given.as_str(),
+            Some(_) => return Err(RpcError::invalid("projectId must be a string")),
+        };
+        let path_of_session = |id: &str| index::get(id).ok().map(|session| session.project_path);
+        let named_path: Option<String> = if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
+            path_of_session(session_id)
+        } else if let Some(pipeline) = params.get("pipeline").and_then(Value::as_str).filter(|_| method.starts_with("pipeline.")) {
+            crate::issue_pipeline::store::get(pipeline).ok().map(|pipeline| pipeline.project_path)
+        } else if let Some(pty_id) = params.get("ptyId").and_then(Value::as_str) {
+            let ptys = self.ptys.lock().unwrap();
+            match ptys.get(pty_id) {
+                Some(pty) if pty.agent.is_none() => return self.same_project(given, pty.project_id.as_deref()),
+                _ => pty_id.strip_prefix(AGENT_PTY_PREFIX).and_then(|tab| index::load().ok()?.into_iter().find(|session| session.tabs.iter().any(|entry| entry.id == tab))).map(|session| session.project_path),
+            }
+        } else if let Some(subscription) = params.get("subscriptionId").and_then(Value::as_str) {
+            if let Some(Subscription::Fs { project, .. }) = self.subscriptions.lock().unwrap().get(subscription) {
+                return self.same_project(given, project.as_deref());
+            }
+            None
+        } else {
+            None
+        };
+        match named_path {
+            Some(path) => self.same_project(given, Some(&machine::project_id(&path))),
+            None => Ok(()),
+        }
+    }
+
+    fn same_project(&self, given: &str, named: Option<&str>) -> Result<(), RpcError> {
+        match named {
+            Some(named) if named != given => Err(RpcError::invalid(format!("projectId {given} is not the project of what this call names"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// `machine.changed`: the machine's name or project set changed.
+    fn broadcast_machine(&self) {
+        let Scope::Machine { identity, .. } = &self.scope else { return };
+        let projects = match machine::projects() {
+            Ok(projects) => projects,
+            Err(error) => {
+                log::warn!("project list for machine.changed: {}", error.message);
+                return;
+            }
+        };
+        self.notify_granted(machine::MACHINE, "machine.changed", json!({ "machine": machine::describe(identity), "projects": projects["projects"] }));
     }
 
     pub fn generation(&self) -> u64 {
@@ -589,9 +776,11 @@ impl WorkspaceRpc {
                 return;
             }
         };
+        let ids = self.project_ids();
+        let wire: Vec<Value> = sessions.iter().map(|session| self.session_wire(session, ids.as_ref())).collect();
         for peer in peers {
             // Workspace-wide, as `visible_sessions`.
-            let visible: Vec<&SessionEntry> = if self.access(&peer).can_view() { sessions.iter().collect() } else { Vec::new() };
+            let visible: &[Value] = if self.access(&peer).can_view() { &wire } else { &[] };
             peer.notify("session.sessions", json!({ "sessions": visible }));
         }
     }
@@ -599,6 +788,10 @@ impl WorkspaceRpc {
     /// `pipeline.changed`: an issue's pipeline was written. Whoever may see
     /// the workspace's sessions may see the pipeline that names them.
     fn broadcast_pipeline(&self, pipeline: Value) {
+        let pipeline = match self.project_ids() {
+            Some(ids) => self.pipeline_wire(pipeline, Some(&ids)),
+            None => pipeline,
+        };
         for peer in self.live_peers() {
             if peer.granted("pipeline/1") && self.access(&peer).can_view() {
                 peer.notify("pipeline.changed", json!({ "pipeline": pipeline }));
@@ -863,7 +1056,7 @@ impl WorkspaceRpc {
         if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
             let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
-            let granted = protocol::negotiate(&params)?;
+            let granted = protocol::negotiate(&params, &protocol::served(self.is_machine()))?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
@@ -898,7 +1091,7 @@ impl WorkspaceRpc {
             }
             return Ok(hello);
         }
-        let Some(spec) = protocol::find_method(method) else {
+        let Some(spec) = protocol::find_method(method).filter(|_| !(self.is_machine() && machine::UNSERVED.contains(&method))) else {
             return Err(RpcError::new("method_not_found", format!("{method} is not a workspace method")));
         };
         match &*peer.granted.lock().unwrap() {
@@ -1039,6 +1232,9 @@ impl WorkspaceRpc {
     }
 
     fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.check_named_project(method, &params)?;
+        // The project a call names, resolved once and checked before it runs.
+        let project = || self.project(peer, &params);
         match method {
             "pty.create" => self.pty_create(peer, params),
             "pty.list" => self.pty_list(peer),
@@ -1048,20 +1244,35 @@ impl WorkspaceRpc {
             "pty.kill" => self.pty_kill(params),
             "pty.attach" => self.pty_attach(peer, params),
             "pty.detach" | "session.unsubscribe" | "fs.unwatch" => self.unsubscribe(peer, params),
-            "fs.list" => self.files.list(&params),
-            "fs.stat" => self.files.stat(&params),
-            "fs.read" => self.files.read(&params),
-            "fs.write" => self.files.write(&peer.device_id, &params),
-            "fs.writePart" => self.files.write_part(&peer.device_id, &params),
-            "fs.rename" => self.files.rename(&params),
-            "fs.delete" => self.files.delete(&params),
-            "fs.mkdir" => self.files.mkdir(&params),
-            "fs.search" => self.files.search(peer.id, &params),
-            "fs.cancel" => self.files.cancel(peer.id, &params),
-            "fs.watch" => self.fs_watch(peer, params),
-            "mirror.manifest" => self.mirror.manifest(&self.git, &params),
+            "fs.list" => project()?.files.list(&params),
+            "fs.stat" => project()?.files.stat(&params),
+            "fs.read" => project()?.files.read(&params),
+            "fs.write" => project()?.files.write(&peer.device_id, &params),
+            "fs.writePart" => project()?.files.write_part(&peer.device_id, &params),
+            "fs.rename" => project()?.files.rename(&params),
+            "fs.delete" => project()?.files.delete(&params),
+            "fs.mkdir" => project()?.files.mkdir(&params),
+            "fs.search" => project()?.files.search(peer.id, &params),
+            "fs.cancel" => self.fs_cancel(peer, &params),
+            "fs.watch" => self.fs_watch(peer, &project()?, params),
+            "mirror.manifest" => match &self.scope {
+                Scope::Workspace { project, mirror } => mirror.manifest(&project.git, &params),
+                Scope::Machine { .. } => Err(RpcError::new("method_not_found", "a machine has no mirror")),
+            },
             "lifecycle.dispositionFacts" => self.disposition_facts(),
-            "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
+            "lifecycle.resources" => Ok(match &self.scope {
+                Scope::Workspace { project, .. } => crate::cloud_resources::observe(&project.root),
+                // A machine's disk is the one its data directory is on.
+                Scope::Machine { .. } => crate::cloud_resources::observe(&crate::store::root().map_err(RpcError::internal)?),
+            }),
+            "machine.describe" => match &self.scope {
+                Scope::Machine { identity, .. } => Ok(machine::describe(identity)),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.projects" => match &self.scope {
+                Scope::Machine { .. } => machine::projects(),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
             "cleanup.scan" => self.cleanup_scan(),
             "cleanup.size" => self.cleanup_size(peer, params),
             "cleanup.cancel" => self.cleanup_cancel(peer),
@@ -1083,7 +1294,7 @@ impl WorkspaceRpc {
             },
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
             "pipeline.noteTracker" => self.pipeline_note_tracker(params),
-            git if git.starts_with("git.") => self
+            git if git.starts_with("git.") => project()?
                 .git
                 .handle(git, &params)
                 .unwrap_or_else(|| Err(RpcError::new("method_not_found", format!("{git} is not a workspace method")))),
@@ -1092,6 +1303,10 @@ impl WorkspaceRpc {
             "session.create" => {
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
+                }
+                // On a machine, refused here without `machine/1` or a project.
+                if self.is_machine() {
+                    project()?;
                 }
                 self.session_create(params)
             },
@@ -1160,7 +1375,9 @@ impl WorkspaceRpc {
 
     /// End every stream a connection opened, keeping the connection.
     fn drop_peer_subscriptions(&self, peer: &Peer) {
-        self.files.disconnect(peer.id);
+        for project in self.served_projects() {
+            project.files.disconnect(peer.id);
+        }
         self.ports.revoke(peer);
         let doomed: Vec<(String, Subscription)> = {
             let mut subscriptions = self.subscriptions.lock().unwrap();
@@ -1175,7 +1392,9 @@ impl WorkspaceRpc {
 
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
-        self.files.disconnect(peer.id);
+        for project in self.served_projects() {
+            project.files.disconnect(peer.id);
+        }
         // Before its streams are ended, so an open still connecting sees it.
         peer.gone.store(true, Ordering::SeqCst);
         // Released here, not when the last reference to the peer goes: a
@@ -1395,6 +1614,8 @@ impl WorkspaceRpc {
                     number: 0,
                     cwd: String::new(),
                     session_id: None,
+                    // Its tab's session names the project.
+                    project_id: None,
                     created_at_ms: crate::cloud_agents::now_ms(),
                     pid: None,
                     cols,
@@ -1534,6 +1755,10 @@ impl WorkspaceRpc {
             "control": pty.control_for(peer),
             "controllerId": pty.controller_user.as_ref().and_then(|(user, _)| user.clone()),
         });
+        // `machine/1`: the project it runs in, which `cwd` is relative to.
+        if let Some(project_id) = &pty.project_id {
+            described["projectId"] = json!(project_id);
+        }
         if let Some(agent) = &pty.agent {
             // The tab whose CLI this is, and whether one runs in it now.
             described["tabId"] = json!(agent.tab_id);
@@ -1559,6 +1784,8 @@ impl WorkspaceRpc {
             cwd: Option<String>,
             #[serde(default)]
             session_id: Option<String>,
+            #[serde(default)]
+            project_id: Option<String>,
             #[allow(dead_code)]
             client_request_id: String,
         }
@@ -1571,15 +1798,21 @@ impl WorkspaceRpc {
             Some(session_id) => Some(self.visible_session(peer, session_id)?),
             None => None,
         };
+        // Where its paths resolve: the workspace, or on a machine the
+        // session's project, else the one the call names.
+        let project = match (&self.scope, &session) {
+            (Scope::Machine { projects, .. }, Some(session)) => projects.get(&machine::project_id(&session.project_path))?,
+            _ => self.project(peer, &params_project(&p.project_id))?,
+        };
         let cwd = match (&p.cwd, &session) {
-            (Some(relative), _) => self.existing_path(relative)?,
+            (Some(relative), _) => project.files.existing_path(relative)?,
             // A session's terminal opens in its checkout (its worktree), when
             // that is inside the workspace; otherwise at the root.
             (None, Some(session)) => std::fs::canonicalize(&session.cwd)
                 .ok()
-                .filter(|cwd| cwd.starts_with(&self.root) && cwd.is_dir())
-                .unwrap_or_else(|| self.root.clone()),
-            (None, None) => self.root.clone(),
+                .filter(|cwd| project.files.contains(cwd) && cwd.is_dir())
+                .unwrap_or_else(|| project.root.clone()),
+            (None, None) => project.root.clone(),
         };
         if !cwd.is_dir() {
             return Err(RpcError::invalid("cwd is not a directory"));
@@ -1596,8 +1829,9 @@ impl WorkspaceRpc {
                 pty_id.clone(),
                 PtyState {
                     number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
-                    cwd: self.relative(&cwd),
+                    cwd: project.files.relative(&cwd),
                     session_id: session.map(|session| session.id),
+                    project_id: project.id.clone(),
                     created_at_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|elapsed| elapsed.as_millis() as u64)
@@ -2195,20 +2429,31 @@ impl WorkspaceRpc {
 
     // ---- files (remote/files.rs) -------------------------------------------
 
-    fn existing_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
-        self.files.existing_path(relative)
+    #[cfg(test)]
+    pub(super) fn files_for_tests(&self) -> Arc<WorkspaceFiles> {
+        self.served_projects()[0].files.clone()
     }
 
     #[cfg(test)]
-    pub(super) fn files_for_tests(&self) -> Arc<WorkspaceFiles> {
-        self.files.clone()
+    pub(super) fn workspace_git_for_tests(&self) -> Arc<ServedProject> {
+        self.served_projects()[0].clone()
     }
 
-    fn relative(&self, path: &Path) -> String {
-        self.files.relative(path)
+    /// `fs.cancel`: stop a search this connection started, in the project
+    /// named, or in any where none is.
+    fn fs_cancel(&self, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+        let named = params.get("projectId").and_then(Value::as_str);
+        let mut cancelled = false;
+        for project in self.served_projects().into_iter().filter(|project| named.is_none() || project.id.as_deref() == named) {
+            cancelled |= project.files.cancel(peer.id, params)?["cancelled"] == true;
+        }
+        if !cancelled && self.served_projects().is_empty() {
+            required_str(params, "searchId")?;
+        }
+        Ok(json!({ "cancelled": cancelled }))
     }
 
-    fn fs_watch(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
+    fn fs_watch(&self, peer: &Arc<Peer>, project: &Arc<ServedProject>, params: Value) -> Result<Value, RpcError> {
         let watching = self
             .subscriptions
             .lock()
@@ -2222,14 +2467,14 @@ impl WorkspaceRpc {
         let subscription_id = Self::subscription_id();
         let notify_peer = peer.clone();
         let id = subscription_id.clone();
-        let (watcher, path) = self.files.watcher(params.get("path").and_then(Value::as_str).unwrap_or(""), move |paths| {
+        let (watcher, path) = project.files.watcher(params.get("path").and_then(Value::as_str).unwrap_or(""), move |paths| {
             let params = match paths {
                 Some(paths) => json!({ "subscriptionId": id, "paths": paths }),
                 None => json!({ "subscriptionId": id, "paths": [], "overflow": true }),
             };
             notify_peer.notify("fs.changed", params);
         })?;
-        self.subscriptions.lock().unwrap().insert(subscription_id.clone(), Subscription::Fs { peer: peer.id, _watcher: watcher });
+        self.subscriptions.lock().unwrap().insert(subscription_id.clone(), Subscription::Fs { peer: peer.id, project: project.id.clone(), _watcher: watcher });
         Ok(json!({ "subscriptionId": subscription_id, "path": path }))
     }
 
@@ -2238,7 +2483,8 @@ impl WorkspaceRpc {
     /// What an archive or delete would lose (saas contract 10.2): unpublished
     /// work per repository, running agent turns and live terminals.
     fn disposition_facts(&self) -> Result<Value, RpcError> {
-        let repositories = self.git.disposition_repositories();
+        let Scope::Workspace { project, .. } = &self.scope else { return Err(RpcError::new("method_not_found", "nothing archives a machine")) };
+        let repositories = project.git.disposition_repositories();
         let active_tasks: Vec<Value> = self
             .agents
             .get()
@@ -2265,16 +2511,26 @@ impl WorkspaceRpc {
     /// repositories is a project, and neither they nor the workspace root are
     /// ever removable. Only worktrees inside the workspace are its to remove.
     fn with_cleanup_host<R>(&self, f: impl FnOnce(&crate::worktree_cleanup::Host<'_>) -> R) -> Result<R, RpcError> {
-        let (names, _) = self.git.repositories();
+        let project = match &self.scope {
+            Scope::Workspace { project, .. } => project.clone(),
+            // A machine's clean-up is the one this computer's own window runs:
+            // every open project, archived ones protected (Settings → Storage).
+            Scope::Machine { .. } => {
+                let manager = self.manager()?;
+                return crate::local_runtime::workspaces::host(manager, |host| Ok(f(host))).map_err(RpcError::internal);
+            }
+        };
+        let root = &project.root;
+        let (names, _) = project.git.repositories();
         let projects: Vec<crate::store::projects::Project> = names
             .iter()
             .map(|name| {
-                let dir = if name == "." { self.root.clone() } else { self.root.join(name) };
+                let dir = if name == "." { root.clone() } else { root.join(name) };
                 let label = dir.file_name().map(|file| file.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
                 serde_json::from_value(json!({ "path": dir, "name": label })).map_err(RpcError::internal)
             })
             .collect::<Result<_, _>>()?;
-        let protected = [self.root.clone()];
+        let protected = [root.clone()];
         let tabs = self.agents.get().map(|agents| agents.tabs()).unwrap_or_default();
         // In a turn, or waiting on an answer: what keeps a worktree even from
         // a removal that stops the agents sitting idle in it.
@@ -2290,13 +2546,21 @@ impl WorkspaceRpc {
             Some(manager) => manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}")),
             None => Ok(()),
         };
-        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents), archive: None }))
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(root), live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents), archive: None }))
     }
 
     /// `cleanup/1`: every worktree of the workspace's repositories with
     /// whether it may be removed, and why not. Reads only.
     fn cleanup_scan(&self) -> Result<Value, RpcError> {
         let projects = self.with_cleanup_host(|host| crate::worktree_cleanup::scan(host, None))?.map_err(RpcError::internal)?;
+        // On a machine each row names its project.
+        let mut projects = json!(projects);
+        if let (Some(ids), Some(rows)) = (self.project_ids(), projects.as_array_mut()) {
+            for row in rows {
+                let id = row.get("path").and_then(Value::as_str).and_then(|path| ids.get(path)).cloned();
+                row["projectId"] = json!(id);
+            }
+        }
         Ok(json!({ "projects": projects }))
     }
 
@@ -2371,7 +2635,8 @@ impl WorkspaceRpc {
     /// Every session of this workspace, whoever asks.
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
-        let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect();
+        let ids = self.project_ids();
+        let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| self.owns(&session.project_path, ids.as_ref())).collect();
         // Sessions on one branch are in one project, so this workspace's sessions are every peer that matters.
         if let Ok(manager) = self.manager() { let stored = sessions.clone(); manager.annotate_row_statuses_among(&mut sessions, &stored); }
         Ok(sessions)
@@ -2395,11 +2660,14 @@ impl WorkspaceRpc {
     }
 
     fn session_list(&self, peer: &Peer) -> Result<Value, RpcError> {
-        Ok(json!({ "sessions": self.visible_sessions(peer)? }))
+        let ids = self.project_ids();
+        let sessions: Vec<Value> = self.visible_sessions(peer)?.iter().map(|session| self.session_wire(session, ids.as_ref())).collect();
+        Ok(json!({ "sessions": sessions }))
     }
 
     fn session_get(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let session = self.session_wire(&session, self.project_ids().as_ref());
         Ok(json!({ "session": session, "runningTabs": self.manager().map(|m| m.running_tabs()).unwrap_or_default() }))
     }
 
@@ -2446,6 +2714,9 @@ impl WorkspaceRpc {
             /// that does not know the field starts a terminal tab, as before.
             #[serde(default)]
             native_codex: bool,
+            /// `machine/1`: the project the session runs in.
+            #[serde(default)]
+            project_id: Option<String>,
         }
         let mut p: Params = parse(params)?;
         // A blank mode is no mode: the tab takes the default launch mode.
@@ -2455,7 +2726,21 @@ impl WorkspaceRpc {
         if let Some(issue) = &p.issue {
             check_issue(issue)?;
         }
-        let project = super::session_target::resolve(&self.root, p.repository.as_ref())?;
+        let (project, workspace_root) = match &self.scope {
+            Scope::Workspace { project, .. } => (super::session_target::resolve(&project.root, p.repository.as_ref())?, Some(project.root.clone())),
+            // A machine's project is named by its id and is already a project
+            // here, with its own pipeline settings, which a caller does not
+            // replace; it has no workspace checkout to route to.
+            Scope::Machine { projects, .. } => {
+                if p.repository.is_some() {
+                    return Err(RpcError::invalid("a machine's session names its project with projectId, not a repository"));
+                }
+                p.pipeline_settings = None;
+                let id = p.project_id.as_deref().ok_or_else(|| RpcError::invalid("projectId is required: this runtime serves several projects"))?;
+                let project = projects.get(id)?;
+                (project.root.clone(), None)
+            }
+        };
         let root = project.to_string_lossy().into_owned();
         // A checkout of the workspace's repository is a project of its own:
         // its issue pipeline's settings are stored and read under its path,
@@ -2472,9 +2757,9 @@ impl WorkspaceRpc {
                 log::warn!("store the issue pipeline settings: {error:#}");
             }
         }
-        if p.use_worktree && p.repository.is_none() {
+        if let (true, None, Some(workspace_root)) = (p.use_worktree, &p.repository, &workspace_root) {
             // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
-            if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
+            if let Err(error) = crate::cloud_agents::launch::init_blank_repository(workspace_root, "main") {
                 log::warn!("prepare the blank project folder: {error:#}");
             }
         }
@@ -2551,7 +2836,8 @@ impl WorkspaceRpc {
             agents.changed(Some(&tab.id), true);
             agents.tab(&tab.id)
         });
-        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info, "pipeline": pipeline, "pipelineNote": pipeline_note, "startError": start_error }))
+        let session = self.session_wire(&entry, self.project_ids().as_ref());
+        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": session, "outcome": outcome, "tab": info, "pipeline": pipeline, "pipelineNote": pipeline_note, "startError": start_error }))
     }
 
     fn session_start_failed(&self, manager: &SessionManager, session_id: &str, tab_id: &str, pipeline: &mut Value, error: anyhow::Error) -> String {
@@ -2606,23 +2892,29 @@ impl WorkspaceRpc {
                 agents.changed(Some(tab_id), true);
             }
         });
-        Ok(crate::issue_pipeline::host::LocalHost::cloud_workspace(self.sink.clone(), manager, tab_added))
+        Ok(match self.scope {
+            // A machine's pipelines are its own: they merge with its `gh` and
+            // move issues with its Linear key, as its window's do.
+            Scope::Machine { .. } => crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), manager),
+            Scope::Workspace { .. } => crate::issue_pipeline::host::LocalHost::cloud_workspace(self.sink.clone(), manager, tab_added),
+        })
     }
 
     /// One of this workspace's pipelines, by its id.
     fn own_pipeline(&self, params: &Value) -> Result<crate::issue_pipeline::Pipeline, RpcError> {
         let id = required_str(params, "pipeline")?;
-        crate::issue_pipeline::store::get(id).ok().filter(|pipeline| super::session_target::owns_project(&self.root, &pipeline.project_path)).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
+        crate::issue_pipeline::store::get(id).ok().filter(|pipeline| self.owns(&pipeline.project_path, None)).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
     }
 
     /// `pipeline/1`: this workspace's pipelines, newest first, as many as fit
     /// [`PIPELINE_LIST_BYTES`]; `truncated` when older ones were left out.
     fn pipeline_list(&self) -> Result<Value, RpcError> {
-        let mut pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| super::session_target::owns_project(&self.root, &pipeline.project_path)).collect();
+        let ids = self.project_ids();
+        let mut pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| self.owns(&pipeline.project_path, ids.as_ref())).collect();
         pipelines.sort_by(|a, b| b.created.cmp(&a.created));
         let (mut listed, mut bytes) = (Vec::new(), 0);
         for pipeline in &pipelines {
-            let wire = pipeline_on_the_wire(json!(pipeline));
+            let wire = self.pipeline_wire(json!(pipeline), ids.as_ref());
             bytes += wire.to_string().len();
             if listed.len() == PIPELINE_LIST_MAX || bytes > PIPELINE_LIST_BYTES {
                 break;
@@ -2637,8 +2929,9 @@ impl WorkspaceRpc {
     fn pipeline_reviewers(&self, params: &Value) -> Result<Value, RpcError> {
         let after = params.get("after").and_then(Value::as_str).unwrap_or("");
         let reviewers = crate::issue_pipeline::store::reviewer_sessions().map_err(RpcError::internal)?;
+        let projects = self.project_ids();
         let mut ids: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter()
-            .filter(|session| super::session_target::owns_project(&self.root, &session.project_path) && session.id.as_str() > after && reviewers.contains(&session.id))
+            .filter(|session| self.owns(&session.project_path, projects.as_ref()) && session.id.as_str() > after && reviewers.contains(&session.id))
             .map(|session| session.id).collect();
         ids.sort();
         let more = ids.len() > 500;
@@ -3098,7 +3391,7 @@ impl WorkspaceRpc {
             .map_err(RpcError::internal)?
             .into_iter()
             .find(|session| Some(session.id.as_str()) == params.get("sessionId").and_then(Value::as_str))
-            .filter(|session| super::session_target::owns_project(&self.root, &session.project_path))
+            .filter(|session| self.owns(&session.project_path, None))
             .ok_or_else(|| RpcError::not_found("no such session"))?;
         let only = params.get("tabId").and_then(Value::as_str);
         let closing: Vec<String> = session.tabs.iter().filter(|tab| only.is_none_or(|id| id == tab.id)).map(|tab| tab.id.clone()).collect();
@@ -3537,6 +3830,11 @@ const PIPELINE_LIST_BYTES: usize = 512 * 1024;
 
 /// A pipeline as a desktop is sent it: without the issue's text, which is the
 /// reviewer's and is never shown.
+/// The `projectId` a `pty.create` named, as params [`WorkspaceRpc::project`] reads.
+fn params_project(project_id: &Option<String>) -> Value {
+    json!({ "projectId": project_id })
+}
+
 fn pipeline_on_the_wire(mut pipeline: Value) -> Value {
     if let Some(fields) = pipeline.as_object_mut() {
         fields.remove("issueBody");
@@ -3563,6 +3861,10 @@ fn check_issue(issue: &index::IssueRef) -> Result<(), RpcError> {
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "machine_tests.rs"]
+mod machine_tests;
 
 #[cfg(test)]
 #[path = "cleanup_tests.rs"]

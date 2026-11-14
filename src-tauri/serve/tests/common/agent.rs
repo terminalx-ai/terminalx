@@ -51,17 +51,26 @@ impl AgentWorld {
     /// The runtime's environment: the fake `claude` first on PATH, and a
     /// home of its own so nothing reads or writes the reader's `~/.claude`.
     pub fn command(&self) -> Command {
+        let mut command = self.machine_command();
+        command.arg("--project-root").arg(&self.project);
+        command
+    }
+
+    /// [`Self::command`] with no project root: a local runtime then serves
+    /// every project its store knows (`machine/1`, PRO-340).
+    pub fn machine_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_terminalx-serve"));
         let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default());
         command
-            .arg("--project-root")
-            .arg(&self.project)
             .arg("--data-dir")
             .arg(&self.data)
             .env("HOME", &self.home)
             .env("PATH", path)
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
             .env_remove("TERMINALX_HOME")
+            // A runtime the desktop started says it has a window; these have none.
+            .env_remove("TERMINALX_LOCAL_DESKTOP")
+            .env_remove("TERMINALX_LOCAL_APPLICATION")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
             .env("RUST_LOG", "info")

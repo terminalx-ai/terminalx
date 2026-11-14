@@ -86,7 +86,7 @@ fn fixture() -> Fixture {
             })
             .collect(),
     );
-    let ops = crate::cloud_agents::ManagerOps { manager, root: root.to_string_lossy().into_owned() };
+    let ops = crate::cloud_agents::ManagerOps { manager, root: Some(root.to_string_lossy().into_owned()) };
     let agents = crate::cloud_agents::CloudAgents::open(&base.join("agents"), Arc::new(ops), None, None, 7).unwrap();
     rpc.set_agents(agents);
     Fixture { _claude: claude, _home: home, _dir: dir, root, rpc, terminals }
