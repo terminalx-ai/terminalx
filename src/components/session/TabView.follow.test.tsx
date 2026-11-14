@@ -9,7 +9,7 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  */
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {} },
+  views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} },
   start: vi.fn(),
   forget: vi.fn(),
   leave: vi.fn(),
@@ -43,6 +43,7 @@ import { applyEvent } from "@/lib/agentEvents";
 import { bootSessions, upsertSession, useSessionStore } from "@/lib/sessions";
 import { mouseClick } from "@/test/press";
 import { permissionEntry } from "@/test/permissionMenu";
+import { noticesDeferred } from "@/lib/noticeDeferral";
 
 let seq = 0;
 let session: SessionEntry;
@@ -243,6 +244,31 @@ describe("a tab that held another conversation before", () => {
     mouseClick(within(bar).getByRole("button", { name: "Conversations" }));
     mouseClick(within(await screen.findByRole("menu")).getByText("First with Claude"));
     expect(mocks.leave).toHaveBeenCalled();
+  });
+
+  it("protects the waiting live terminal independently of the earlier chat being read", async () => {
+    mocks.views.views = { [`tab${seq}`]: "chat" };
+    const view = open({ ...held, status: "waiting" }, log());
+    await waitFor(() => expect(said()).toEqual(["then, with Codex"]));
+    expect(noticesDeferred()).toBe(true);
+    mouseClick(screen.getByRole("button", { name: "Conversations" }));
+    mouseClick(within(await screen.findByRole("menu")).getByText("First with Claude"));
+    await screen.findByTestId("conversation-read-only");
+    expect(noticesDeferred()).toBe(false);
+
+    mocks.views.views[tabId()] = "terminal";
+    view.rerender(<Tab />);
+    expect(screen.getByText("Terminal view · Needs attention")).toBeTruthy();
+    expect(noticesDeferred()).toBe(true);
+    // Returning to history releases the notices; the terminal is no longer visible.
+    mocks.views.views[tabId()] = "chat";
+    view.rerender(<Tab />);
+    expect(noticesDeferred()).toBe(false);
+    mocks.views.views[tabId()] = "terminal";
+    view.rerender(<Tab />);
+    expect(noticesDeferred()).toBe(true);
+    become({ status: "idle" });
+    expect(noticesDeferred()).toBe(false);
   });
 
   it("does not list a conversation in which nothing was said", async () => {

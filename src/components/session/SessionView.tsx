@@ -15,7 +15,7 @@ import { linkText } from "@/lib/issueWork";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { checkoutLabel, worktreeCheckout } from "@/lib/checkout";
+import { checkoutLabel, rootCheckout, worktreeCheckout } from "@/lib/checkout";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
@@ -485,7 +485,12 @@ export function SessionView({
   const workspace = managedWorkspaceFor(session);
   // The worktree's agent moved it off the branch it was made on: say where it is now.
   const own = worktreeCheckout(session, store.workspaces);
-  const movedTo = own && own.branch !== session.branch ? checkoutLabel(own) : null;
+  // In the project's own folder, the header names what is checked out there now: it is what this conversation's agent
+  // reads and commits to next, even when another conversation switched it. (The sidebar keeps naming the conversation by
+  // the branch it worked on.)
+  const root = rootCheckout(session, store.workspaces);
+  const here = own ?? root;
+  const movedTo = here && here.branch !== session.branch ? checkoutLabel(here) : null;
   // One action for local and cloud tabs, so a remapped shortcut switches either.
   // A cloud tab's terminal is the runtime's, which also moves a native Codex tab there (#644).
   const viewPlace = { remote: !local, toTerminal: local ? undefined : backend.toTerminal };
@@ -581,7 +586,7 @@ export function SessionView({
                 {movedTo ? (
                   // Its agent moved the worktree to another branch (or a bare commit): that is where the session is now, and the folder keeps its own name beside it.
                   <>
-                    <span className="truncate" title={`Checked out now. The worktree was made on ${session.branch ?? "its own branch"}.`} data-testid="session-checkout">
+                    <span className="truncate" title={root ? `Checked out now in this folder. This conversation started on ${session.branch ?? "another branch"}.` : `Checked out now. The worktree was made on ${session.branch ?? "its own branch"}.`} data-testid="session-checkout">
                       {movedTo}
                     </span>
                   </>
@@ -713,7 +718,7 @@ export function SessionView({
 
           {/* At the right edge whatever the width. */}
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
-              20px in a 40px-wide button; one beside a label (Share) stays at the label's scale. */}
+              20px in a 40px-wide button (32px when the header is tight); one beside a label (Share) stays at the label's scale. */}
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}

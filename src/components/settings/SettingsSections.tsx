@@ -25,6 +25,7 @@ import { AgentIdleSettings } from "./AgentIdleSettings";
 import { CommandApprovalSettings } from "./CommandApprovalSettings";
 import { ArchiveIdleSettings } from "./ArchiveIdleSettings";
 import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
+import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 
 export function GeneralTab() {
@@ -119,6 +120,7 @@ export function GeneralTab() {
       />
       <QuickChatSettings />
       <LocalRuntimeSettings />
+      <RegisteredSetting setting="general.startupDiagnostics" control={<Button variant="outline" size="sm" onClick={openStartupDiagnostics}>Inspect startup</Button>} />
     </div>
   );
 }
@@ -578,10 +580,35 @@ export function AboutTab() {
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
-        <RegisteredSetting setting="about.changelog"><div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-          <Markdown text={changelog.replace(/^# TerminalX changelog\s*/m, "")} />
-        </div></RegisteredSetting>
+        <RegisteredSetting setting="about.changelog"><Changelog /></RegisteredSetting>
       </div>
+    </div>
+  );
+}
+
+/** The changelog, split at its releases (`## 0.2.25`), newest first. */
+const RELEASES = changelog.replace(/^# TerminalX changelog\s*/m, "").split(/\n(?=## )/).filter((part) => part.trim());
+/** Unreleased (when there is one) and the newest release open the page; the rest wait to be asked for. */
+const FIRST_SHOWN = RELEASES[0]?.startsWith("## Unreleased") ? 2 : 1;
+
+/**
+ * What's new: the latest notes, then the earlier releases on request. The
+ * whole file is 28 releases of Markdown, which took About two thirds of a
+ * second to draw every time it opened.
+ */
+function Changelog() {
+  const [all, setAll] = useState(false);
+  const earlier = RELEASES.length - FIRST_SHOWN;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
+        <Markdown text={(all ? RELEASES : RELEASES.slice(0, FIRST_SHOWN)).join("\n")} />
+      </div>
+      {!all && earlier > 0 && (
+        <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(true)}>
+          Show earlier releases ({earlier})
+        </Button>
+      )}
     </div>
   );
 }

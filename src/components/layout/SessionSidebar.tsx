@@ -1,7 +1,7 @@
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { Fragment, createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { Fragment, createContext, useMemo, useState, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -55,7 +55,6 @@ import { StatusMark } from "@/components/ui/StatusMark";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
-import { AgentMark } from "@/components/AgentMark";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
@@ -571,7 +570,7 @@ function ProjectGroup({
   return (
     <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
-        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-8 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+        <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -803,7 +802,7 @@ function BranchRow({
     <li>
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className={cn(actionRow, "relative -mx-2 flex h-8 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
+      <div className={cn(actionRow, "relative -mx-2 flex h-9 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
         <button
           type="button"
           onClick={toggle}
@@ -1069,8 +1068,7 @@ function ConversationRow({
   const removed = session.worktreeRemoved;
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
   const status = pressingStatus(peers.map(sessionStatus));
-  const agent = useContext(ShowAgents) ? conversationAgent(session) : null;
-  const mark = agent && <AgentMark id={agent} className={cn("size-3 text-faint", yieldsToRowActions)} />;
+  // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
   const branchName = locationLabel ?? label ?? branch;
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
@@ -1083,7 +1081,7 @@ function ConversationRow({
           className={cn(
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
-            "relative -mx-2 flex h-8 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            "relative -mx-2 flex h-9 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
             selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
@@ -1109,7 +1107,6 @@ function ConversationRow({
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
                 {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {mark}
                 {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
                 <StatusMark status={status} />
                 {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
@@ -1118,7 +1115,6 @@ function ConversationRow({
               <>
                 <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {mark}
                 <StatusMark status={status} />
               </>
             )}

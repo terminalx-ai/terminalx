@@ -346,6 +346,7 @@ export const api = {
    */
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  accountPasteCallback: (link: string) => invoke<void>("account_paste_callback", { link }),
   /** Opens the organization's page in the web console, in the system browser. */
   organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
@@ -732,6 +733,8 @@ export interface AccountIdentity {
   organization: string | null;
   /** The active (default) organization's id. */
   organizationId?: string | null;
+  /** The person's picture from the sign-in service, an https: URL; absent when it sends none. */
+  picture?: string | null;
 }
 
 export interface AccountStatus {
@@ -1987,6 +1990,8 @@ export const agent = {
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
+  reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
+    invoke<void>("report_terminal_view", { sessionId, tabId, report }),
   reportSendShown: (sessionId: string, tabId: string, seq: number, timings: { pressedAt?: number; drawnAt?: number; answeredAt?: number; shownAt: number }) =>
     invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
   /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
@@ -1997,7 +2002,7 @@ export const agent = {
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
-  tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
+  tabToTerminal: (sessionId: string, tabId: string, transitionId?: string) => invoke<boolean | void>("tab_to_terminal", { sessionId, tabId, transitionId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /**

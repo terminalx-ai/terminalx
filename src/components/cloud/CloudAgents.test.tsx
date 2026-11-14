@@ -44,6 +44,8 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
+import { noticesDeferred } from "@/lib/noticeDeferral";
+import { applyEvent } from "@/lib/agentEvents";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -174,11 +176,11 @@ function makeClient() {
 }
 let client: ReturnType<typeof makeClient>;
 
-function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready", wake = vi.fn()) {
+function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready", wake = vi.fn(), active = true) {
   client.connection = state;
   return (
     <TooltipProvider>
-      <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} wakeWorkspace={wake} />
+      <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} wakeWorkspace={wake} active={active} />
     </TooltipProvider>
   );
 }
@@ -373,8 +375,13 @@ describe("cloud agent tabs", () => {
         ],
       }),
     ];
-    render(view(connected()));
+    const mounted = render(view(connected()));
     const allow = await screen.findByRole("button", { name: /^Allow/ });
+    expect(noticesDeferred()).toBe(true);
+    mounted.rerender(view(connected(), "ready", undefined, false));
+    expect(noticesDeferred()).toBe(false);
+    mounted.rerender(view(connected()));
+    expect(noticesDeferred()).toBe(true);
     fireEvent.click(allow);
     fireEvent.click(allow);
     await waitFor(() => expect(enqueued).toHaveLength(1));
@@ -383,6 +390,11 @@ describe("cloud agent tabs", () => {
     fireEvent.click(screen.getByRole("button", { name: /Deny/ }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(enqueued).toHaveLength(1);
+    // A queued answer is still pending until the runtime confirms the decision.
+    expect(noticesDeferred()).toBe(true);
+    act(() => applyEvent(ev(3, { type: "permission_decided", requestId: "req-9", allowed: true, label: "Allowed", automatic: false })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
+    expect(noticesDeferred()).toBe(false);
   });
 
   it("shows follow-ups the runtime holds until the turn ends, and steers or stops the running turn", async () => {

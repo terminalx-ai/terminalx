@@ -41,6 +41,7 @@ mod commands;
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
+pub mod startup;
 #[cfg(feature = "desktop")]
 mod cloud_ports;
 #[cfg(feature = "desktop")]
@@ -430,6 +431,7 @@ pub fn run() {
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
+            commands::account_paste_callback,
             commands::organization_console_open,
             commands::account_sign_out,
             commands::organization_create,
@@ -535,6 +537,11 @@ pub fn run() {
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
+            startup::commands::startup_diagnostics_status,
+            startup::commands::startup_diagnostics_policy,
+            startup::commands::startup_diagnostics_probe,
+            startup::commands::startup_diagnostics_preview,
+            startup::commands::startup_diagnostics_export,
             cloud_agent_client::cloud_agent_enqueue,
             cloud_agent_client::cloud_agent_outbox,
             cloud_agent_client::cloud_agent_outbox_sync,
@@ -638,6 +645,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::report_send_shown,
+            commands::report_terminal_view,
             commands::report_recovery_ui,
             commands::resend_unsent,
             commands::resend_message,
