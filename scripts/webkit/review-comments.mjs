@@ -45,7 +45,7 @@ try {
  await tab(page,'gemini tab').click();
  await page.getByRole('button',{name:'Branch',exact:true}).click();
  await page.getByRole('tab',{name:'Changes',exact:true}).click();
- await page.getByRole('button',{name:/review.ts/}).click();
+ await page.getByRole('button',{name:/^Modified review\.ts/}).click();
  const centre=page.getByRole('tabpanel',{name:'review.ts · All changes',exact:true});
  for(const mode of ['Unified','Split']) {
    await centre.getByRole('button',{name:mode,exact:true}).click();

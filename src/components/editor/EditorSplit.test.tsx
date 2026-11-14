@@ -189,7 +189,8 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   openDiff("split", "/workspace", "options.ts", { scope: "turn", range: { base: "before", head: "after" } });
   const first = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
   await screen.findByRole("button", { name: "Copy file" });
-  expect(first.container.querySelector(".cm-changedLine")).not.toBeNull();
+  // The button commits with the diff; CodeMirror is built in DiffPane's effect after it.
+  await waitFor(() => expect(first.container.querySelector(".cm-changedLine")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
   expect(first.container.querySelector(".cm-changedLine")).toBeNull();
   fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "false" } });
@@ -210,7 +211,7 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   await screen.findByRole("button", { name: "Copy file" });
   expect(screen.getByRole("button", { name: "Split" }).getAttribute("aria-pressed")).toBe("true");
   expect((screen.getByLabelText("Hide whitespace changes") as HTMLInputElement).checked).toBe(true);
-  expect(second.container.querySelectorAll(".cm-content")).toHaveLength(2);
+  await waitFor(() => expect(second.container.querySelectorAll(".cm-content")).toHaveLength(2));
   expect(second.container.querySelector(".cm-lineWrapping")).toBeNull();
 });
 

@@ -3,14 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { setPrefs } from "@/lib/prefs";
+import { announceProjectAdded } from "@/lib/projectAdded";
 import { addProject, startSessionIn } from "@/lib/sessions";
 import type { Project } from "@/types/session";
 
 /**
  * The three ways to a local project: a folder already on this computer, a
- * repository cloned from GitHub (or any Git URL), and a new empty one. Each
- * ends in the same place, a project attached and its new-session view open
- * with the composer focused. The start screen, the sidebar's empty state and
+ * repository cloned from GitHub (or any Git URL), and a new one made from a
+ * template. Each ends in the same place, a project attached and its
+ * new-session view open with the composer focused (unless "Create a project"
+ * was told not to open one). The start screen, the sidebar's empty state and
  * the command palette all go through here.
  */
 
@@ -45,8 +47,24 @@ export interface StartDefaults {
   suggestedName: string;
 }
 
+/** A starting point "Create a project" offers: one that ships with the app, or a folder the reader added in Settings. */
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  /** What a built-in template holds; a user template's folder. */
+  description: string;
+  builtIn: boolean;
+  path?: string;
+  /** Why a user template cannot be used now (its folder is gone). */
+  problem?: string;
+}
+
+/** The built-in template a new project starts from unless the reader picks another. */
+export const DEFAULT_TEMPLATE = "empty";
+
 export type StartFailureCode =
   | "invalid-source"
+  | "invalid-template"
   | "invalid-name"
   | "invalid-destination"
   | "destination-exists"
@@ -76,7 +94,10 @@ export const projectStart = {
   clone: (id: string, source: string, parent: string) => invoke<CloneOutcome>("project_clone", { id, source, parent }),
   cancelClone: (id: string) => invoke<void>("project_clone_cancel", { id }),
   defaults: (parent: string | null) => invoke<StartDefaults>("project_start_defaults", { parent }),
-  create: (parent: string, name: string) => invoke<string>("project_create", { parent, name }),
+  create: (parent: string, name: string, template: string) => invoke<string>("project_create", { parent, name, template }),
+  templates: () => invoke<ProjectTemplate[]>("project_templates"),
+  addTemplate: (path: string) => invoke<ProjectTemplate>("project_template_add", { path }),
+  removeTemplate: (id: string) => invoke<void>("project_template_remove", { id }),
   /** Progress of the clone started with `id`, until the returned function is called. */
   async onCloneProgress(id: string, onProgress: (progress: CloneProgress) => void): Promise<() => void> {
     try {
@@ -94,13 +115,37 @@ function focusComposer() {
   setTimeout(() => document.querySelector<HTMLTextAreaElement>("textarea[data-new-session-prompt]")?.focus(), 0);
 }
 
-/** Attach the folder at `path` as a project and land on its new-session view, ready to type. */
-export async function attachProject(path: string): Promise<Project> {
+/**
+ * Attach the folder at `path` as a project and land on its new-session view, ready to type.
+ * With `openSession: false` the project is only added (and announced): whatever is open stays.
+ */
+export async function attachProject(path: string, { openSession = true }: { openSession?: boolean } = {}): Promise<Project> {
   const project = await addProject(path);
   setPrefs({ lastProject: project.path });
-  startSessionIn(project.path, null);
-  focusComposer();
+  if (openSession) startSessionIn(project.path, null);
+  announceProjectAdded(project);
+  if (openSession) focusComposer();
   return project;
+}
+
+/** Ask for a folder to keep as a project template. Null when the reader backed out. */
+export async function chooseTemplateFolder(): Promise<string | null> {
+  const dir = await openDialog({ directory: true, multiple: false, title: "Choose a folder to start new projects from" });
+  return typeof dir === "string" ? dir : null;
+}
+
+const templateSettingsListeners = new Set<() => void>();
+
+/** Ask the app shell to open Settings › Projects, where the reader's own templates are added. */
+export function requestTemplateSettings() {
+  for (const listener of [...templateSettingsListeners]) listener();
+}
+
+export function onTemplateSettingsRequest(listener: () => void): () => void {
+  templateSettingsListeners.add(listener);
+  return () => {
+    templateSettingsListeners.delete(listener);
+  };
 }
 
 /** "Open local project": the folder picker, then `attachProject`. Null when the reader backed out. */
@@ -120,7 +165,7 @@ export type ProjectStartDialog = "github" | "quick";
 let dialog: ProjectStartDialog | null = null;
 const listeners = new Set<() => void>();
 
-/** Open "Open GitHub project" or "Quick start" (or close whichever is open). */
+/** Open "Open GitHub project" or "Create a project" (Quick start), or close whichever is open. */
 export function openProjectStart(next: ProjectStartDialog | null) {
   dialog = next;
   for (const listener of [...listeners]) listener();

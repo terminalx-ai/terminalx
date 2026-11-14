@@ -87,6 +87,8 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+#[cfg(feature = "desktop")]
+mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
 mod git_media;
@@ -130,6 +132,7 @@ mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
 mod project_start;
+mod project_templates;
 mod pty;
 #[cfg(feature = "desktop")]
 mod quit;
@@ -437,6 +440,7 @@ pub fn run() {
             environment_commands::environment_read_file,
             environment_commands::environment_changed,
             local_runtime::ui::local_runtime_status,
+            local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
             local_runtime::ui::local_runtime_replace,
@@ -595,6 +599,9 @@ pub fn run() {
             commands::project_clone_cancel,
             commands::project_start_defaults,
             commands::project_create,
+            commands::project_templates,
+            commands::project_template_add,
+            commands::project_template_remove,
             commands::list_sessions,
             commands::session_row_statuses,
             commands::local_sections,
@@ -808,6 +815,9 @@ pub fn run() {
             commands::update_project,
             commands::set_project_logo,
             commands::list_workspaces,
+            commands::repo_mirror_status,
+            commands::repo_mirror_start,
+            commands::repo_mirror_stop,
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::rename_branch,

@@ -2,7 +2,7 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Github, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
+import { Check, ChevronDown, Cloud, FileCode2, FolderOpen, FolderGit2, GitBranch, Github, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +45,12 @@ import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
+
+/** The first line of a setup script, with a mark when there is more, or null when none is saved. */
+function setupScriptSummary(script: string | undefined): string | null {
+  const lines = (script ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length ? lines[0] + (lines.length > 1 ? " …" : "") : null;
+}
 
 /** The dialog's unsent prompt (see `modal`). */
 let dialogDraft = "";
@@ -136,6 +142,9 @@ export function NewSessionView({
     const state = readiness.values?.[item.id]?.state;
     return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
   });
+  // Only the agents that are installed and whose local login was found just now: a guess is not "signed in".
+  const signedIn = cloud ? [] : harnesses.filter((item) => item.available && readiness.values?.[item.id]?.state === "ready");
+  const setupCommand = !projectless && !cloud ? setupScriptSummary(project?.scripts?.setup) : null;
   const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
   const { harness, modelId, effort, mode } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
@@ -616,6 +625,14 @@ export function NewSessionView({
                 }
                 className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
               />
+              {setupCommand && (
+                <p className="mt-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground" data-testid="setup-script-line">
+                  <FileCode2 className="size-3.5 shrink-0" aria-hidden />
+                  <span className="min-w-0 truncate">
+                    Setup script found · <code className="font-mono text-foreground">{setupCommand}</code> runs by itself in each new worktree, without asking
+                  </span>
+                </p>
+              )}
             </div>
 
             <div className="flex items-center gap-1 px-2 pb-2">
@@ -637,7 +654,14 @@ export function NewSessionView({
             </div>
           </div>
 
-          {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {projectless ? "Ask" : "Create"}.</p>}
+          {!cloud && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint">
+              {signedIn.map((item) => (
+                <span key={item.id} className="flex items-center gap-1" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
+              ))}
+              <p className="ml-auto">Nothing starts until you press {projectless ? "Ask" : "Create"}.</p>
+            </div>
+          )}
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
               {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}

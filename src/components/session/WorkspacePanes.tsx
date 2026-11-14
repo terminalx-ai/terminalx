@@ -128,7 +128,7 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
             <EnvironmentNotice id={tab.tab.pane ?? `tab:${tab.id}`} active={active && tabViewIn(views.views, tab.tab) !== "terminal"} />
             <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen} workspace={localRemovableWorkspace(owner)} />
           </> : tab.kind === "terminal" ? <>
-            <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} />
+            <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
           </> : tab.kind === "review" ? <ReviewTab entry={tab.editor} visible={active} focused={active && pane.id === focused.id} embedded />
           : <BrowserView session={session} page={tab.page} active={active} />}

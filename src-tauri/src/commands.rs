@@ -1765,10 +1765,29 @@ pub fn project_start_defaults(parent: Option<String>) -> crate::project_start::S
     crate::project_start::defaults(parent.as_deref())
 }
 
-/// Quick start: a new empty Git repository at `parent/name`, returned as a path to add.
+/// "Create a project": a new Git repository at `parent/name` holding `template`'s
+/// files in one first commit on `main`, returned as a path to add.
 #[tauri::command]
-pub async fn project_create(parent: String, name: String) -> StartResult<String> {
-    tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name)).await.map_err(start_failure)?
+pub async fn project_create(parent: String, name: String, template: String) -> StartResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name, &template)).await.map_err(start_failure)?
+}
+
+/// The templates a project can start from: the built-in ones, then the reader's own.
+#[tauri::command]
+pub fn project_templates() -> StartResult<Vec<crate::project_templates::TemplateInfo>> {
+    crate::project_templates::list()
+}
+
+/// Keep the folder at `path` as a template for new projects.
+#[tauri::command]
+pub async fn project_template_add(path: String) -> StartResult<crate::project_templates::TemplateInfo> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_templates::add(&path)).await.map_err(start_failure)?
+}
+
+/// Forget a template the reader added; its folder is left as it is.
+#[tauri::command]
+pub fn project_template_remove(id: String) -> StartResult<()> {
+    crate::project_templates::remove(&id)
 }
 
 // ------------------------------------------------------------------ sessions
@@ -5167,6 +5186,34 @@ pub async fn remove_workspace(app: AppHandle, project_path: String, path: String
         let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", params).map_err(err)?;
         state.browser.forget_workspace(&crate::browser::control::canonical(&path));
         Ok(removed)
+    }).await.map_err(err)?
+}
+
+// Local session ids are resolved here; cloud/guest paths cannot select a root.
+#[tauri::command]
+pub async fn repo_mirror_status(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::status(Path::new(&session.project_path)).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_start(session_id: String, confirmed: bool) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        if session.worktree_name.is_none() || session.worktree_removed || session.is_quick() {
+            return Err("Choose a local worktree session to mirror.".into());
+        }
+        crate::repo_mirror::start(Path::new(&session.project_path), Path::new(&session.cwd), confirmed).map_err(err)
+    }).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn repo_mirror_stop(session_id: String) -> CmdResult<crate::repo_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::get(&session_id).map_err(err)?;
+        crate::repo_mirror::stop(Path::new(&session.project_path)).map_err(err)
     }).await.map_err(err)?
 }
 

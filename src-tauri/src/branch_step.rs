@@ -639,9 +639,9 @@ mod tests {
                 "head" => pr.head_sha = "2".repeat(40),
                 "required" => pr.required_checks = Some(vec!["missing".into()]),
                 "unknown" => pr.checks[0].state = "future_status".into(),
-                "queued" => pr.validation = Some(vec![github::PrCheck { name: "workflow".into(), state: "queued".into(), url: None }]),
+                "queued" => pr.validation = Some(vec![github::PrCheck { name: "workflow".into(), state: "queued".into(), url: None, actions: None, ..Default::default() }]),
                 "blocked" => pr.merge_state = "BLOCKED".into(),
-                "optionalFailure" => { pr.required_checks = Some(vec!["test".into()]); pr.validation = Some(vec![github::PrCheck { name: "optional".into(), state: "failure".into(), url: None }]); }
+                "optionalFailure" => { pr.required_checks = Some(vec!["test".into()]); pr.validation = Some(vec![github::PrCheck { name: "optional".into(), state: "failure".into(), url: None, actions: None, ..Default::default() }]); }
                 "behind" => pr.merge_state = "BEHIND".into(),
                 "conflicting" => pr.mergeable = "CONFLICTING".into(),
                 _ => unreachable!(),

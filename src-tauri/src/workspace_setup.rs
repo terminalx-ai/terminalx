@@ -68,7 +68,17 @@ fn path(session: &str) -> Result<std::path::PathBuf> {
     Ok(store::sessions_dir()?.join(session).join("workspace-setup.json"))
 }
 fn read(session: &str) -> Result<Option<Setup>> { store::read_json(&path(session)?) }
+
+#[cfg(test)]
+thread_local! {
+    /// Lets a test stand in for a status file that cannot be written once the
+    /// session's index entry exists (its folder is named by the new id).
+    pub(crate) static SAVE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn save(setup: &Setup) -> Result<()> {
+    #[cfg(test)]
+    if SAVE_FAILS.with(|fails| fails.get()) { anyhow::bail!("setup status could not be written"); }
     let mut value = serde_json::to_value(setup)?;
     value["log"] = json!(setup.log);
     store::session_dir(&setup.session_id)?;

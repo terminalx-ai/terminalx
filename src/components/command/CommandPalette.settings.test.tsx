@@ -24,7 +24,13 @@ beforeEach(async () => {
   });
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  // Radix FocusScope dispatches its unmount event from a 0 ms timer. Let it run
+  // while jsdom is still installed: after the file's environment is torn down
+  // it throws an uncaught "parameter 1 is not of type 'Event'".
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 
 function palette() {
   const props = { onOpenChange: vi.fn(), onOpenSettings: vi.fn(), onCreated: vi.fn() };
@@ -65,8 +71,9 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-labelledby"))).toEqual(["palette-group-settings"]);
     const results = screen.getAllByRole("option");
-    expect(results).toHaveLength(14);
+    expect(results).toHaveLength(15);
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Projects/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /^Repositories/ })).toBeTruthy();
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);

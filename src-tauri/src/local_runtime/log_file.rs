@@ -132,6 +132,21 @@ impl Write for Tee {
     }
 }
 
+/// The last `limit` bytes of the log at `path`, from the first whole line in
+/// them, said to be cut when they are not the whole file.
+pub fn tail(path: &Path, limit: u64) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    let from = length.saturating_sub(limit);
+    file.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    if from == 0 { return Ok(String::from_utf8_lossy(&bytes).into_owned()); }
+    let start = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |newline| newline + 1);
+    Ok(format!("[… earlier lines are in {}]\n{}", path.display(), String::from_utf8_lossy(&bytes[start..])))
+}
+
 /// How a log line says how long something took: "850 ms", "4.2 s",
 /// "3 min 5 s", "2 h 13 min".
 pub fn span(duration: Duration) -> String {
@@ -159,6 +174,19 @@ pub fn size(bytes: usize) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// PRO-287: "Copy logs" copies the latest whole lines, and says when
+    /// earlier ones were left in the file.
+    #[test]
+    fn a_tail_is_the_latest_whole_lines_of_the_log() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("runtime.log");
+        std::fs::write(&path, "first line\nsecond line\nthird line\n").unwrap();
+        assert_eq!(tail(&path, 1024).unwrap(), "first line\nsecond line\nthird line\n", "a short log is copied whole");
+        let cut = tail(&path, 15).unwrap();
+        assert_eq!(cut, format!("[… earlier lines are in {}]\nthird line\n", path.display()), "never half a line");
+        assert!(tail(&fixture.path().join("missing.log"), 1024).is_err());
+    }
 
     #[test]
     fn a_tee_writes_each_line_to_its_file_once_one_is_kept() {

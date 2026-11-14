@@ -436,6 +436,37 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "Continue in New Session…" })).toBeTruthy();
   });
 
+  // The crumb has no room for one more control beside its chips (tab-strip.mjs):
+  // a mirror starts from the workspace menu, and a running one is in the title bar.
+  it("starts a repo-root mirror from the workspace menu, not from a title bar button", async () => {
+    guard.handlers.repo_mirror_status = () => ({ root: "/Users/me/api", source: null, active: false, error: null });
+    const header = show();
+    await waitFor(() => expect(guard.calls.some(({ command }) => command === "repo_mirror_status")).toBe(true));
+    expect(within(header).queryByRole("button", { name: /repo root/ })).toBeNull();
+    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
+    fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
+    fireEvent.click(menu);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Mirror into repo root…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Mirror into repo root" });
+    await waitFor(() => expect((within(dialog).getByRole("button", { name: "Mirror into repo root" }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("shows a running repo-root mirror in the title bar and leaves it out of the menu", async () => {
+    guard.handlers.repo_mirror_status = () => ({ root: "/Users/me/api", source: "/Users/me/api/.raccoon/worktrees/fix", active: true, error: null });
+    const header = show();
+    fireEvent.click(await within(header).findByRole("button", { name: "Mirroring to repo root" }));
+    expect(await screen.findByRole("dialog", { name: "Stop mirroring" })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
+    fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
+    fireEvent.click(menu);
+    await screen.findByRole("menuitem", { name: "Reveal in Finder" });
+    expect(screen.queryByRole("menuitem", { name: /repo root/ })).toBeNull();
+  });
+
   it("has no continuation action without an active agent tab", async () => {
     const header = show({ tabs: [], activeTab: null });
     expect(within(header).queryByRole("button", { name: "Continue in New Session…" })).toBeNull();

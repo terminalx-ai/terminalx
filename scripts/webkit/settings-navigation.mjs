@@ -32,7 +32,8 @@ try {
       const groups = await nav.getByRole("group").evaluateAll((elements) => elements.map((element) => document.getElementById(element.getAttribute("aria-labelledby"))?.textContent));
       const checks = {
         "five named groups in order": JSON.stringify(groups) === JSON.stringify(["Personal", "Agents & environment", "Repositories", "Admin", "More"]),
-        "all repositories appear": await nav.getByRole("group", { name: "Repositories", exact: true }).getByRole("button").count() === projectCount,
+        // Settings › Projects (project templates, PRO-286) leads the group, then one row per repository.
+        "all repositories appear": JSON.stringify(await nav.getByRole("group", { name: "Repositories", exact: true }).getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.hasAttribute("title") ? "repository" : button.textContent))) === JSON.stringify(["Projects", ...Array(projectCount).fill("repository")]),
       };
       const repositories = nav.getByRole("group", { name: "Repositories", exact: true });
       const first = repositories.getByRole("button", { name: "A repository with a very long name that should be truncated", exact: true });

@@ -5,6 +5,12 @@ import { HeldQueueTray } from "./HeldQueueTray";
 import type { HeldQueue } from "@/types/events";
 import type { HeldQueueChange } from "@/lib/heldQueue";
 
+/** A change commits the queue inside act(); the tray unlocks after it resolves, a scheduler task later. */
+async function enabled(element: HTMLElement) {
+  await waitFor(() => expect((element as HTMLButtonElement).disabled).toBe(false));
+  return element;
+}
+
 const initial: HeldQueue = { items: ["first", "second", "third"].map(id => ({ id, text: id, images: id === "second" ? [{ url: "/a.png", name: "screenshot.png" }] : [] })), paused: false, sending: null, next: null, error: null };
 afterEach(cleanup);
 
@@ -42,18 +48,19 @@ it("collapses, pauses before editing, keeps attachments, reorders, deletes, and 
   fireEvent.click(screen.getByText("Save"));
   await screen.findByText("corrected");
   await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ type: "pause", paused: false }));
+  // The resume call is recorded before the edit closes: wait for the editor to go.
+  await waitFor(() => expect(screen.queryByLabelText("Edit held follow-up")).toBeNull());
   expect(document.activeElement).toBe(screen.getByLabelText("Edit follow-up 2"));
   expect(screen.getByText("screenshot.png")).toBeTruthy();
-  fireEvent.click(screen.getByLabelText("Move follow-up 2 up"));
+  fireEvent.click(await enabled(screen.getByLabelText("Move follow-up 2 up")));
   await waitFor(() => expect(within(screen.getAllByRole("listitem")[0]).getByText("corrected")).toBeTruthy());
-  fireEvent.click(screen.getByLabelText("Delete follow-up 2"));
+  fireEvent.click(await enabled(screen.getByLabelText("Delete follow-up 2")));
   await waitFor(() => expect(screen.queryByText("first")).toBeNull());
-  expect(screen.getByRole("status").textContent).toBe("Deleted held follow-up.");
-  fireEvent.click(screen.getByText("Pause queue"));
-  await screen.findByText("Resume");
-  fireEvent.click(screen.getByText("Resume"));
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Deleted held follow-up."));
+  fireEvent.click(await enabled(screen.getByText("Pause queue")));
+  fireEvent.click(await enabled(await screen.findByText("Resume")));
   await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ type: "pause", paused: false }));
-  fireEvent.click(screen.getAllByText("Send now")[0]);
+  fireEvent.click(await enabled(screen.getAllByText("Send now")[0]));
   await waitFor(() => expect(changed).toHaveBeenLastCalledWith({ type: "sendNow", id: "second" }));
 });
 
