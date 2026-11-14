@@ -40,6 +40,8 @@ export interface CloudAttention {
 /** Local catalog evidence; saved with the row, never sent as authority to a runtime. */
 type ObservedItem = CloudWorkspaceListItem & {
   resolvedLaunchFailure?: string;
+  /** Suppress only the uninterrupted attention episode in which recovery was observed. */
+  resolvedLaunchAttention?: string;
   launchFailureObservation?: { key: string; at: number };
 };
 
@@ -86,7 +88,7 @@ function runtimeAgentRan(item: CloudWorkspaceListItem): boolean {
  */
 export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?: CloudWorkspaceListItem, sessions: readonly RuntimeSession[] = [], observedAt = Date.now()): CloudWorkspaceListItem {
   const key = launchFailureKey(item);
-  const { resolvedLaunchFailure: _old, launchFailureObservation: _observation, ...clean } = item as ObservedItem;
+  const { resolvedLaunchFailure: _old, resolvedLaunchAttention: _attention, launchFailureObservation: _observation, ...clean } = item as ObservedItem;
   if (!launchFailed(item)) return clean;
   const boundary = finiteTime(item.workspace.launch?.timings?.failedAt) ? undefined
     : observation(item, key) ?? observation(previous, key) ?? {
@@ -102,7 +104,16 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
   const resolved = laterSession || runtimeAgentRan(candidate)
     || (item as ObservedItem).resolvedLaunchFailure === key
     || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key;
-  return resolved ? { ...candidate, resolvedLaunchFailure: key } as ObservedItem : candidate;
+  if (!resolved) return candidate;
+  const prior = (previous ?? item) as ObservedItem;
+  const previouslyResolved = prior.resolvedLaunchFailure === key;
+  // Arm suppression only when recovery is first established in attention.
+  // Leaving attention consumes it; later activity cannot re-arm it for this
+  // historical launch. Identical attention snapshots reveal no new episode.
+  const staleAttention = item.workspace.state === "attention-required" && (
+    !previouslyResolved || (prior.workspace.state === "attention-required" && prior.resolvedLaunchAttention === key)
+  );
+  return { ...candidate, resolvedLaunchFailure: key, ...(staleAttention ? { resolvedLaunchAttention: key } : {}) } as ObservedItem;
 }
 
 /** Dated activity must follow the authoritative failure or its stable observation boundary. */
@@ -200,10 +211,10 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
     const code = workspace.launch?.category ?? (workspace.launch?.state === "expired" ? "launch-expired" : loginCode ?? "launch-failed");
     return { code, message: failureMessage(item), recovery: launchRecovery(code, input) };
   }
-  // The server can retain its coarse attention state after agent recovery.
-  // Independent operation/runtime errors were handled above; do not turn a
-  // recovered failed launch back into an unexplained generic failure.
-  if (workspace.state === "attention-required" && !failedLaunch) return {
+  // Only catalog history can identify uninterrupted stale attention. A resolved
+  // launch alone (or an explicit caller hint) cannot explain a new server error.
+  const staleLaunchAttention = !launchNeedsAttention && (item as ObservedItem).resolvedLaunchAttention === launchFailureKey(item);
+  if (workspace.state === "attention-required" && !staleLaunchAttention) return {
     code: "cloud_workspace_attention_required",
     message: "The workspace needs attention. Open it to inspect its runtime and provider state.",
     recovery: openSession("Open the workspace to inspect its runtime and provider state. If it cannot connect, an owner or admin can check the organization's provider connection in Settings."),

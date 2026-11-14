@@ -221,8 +221,11 @@ describe("shared attention and recovery", () => {
         [runtime, {}],
       ];
       for (const [recovered, input] of recoveries) {
-        expect(resolveCloudAttention(recovered, input)?.code ?? null).toBe(after);
-        expect(deriveCloudActivity(recovered, input).tone === "attention").toBe(after !== null);
+        // Stateless hints suppress the launch, not an otherwise unexplained
+        // server attention state. Durable history identifies stale attention.
+        const expected = after ?? (state === "attention-required" && recovered !== durable ? "cloud_workspace_attention_required" : null);
+        expect(resolveCloudAttention(recovered, input)?.code ?? null).toBe(expected);
+        expect(deriveCloudActivity(recovered, input).tone === "attention").toBe(expected !== null);
         // Runtime incompatibility remains independently actionable, except
         // failed deletion retains its existing higher recovery precedence.
         expect(resolveCloudAttention(recovered, { ...input, connection: "updateRequired" })?.code).toBe(operation?.action === "delete" ? "cloud_provider_unavailable" : "runtime-update-required");

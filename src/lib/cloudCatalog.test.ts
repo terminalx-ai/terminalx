@@ -1590,4 +1590,51 @@ describe("attention across catalog refreshes (#934)", () => {
     expect(resolveCloudAttention(read())).toBeNull();
   });
 
+
+  it.each(["ready", "attention-required"])("preserves new server attention after launch recovery starting in %s", async (initialState) => {
+    signIn();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { failedAt: 50 } };
+    const active = { online: true, reportedAt: 101, activeTurns: 1, pendingApprovals: 0 };
+    const idle = { ...active, reportedAt: 102, activeTurns: 0 };
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    let at = 100;
+    const refresh = async (state: string, runtimeActivity = idle, operation: unknown = null) => {
+      const next = item("w", { state, launch, runtimeActivity }, operation);
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [next] });
+      await refreshCloudCatalog(ORG, () => ++at);
+    };
+    await refresh(initialState, active);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // Continued identical stale attention remains suppressed, including snapshots
+    // and persistence. No evidence claims to distinguish two identical episodes.
+    await refresh(initialState);
+    applyCloudSnapshot({ workspace: read().workspace, operation: null } as never, ++at);
+    expect(resolveCloudAttention(read())).toBeNull();
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])).toBeNull();
+    // Even the stale episode must expose an independent operation error.
+    const operation = { action: "suspend", state: "failed", errorCode: "cloud_provider_unavailable" };
+    await refresh(initialState, idle, operation);
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_provider_unavailable");
+    await refresh(initialState);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // Leaving attention consumes stale suppression. Returning is a new server
+    // problem even with historical recovery and renewed agent activity.
+    await refresh("ready");
+    expect(read()).not.toHaveProperty("resolvedLaunchAttention");
+    await refresh("attention-required", active);
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_workspace_attention_required");
+    expect(resolveCloudAttention(read(), { agentRan: true })?.code).toBe("cloud_workspace_attention_required");
+    expect(deriveCloudActivity(read()).label).toBe("Needs attention");
+    await refresh("attention-required");
+    applyCloudSnapshot({ workspace: read().workspace, operation: null } as never, ++at);
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_workspace_attention_required");
+    await refresh("attention-required", idle, operation);
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_provider_unavailable");
+    await refresh("attention-required");
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_workspace_attention_required");
+    const savedNew = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(savedNew.orgs[ORG].workspaces[0])?.code).toBe("cloud_workspace_attention_required");
+  });
+
 });
