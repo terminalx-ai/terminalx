@@ -554,7 +554,7 @@ export function TabView({
   };
 
   const retry = (model?: string, surface: Surface = "banner") => {
-    if (!model && signInAgent) return requestSignIn();
+    if (!model && recovery === "signed_out" && signInAgent && !loginIncident.cancelled) return requestSignIn();
     cancelLogin();
     return recover(model ? "choose_model" : "retry", surface, async () => {
       // Await confirmed local exit before starting a replacement. Remote
@@ -571,7 +571,7 @@ export function TabView({
   // The agent carries on in the same conversation (#665). Nothing is stopped: a
   // send starts an agent whose process has gone, and one still running takes it as its next turn.
   const sendContinue = (surface: Surface = "banner") => {
-    if (signInAgent) return requestSignIn();
+    if (recovery === "signed_out" && signInAgent && !loginIncident.cancelled) return requestSignIn();
     cancelLogin();
     return recover("continue_here", surface, () => backend.send(tab.id, CONTINUE_PROMPT, []));
   };

@@ -17,6 +17,18 @@ beforeEach(() => {
 afterEach(() => { cleanup(); invoke.mockReset(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("agent readiness", () => {
+  it("lets a slow sign-in probe finish without polling invalidating its result", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: AgentReadiness) => void;
+    invoke.mockImplementation(() => new Promise<AgentReadiness>(resolve => { finish = resolve; }));
+    const ready = vi.fn();
+    renderHook(() => useSignInReadiness("claude", ready));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(invoke).toHaveBeenCalledOnce();
+    await act(async () => finish(answer("ready")));
+    expect(ready).toHaveBeenCalledOnce();
+  });
+
   it("detects login in an open terminal without focus or exit events and stops polling when disabled", async () => {
     vi.useFakeTimers();
     invoke.mockResolvedValue(answer("signed_out"));

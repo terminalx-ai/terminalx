@@ -566,6 +566,26 @@ describe("TabView recovery lifecycle", () => {
     expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
   });
 
+  it("continues explicitly after Stop cancels a pending login, even when signed-out recovery remains", async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "stop_tab") { setTabStatus(session.id, session.tabs[0].id, "idle"); return; }
+      return original(command, args);
+    });
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await screen.findByText(/^Session closed/);
+    const button = screen.getAllByRole("button", { name: "Continue here" }).at(-1) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(sends()[0][1].text).toBe(CONTINUE_PROMPT);
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
   it("continues the same conversation from the closed session's bar after Stop", async () => {
     render(<Harness />);
     emit({ type: "recovery", kind: "capacity" });

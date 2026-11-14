@@ -179,11 +179,24 @@ export function useSignInReadiness(harness: string | null, onReady: () => void) 
   const ready = useRef(onReady);
   ready.current = onReady;
   const generation = useRef(0);
+  const pending = useRef<{ harness: string; promise: Promise<void> } | null>(null);
   const refresh = useCallback(async () => {
+    if (!harness) { generation.current++; return; }
+    // A slow probe must finish before polling again, or every result could
+    // be discarded as stale while authentication is already complete.
+    if (pending.current?.harness === harness) return pending.current.promise;
     const run = ++generation.current;
-    if (!harness) return;
-    const value = await checkAgentReadiness(harness);
-    if (run === generation.current && value.state === "ready") ready.current();
+    const request = { harness, promise: Promise.resolve() };
+    request.promise = (async () => {
+      try {
+        const value = await checkAgentReadiness(harness);
+        if (run === generation.current && value.state === "ready") ready.current();
+      } finally {
+        if (pending.current === request) pending.current = null;
+      }
+    })();
+    pending.current = request;
+    return request.promise;
   }, [harness]);
   useEffect(() => {
     void refresh();
