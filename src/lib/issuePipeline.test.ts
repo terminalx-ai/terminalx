@@ -155,7 +155,13 @@ describe("where a pipeline stands", () => {
     expect(forward(pipeline({ state: "needsYou" }))).toEqual({ action: "advance", label: "Open pull request" });
     expect(forward(pipeline({ stage: "pullRequest", state: "needsYou" }))).toEqual({ action: "advance", label: "Try again" });
     expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "noVerdict" } }))).toEqual({ action: "advance", label: "Review again" });
-    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "advance", label: "Review once more" });
+    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // At the merge stage too: an advance there only looks again and stops on the limit again.
+    expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // The final review passed and the branch moved with commits of their own (#947): one more review.
+    const moved = pipelineActions(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "movedAfterFinalReview", reviewed: C1, head: "2222222", rounds: 3 } }));
+    expect(moved.primary).toEqual({ action: "review", label: "Review the new head once more" });
+    expect(moved.secondary.map((button) => button.action)).toEqual(["refresh", "stop"]);
     expect(forward(pipeline({ stage: "address", state: "needsYou" }))).toEqual({ action: "advance", label: "Review the changes" });
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "checksFailed" } }))).toEqual({ action: "advance", label: "Check again" });
     // A head nobody reviewed is fixed by a review, not by looking again.
@@ -260,7 +266,7 @@ describe("a pipeline as the app stores it", () => {
       ["address", "done", null],
       ["merge", "pending", null],
     ]);
-    expect(pipelineActions(fixture).primary).toEqual({ action: "advance", label: "Review once more" });
+    expect(pipelineActions(fixture).primary).toEqual({ action: "review", label: "Review once more" });
     expect(pipelineForIssue([fixture], "/repo", "https://github.com/acme/widgets/issues/433")).toBe(fixture);
     expect(pipelineForSession([fixture], "reviewer-1")?.role).toBe("reviewer");
     expect(fixture.verdict?.findings.map((finding) => [finding.severity, finding.security, finding.file ?? null, finding.line ?? null])).toEqual([
@@ -286,6 +292,7 @@ describe("a pipeline as the app stores it", () => {
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
       "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing", "answered",
+      "mergeCheck",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);

@@ -244,12 +244,11 @@ fn remote_head(cwd: &Path, url: &str, branch: &str) -> Result<Option<String>> {
     }))
 }
 
-/// `required`: GitHub asks for the merge, the branch behind or in conflict,
-/// whatever `git merge-tree` says. The two can differ: with more than one
-/// merge base, git merges the bases into one first and GitHub does not.
-fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+/// The base branch's commit as the remote has it now, fetched: the pull
+/// request's base repository when there is a pull request, `origin` when not.
+fn fetch_base(cwd: &Path, base: &str, pr: Option<&PrSnapshot>) -> Result<String> {
     let _request = crate::github_process::scope();
-    let base_commit = if let Some(pr) = pr {
+    Ok(if let Some(pr) = pr {
         if pr.base != base { bail!("The requested base branch does not match the pull request."); }
         let url = crate::github::base_fetch_destination(cwd, pr)?;
         let commit = remote_head(cwd, &url, base)?.context("The pull request's base branch is missing from its repository.")?;
@@ -262,7 +261,22 @@ fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: O
         crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
         let base_ref = format!("refs/remotes/origin/{base}");
         crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string()
-    };
+    })
+}
+
+/// Whether the commits after `reviewed` only merge the pull request's base,
+/// against the base as GitHub has it now (#947).
+fn base_merges(cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+    let base_commit = fetch_base(cwd, &pr.base, Some(pr))?;
+    super::carry::classify(cwd, &base_commit, reviewed, head)
+}
+
+/// `required`: GitHub asks for the merge, the branch behind or in conflict,
+/// whatever `git merge-tree` says. The two can differ: with more than one
+/// merge base, git merges the bases into one first and GitHub does not.
+fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+    let _request = crate::github_process::scope();
+    let base_commit = fetch_base(cwd, base, pr)?;
     let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
     let ahead = crate::git::run(cwd, &["rev-list", "--count", &format!("{base_commit}..{head}")])?;
     let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
@@ -406,6 +420,10 @@ impl Host for LocalHost {
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn base_merges(&self, cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+        base_merges(cwd, reviewed, head, pr)
     }
 
     fn abort_merge(&self, cwd: &Path, head: &str, merge_head: &str) -> Result<()> {

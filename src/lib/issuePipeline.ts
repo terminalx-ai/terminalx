@@ -411,7 +411,10 @@ export function pipelineActions(pipeline: IssuePipeline): { primary: PipelineAct
         return { primary: { action: "review", label: "Review the new commit" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       }
       // Findings left open at the round limit: one more round is the reader's to grant.
-      if (kind === "roundLimit") return { primary: { action: "advance", label: "Review once more" }, secondary: [stop] };
+      // A review, not an advance: at the merge stage an advance only looks again and stops again.
+      if (kind === "roundLimit") return { primary: { action: "review", label: "Review once more" }, secondary: [stop] };
+      // The final review passed and the branch then moved with commits of its own (#947).
+      if (kind === "movedAfterFinalReview") return { primary: { action: "review", label: "Review the new head once more" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       // The reviewer's own checks failed on the commit it passed: another look is the way on.
       if (kind === "reviewChecksFailed") return { primary: { action: "review", label: "Review again" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       return { primary: { action: "advance", label: ADVANCE[pipeline.stage] }, secondary: [stop] };

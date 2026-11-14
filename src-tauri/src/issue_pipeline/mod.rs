@@ -29,6 +29,7 @@
 //! a person merges from the issue page with their own `gh`, pinned the same way.
 
 pub mod admission;
+pub mod carry;
 pub mod categories;
 pub mod cloud_merge;
 #[cfg(feature = "desktop")]
@@ -218,6 +219,11 @@ pub struct Pipeline {
     pub review_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_requested_at: Option<String>,
+    /// While the reviewer reads only what merges of the base changed at
+    /// `review_commit`: the commit whose passing verdict that check would
+    /// carry forward. Such a check is not a review round (#947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_check: Option<String>,
     /// When the reviewer first said its checks for this review were still
     /// running. Its verdict is waited for until [`engine::REVIEW_CHECKS_MINUTES`]
     /// after this, and then asked for once.

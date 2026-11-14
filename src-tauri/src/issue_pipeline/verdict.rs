@@ -133,6 +133,10 @@ pub struct Verdict {
     pub checks_note: Option<String>,
     pub round: u32,
     pub at: String,
+    /// The commit this verdict was given for, when it was carried forward
+    /// over merges of the base branch to `commit` (#947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<String>,
 }
 
 impl Verdict {
@@ -250,7 +254,7 @@ pub fn review(message: &str, round: u32, at: &str) -> Result<Verdict, ReviewErro
     let security_pass = if findings.iter().any(|finding| finding.security) { SecurityPass::Flagged } else { security_pass };
     let checks = Some(ReviewChecks::parse(text_field(&value, &["checks"]).as_deref()));
     let checks_note = text_field(&value, &["checksNote", "checks_note", "checksReason"]);
-    Ok(Verdict { commit, decision, security_pass, findings, checks, checks_note, round, at: at.to_string() })
+    Ok(Verdict { commit, decision, security_pass, findings, checks, checks_note, round, at: at.to_string(), carried_from: None })
 }
 
 fn location(finding: &Finding) -> String {
@@ -281,7 +285,14 @@ pub fn findings_markdown(findings: &[Finding]) -> String {
 pub fn review_comment(verdict: &Verdict, max_rounds: u32, mergeable: bool) -> String {
     let short = verdict.commit.chars().take(10).collect::<String>();
     let headline = if mergeable { "no blocking findings" } else { "changes requested" };
-    let mut body = format!("### TerminalX review of `{short}` — {headline}\n\nRound {} of {max_rounds}, by a reviewer session that did not write this change.", verdict.round);
+    let mut body = match verdict.carried_from.as_deref() {
+        Some(from) => format!(
+            "### TerminalX check of the merge in `{short}` — {headline}\n\nThe branch only merged its base after round {} of {max_rounds} passed `{}`. The reviewer read what the merge changed in the pull request, not the whole change again; this is not a review round.",
+            verdict.round,
+            from.chars().take(10).collect::<String>(),
+        ),
+        None => format!("### TerminalX review of `{short}` — {headline}\n\nRound {} of {max_rounds}, by a reviewer session that did not write this change.", verdict.round),
+    };
     match verdict.security_pass {
         SecurityPass::NotNeeded => {}
         SecurityPass::Clean => body.push_str(" Security pass: clean."),
@@ -298,6 +309,19 @@ pub fn review_comment(verdict: &Verdict, max_rounds: u32, mergeable: bool) -> St
         body.push_str(&findings_markdown(&verdict.findings));
     }
     body
+}
+
+/// Posted when a passing verdict carries over clean merges of the base with
+/// no reviewer asked (#947).
+pub fn carried_comment(verdict: &Verdict, max_rounds: u32, base: &str) -> String {
+    let short = |commit: &str| commit.chars().take(10).collect::<String>();
+    let from = verdict.carried_from.as_deref().unwrap_or_default();
+    format!(
+        "### TerminalX review of `{}` carries forward to `{}`\n\nThe commits since round {} of {max_rounds} only merge `{base}`, cleanly, and the pull request's change against `{base}` is the same as the reviewer read it. Checks still run on the new head.",
+        short(from),
+        short(&verdict.commit),
+        verdict.round,
+    )
 }
 
 #[cfg(test)]
@@ -390,7 +414,7 @@ mod tests {
             findings_markdown(&findings),
             "- **[critical, security]** Deletes the wrong rows (`db.rs:9`)\n  No tenant filter.\n  See the query.\n- **[low]** Rename (`a.rs`)"
         );
-        let verdict = Verdict { commit: "abc1234def5678".into(), decision: Decision::Changes, security_pass: SecurityPass::Flagged, findings, checks: None, checks_note: None, round: 1, at: "now".into() };
+        let verdict = Verdict { commit: "abc1234def5678".into(), decision: Decision::Changes, security_pass: SecurityPass::Flagged, findings, checks: None, checks_note: None, round: 1, at: "now".into(), carried_from: None };
         let comment = review_comment(&verdict, 3, false);
         assert!(comment.starts_with("### TerminalX review of `abc1234def` — changes requested"));
         assert!(comment.contains("Round 1 of 3"));
