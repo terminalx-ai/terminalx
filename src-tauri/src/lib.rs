@@ -145,6 +145,7 @@ mod landed;
 mod local_sharing;
 pub mod local_runtime;
 mod local_vm;
+mod machine_name;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;

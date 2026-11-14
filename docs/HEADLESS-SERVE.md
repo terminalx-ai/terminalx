@@ -249,6 +249,8 @@ Registration states are printed as `{"type":"relay","status":{...}}` lines.
 `--relay-link <file>` reads the relay session from a JSON file instead of the bootstrap;
 `scripts/remote-runtime/e2e.sh` uses it to run `serve/tests/relay_e2e.rs` against the
 terminalx-saas relay code.
+A local runtime given `--relay-link` and no `--project-root` serves every project it
+knows over that one connection (`machine/1`, PRO-340; [MACHINES.md](MACHINES.md#machine1)).
 
 ## Testing on Linux
 
