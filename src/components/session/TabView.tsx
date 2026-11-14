@@ -717,7 +717,7 @@ export function TabView({
     try {
       await signInAgent();
       // Opening a terminal proves nothing about credentials. Readiness probes
-      // on return, PTY exit, or Retry decide whether the turn can resume.
+      // while pending, on return, PTY exit, or Retry decide whether the turn can resume.
       if (currentLogin.current === incident && !incident.cancelled) setLoginPending(incident);
       done("ok");
     } catch (e) {

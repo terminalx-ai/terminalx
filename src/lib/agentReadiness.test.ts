@@ -17,6 +17,25 @@ beforeEach(() => {
 afterEach(() => { cleanup(); invoke.mockReset(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("agent readiness", () => {
+  it("detects login in an open terminal without focus or exit events and stops polling when disabled", async () => {
+    vi.useFakeTimers();
+    invoke.mockResolvedValue(answer("signed_out"));
+    const ready = vi.fn();
+    const { rerender } = renderHook(({ harness }) => useSignInReadiness(harness, ready), { initialProps: { harness: "claude" as string | null } });
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(ready).not.toHaveBeenCalled();
+    invoke.mockResolvedValue(answer("ready"));
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(ready).toHaveBeenCalledOnce();
+    rerender({ harness: null });
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(ready).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("verifies pending sign-in on exit and return, and ignores cached readiness and unsuccessful probes", async () => {
     announceReadiness("codex", answer("ready"));
     invoke.mockResolvedValue(answer("signed_out"));

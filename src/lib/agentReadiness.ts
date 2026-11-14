@@ -117,8 +117,8 @@ export function forgetReadiness() {
   known.clear();
 }
 
-/** Keep every local setup surface current; only Settings requests periodic checks. */
-function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll = false) {
+/** Keep local setup surfaces current; Settings and pending sign-ins request polling. */
+function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll: boolean | number = false) {
   useEffect(() => {
     if (!enabled) return;
     const recheck = () => { void refresh(); };
@@ -133,7 +133,7 @@ function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, 
     }).catch(() => { /* outside a webview */ });
     const timer = poll ? setInterval(() => {
       if (!document.hidden) recheck();
-    }, 2 * 60_000) : undefined;
+    }, typeof poll === "number" ? poll : 2 * 60_000) : undefined;
     return () => {
       disposed = true;
       stopResume();
@@ -194,7 +194,7 @@ export function useSignInReadiness(harness: string | null, onReady: () => void) 
     });
     return () => { generation.current++; stop(); };
   }, [harness, refresh]);
-  useReadinessRefresh(!!harness, refresh);
+  useReadinessRefresh(!!harness, refresh, 5_000);
   return refresh;
 }
 
