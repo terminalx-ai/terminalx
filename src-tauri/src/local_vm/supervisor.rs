@@ -975,6 +975,7 @@ mod tests {
             deleted_at: None,
             keep_awake: false,
             owned: false,
+            detached: false,
             provision: None,
             manual_control: false,
             setup: None,

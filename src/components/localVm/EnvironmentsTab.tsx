@@ -76,6 +76,8 @@ function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: Lo
   const [deletionInspection, setDeletionInspection] = useState<{ generation: string; report: LocalVmEnvironmentInspection } | null>(null);
   const progress = environment.provision;
   const deleted = !!environment.deletedAt;
+  // A VM TerminalX did not create is the person's own: it is detached, never deleted.
+  const owned = environment.owned === true;
   const deletion = deletionInspection?.generation === environment.generation ? deletionInspection.report?.deletion : null;
 
   async function run(label: string, action: () => Promise<LocalVmJson>) {
@@ -88,8 +90,8 @@ function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: Lo
 
   return (
     <article aria-label={`Environment ${environment.name}`} className="space-y-3 rounded-lg border border-border p-4">
-      <div><h4 className="text-sm font-medium">{environment.name}{deleted ? " · Deleted" : ""}</h4><p className="break-all text-muted-foreground">{environment.sandbox} · {tasks.length} unfinished task{tasks.length === 1 ? "" : "s"}</p></div>
-      {deleted ? <p className="text-muted-foreground">VM deleted at {environment.deletedAt}. Retained task records remain in their parent conversations.</p> : null}
+      <div><h4 className="text-sm font-medium">{environment.name}{deleted ? environment.detached ? " · Removed from TerminalX" : " · Deleted" : ""}</h4><p className="break-all text-muted-foreground">{environment.sandbox} · {tasks.length} unfinished task{tasks.length === 1 ? "" : "s"}</p></div>
+      {deleted ? <p className="text-muted-foreground">{environment.detached ? `Removed from TerminalX at ${environment.deletedAt}; the VM itself was kept.` : `VM deleted at ${environment.deletedAt}.`} Retained task records remain in their parent conversations.</p> : null}
       {progress ? <EnvironmentProgress label="Environment progress" progress={progress} /> : null}
       {!deleted ? <>
       <LocalVmSetup environment={environment} disabled={!!busy || !setupEnabled} hasActiveTasks={tasks.length > 0} run={run} />
@@ -107,7 +109,7 @@ function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: Lo
           const report = await localVmRequest("environment.inspect", { environmentId: environment.id, generation: environment.generation, purpose: "deletion" });
           setDeletionInspection({ generation: environment.generation, report }); setDeleteOpen(true);
           return null;
-        })}>Delete VM…</Button>
+        })}>{owned ? "Delete VM…" : "Remove from TerminalX…"}</Button>
         {progress && !["ready", "completed", "adopted", "failed", "canceled", "deleted", "stopped"].includes(progress.status) ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Canceling provisioning", () => localVmRequest("environment.cancelProvision", { environmentId: environment.id }))}>Cancel provisioning</Button> : null}
       </div>
       <p className="text-muted-foreground">The desktop viewer is interactive and independent of task lifetime. Take over from the task card before changing apps; closing the viewer leaves tasks running.</p>
@@ -125,7 +127,7 @@ function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: Lo
         </DialogContent>
       </Dialog>
       <Dialog open={deleteOpen && !deleted} onOpenChange={setDeleteOpen}><DialogContent>
-        <DialogHeader><DialogTitle>Delete {environment.name}?</DialogTitle><DialogDescription>This removes the whole local VM and its guest files, affecting every task and conversation using it. Export needed artifacts first. Task history is retained; it does not restore deleted guest data.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{owned ? `Delete ${environment.name}?` : `Remove ${environment.name} from TerminalX?`}</DialogTitle><DialogDescription>{owned ? "This removes the whole local VM and its guest files, affecting every task and conversation using it. Export needed artifacts first. Task history is retained; it does not restore deleted guest data." : "TerminalX did not create this VM, so it is kept with its guest files: only TerminalX stops using it, for every task and conversation. Task history is retained. The guest runtime TerminalX installed in it stays until you remove it from the VM yourself."}</DialogDescription></DialogHeader>
         <p className="text-xs">{tasks.length} unfinished task{tasks.length === 1 ? "" : "s"} will be affected.</p>
         <div className="max-h-[45vh] space-y-3 overflow-y-auto text-xs">
           {deletion ? <>
@@ -136,8 +138,8 @@ function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: Lo
         </div>
         <DialogFooter><Button variant="ghost" onClick={() => setDeleteOpen(false)}>Keep VM</Button><Button variant="destructive" disabled={deleted || !!busy || deletion?.canDelete !== true || tasks.length > 0} onClick={() => {
           if (deleted || deletion?.canDelete !== true || tasks.length) return;
-          setDeleteOpen(false); void run("Deleting VM", () => localVmRequest("environment.delete", { environmentId: environment.id, generation: environment.generation, confirm: true }));
-        }}>Delete VM and guest files</Button></DialogFooter>
+          setDeleteOpen(false); void run(owned ? "Deleting VM" : "Removing VM from TerminalX", () => localVmRequest("environment.delete", { environmentId: environment.id, generation: environment.generation, confirm: true }));
+        }}>{owned ? "Delete VM and guest files" : "Remove from TerminalX and keep the VM"}</Button></DialogFooter>
       </DialogContent></Dialog>
     </article>
   );

@@ -765,6 +765,7 @@ fn reserve_creation(
             deleted_at: None,
             keep_awake: false,
             owned: true,
+            detached: false,
             provision: Some(progress(
                 "queued",
                 "Waiting for disclosed tool preparation before creating the VM",
@@ -1470,6 +1471,22 @@ fn delete(journal: &Journal, params: &Value) -> Result<Value> {
     {
         bail!("Environment disposition changed; inspect again before deletion");
     }
+    remove(journal, &env)
+}
+
+/// The last step of deletion, after every check above.
+fn remove(journal: &Journal, env: &Environment) -> Result<Value> {
+    // A VM TerminalX did not create is the person's own (review 2): it is
+    // detached, never removed, and its guest files stay where they are.
+    if !env.owned {
+        journal.transaction(|s| {
+            let current = s.environments.get_mut(&env.id).unwrap();
+            current.deleted_at = Some(journal::now());
+            current.detached = true;
+            Ok(())
+        })?;
+        return Ok(json!({"deleted":false,"detached":true,"vmKept":true,"historyRetained":true}));
+    }
     // The UI lists uncommitted work and resume metadata before this call.
     // Deletion never traverses a host checkout or removes its journal/artifacts.
     cua(
@@ -1603,6 +1620,21 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Review 2: deleting an enrolled VM ran `cua sb rm --force` on a VM the
+    /// person made themselves.
+    #[test]
+    fn a_vm_terminalx_did_not_create_is_detached_and_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Yours", "local:yours").unwrap();
+        assert!(!env.owned);
+        // No Cua runs here: with no pinned Cua, a removal would fail.
+        let result = remove(&journal, &env).unwrap();
+        assert_eq!(result, json!({"deleted":false,"detached":true,"vmKept":true,"historyRetained":true}));
+        let kept = journal.read().unwrap().environments[&env.id].clone();
+        assert!(kept.detached && kept.deleted_at.is_some());
+        assert_eq!(serde_json::to_value(&kept).unwrap()["detached"], true);
+    }
     #[test]
     fn a_task_whose_guest_cannot_answer_can_be_abandoned_and_one_that_answers_cannot() {
         let temp = tempfile::tempdir().unwrap();

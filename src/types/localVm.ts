@@ -79,6 +79,10 @@ export interface LocalVmEnvironment {
   createdAt: string;
   deletedAt: string | null;
   keepAwake: boolean;
+  /** Created by TerminalX; one that was not is detached from TerminalX, never deleted. */
+  owned?: boolean;
+  /** Detached from TerminalX with its VM kept (`deletedAt` says when). */
+  detached?: boolean;
   /** Retained guest desktop hold; viewer closure does not return control to queued tasks. */
   manualControl?: boolean;
   provision?: LocalVmEnvironmentInspection;

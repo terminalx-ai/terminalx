@@ -37,7 +37,7 @@ pub(super) fn enroll(journal: &super::journal::Journal, params: Value) -> Result
         transport: Transport::LinuxContainer { runtime: *runtime, id: id.clone(), runtime_sha256: request.runtime_sha256.clone() },
         id: environment_id.clone(), name: request.name.clone(), sandbox: format!("container:{}:{id}", runtime.name()),
         generation: generation.clone(), created_at: super::journal::now(), deleted_at: None,
-        keep_awake: false, owned: false, provision: None, manual_control: false, setup: None,
+        keep_awake: false, owned: false, detached: false, provision: None, manual_control: false, setup: None,
     };
     let description = linux_rpc(&env, "describe", json!({}), Duration::from_secs(45))?;
     validate_description(&env, &description)?;

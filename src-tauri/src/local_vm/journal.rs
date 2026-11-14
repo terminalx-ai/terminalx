@@ -156,6 +156,10 @@ pub struct Environment {
     pub keep_awake: bool,
     #[serde(default)]
     pub owned: bool,
+    /// Removed from TerminalX without deleting the VM, which TerminalX did
+    /// not create (`deleted_at` records when).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     #[serde(default)]
     pub provision: Option<Value>,
     #[serde(default)]
@@ -261,6 +265,7 @@ impl Journal {
                 deleted_at: None,
                 keep_awake: false,
                 owned: false,
+                detached: false,
                 provision: None,
                 manual_control: false,
                 setup: None,
@@ -292,7 +297,7 @@ impl Journal {
             let env = Environment {
                 transport, id: environment_id.clone(), name: name.trim().into(),
                 sandbox: format!("container:{}:{id}", runtime.name()), generation: generation.clone(),
-                created_at: now(), deleted_at: None, keep_awake: false, owned: false,
+                created_at: now(), deleted_at: None, keep_awake: false, owned: false, detached: false,
                 provision: None, manual_control: false, setup: None,
             };
             state.environments.insert(env.id.clone(), env.clone());
