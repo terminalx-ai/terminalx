@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Ellipsis, Loader2, Pencil, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,7 @@ export function UserAvatar({ user, className }: { user?: IssueUser | null; class
   const [broken, setBroken] = useState(false);
   const name = user?.name || user?.login || "?";
   if (user?.avatarUrl && !broken) {
-    return <img src={user.avatarUrl} alt="" onError={() => setBroken(true)} className={cn("size-6 shrink-0 rounded-full bg-veil-raised object-cover", className)} />;
+    return <PrivacyImage src={user.avatarUrl} alt="" onError={() => setBroken(true)} className={cn("size-6 shrink-0 rounded-full bg-veil-raised object-cover", className)} />;
   }
   return (
     <span aria-hidden className={cn("flex size-6 shrink-0 items-center justify-center rounded-full bg-veil-strong text-[11px] font-medium uppercase text-muted-foreground", className)}>

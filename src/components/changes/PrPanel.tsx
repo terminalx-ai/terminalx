@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openPr } from "@/lib/editors";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -253,7 +254,7 @@ export function PrPanel({
   }, [active, loading, working, tick, pendingRuns]);
 
   const actionLock = useRef<number | null>(null);
-  const act = async (label: string, fn: () => Promise<string | null | void>) => {
+  const act = async (label: string, fn: () => Promise<string | null | void>, reconcile = true) => {
     if (actionLock.current === generation) return false;
     actionLock.current = generation;
     actionError.current = null;
@@ -264,15 +265,16 @@ export function PrPanel({
       const said = await fn();
       if (!mounted.current || selected.current.generation !== generation) return false;
       if (said) setNotice(said);
-      setTick((t) => t + 1);
+      if (reconcile) setTick((t) => t + 1);
       return true;
     } catch (e) {
       if (!mounted.current || selected.current.generation !== generation) return false;
       actionError.current = source.errorMessage(e);
       setError(actionError.current);
       setErrorFrom("action");
-      // A refusal may still have changed something (a lost answer): read GitHub again.
-      setTick((t) => t + 1);
+      // Reconcile a lost answer, but a revoked action cannot start a fresh
+      // generation of reads. Normal refresh/new actions remain available.
+      if (reconcile && !actionError.current.includes(PRIVACY_MESSAGE)) setTick((t) => t + 1);
       return false;
     } finally {
       if (actionLock.current === generation) actionLock.current = null;
@@ -281,12 +283,13 @@ export function PrPanel({
   };
 
   const rerun = (pr: PullRequest, failedOnly: boolean) => void act("rerun", async () => {
-    if (!source.canWrite || !source.rerunCheck) throw new Error("Re-running checks is unavailable here.");
+    if (!source.canWrite || !source.rerunCheck || !source.checkAuthority) throw new Error("Re-running checks is unavailable here.");
     const checks = actionsRuns(pr, failedOnly);
+    const authority = await source.checkAuthority();
     for (const check of checks) {
       // A navigation during a batch cancels the remaining outward actions.
       if (!mounted.current || selected.current.generation !== generation) return;
-      await source.rerunCheck(pr.url, check.url!, failedOnly);
+      await source.rerunCheck(pr.url, check.url!, failedOnly, authority);
       if (!mounted.current || selected.current.generation !== generation) return;
       const runId = check.actions!.runId;
       setPendingRuns((old) => [...old.filter((p) => p.until > Date.now() && !(p.prUrl === pr.url && p.runId === runId)), {
@@ -294,7 +297,10 @@ export function PrPanel({
       }]);
     }
     return `Re-run requested for ${checks.length} Actions ${checks.length === 1 ? "run" : "runs"}.`;
-  });
+  // An Actions reply can arrive after its ticket expires, including success or
+  // an ordinary error. Keep its result, then let independent polling/manual
+  // refresh read again; this old action cannot initiate unscoped reconciliation.
+  }, false);
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>

@@ -45,7 +45,7 @@ pub(crate) fn poll(cwd: &Path, urls: &[String]) -> Poll {
             .args(["-f", &format!("query={}", query(urls.len())), "-f", &format!("owner={}", repo.owner), "-f", &format!("name={}", repo.name)])
             .env("GH_NO_UPDATE_NOTIFIER", "1");
         for (i, url) in urls.iter().enumerate() { command.args(["-F", &format!("p{i}={}", url.rsplit('/').next().unwrap())]); }
-        Ok((crate::git::capture_within(command, BOUNDED)?, urls))
+        Ok((output_within(command, BOUNDED)?, urls))
     })();
     match result {
         Ok((out, urls)) => parse(&String::from_utf8_lossy(&out.stdout), out.status.success(), chrono::Utc::now(), &urls),

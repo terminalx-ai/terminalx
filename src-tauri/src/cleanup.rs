@@ -206,6 +206,8 @@ fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], o
                 None => Some("Git could not compare the branch, so it is kept.".to_string()),
             },
         };
+        let kept_because = if crate::github_process::ticket().valid() { kept_because }
+            else { Some(format!("Not verified: {}", crate::data_privacy::MESSAGE)) };
         out.push(Leftover {
             id: format!("branch:{}:{branch}", project.path),
             kind: LeftoverKind::Branch,
@@ -361,6 +363,7 @@ fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry],
 }
 
 pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
+    let _github_request = crate::github_process::scope();
     let mut out = Vec::new();
     for project in sources.projects {
         let path = Path::new(&project.path);
@@ -417,6 +420,9 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(leftover.size_bytes)
         }
         LeftoverKind::Branch => {
+            // The scan's fetch is no longer proof once its request expires,
+            // including a privacy toggle in a progress callback between items.
+            let _verified = crate::github_process::ticket().enter().map_err(|error| error.to_string())?;
             let prefix = crate::store::configuration::branch_prefix(project).map_err(|e| e.to_string())?;
             let plain = leftover.name.strip_prefix(&prefix).is_some_and(|name| !prefix.is_empty() && !name.is_empty() && !name.contains("..") && !name.starts_with('-'));
             if !plain || leftover.name.starts_with('-') {
@@ -471,6 +477,7 @@ pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String], report:
 }
 
 fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report: &dyn Fn(&Progress), runner: Option<crate::archive_script::Runner<'_>>) -> Removal {
+    let _github_request = crate::github_process::scope();
     // Worktrees first: removing one also removes its branch when it can.
     let mut wanted: Vec<&String> = ids.iter().collect();
     wanted.sort_by_key(|id| !id.starts_with("worktree:"));
@@ -499,6 +506,7 @@ fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report
 }
 
 fn with_sources<R>(f: impl FnOnce(&Sources<'_>) -> R) -> anyhow::Result<R> {
+    let _github_request = crate::github_process::scope();
     let (projects, _) = crate::store::projects::list()?;
     let sessions = crate::store::index::load()?;
     let claude_root = agent_data::claude_projects_root();
@@ -655,7 +663,7 @@ mod tests {
             harness: harness.into(),
             title: None,
             model: String::new(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: "default".into(),
             provider_session_id: Some(conversation.into()),
             status: TabStatus::Idle,

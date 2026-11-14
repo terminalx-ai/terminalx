@@ -920,7 +920,7 @@ fn what_needs_the_cli_restarted_is_refused_for_one_started_by_hand_and_says_why(
     assert!(rig.tabs().iter().all(|tab| tab.requested_permission_mode.is_none() && tab.permission_mode == follow::MODE_SET_IN_TERMINAL));
     // A guest of a shared session cannot drive a CLI the host started by hand.
     let guest = crate::local_sharing::Person { user_id: "guest".into(), display_name: "Guest".into(), email: String::new(), email_verified: false, organization_ids: Vec::new() };
-    let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "c".into(), revision: 0, tab_epoch: 0 };
+    let permit = crate::local_sharing::WritePermit { privacy:Default::default(), share_generation: String::new(), connection_id: "c".into(), revision: 0, tab_epoch: 0 };
     let refused = rig.manager.send_shared(SESSION, &tab("claude"), "hi".into(), guest.clone(), permit.clone()).unwrap_err();
     assert!(format!("{refused:#}").contains("Only the host can send to it"), "{refused:#}");
     // Nor start an agent in a tab that is a terminal.

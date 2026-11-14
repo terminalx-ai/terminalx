@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { agent, errorMessage, gh, type PullRequest } from "./api";
+import { agent, errorMessage, gh, type CheckAuthority, type PullRequest } from "./api";
 import { mergeTabEvents } from "./agentEvents";
 import { actionsRuns } from "./checks";
 import { localGitSource } from "./gitSource";
@@ -18,8 +18,12 @@ export function fixErrorsPrompt(prUrl: string, path: string, instructions: strin
  * Fix errors uses. Says what was done. The pipeline panel sends them to an
  * issue's author session this way (#881).
  */
-export async function sendFailedChecks(sessionId: string, tabId: string, prUrl: string, instructions: string, stillWanted: () => boolean = () => true): Promise<string | null> {
-  const attachment = await gh.fixAttachment(sessionId, tabId, prUrl);
+export async function sendFailedChecks(sessionId: string, tabId: string, prUrl: string, instructions: string, stillWanted: () => boolean = () => true, authority?: CheckAuthority): Promise<string | null> {
+  // Discovery callers retain their original authority; direct pipeline clicks
+  // capture it here before collecting logs. Never renew a discovered request.
+  const captured = authority ?? await gh.checkAuthority();
+  if (!stillWanted()) return null;
+  const attachment = await gh.fixAttachment(sessionId, tabId, prUrl, captured);
   // Log downloads can take time. Never send after the reader changes tabs,
   // sessions, or closes this view, and never retry a send automatically.
   if (!stillWanted()) return null;
@@ -48,9 +52,11 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
     locked.current = generation;
     setState({ key, busy: true });
     try {
+      const authority = await gh.checkAuthority();
+      if (!isCurrent()) return;
       let pr = given;
       if (!pr) {
-        const source = localGitSource(cwd);
+        const source = localGitSource(cwd, authority);
         const status = await source.workStatus();
         const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
         if (result.error) throw new Error(result.error);
@@ -60,7 +66,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
       }
       if (!isCurrent()) return;
       if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
-      const notice = await sendFailedChecks(sessionId, tabId, pr.url, prefs.fixErrorsInstructions, isCurrent);
+      const notice = await sendFailedChecks(sessionId, tabId, pr.url, prefs.fixErrorsInstructions, isCurrent, authority);
       if (notice && isCurrent()) setState({ key, busy: false, notice });
     } catch (error) {
       if (isCurrent()) setState({ key, busy: false, error: errorMessage(error) });

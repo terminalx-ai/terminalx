@@ -8,6 +8,9 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+pub mod data_privacy;
+#[cfg(feature = "desktop")]
+mod updater;
 mod archive_script;
 mod project_overview;
 #[cfg(feature = "desktop")]
@@ -93,9 +96,20 @@ mod checkpoints;
 mod worktree_files;
 mod git_media;
 mod github;
+mod github_process;
+
+/// Internal stdio transport entry, handled before starting a desktop/runtime.
+/// Its parent owns admission and the process group, including all probes.
+pub fn run_git_transport_cli() -> Option<i32> {
+    #[cfg(unix)]
+    { git::ssh::run_cli() }
+    #[cfg(not(unix))]
+    { None }
+}
 mod unfinished_merge;
 mod pr_associations;
 mod github_identity;
+mod ssh_containment;
 mod harness;
 pub mod hooks;
 mod idle_agents;
@@ -258,6 +272,7 @@ pub fn run() {
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
     let status_state = Arc::new(status::StatusState::default());
+    data_privacy::initialize();
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     pairing.attach_models(codex_models.clone());
@@ -450,6 +465,10 @@ pub fn run() {
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
             commands::local_vm_request,
+            data_privacy::data_privacy_status,
+            data_privacy::data_privacy_set,
+            updater::app_update_check,
+            updater::app_update_install,
             commands::repository_files_preview,
             commands::account_status,
             commands::account_refresh_roles,
@@ -760,6 +779,7 @@ pub fn run() {
             commands::pr_create,
             commands::pr_merge,
             commands::pr_ready,
+            commands::pr_check_authority,
             commands::pr_check_log,
             commands::pr_check_rerun,
             commands::pr_check_fix_attachment,

@@ -253,6 +253,7 @@ impl PairingManager {
         self: &Arc<Self>,
         connection_mode: PairingConnectionMode,
     ) -> Result<PairingStatus> {
+        crate::data_privacy::require_network()?;
         let previous = self.inner.lock().unwrap().pending_pairing_device.clone();
         if let Some(previous) = previous {
             self.discard_unclaimed_pairing(&previous)?;
@@ -509,6 +510,7 @@ impl PairingManager {
     }
 
     pub(super) fn relay_permitted(&self, context: &AccountContext) -> bool {
+        if crate::data_privacy::enabled() { return false; }
         let mut suspended = self.suspended_account_token.lock().unwrap();
         if suspended.as_deref() == Some(&context.access_token) {
             return false;
@@ -605,6 +607,7 @@ impl PairingManager {
     /// Wake the existing supervisor. Never start a second control connection
     /// or tear down a connection that recovered just before the click arrived.
     pub fn retry_relay(&self) -> Result<PairingStatus> {
+        crate::data_privacy::require_network()?;
         let mut inner = self.inner.lock().unwrap();
         if self.is_stopped() || inner.relay_status.phase == RelayPhase::Off {
             bail!("Relay is not configured. Check Settings → Account.");
@@ -894,7 +897,7 @@ impl PairingManager {
                 tauri::async_runtime::spawn(async move {
                     let result = async {
                         let socket = tokio_tungstenite::accept_async_with_config(
-                            stream,
+                            crate::data_privacy::NetworkIo::new(stream),
                             Some(pairing_websocket_config()),
                         )
                         .await?;

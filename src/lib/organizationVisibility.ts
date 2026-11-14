@@ -1,3 +1,4 @@
+import { privacyEnabled, useDataPrivacy } from "@/lib/dataPrivacy";
 import { useEffect, useMemo } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { getAccount, useAccount } from "@/lib/account";
@@ -30,7 +31,7 @@ export function organizationVisibility(status: AccountStatus, prefs: VisibilityP
 
 /** Prune only an authoritative signed-in membership list, never a sign-out or a failed account load. */
 export function reconcileOrganizationPrefs(status: AccountStatus) {
-  if (status.state !== "signed-in" || !status.organizations) return;
+  if (privacyEnabled() || status.state !== "signed-in" || !status.organizations) return;
   const prefs = getPrefs();
   const ids = new Set(status.organizations.map((org) => org.id));
   const hiddenOrganizations = prefs.hiddenOrganizations.filter((id) => ids.has(id));
@@ -43,11 +44,12 @@ export function reconcileOrganizationPrefs(status: AccountStatus) {
 }
 
 export function useOrganizationVisibility() {
+  const privacy = useDataPrivacy();
   const { status } = useAccount();
   const prefs = usePrefs();
   const { selectedSessionId } = useSessionStore();
   useEffect(() => reconcileOrganizationPrefs(status), [status, prefs.hiddenOrganizations, prefs.organizationDisplay, prefs.selectedOrganization]);
-  return useMemo(() => organizationVisibility(status, prefs, selectedSessionId), [status, prefs.hiddenOrganizations, prefs.organizationDisplay, prefs.selectedOrganization, selectedSessionId]);
+  return useMemo(() => organizationVisibility(status, prefs, selectedSessionId), [status, prefs.hiddenOrganizations, prefs.organizationDisplay, prefs.selectedOrganization, selectedSessionId, privacy.enabled]);
 }
 
 /** Count running machines even when the member's workspace list is incomplete. Reading never connects. */

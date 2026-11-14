@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useState } from "react";
 import { UserRound } from "@/icons";
 import { cn } from "@/lib/cn";
@@ -21,7 +22,7 @@ export function AccountAvatar({ identity, className }: { identity: AccountIdenti
       className={cn("flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-accent/15 text-[10px] font-semibold text-accent", className)}
     >
       {picture ? (
-        <img src={picture} alt="" referrerPolicy="no-referrer" className="size-full object-cover" onError={() => setFailed((previous) => new Set([...previous, picture]))} data-testid="account-picture" />
+        <PrivacyImage src={picture} alt="" referrerPolicy="no-referrer" className="size-full object-cover" onError={() => setFailed((previous) => new Set([...previous, picture]))} data-testid="account-picture" />
       ) : (
         initial ?? <UserRound className="size-3.5" />
       )}

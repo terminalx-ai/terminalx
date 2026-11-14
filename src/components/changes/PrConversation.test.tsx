@@ -23,6 +23,7 @@ beforeEach(() => {
       if (action.kind === "request") data.reviewers = [{ login: action.login, kind: "user", state: "PENDING", requested: true }];
       if (action.kind === "remove") data.reviewers = [];
       if (action.kind === "edit") { data.title = action.title; data.body = action.body; }
+      return { conversation: structuredClone(data), error: null };
     }),
     search: vi.fn(async () => ["author", "ben"]),
   };
@@ -65,11 +66,13 @@ it("edits title and body, preserves unsaved drafts on refresh, and updates the c
 
 it("keeps a failed edit and its error visible after a successful background read", async () => {
   vi.mocked(access.act).mockRejectedValue(new Error("GitHub refused edit"));
-  render(view());
+  const rendered = render(view());
   fireEvent.click(await screen.findByRole("button", { name: "Edit title and description" }));
   fireEvent.change(screen.getByLabelText("Pull request title"), { target: { value: "Keep my draft" } });
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByText("Error: GitHub refused edit");
+  expect(access.read).toHaveBeenCalledTimes(1);
+  rendered.rerender(<PrConversation key="first" source={source} row={row} active refresh={1} onEdited={onEdited} />);
   await waitFor(() => expect(access.read).toHaveBeenCalledTimes(2));
   expect(screen.getByRole("alert").textContent).toContain("GitHub refused edit");
   expect((screen.getByLabelText("Pull request title") as HTMLInputElement).value).toBe("Keep my draft");

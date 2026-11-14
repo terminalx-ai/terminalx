@@ -75,12 +75,14 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
   }, []);
 
   useEffect(() => {
-    if (!canRefresh || !access.client || working) return;
+    if (!canRefresh || !access.client) return;
     const previous = completed.current;
     if (previous?.client === access.client && previous.state !== "OPEN" && previous.rowState === rowState && previous.refresh === refresh && previous.revision === revision) return;
     let cancelled = false;
     let timer: number | undefined;
     const load = async () => {
+      // A timer is independent work; action completion never starts a read.
+      if (busy.current) { timer = window.setTimeout(() => void load(), 60_000); return; }
       const request = ++sequence.current;
       let poll = rowState === "OPEN";
       setLoading(true);
@@ -95,24 +97,25 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
       } catch (error) {
         if (!cancelled && request === sequence.current) setError(source.errorMessage(error));
       } finally {
-        if (!cancelled && request === sequence.current) {
-          setLoading(false);
+        if (!cancelled) {
+          if (request === sequence.current) setLoading(false);
           if (poll) timer = window.setTimeout(() => void load(), 60_000);
         }
       }
     };
     void load();
     return () => { cancelled = true; sequence.current++; window.clearTimeout(timer); };
-  }, [access, canRefresh, source, refresh, revision, working, rowState]);
+  }, [access, canRefresh, source, refresh, revision, rowState]);
 
   useEffect(() => {
     setResults([]);
     setSearchError(null);
     setSearching(false);
-    if (!canRefresh || !access.client || !source.canWrite || query.trim().length < 2 || working) return;
+    if (!canRefresh || !access.client || !source.canWrite || query.trim().length < 2 || busy.current) return;
     let cancelled = false;
     setSearching(true);
     const timer = window.setTimeout(() => {
+      if (busy.current) { setSearching(false); return; }
       void access.client!.search(query.trim()).then((users) => {
         if (!cancelled) setResults(users);
       }, (error) => {
@@ -120,7 +123,7 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
       }).finally(() => { if (!cancelled) setSearching(false); });
     }, 300);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [access, canRefresh, source, query, working]);
+  }, [access, canRefresh, source, query]);
 
   const act = async (action: PrConversationAction) => {
     if (!access.client || busy.current || !source.canWrite) return;
@@ -128,9 +131,10 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
     busy.current = true;
     sequence.current++;
     setWorking(true);
+    setLoading(false);
     setActionError(null);
     try {
-      await access.client.act(action);
+      const update = await access.client.act(action);
       if (!alive.current) return;
       if (action.kind === "edit") {
         setData((value) => value && { ...value, title: action.title, body: action.body });
@@ -138,13 +142,20 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
         setEditing(false);
       }
       setQuery("");
-      // Leaving the working state reads back just this conversation, preserving
-      // the list and scroll position. A hidden tab waits until it is visible.
+      // Native readback uses the mutation's original authority. A delayed reply
+      // (or a legacy runtime's empty reply) must never create a fresh request.
+      if (update?.conversation) {
+        const next = update.conversation;
+        completed.current = { client: access.client, state: next.state, rowState, refresh, revision };
+        setData(next);
+        changed.current(next.title, next.body);
+        setError(null);
+      } else if (update?.error) setError(update.error);
     } catch (error) {
       if (alive.current) setActionError(source.errorMessage(error));
     } finally {
       busy.current = false;
-      if (alive.current) { setWorking(false); setRevision((value) => value + 1); }
+      if (alive.current) setWorking(false);
     }
   };
 

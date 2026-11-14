@@ -24,6 +24,7 @@ struct Owner { actor: Actor, attachment: Arc<Attachment>, revoked: bool }
 
 pub struct Grant {
     actor: Actor,
+    pub(crate) privacy: crate::data_privacy::Ticket,
     attachment: Arc<Attachment>,
     pub device: DeviceEntry,
     active: Mutex<bool>,
@@ -31,16 +32,18 @@ pub struct Grant {
 }
 
 pub struct ReadGuard<'a> {
+    _privacy: crate::data_privacy::RemoteWrite,
     _active: MutexGuard<'a, bool>,
     _attachment: MutexGuard<'a, Option<std::time::Instant>>,
 }
 
 impl Grant {
     pub fn enter(&self) -> Result<ReadGuard<'_>> {
+        let privacy = self.privacy.enter()?;
         let attachment = self.attachment.enter()?;
         let active = self.active.lock().unwrap();
         if !*active { bail!("The paired-device grant was revoked."); }
-        Ok(ReadGuard { _active:active, _attachment:attachment })
+        Ok(ReadGuard { _privacy:privacy, _active:active, _attachment:attachment })
     }
     pub fn valid(&self) -> bool { self.enter().is_ok() }
     fn revoke(&self) {
@@ -491,7 +494,7 @@ impl Registry {
         if state.connections.contains_key(connection) { bail!("The paired-device connection cannot be rebound."); }
         if state.connections.len() >= 128 { bail!("Too many paired-device connections."); }
         state.owners.insert(actor.lease.clone(),Owner { actor:actor.clone(),attachment:attachment.clone(),revoked:false });
-        state.connections.insert(connection.into(),Arc::new(Grant { actor,attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
+        state.connections.insert(connection.into(),Arc::new(Grant { actor,privacy:Default::default(),attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
         Ok(())
     }
 
@@ -658,6 +661,11 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         _ => {}
     }
     let grant = manager.mobile.grant(&actor, string("connection")?)?;
+    // This independent lease survives controls releasing their device locks
+    // before taking admission/runtime locks. Queued writers inherit its ticket.
+    let _privacy = grant.privacy.scope()?;
+    #[cfg(test)]
+    after_control_admission();
     if method == "rowStatuses" {
         drop(grant.enter()?);
         let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| !s.archived).collect();
@@ -1289,3 +1297,17 @@ mod lock_tests;
 #[cfg(test)]
 #[path = "mobile_create_tests.rs"]
 mod create_tests;
+
+#[cfg(test)]
+thread_local! {
+    static CONTROL_ADMITTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn observe_control_admission(callback: Box<dyn FnOnce()>) {
+    CONTROL_ADMITTED.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+#[cfg(test)]
+fn after_control_admission() {
+    let callback = CONTROL_ADMITTED.with(|slot| slot.borrow_mut().take());
+    if let Some(callback) = callback { callback(); }
+}

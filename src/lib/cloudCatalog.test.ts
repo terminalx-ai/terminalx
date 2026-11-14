@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountStatus, CloudCatalogFeed, CloudSelectedRepository, CloudWorkspaceList, CloudWorkspaceListItem } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
+  privacyNative: vi.fn(),
   api: {
     cloudWorkspaces: vi.fn(),
     cloudCatalogFeed: vi.fn(),
@@ -20,6 +21,9 @@ const mocks = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
   refreshAccount: vi.fn(),
 }));
+
+vi.mock("@tauri-apps/api/core", async (original) => ({ ...(await original<object>()), invoke: mocks.privacyNative }));
+import { setDataPrivacy } from "./dataPrivacy";
 
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
@@ -73,6 +77,48 @@ import {
 } from "./cloudCatalog";
 import { cloudWorkspaceDeleted, noteCloudWorkspaceDeleted, resetPurged } from "./cloudLifecycle";
 import { registerAccountRoles } from "./accountRoles";
+
+describe("privacy catalog gating", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(async () => {
+    resetCloudCatalog();
+    mocks.privacyNative.mockResolvedValue({ enabled: false, managed: false });
+    await setDataPrivacy(false);
+  });
+
+  it("does not list at boot or poll while enabled; resumes on the retained account", async () => {
+    signIn();
+    mocks.privacyNative.mockResolvedValue({ enabled: true, managed: false });
+    await setDataPrivacy(true);
+    bootCloudCatalog();
+    await refreshCloudCatalog(ORG);
+    await refreshCloudFeed();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+    expect(mocks.api.cloudCatalogFeed).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceRepositories).not.toHaveBeenCalled();
+    mocks.privacyNative.mockResolvedValue({ enabled: false, managed: false });
+    await setDataPrivacy(false);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalled();
+    expect(mocks.account.status.state).toBe("signed-in");
+  });
+
+  it("cancels running poll timers when turned on", async () => {
+    signIn();
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalled();
+    mocks.privacyNative.mockResolvedValue({ enabled: true, managed: false });
+    await setDataPrivacy(true);
+    mocks.api.cloudWorkspaces.mockClear();
+    mocks.api.cloudCatalogFeed.mockClear();
+    mocks.api.cloudWorkspaceRepositories.mockClear();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+    expect(mocks.api.cloudCatalogFeed).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceRepositories).not.toHaveBeenCalled();
+  });
+});
 import { notifyAccessChanged } from "./cloudCollab";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
 // What the Rust `cloud_workspaces` command hands the webview for a saas #137/#139

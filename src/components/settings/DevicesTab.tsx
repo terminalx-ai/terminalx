@@ -1,3 +1,6 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "./DataPrivacySettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, Loader2, QrCode, RotateCw, Smartphone, Trash2 } from "@/icons";
@@ -81,6 +84,10 @@ function ConnectionOption({
 }
 
 export function DevicesTab() {
+  return useDataPrivacy().enabled ? <PrivacyEmptyState /> : <DevicesTabContent />;
+}
+
+function DevicesTabContent() {
   const account = useAccount();
   const pairing = usePairing();
   const activeOffer = pairing.status.activePairing;
@@ -188,7 +195,7 @@ export function DevicesTab() {
             <div className="flex flex-wrap items-start gap-4">
               <div className="flex aspect-square w-[320px] max-w-full shrink-0 items-center justify-center overflow-hidden rounded-md bg-white">
                 {qrDataUrl ? (
-                  <img src={qrDataUrl} alt="TerminalX phone pairing QR code" className="size-full" />
+                  <PrivacyImage src={qrDataUrl} alt="TerminalX phone pairing QR code" className="size-full" />
                 ) : (
                   <Loader2 className="size-5 animate-spin text-black/50" />
                 )}

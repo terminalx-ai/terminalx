@@ -805,7 +805,7 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames
             let dispatch = dispatch.clone();
             // One thread per hook: a permission frame parks until it is
             // answered, and the next hook must not queue behind it.
-            let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
+            let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(crate::github_process::queued(move || {
                 let _slot = slot;
                 // A hook writes its frame as soon as it connects.
                 let _ = stream.set_read_timeout(Some(FRAME_READ));
@@ -819,7 +819,7 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames
                 }
                 let _ = stream.set_read_timeout(None);
                 answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
-            });
+            }));
         }
     })?;
     Ok(())
@@ -1188,8 +1188,12 @@ impl Bridge {
         let dispatch = self.publisher.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).dispatch.clone();
         self.gate.lock().busy += 1;
         let busy = Busy(self.gate.clone());
+        // A frame held across handover has no surviving positive network
+        // authority. Keep its local work usable, without renewing old fetches.
         let spawned = std::thread::Builder::new().name("hook-frame".into()).spawn(move || {
-            answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
+            crate::github_process::with_ticket(crate::data_privacy::Ticket::denied(), || {
+                answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
+            });
         });
         if let Err(error) = spawned { log::warn!("answer a held hook frame: {error}"); }
     }

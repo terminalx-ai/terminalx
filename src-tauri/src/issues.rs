@@ -184,7 +184,9 @@ pub(crate) fn gh() -> Result<Command> {
 }
 
 fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = gh()?.current_dir(gh_dir(cwd)).args(args).output().with_context(|| format!("gh {}", args.join(" ")))?;
+    let mut command = gh()?;
+    command.current_dir(gh_dir(cwd)).args(args);
+    let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).with_context(|| format!("gh {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("{}", if err.is_empty() { format!("gh {} failed", args.join(" ")) } else { err });
@@ -474,6 +476,7 @@ pub fn parse_github_rest_issue(v: &Value) -> Option<Issue> {
 const REST_PAGES: usize = 3;
 
 pub fn github_list(cwd: &Path, filter: &IssueFilter) -> Result<Vec<Issue>> {
+    let _request = crate::github_process::scope();
     let repo = github_repo(cwd).ok_or_else(|| anyhow!("This project has no GitHub remote. Add one named origin to see its issues."))?;
     let me = || Ok(run_gh(cwd, &["api", "user", "--jq", ".login"])?.trim().to_string());
     match github_list_query(&repo, filter, me)? {
@@ -505,6 +508,7 @@ pub fn github_list(cwd: &Path, filter: &IssueFilter) -> Result<Vec<Issue>> {
 }
 
 pub fn github_details(cwd: &Path, number: &str) -> Result<Issue> {
+    let _request = crate::github_process::scope();
     let repo = github_repo(cwd).ok_or_else(|| anyhow!("This project has no GitHub remote."))?;
     let out = run_gh(cwd, &["issue", "view", number, "--repo", &repo, "--json", GH_VIEW_FIELDS])?;
     let v: Value = serde_json::from_str(&out).context("parse gh issue view")?;
@@ -514,6 +518,7 @@ pub fn github_details(cwd: &Path, number: &str) -> Result<Issue> {
 /// An issue in a repository named by `owner/name`, with no checkout of it
 /// here: a cloud workspace's (#441).
 pub fn github_details_in(repo: &str, number: &str) -> Result<Issue> {
+    let _request = crate::github_process::scope();
     let out = run_gh(&std::env::temp_dir(), &["issue", "view", number, "--repo", repo, "--json", GH_VIEW_FIELDS])?;
     let v: Value = serde_json::from_str(&out).context("parse gh issue view")?;
     Ok(parse_github_issue(&v))
@@ -524,6 +529,7 @@ const GH_AUTOMATION_FIELDS: &str = "number,id,title,body,updatedAt,labels,url,st
 /// Run an automation's raw GitHub search through the same `gh` authority and
 /// error surface as the Issues view.
 pub fn github_search(cwd: &Path, repo: &str, query: &str, limit: usize) -> Result<Vec<Issue>> {
+    let _request = crate::github_process::scope();
     let limit = limit.min(50).to_string();
     let out = run_gh(cwd, &["issue", "list", "--repo", repo, "--search", query, "--json", GH_AUTOMATION_FIELDS, "--limit", &limit])?;
     let value: Value = serde_json::from_str(&out).context("parse gh issue list")?;
@@ -531,6 +537,7 @@ pub fn github_search(cwd: &Path, repo: &str, query: &str, limit: usize) -> Resul
 }
 
 pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result<String> {
+    let _request = crate::github_process::scope();
     let output = run_gh(cwd, &["issue", "comment", &number.to_string(), "--repo", repo, "--body", body])?;
     Ok(output.trim().lines().last().unwrap_or("").to_string())
 }
@@ -538,7 +545,7 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
 // ------------------------------------------------------------------ Linear
 
 fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
     let resp = agent
         .post(linear_api().as_ref())
         .set("Authorization", key)

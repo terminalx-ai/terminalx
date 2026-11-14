@@ -558,7 +558,7 @@ export function TabView({
       setPermissionNotice(null);
       try {
         const outcome = await respondPermissionOnce(backend.logSessionId, tab.id, requestId,
-          () => backend.respondPermission(tab.id, requestId, optionId), local);
+          () => backend.respondPermission(tab.id, requestId, optionId));
         if (outcome === "already_answered") setPermissionNotice("This request was already answered or is no longer open.");
       } catch (e) {
         setError(local ? safeError(e) : commandError(e));

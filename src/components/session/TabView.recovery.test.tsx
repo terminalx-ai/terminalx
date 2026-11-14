@@ -73,7 +73,11 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("TabView recovery lifecycle", () => {
-  it.each([["allow", "chat"], ["deny", "chat"], ["allow", "terminal"], ["deny", "terminal"]])("retires a duplicate Codex request after %s in %s before the decision broadcast arrives (PRO-160)", async (option, mode) => {
+  it.each([["allow", "chat"], ["deny", "chat"], ["allow", "terminal"], ["deny", "terminal"]])("keeps %s in %s pending until delivery, then retires duplicate Codex requests (PRO-160)", async (option, mode) => {
+    const original = mocks.invoke.getMockImplementation()!;
+    let enqueued!: () => void;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "respond_permission"
+      ? new Promise<void>(resolve => { enqueued = resolve; }) : original(command, args));
     mocks.views.views[session.tabs[0].id] = mode;
     render(<Harness />);
     const request: Payload = { type: "permission_requested", requestId: "codex-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [
@@ -84,6 +88,15 @@ describe("TabView recovery lifecycle", () => {
     act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
     expect(screen.getAllByText("Waiting for permission to run a command")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : "Deny" }));
+    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : "Deny" }));
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(1);
+    await act(async () => enqueued());
+    // IPC success acknowledges the queue, not provider delivery. A duplicate
+    // request must still leave one usable card until the owner settles it.
+    expect(screen.getByRole("button", { name: /^Allow/ })).toBeTruthy();
+    emit(request);
+    expect(screen.getAllByText("Waiting for permission to run a command")).toHaveLength(1);
+    emit({ type: "permission_decided", requestId: "codex-request", allowed: option === "allow", label: option === "allow" ? "Allowed" : "Denied", automatic: false });
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
     emit(request);
     expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();

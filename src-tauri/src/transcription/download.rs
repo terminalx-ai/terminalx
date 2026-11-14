@@ -139,7 +139,7 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
         std::fs::create_dir_all(parent)?;
     }
     if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
-    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(30)).build();
+    let agent = crate::data_privacy::http_agent().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(30)).build();
     let resp = agent.get(&spec.url()).call().map_err(|e| anyhow!("download failed: {e}"))?;
     receive(spec, resp.into_reader(), cancel, report, &final_path)
 }

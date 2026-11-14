@@ -221,12 +221,38 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     }
 }
 
+/// Only app-owned network operations use this boundary. Local Git inspection,
+/// edits and the agent process runner keep their existing execution paths.
+enum Network { Git, Github }
+
+fn run_network(command: Command, timeout: Duration, kind: Network) -> Result<Ran, RpcError> {
+    let ticket = crate::github_process::ticket();
+    let (what, output) = match kind {
+        Network::Git => ("git", crate::github_process::git_output_admitted(command, timeout, ticket.clone())),
+        Network::Github => ("gh", crate::github_process::output_admitted(command, timeout, None, ticket.clone())),
+    };
+    let out = match output {
+        Ok(out) => out,
+        Err(_) if !ticket.valid() => return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)),
+        // Keep uncertain outcomes eligible for the caller's existing read-back
+        // reconciliation, under the same ticket. Revocation never gets here.
+        Err(error) if error.is::<crate::github_process::TimedOut>() =>
+            return Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }),
+        Err(error) => return Err(failure_error(what, &error.to_string(), classify(&error.to_string(), false))),
+    };
+    Ok(Ran { ok: out.status.success(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(), timed_out: false })
+}
+
 pub(super) fn git_command(dir: &Path) -> Command {
     let mut command = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     command
         .current_dir(dir)
         .env("PATH", crate::binpath::login_path())
         .env("GIT_TERMINAL_PROMPT", "0")
+        // A read-only diff/status call must not demand-fetch promised objects.
+        // Explicit network verbs still go through run_network.
+        .env("GIT_NO_LAZY_FETCH", "1")
         // Paths are file names, never pathspec magic such as `:(top)` or `:!x`.
         .env("GIT_LITERAL_PATHSPECS", "1")
         .env("LC_ALL", "C");
@@ -327,6 +353,7 @@ impl WorkspaceGit {
 
     /// Answer a `git.*` method; `None` for any other.
     pub fn handle(&self, method: &str, params: &Value) -> Option<Result<Value, RpcError>> {
+        let _request = crate::github_process::scope();
         let result = match method {
             "git.repositories" => Ok(self.list()),
             "git.status" => self.status(params),
@@ -465,7 +492,11 @@ impl WorkspaceGit {
         for (key, value) in env {
             command.env(key, value);
         }
-        run_bounded(command, timeout).map_err(RpcError::internal)
+        if matches!(args.first().copied(), Some("fetch" | "pull" | "push" | "ls-remote")) {
+            run_network(command, timeout, Network::Git)
+        } else {
+            run_bounded(command, timeout).map_err(RpcError::internal)
+        }
     }
 
     /// A repository-relative path: lexically inside it. Git refuses paths
@@ -559,7 +590,7 @@ impl WorkspaceGit {
 
     fn diff(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+        let mut args = vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
         if params.get("staged").and_then(Value::as_bool) == Some(true) {
             args.push("--cached");
         }
@@ -891,7 +922,7 @@ impl WorkspaceGit {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("NO_COLOR", "1");
-        run_bounded(command, timeout).map_err(RpcError::internal)
+        run_network(command, timeout, Network::Github)
     }
 
     fn panel_pr(&self, repo: &Repo, pr: &mut crate::github::PullRequest) {
@@ -975,7 +1006,7 @@ impl WorkspaceGit {
             "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
             "git.prReviewerSearch" => conversation::search_with(&target, required_str(params, "query")?, run).map(|value| json!(value)),
             _ => {
-                conversation::act_with(&target, action.ok_or_else(|| RpcError::invalid("Invalid PR action"))?, run).map(|()| Value::Null)
+                conversation::update_with(&target, action.ok_or_else(|| RpcError::invalid("Invalid PR action"))?, run).map(|value| json!(value))
             }
         }.map_err(RpcError::internal)
     }
@@ -1104,10 +1135,11 @@ impl WorkspaceGit {
     /// delete. Read-only and bounded; a forge that cannot be asked in time is
     /// `openPullRequests: null`, never an error.
     pub fn disposition_repositories(&self) -> Vec<Value> {
+        let _request = crate::github_process::scope();
         let (names, _) = self.repositories();
         // Side by side, so the whole answer takes about one repository's budget.
         std::thread::scope(|scope| {
-            let running: Vec<_> = names.iter().map(|name| scope.spawn(move || self.repository_facts(name))).collect();
+            let running: Vec<_> = names.iter().map(|name| scope.spawn(crate::github_process::queued(move || self.repository_facts(name)))).collect();
             running.into_iter().zip(&names).map(|(handle, name)| handle.join().unwrap_or_else(|_| json!({ "path": name }))).collect()
         })
     }

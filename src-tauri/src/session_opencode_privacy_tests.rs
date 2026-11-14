@@ -1,0 +1,243 @@
+//! Real relay send, SessionManager queues, and a loopback OpenCode HTTP/SSE
+//! provider. The refused opening never reaches the server and never replies.
+use super::*;
+use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
+
+const CASE: &str = "TERMINALX_TEST_OPENCODE_PRIVACY";
+
+#[test]
+fn privacy_opencode_denied_opening_preserves_local_followups() {
+    for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+            .env(CASE, kind).output().unwrap();
+        assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn opening_child() {
+    let Ok(kind) = std::env::var(CASE) else { return };
+    let managed = kind.contains("managed");
+    let cycle = kind.ends_with("cycle");
+    let rig = Rig::of(CliKind::Claude, "");
+    let policy = |enabled| {
+        if managed && enabled { std::env::set_var("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+        else { std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY"); }
+        store::write_json(&store::root().unwrap().join("data-privacy.json"), &json!({"enabled":enabled && !managed})).unwrap();
+        assert_eq!(crate::data_privacy::refresh().enabled, enabled);
+    };
+    policy(false);
+    let root = rig._dir.path().canonicalize().unwrap();
+    index::save(&[serde_json::from_value(json!({"id":SESSION,"projectPath":root,"cwd":root,
+        "title":"OpenCode privacy","created":index::now(),"modified":index::now(),
+        "tabs":[{"id":TAB,"harness":"opencode","permissionMode":"default","created":index::now()}]})).unwrap()]).unwrap();
+    let script = root.join("provider.py");
+    let port_file = root.join("port");
+    let records = root.join("requests");
+    std::fs::write(&script, r#"
+import http.server, json, pathlib, queue, socket, time
+root = pathlib.Path(__file__).parent
+news = queue.Queue()
+class Provider(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.path == '/session':
+            self.send_response(200); self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'[]'); return
+        assert self.path == '/event'
+        self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+        while True:
+            self.wfile.write(('data: '+json.dumps(news.get())+'\n\n').encode()); self.wfile.flush()
+    def do_POST(self):
+        data = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+        with (root/'requests').open('a') as f:
+            f.write(json.dumps({'path':self.path, 'body':data})+'\n')
+        if '/permissions/' in self.path and (root/'fail-answer').exists():
+            while not (root/'release-failure').exists(): time.sleep(0.005)
+            if (root/'fail-answer').read_text() == 'transport':
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR); self.connection.close(); return
+            self.send_response(500); self.send_header('Content-Length', '0'); self.end_headers(); return
+        body = b'{"id":"local-session"}' if self.path == '/session' else b'{}'
+        self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
+        self.wfile.write(body); self.wfile.flush()
+        if self.path.endswith('/message'):
+            if (root/'approval').exists():
+                news.put({'type':'session.status','properties':{'sessionID':'local-session','status':{'type':'busy'}}})
+                news.put({'type':'permission.asked','properties':{'sessionID':'local-session','id':'approval','type':'bash','input':{'command':'echo allowed'}}})
+                return
+            for status in ['busy', 'idle']:
+                news.put({'type':'session.status','properties':{'sessionID':'local-session','status':{'type':status}}})
+server = http.server.ThreadingHTTPServer(('127.0.0.1',0), Provider)
+(root/'port.tmp').write_text(str(server.server_address[1]))
+(root/'port.tmp').replace(root/'port')
+server.serve_forever()
+"#).unwrap();
+    let python = crate::binpath::resolve("python3").expect("python3 fixture provider");
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.engine = Engine::OpenCode(opencode::OpenCode::new(0, root.to_str().unwrap(), None, None, "default"));
+        rt.harness = "opencode".into();
+        rig.manager.spawn_child(&mut rt, &rig.rt, &python, &[script.to_string_lossy().into_owned()], root.to_str().unwrap()).unwrap();
+    }
+    struct ProviderOwner(SessionManager);
+    impl Drop for ProviderOwner {
+        fn drop(&mut self) { let _ = self.0.stop(SESSION, TAB); }
+    }
+    let _provider = ProviderOwner(rig.manager.clone());
+    wait_for("fixture HTTP provider listening", || port_file.exists());
+    let port: u16 = std::fs::read_to_string(&port_file).unwrap().parse().unwrap();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.engine = Engine::OpenCode(opencode::OpenCode::new(port, root.to_str().unwrap(), None, None, "default"));
+    }
+    let manager = rig.manager.clone(); let rt = rig.rt.clone();
+    let pid = rt.lock().unwrap().child_pid;
+    let pump = std::thread::spawn(move || opencode::pump_events(&format!("http://127.0.0.1:{port}"),
+        || rt.lock().unwrap().child_pid == pid, |line| manager.on_line(&rt, &line)));
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(2).enable_all().build().unwrap();
+    let rpc = WorkspaceRpc::new(&root, 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
+    let (peer, _events) = Peer::new("opencode-privacy".into(), Authority::Manage);
+    assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
+    let send = |text: &str| runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
+        "sessionId":SESSION,"tabId":TAB,"text":text,"clientRequestId":uuid::Uuid::new_v4().to_string()}})));
+    if let Some(failure) = kind.strip_prefix("failed-answer-") {
+        std::fs::write(root.join("approval"), "").unwrap();
+        std::fs::write(root.join("fail-answer"), failure).unwrap();
+        rig.manager.send(SESSION, TAB, "local task".into(), vec![]).unwrap();
+        wait_for("provider approval card", || !rig.rt.lock().unwrap().pending.is_empty());
+        let request = rig.rt.lock().unwrap().pending.keys().next().unwrap().clone();
+        let replies = || std::fs::read_to_string(&records).unwrap_or_default().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["path"].as_str().unwrap().contains("/permissions/")).collect::<Vec<_>>();
+        // The IPC contract is enqueue success; the real HTTP reply is still
+        // held, then fails without a provider terminal/decision event.
+        rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap();
+        wait_for("physical first approval request", || replies().len() == 1);
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
+        assert!(rig.rt.lock().unwrap().pending.contains_key(&request));
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        std::fs::write(root.join("release-failure"), "").unwrap();
+        wait_for("failed delivery released its in-flight answer", || {
+            let rt = rig.rt.lock().unwrap();
+            matches!(&rt.engine, Engine::OpenCode(o) if !o.answer_pending(&request))
+        });
+        {
+            let rt = rig.rt.lock().unwrap();
+            assert!(rt.pending.contains_key(&request) && rt.turn_open);
+            assert!(matches!(&rt.engine, Engine::OpenCode(o) if o.has_ask(&request)));
+        }
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        std::fs::remove_file(root.join("fail-answer")).unwrap();
+        rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap();
+        wait_for("retried HTTP answer delivered and settled", || rig.rt.lock().unwrap().pending.is_empty());
+        let rows = replies();
+        assert_eq!(rows.len(), 2, "failure must not replay consent: {rows:?}");
+        assert_eq!(rows[0]["body"]["response"], "once");
+        assert_eq!(rows[1]["body"]["response"], "reject");
+        let decisions: Vec<_> = rig.events().into_iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).collect();
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0].payload, Payload::PermissionDecided { request_id, allowed: false, automatic: false, .. } if request_id == &request));
+        rig.manager.stop(SESSION, TAB).unwrap(); pump.join().unwrap();
+        return;
+    }
+    if kind.starts_with("approval-") {
+        std::fs::write(root.join("approval"), "").unwrap();
+        rig.manager.send(SESSION, TAB, "local task".into(), vec![]).unwrap();
+        wait_for("provider approval card", || !rig.rt.lock().unwrap().pending.is_empty());
+        let request = rig.rt.lock().unwrap().pending.keys().next().unwrap().clone();
+        let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
+        *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap(); released.recv_timeout(WAIT).unwrap();
+        }));
+        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
+          rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap(); }
+        arrived.recv_timeout(WAIT).unwrap();
+        assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
+        assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
+        assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
+        policy(true); if cycle { policy(false); }
+        release.send(()).unwrap();
+        wait_for("revoked HTTP answer restored for local reply", || rig.manager.respond_permission(SESSION, TAB, &request, "reject").is_ok());
+        wait_for("local HTTP answer settled", || rig.rt.lock().unwrap().pending.is_empty());
+        let rows = std::fs::read_to_string(&records).unwrap().lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        let replies: Vec<_> = rows.iter().filter(|row| row["path"].as_str().unwrap().contains("/permissions/")).collect();
+        assert_eq!(replies.len(), 1, "revoked approval reached provider: {rows:?}");
+        assert_eq!(replies[0]["body"]["response"], "reject");
+        assert_eq!(rig.events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { allowed: false, automatic: false, .. })).count(), 1);
+        policy(false);
+        rig.manager.stop(SESSION, TAB).unwrap(); pump.join().unwrap();
+        return;
+    }
+    let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
+    *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap(); released.recv_timeout(WAIT).unwrap();
+    }));
+    let remote = send("expired remote");
+    assert_eq!(remote["ok"], true, "{remote}");
+    arrived.recv_timeout(WAIT).unwrap();
+    let old_actions = { // a duplicate old opening callback must not touch a replacement
+        let rt = rig.rt.lock().unwrap();
+        let Engine::OpenCode(o) = &rt.engine else { panic!("OpenCode") };
+        o.generation()
+    };
+    let first = rig.manager.send(SESSION, TAB, "local first".into(), vec![]).unwrap();
+    let second = rig.manager.send(SESSION, TAB, "local second".into(), vec![]).unwrap();
+    assert!(first.queued && second.queued);
+    assert_eq!(rig.rt.lock().unwrap().queued.len(), 2);
+    policy(true); if cycle { policy(false); }
+    assert!(!records.exists(), "the denied opening has not contacted HTTP");
+    release.send(()).unwrap();
+    let read = || std::fs::read_to_string(&records).unwrap_or_default().lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    wait_for("both queued local prompts physically delivered", || read().len() >= 3);
+    wait_for("local turns settled", || !rig.rt.lock().unwrap().turn_open);
+    let rows = read();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["path"], "/session");
+    assert_eq!(rows[1]["body"]["parts"][0]["text"], "local first");
+    assert_eq!(rows[2]["body"]["parts"][0]["text"], "local second");
+    assert!(rig.rt.lock().unwrap().queued.is_empty());
+    let remote_seq = rig.events().iter().find_map(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "expired remote").then_some(event.seq)).unwrap();
+    assert_eq!(rig.events().iter().filter(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, unconfirmed: false } if prompt_seq == remote_seq)).count(), 1);
+    for text in ["local first", "local second"] {
+        assert_eq!(rig.events().iter().filter(|event| matches!(&event.payload, Payload::UserMessage { text: sent, .. } if sent == text)).count(), 1);
+    }
+    // Execute a genuinely obsolete asynchronous opening request. Its worker
+    // has the same child but must reject the retired generation before HTTP.
+    let (entered, arrived) = mpsc::channel();
+    *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || { entered.send(()).unwrap(); }));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply_actions(&mut rt, vec![Action::Http { generation: old_actions, tag:"session_new".into(), method:"POST".into(), url:format!("http://127.0.0.1:{port}/session"), body:Some(json!({})) }]);
+    }
+    arrived.recv_timeout(WAIT).unwrap();
+    policy(false);
+    assert_eq!(send("fresh remote")["ok"], true);
+    wait_for("fresh remote physically delivered", || read().len() >= 4);
+    wait_for("fresh turn settled", || !rig.rt.lock().unwrap().turn_open);
+    let rows = read();
+    assert_eq!(rows.len(), 4, "expired opening/prompt replayed: {rows:?}");
+    assert_eq!(rows[3]["body"]["parts"][0]["text"], "fresh remote");
+    rig.manager.stop(SESSION, TAB).unwrap();
+    pump.join().unwrap();
+}
+
+#[test]
+fn privacy_review3_revoked_approval_opencode_stays_answerable() {
+    for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+            .env(CASE, format!("approval-{kind}")).output().unwrap();
+        assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn privacy_native3_opencode_failed_approval_delivery_can_be_retried() {
+    for failure in ["http500", "transport"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+            .env(CASE, format!("failed-answer-{failure}")).output().unwrap();
+        assert!(output.status.success(), "{failure}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}

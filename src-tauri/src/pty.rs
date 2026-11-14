@@ -643,6 +643,31 @@ impl Terminals {
     /// `env` is set inside the PTY before the command runs. An agent tab uses
     /// it to tell the CLI — and every hook the CLI spawns, since a hook is a
     /// grandchild of this shell — which tab it belongs to.
+    /// App-owned interactive network setup retains its original authority until
+    /// this exact process group exits. Ordinary user shells and agents do not.
+    pub(crate) fn spawn_network(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
+        let ticket = crate::github_process::ticket();
+        let lease = ticket.enter()?;
+        let (send, receive) = std::sync::mpsc::sync_channel::<StoppingPane>(1);
+        std::thread::Builder::new().name("network-setup-admission".into()).spawn(move || {
+            let _lease = lease;
+            let Ok(owned) = receive.recv() else { return };
+            while ticket.valid() && owned.pid().is_some() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if owned.pid().is_some() {
+                owned.group.signal(false);
+                // Never acknowledge activation while our process is still live.
+                while !owned.wait(Duration::from_secs(5)) {}
+            }
+        })?;
+        self.spawn(sink, id, spec)?;
+        if let Some(group) = self.panes.lock().unwrap().get(id).map(|pane| pane.group.clone()) {
+            send.send(StoppingPane { id: id.into(), group }).map_err(|_| anyhow!("Network setup monitor stopped"))?;
+        }
+        Ok(())
+    }
+
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
         let result = self.spawn_after(sink, id, spec, printed, None);
@@ -1153,6 +1178,31 @@ impl Terminals {
         let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
         let mut input = input.lock().unwrap();
         input.write(data)
+    }
+
+    /// A remote queue may wait behind local input. Acquire its original
+    /// authority only after that wait, and keep the lease through every partial
+    /// write/flush. Activation can then acknowledge either no write or its end.
+    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket) -> Result<bool> {
+        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
+        let mut input = input.lock().unwrap();
+        let Ok(_privacy) = ticket.enter() else { return Ok(false) };
+        input.write(data).map(|()| true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_input_lock_for_test(&self, id: &str, f: impl FnOnce()) {
+        let input = self.panes.lock().unwrap().get(id).unwrap().input.clone();
+        let _input = input.lock().unwrap();
+        f();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wrap_input_for_test(&self, id: &str, wrap: impl FnOnce(Box<dyn Write + Send>) -> Box<dyn Write + Send>) {
+        let input = self.panes.lock().unwrap().get(id).unwrap().input.clone();
+        let mut input = input.lock().unwrap();
+        let writer = std::mem::replace(&mut input.writer, Box::new(std::io::sink()));
+        input.writer = wrap(writer);
     }
 
     /// Capture the writer only if it is still the process the caller admitted.

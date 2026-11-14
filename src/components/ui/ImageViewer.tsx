@@ -1,3 +1,5 @@
+import { PrivacyImage, externalImage } from "./privacy-image";
+import { getDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { ChevronLeft, ChevronRight, Copy, ExternalLink, Expand, Minus, Plus, RotateCw, X } from "@/icons";
@@ -179,10 +181,9 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
   /** The image as a PNG on the clipboard (the clipboard takes PNG), drawn from what is shown. */
   async function copy() {
     try {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.src = image.src;
-      await img.decode();
+      if (getDataPrivacy().enabled && externalImage(image.src)) throw new Error(PRIVACY_MESSAGE);
+      const img = stage.current?.querySelector("img");
+      if (!img?.complete || !img.naturalWidth) throw new Error("Image is not loaded");
       const canvas = document.createElement("canvas");
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
@@ -225,7 +226,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
         onClick={(event) => { if (event.target === event.currentTarget && fitted) closeImageViewer(); }}
         data-testid="image-viewer-stage"
       >
-        <img
+        <PrivacyImage
           src={image.src}
           alt={image.name}
           draggable={false}

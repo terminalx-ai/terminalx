@@ -282,6 +282,7 @@ fn run(options: Options) -> Result<()> {
     if guest_mode && options.adopt.is_some() {
         bail!("A pinned guest runtime is never handed over; it is replaced by its host");
     }
+    crate::data_privacy::initialize();
     // A runtime taking over from the one this process was (#765) holds the
     // home already: its lock, its sockets and its terminals came with it.
     #[cfg(unix)]

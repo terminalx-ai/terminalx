@@ -64,7 +64,7 @@ pub struct Repository { pub root: PathBuf, identity: String }
 /// discover the checkout. All workspaces inherit the primary checkout's files.
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")))
-        .current_dir(root).env_remove("GIT_DIR").env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
+        .env("GIT_NO_LAZY_FETCH", "1").current_dir(root).env_remove("GIT_DIR").env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE").env_remove("GIT_OBJECT_DIRECTORY").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .args(["-c", "core.fsmonitor=false"]).args(args).output()?;
     ensure!(output.status.success(), "Cannot read repository configuration metadata.");

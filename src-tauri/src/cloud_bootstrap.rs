@@ -323,7 +323,7 @@ pub struct HttpApi {
 
 impl HttpApi {
     pub fn new(origin: &str) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).user_agent(&format!("terminalx-serve/{VERSION}")).build();
+        let agent = crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).user_agent(&format!("terminalx-serve/{VERSION}")).build();
         Self { origin: origin.to_string(), agent }
     }
 

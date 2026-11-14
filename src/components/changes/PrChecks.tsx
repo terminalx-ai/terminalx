@@ -31,7 +31,7 @@ export function PrChecks({ pr, source, disabled, fixBusy, onRerun, onFix, showSu
     {showSummary && <p className="mb-1 text-[11px] text-muted-foreground">{checkSummary(pr.checks)}</p>}
     {runs.length > 0 && source.canWrite && <div className="flex flex-wrap gap-1 py-1">
       {onFix && failedRuns.length > 0 && <Button size="xs" disabled={disabled || fixBusy} onClick={onFix} title="Send failed check logs to the active agent tab">{fixBusy && <Loader2 className="animate-spin" />}Fix errors</Button>}
-      {source.rerunCheck && <>
+      {source.rerunCheck && source.checkAuthority && <>
         <Button size="xs" variant="outline" disabled={disabled || running || !failedRuns.length} onClick={() => onRerun(true)}>Re-run failed</Button>
         <Button size="xs" variant="ghost" disabled={disabled || running} onClick={() => onRerun(false)}>Re-run all</Button>
       </>}
