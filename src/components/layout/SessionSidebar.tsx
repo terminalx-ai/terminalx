@@ -506,12 +506,21 @@ function ProjectGroup({
   const [renaming, setRenaming] = useState<string | null>(null);
   // On a detached HEAD there is no branch to rename: Rename… says so, and offers to make one at the commit (PRO-295).
   // The row's branch reads "detached at 1a2b3c4" then (or nothing): it is the checkout that says there is no branch.
-  const detachedAt = (branch: string, sessions: SessionEntry[]) => {
-    const session = sessions.find((entry) => entry.id === selectedId) ?? sessions[0];
-    if (!session || session.worktreeRemoved) return null;
+  const detachedCheckout = (session: SessionEntry, branch: string) => {
+    if (session.worktreeRemoved) return null;
     const checkout = workspaces.find((workspace) => canon(workspace.path) === canon(session.cwd));
     if (!checkout || checkout.branch || !checkout.head || (branch && branch !== checkoutLabel(checkout))) return null;
-    return { cwd: checkout.path, head: checkout.head, title: conversationTitle(session) || null };
+    return { ...checkout, head: checkout.head };
+  };
+  // A detached row is one checkout's (see `branches` below), so any live session in it names that checkout: the open
+  // one first, else the next that still is, not just the first, which may be gone (PRO-367).
+  const detachedAt = (branch: string, sessions: SessionEntry[]) => {
+    const selected = sessions.find((entry) => entry.id === selectedId);
+    for (const session of selected ? [selected, ...sessions.filter((entry) => entry !== selected)] : sessions) {
+      const checkout = detachedCheckout(session, branch);
+      if (checkout) return { cwd: checkout.path, head: checkout.head, title: conversationTitle(session) || null };
+    }
+    return null;
   };
   const renameBranch = (branch: string, sessions: SessionEntry[]) => {
     if (!group.project || group.project.kind === "folder") return null;
@@ -546,13 +555,15 @@ function ProjectGroup({
       const branch = group.branches[session.id] ?? "";
       // A retained history must not join a live checkout merely because its
       // original branch name has been reused (or it now resumes on main).
-      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : `branch:${branch}`;
+      // Checkouts detached at one commit share a label, not a row: each is its own, so its actions act on it (PRO-367).
+      const detached = branch ? detachedCheckout(session, branch) : null;
+      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : detached ? `detached:${canon(detached.path)}` : `branch:${branch}`;
       const entry = byBranch.get(key) ?? { key, branch, sessions: [] };
       entry.sessions.push(session);
       byBranch.set(key, entry);
     }
     return [...byBranch.values()];
-  }, [group, nested.top]);
+  }, [group, nested.top, workspaces]);
   // A removed workspace's conversations are kept, read and resumed from here, but set apart from the live ones
   // under a fold of their own (#696): left in the list, they sat beside live work for good.
   const live = branches.filter((entry) => !entry.key.startsWith("removed:"));
@@ -617,6 +628,7 @@ function ProjectGroup({
         sortId={`branch:${key}`}
         path={group.path}
         branch={branch}
+        foldKey={key.startsWith("branch:") ? branch : key}
         label={labels[branch]}
         sessions={sessions}
         selectedId={selectedId}
@@ -845,10 +857,13 @@ function BranchRow({
   merged,
   onNewSession,
   onRename,
+  foldKey,
 }: {
   sortId: string;
   path: string;
   branch: string;
+  /** What its fold is remembered by: the branch, or the one checkout or removed workspace the row stands for. */
+  foldKey: string;
   /** What the reader named the branch, shown instead of it. */
   label?: string;
   onRename: (() => void) | null;
@@ -865,7 +880,6 @@ function BranchRow({
   const holdsSelected = sessions.some((session) => session.id === selectedId || familyHolds(workersOf, session.id, selectedId));
   const removed = sessions.every((session) => session.worktreeRemoved);
   const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
-  const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
   const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
   const label = `${named ?? (branch || "No branch")}${removed ? " (workspace removed)" : ""}`;

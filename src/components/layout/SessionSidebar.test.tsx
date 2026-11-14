@@ -538,6 +538,66 @@ describe("renaming from the sidebar", () => {
     }
   });
 
+  // Two worktrees detached at one commit read the same, but are two checkouts: each row stands for one (PRO-367).
+  const sameCommit = (names: string[]) => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [...(await base(command, args)), ...names.map((name) => ({ ...tree(name, ""), branch: null, head: "3f2a91c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f" }))];
+      if (command === "git_branch_here") return "dc/new";
+      return base(command, args);
+    });
+  };
+  const createBranchFrom = async (row: HTMLElement) => {
+    fireEvent.contextMenu(row);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
+  };
+
+  it("gives each checkout detached at the same commit its own row, and branches the one chosen (PRO-367)", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    sameCommit(["panda", "crane"]);
+    await boot([
+      session("panda", "/repos/web", at(2), { branch: "dc/panda", worktreeName: "panda", cwd: "/repos/web/.worktrees/panda" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+    // The newer one is open: it must not stand in for the row the person right-clicks.
+    act(() => store.selectSession("panda"));
+    render(<Toasts />);
+    mount();
+    try {
+      const web = screen.getByRole("group", { name: "web" });
+      expect(within(web).getAllByRole("button", { name: /^detached at/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["detached at 3f2a91c, Talk panda", "detached at 3f2a91c, Talk crane"]);
+      await createBranchFrom(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
+      expect(mocks.invoke).toHaveBeenCalledWith("git_branch_here", { projectPath: "/repos/web", cwd: "/repos/web/.worktrees/crane", name: "Talk crane" });
+      expect(mocks.invoke).not.toHaveBeenCalledWith("git_branch_here", expect.objectContaining({ cwd: "/repos/web/.worktrees/panda" }));
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
+  it("keeps Rename… on a detached row while a session in it is live, its newest gone with its worktree (PRO-367)", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    sameCommit(["crane"]);
+    await boot([
+      session("panda", "/repos/web", at(3), { branch: "dc/panda", worktreeName: "panda", cwd: "/repos/web/.worktrees/panda", worktreeRemoved: true, removedWorkspace: { path: "/repos/web/.worktrees/panda", branch: null } } as Partial<SessionEntry>),
+      session("crane-2", "/repos/web", at(2), { title: "Talk heron", branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+    render(<Toasts />);
+    mount();
+    try {
+      // Both of crane's sessions share its row (its count says 2); the removed worktree's conversation is kept apart.
+      const rows = screen.getAllByRole("button", { name: /^detached at 3f2a91c/ });
+      expect(rows.map((row) => row.textContent)).toEqual(["detached at 3f2a91c2"]);
+      await createBranchFrom(rows[0]);
+      expect(mocks.invoke).toHaveBeenCalledWith("git_branch_here", expect.objectContaining({ projectPath: "/repos/web", cwd: "/repos/web/.worktrees/crane" }));
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
   it("offers a developer's few actions on a right-click", async () => {
     withTrees();
     await bootTwo();
