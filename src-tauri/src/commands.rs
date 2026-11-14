@@ -2388,17 +2388,26 @@ pub async fn send_message(
     text: String,
     images: Option<Vec<ImageInput>>,
     confirm_delivery: Option<bool>,
+    pressed_at: Option<i64>,
 ) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         if confirm_delivery.unwrap_or(false) {
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
         } else {
-            m.send(&session_id, &tab_id, text, images.unwrap_or_default()).map_err(err)
+            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at).map_err(err)
         }
     })
         .await
         .map_err(err)?
+}
+
+/// The chat drew a message it sent (#727): its timings go into the tab's
+/// diagnostics beside the runtime's, so a slow send can be traced to a step.
+#[tauri::command]
+pub async fn report_send_shown(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64, timings: crate::session::SendShown) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.note_shown(&session_id, &tab_id, seq, &timings).map_err(err)).await.map_err(err)?
 }
 
 /// The recovery banner's "Resend last prompt": the prompt the tab's agent
@@ -2408,6 +2417,14 @@ pub async fn send_message(
 pub async fn resend_unsent(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.resend_unsent(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+/// "Send again" on a message the agent dropped unanswered, taking another
+/// prompt in its place (#722): sent as a new message, as it was sent.
+#[tauri::command]
+pub async fn resend_message(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<SendOutcome> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.resend_message(&session_id, &tab_id, seq).map_err(err)).await.map_err(err)?
 }
 
 /// Press Enter in a new session for the handoff left in its input (#662).
@@ -2737,6 +2754,25 @@ pub async fn git_pull(cwd: String) -> CmdResult<String> {
 #[tauri::command]
 pub async fn git_discard(cwd: String, path: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || git::discard_file(Path::new(&cwd), &path).map_err(err)).await.map_err(err)?
+}
+
+/// The merge left in progress in a checkout, with what each of its
+/// uncommitted files is; `None` when no merge is in progress.
+#[tauri::command]
+pub async fn unfinished_merge(cwd: String) -> CmdResult<Option<crate::unfinished_merge::UnfinishedMerge>> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::read(Path::new(&cwd)).map_err(err)).await.map_err(err)?
+}
+
+/// Commit the merge that was read (HEAD at `head`, merging `merge_head`).
+#[tauri::command]
+pub async fn commit_merge(cwd: String, head: String, merge_head: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::commit(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
+}
+
+/// Abort the merge that was read (HEAD at `head`, merging `merge_head`).
+#[tauri::command]
+pub async fn abort_merge(cwd: String, head: String, merge_head: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::unfinished_merge::abort(Path::new(&cwd), &head, &merge_head).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

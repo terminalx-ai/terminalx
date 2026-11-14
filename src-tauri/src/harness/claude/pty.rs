@@ -214,6 +214,78 @@ pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// The glyphs Claude Code starts its input box's first row with when the box
+/// takes a prompt: `❯` since 2.1, `>` before it.
+const PROMPT_GLYPHS: &[&str] = &["❯", ">"];
+
+/// What Claude Code's input box holds, read from the screen it has drawn
+/// (#722).
+///
+/// Claude Code 2.1 draws the box as rows between two rules that run the
+/// width of the terminal, the first of them starting with its prompt glyph:
+///
+/// ```text
+/// ──────────────────────────────────────────
+/// ❯ what is in the box, wrapped onto as many
+///   rows as it needs
+/// ──────────────────────────────────────────
+/// ```
+///
+/// The box is the last such pair on screen: a prompt the CLI took is echoed
+/// above it with the same glyph, and the hints and status sit below it.
+///
+/// An empty box shows a suggestion drawn faint (`Try "fix lint errors"`),
+/// or nothing at all once a prompt has been sent. Anything drawn at normal
+/// weight is in the box: typed, pasted (`[Pasted text #1 +33 lines]`), or a
+/// prompt the CLI put back when it dropped a turn before answering it. A
+/// glyph other than the prompt's says the box is in a mode the reader put it
+/// in (`!` for a shell command), and that is not empty either.
+pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
+    use crate::harness::tui::Composer;
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let cell = |row: u16, col: u16| screen.cell(row, col).map_or("", |cell| cell.contents());
+    // A rule fills most of the row with `─` and has nothing else in it.
+    let is_rule = |row: u16| {
+        let mut ruled = 0;
+        for col in 0..cols {
+            match cell(row, col) {
+                "─" => ruled += 1,
+                "" | " " => {}
+                _ => return false,
+            }
+        }
+        ruled >= cols.saturating_mul(3) / 4
+    };
+    let Some(bottom) = (1..rows).rev().find(|row| is_rule(*row)) else { return Composer::Unseen };
+    let Some(top) = (0..bottom).rev().find(|row| is_rule(*row)) else { return Composer::Unseen };
+    if bottom - top < 2 {
+        return Composer::Unseen;
+    }
+    let glyph = cell(top + 1, 0);
+    if glyph.trim().is_empty() {
+        return Composer::Unseen;
+    }
+    let mut words = Vec::new();
+    if !PROMPT_GLYPHS.contains(&glyph) {
+        words.push(glyph.to_string());
+    }
+    for row in top + 1..bottom {
+        let mut line = String::new();
+        for col in u16::from(row == top + 1)..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            // What a cell shows when it is a suggestion, not text: faint.
+            line.push_str(if cell.dim() || !cell.has_contents() { " " } else { cell.contents() });
+        }
+        words.extend(line.split(|c: char| c.is_whitespace()).filter(|word| !word.is_empty()).map(str::to_owned));
+    }
+    if words.is_empty() {
+        Composer::Empty
+    } else {
+        Composer::Holds(words.join(" "))
+    }
+}
+
 /// The reply a `PermissionRequest` hook prints. Its shape differs from
 /// `PreToolUse`'s `permissionDecision`: this event carries a decision object,
 /// and it ignores exit code 2, so a denial has to be said in JSON.
@@ -236,6 +308,46 @@ pub fn permission_decision(allow: bool, updated_input: Option<Value>, updated_pe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::tui::Composer;
+
+    /// What a 110 by 40 terminal shows once it has drawn `output`: the size
+    /// the fixtures were recorded at.
+    fn drawn(output: &[u8]) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(40).unwrap(), std::num::NonZeroU16::new(110).unwrap(), 0);
+        parser.process(output);
+        parser
+    }
+
+    /// Claude Code 2.1.316, recorded in a pty: idle with its suggestion in
+    /// the box; working on a prompt, the box empty; and that prompt put back
+    /// in the box, wrapped over three rows, after Escape dropped its turn
+    /// before any reply (#722).
+    #[test]
+    fn claude_codes_input_box_is_read_from_the_screen_it_drew() {
+        assert_eq!(composer(drawn(include_bytes!("fixtures/composer_idle.bin")).screen()), Composer::Empty, "the suggestion is drawn faint");
+        assert_eq!(composer(drawn(include_bytes!("fixtures/composer_working.bin")).screen()), Composer::Empty, "the prompt echoed above the box is not in it");
+        let Composer::Holds(text) = composer(drawn(include_bytes!("fixtures/composer_restored.bin")).screen()) else { panic!("the restored prompt is in the box") };
+        assert!(text.starts_with("This is a long prompt that the probe pastes"), "{text}");
+        assert!(text.ends_with("so I want you to understand this scenario and create a proper issue with expected behavior"), "every wrapped row: {text}");
+    }
+
+    #[test]
+    fn a_box_in_another_mode_or_out_of_sight_is_not_an_empty_box() {
+        let rule = "─".repeat(40);
+        let screen = |rows: &str| {
+            let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(8).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+            parser.process(rows.as_bytes());
+            parser
+        };
+        // Shell mode: Claude Code swaps its glyph for `!`, the box otherwise bare.
+        assert_eq!(composer(screen(&format!("\x1b[3;1H{rule}\r\n! \r\n{rule}")).screen()), Composer::Holds("!".into()));
+        // A picker in the box's place: no rules round a prompt row.
+        assert_eq!(composer(screen("\x1b[3;1H Select model\r\n❯ 1. Default\r\n  2. Opus").screen()), Composer::Unseen);
+        // Typed text at normal weight beside a faint hint.
+        assert_eq!(composer(screen(&format!("\x1b[3;1H{rule}\r\n❯ half a\x1b[2m line\x1b[22m\r\n{rule}")).screen()), Composer::Holds("half a".into()));
+        // Nothing drawn at all.
+        assert_eq!(composer(screen("").screen()), Composer::Unseen);
+    }
 
     #[test]
     fn only_local_owner_deciding_hooks_use_the_extended_wait() {

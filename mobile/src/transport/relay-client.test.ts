@@ -4,6 +4,7 @@ import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
 import { RelayClient, RelayOuterError } from "./relay-client";
+import { MAC_NEEDS_UPDATE } from "./refusal";
 import { encodeFragments, RELAY_MESSAGE_BYTES_LIMIT, textPlaintextLimit } from "./wire";
 
 class FakeSocket {
@@ -63,8 +64,8 @@ class EncryptedPeer extends FakeSocket {
   largestToPhone = 0;
   requests: { method: string; params?: unknown }[] = [];
 
-  /** `fragments`: whether this Mac agrees to them, as a desktop from #669 on does. `unanswered`: a method it never replies to. */
-  constructor(private readonly options: { fragments?: boolean; reply?: (method: string) => unknown; unanswered?: string } = {}) { super(); }
+  /** `fragments`: whether this Mac agrees to them, as a desktop from #669 on does. `unanswered`: a method it never replies to. `refuse`: the error it answers a method with, if any. */
+  constructor(private readonly options: { fragments?: boolean; reply?: (method: string) => unknown; unanswered?: string; refuse?: (method: string) => { code: string; message: string } | undefined } = {}) { super(); }
 
   private emit(value: unknown) { queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(value) })); }
   private encrypted(value: unknown) {
@@ -134,6 +135,8 @@ class EncryptedPeer extends FakeSocket {
       this.encrypted({ type: "e2ee_authenticated", v: 2, transcriptHashB64: value.transcriptHashB64 });
     } else if (value.method && value.method === this.options.unanswered) {
       // Still in flight when the socket closes.
+    } else if (value.method && this.options.refuse?.(value.method)) {
+      this.encrypted({ id: value.id, ok: false, error: this.options.refuse(value.method) });
     } else if (value.method === "pairing.getEndpoints") {
       this.encrypted({ id: value.id, ok: true, result: { v: 1, relay: relayEndpoint,
         resumeConfirmation: { v: 1, reqId: value.params.resumeConfirmReqId, currentVersion: 1, acceptedAs: "current", renewed: false, resumeExpiresAt: Date.now() + 60_000 },
@@ -284,4 +287,19 @@ it("keeps the close frame's reason while connecting, which tells an oversized me
   socket.onclose?.({ code: 1001, reason: "Stream end encountered" });
   // The reason is for the connection log; the message stays the code (#670).
   await expect(connecting).rejects.toMatchObject({ code: 1001, reason: "Stream end encountered", wasClean: false, message: "relay_outer_1001" });
+});
+
+/** #730: a Mac app newer than its runtime offered a feature the runtime then refused, and passed the refusal on as it was. */
+it("says the Mac needs updating when it refuses an operation it does not know, and stays usable", async () => {
+  const socket = new EncryptedPeer({ refuse: (method) => method === "terminal.open" ? { code: "unavailable", message: "internal: Unsupported paired-device owner operation." }
+    : method === "session.stop" ? { code: "unavailable", message: "The tab is not running." } : undefined });
+  const client = new RelayClient({ deviceToken: "test-device-token", desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket, transport: "direct", endpoint: "ws://example.test" });
+  try {
+    const connected = client.connect();
+    socket.onopen?.();
+    await connected;
+    expect(await client.request("terminal.open", { worktreeId: "s", tabId: "t" })).toEqual({ ok: false, refusal: { code: "unavailable", message: MAC_NEEDS_UPDATE } });
+    expect(await client.request("session.stop", { sessionId: "s", tabId: "t" })).toEqual({ ok: false, refusal: { code: "unavailable", message: "The tab is not running." } });
+    expect(await client.request("sessions.summaries")).toEqual({ ok: true, value: { sessions: [] } });
+  } finally { client.close(); }
 });

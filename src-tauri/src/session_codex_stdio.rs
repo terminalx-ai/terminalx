@@ -117,13 +117,20 @@ impl SessionManager {
         Ok(())
     }
     /// The reader opened the terminal view of an experimental tab: Codex moves
-    /// to its own terminal interface on the same thread, for good. Admission is
-    /// held throughout, so no send starts another connection between the
-    /// confirmed exit and the switch. The PTY engine copies the thread's
-    /// rollout into its home and reads it from the end, so what the chat
-    /// already shows is not drawn again.
+    /// to its own terminal interface on the same thread, for good. The tab is
+    /// fenced throughout, so no send starts another connection between the
+    /// confirmed exit and the switch: a prompt sent to it meanwhile waits and
+    /// then goes to the terminal, and every other tab is admitted while Codex
+    /// exits (#727). The PTY engine copies the thread's rollout into its home
+    /// and reads it from the end, so what the chat already shows is not drawn
+    /// again.
     pub fn codex_stdio_to_terminal(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        let _admission = crate::issue_pipeline::admission::lock();
+        use crate::issue_pipeline::admission::{fence, Kind, Scope};
+        // One switch at a time, as when admission was held for it: a second
+        // finds the first one's tab already moved.
+        static SWITCHING: Mutex<()> = Mutex::new(());
+        let _one = SWITCHING.lock().unwrap_or_else(|error| error.into_inner());
+        let _switching = fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]);
         self.accepting_work()?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let experimental = index::get(session_id)?.tab(tab_id).is_some_and(selected);
@@ -178,9 +185,12 @@ impl SessionManager {
         let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
         let actions = if engine.ready { engine.prompt(text, wire_images)? } else { engine.start(text, wire_images)? };
         // No user message or user turn for manual compaction (#524/#566).
-        let events = if manual { Vec::new() } else { vec![self.publish(rt, Payload::UserMessage {
-            author: prompt.author, text: prompt.display, images, baseline: git::snapshot_tree(Path::new(&entry.cwd)).ok(), queued: false, cwd: Some(entry.cwd.clone()),
-        }, None)] };
+        let events = if manual { Vec::new() } else {
+            let baseline = rt.baseline_for(&entry.cwd);
+            vec![self.publish(rt, Payload::UserMessage {
+                author: prompt.author, text: prompt.display, images, baseline, queued: false, cwd: Some(entry.cwd.clone()),
+            }, None)]
+        };
         // Every prompt replaces what the last one left: a desktop prompt is
         // held to nothing, a phone's or a share's to its permits.
         rt.stdio_authority = (prompt.mobile.is_some() || prompt.shared_connection.is_some()).then(|| Authority {

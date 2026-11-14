@@ -430,6 +430,7 @@ impl SessionManager {
             nudges_left: 0,
             entered_at: None,
             held: Vec::new(),
+            prompts: RecordedPrompts::default(),
             resend_after_abort: None,
             codex_interrupt_hooks_owed: 0,
             codex_prompt_starts_turn: false,
@@ -608,7 +609,7 @@ impl SessionManager {
         };
         let mut records = read();
         let prompts: Vec<usize> =
-            records.iter().enumerate().filter(|(_, (payloads, _, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. }))).map(|(at, _)| at).collect();
+            records.iter().enumerate().filter(|(_, (payloads, _, _, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. }))).map(|(at, _)| at).collect();
         // Still the first read until there is something to sort.
         let wait = |first: First| {
             if let Engine::Cli(CliTab { tail: current, by_hand: Some(by), .. }) = &mut rt_arc.lock().unwrap().engine {
@@ -635,8 +636,8 @@ impl SessionManager {
             let busy = live.is_empty() && self.follow.locator().glance(&agent).activity == Some(Activity::Busy);
             self.import(rt_arc, tail, records, live.is_empty(), busy);
         }
-        for (payloads, mark, ts) in live {
-            self.pump_read(rt_arc, tail, vec![(payloads, mark, ts)]);
+        for record in live {
+            self.pump_read(rt_arc, tail, vec![record]);
         }
     }
 
@@ -657,7 +658,7 @@ impl SessionManager {
             if !Self::has_tail(&rt, tail) || !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
                 return;
             }
-            for (payloads, mark, ts) in records.by_ref().take(IMPORT_BATCH) {
+            for (payloads, mark, ts, _) in records.by_ref().take(IMPORT_BATCH) {
                 rt.source_timestamp = Some(ts);
                 for payload in payloads {
                     match payload {

@@ -605,6 +605,38 @@ pub fn actor(params: &Value) -> Result<Actor> {
 }
 
 
+/// The phone features this runtime's owner operations serve, each at the
+/// level it is served (#730). The desktop names a feature to a phone only
+/// when the runtime it is attached to names it: the phone methods behind it
+/// come down to operations of [`execute`], and a runtime that does not know
+/// an operation refuses it. A level only grows, and a runtime that names one
+/// serves every lower level too. Change this with `execute`.
+///
+/// - `sendIds`: `send` takes a `clientMessageId` and answers a repeat once (#675).
+/// - `sessionControls`: `tab`, `models`, `prepareContinuation`, `stop`,
+///   `interrupt`, `resendUnsent`, `setModel`, `setEffort`, `setMode` and `continue`.
+/// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
+/// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
+pub fn features() -> Value {
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 })
+}
+
+/// What a runtime too old to name its features serves, by its version
+/// (#730). TerminalX 0.2.22 brought every feature [`features`] names at level
+/// 1; the releases before it serve none of them. A runtime that will not say
+/// its version is taken to serve none.
+pub fn released_features(version: Option<&semver::Version>) -> Value {
+    match version {
+        Some(version) if *version >= semver::Version::new(0, 2, 22) =>
+            serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 }),
+        _ => serde_json::json!({}),
+    }
+}
+
+/// How every runtime, this one and those before it, refuses an operation it
+/// does not know. A desktop attached to an older runtime meets it (#730).
+pub const UNSUPPORTED: &str = "Unsupported paired-device owner operation.";
+
 /// Fixed native owner operations. A guest-facing router never forwards arbitrary
 /// commands here; every connection is admitted from its persisted device record.
 pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, method: &str, params: Value) -> Result<Value> {
@@ -730,7 +762,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
                 }
             }
         }
-        _ => bail!("Unsupported paired-device owner operation."),
+        _ => bail!(UNSUPPORTED),
     }
 }
 

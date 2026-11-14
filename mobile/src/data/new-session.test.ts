@@ -47,7 +47,7 @@ describe("the phone's new-session form", () => {
 });
 
 describe("the Mac's side of a new session", () => {
-  const api = (request: ReturnType<typeof vi.fn>) => new HostApi({ request } as unknown as HostConnection);
+  const api = (request: ReturnType<typeof vi.fn>) => new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
 
   it("asks only a Mac that says it can start sessions for a phone", async () => {
     const old = vi.fn(async (method: string) => method === "sync.capabilities" ? { ok: true, value: { sendIds: 1 } } : { ok: false, refusal: { message: "unknown method" } });

@@ -94,6 +94,21 @@ export async function restartLocalRuntime(epoch: string | null): Promise<void> {
   }
 }
 
+/**
+ * "Restart now" for a runtime older than this app (#730): the desktop
+ * replaces it with the app's own without waiting for its agents' turns, which
+ * stop with it, and terminals attach again in place. `epoch` is the runtime
+ * this window was told about: one already replaced is left alone. Throws why
+ * it could not be replaced.
+ */
+export async function replaceLocalRuntime(epoch: string): Promise<void> {
+  try {
+    await localRuntime.replace(epoch);
+  } finally {
+    await refreshLocalRuntime();
+  }
+}
+
 export function useLocalRuntime(): LocalRuntimeView {
   return useSyncExternalStore(
     (listener) => {

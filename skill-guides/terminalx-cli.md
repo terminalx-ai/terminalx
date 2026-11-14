@@ -51,6 +51,7 @@ When automation passes ids between commands, copy the full ids from JSON output.
 terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] --json
+terminalx sessions list --worktree <path-or-name> [--project <project>] --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -178,8 +179,13 @@ Without `--title`, the first line of the prompt is the title. The returned `kind
 
 `sessions list` includes quick chats, each with `"kind": "quick"`; a session of a project has
 no `kind`. `--quick` lists only them. `--project` never matches one, even when its `--cwd` is
-inside that project. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
+inside that project. It does match a session that names the project's folder another way, such
+as through a symlink. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
 `wait` take a quick chat's id like any other session's.
+
+`--worktree` lists every session that runs in that worktree, by the same rule `worktrees
+delete` uses to choose what it deletes: sessions of other projects and quick chats whose
+folder is in it are included. There `--project` only says whose worktree it is.
 
 Deleting a quick chat in the app deletes its scratch directory and what is in it. Anything a
 reader should keep belongs somewhere else.
@@ -249,7 +255,8 @@ already raised.
 ```text
 terminalx worktrees list [--project <project>] --json
 terminalx worktrees rename <path-or-name> --name <name> [--project <project>] --json
-terminalx worktrees delete <path-or-name> [--project <project>] --yes [--force] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --dry-run [--sessions <id>,<id>] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes [--sessions <id>,<id>] [--force] --json
 ```
 
 Renaming moves a TerminalX-managed worktree and renames its matching branch, using the same
@@ -257,10 +264,30 @@ slug rules as creation. It rejects taken or unusable names and updates every ses
 to that workspace. The response includes `name`, `path`, `branch`, and the updated `sessions`.
 The project's main checkout and externally managed worktrees cannot be renamed here.
 
-Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
-running in the worktree and removes the sessions that ran there, transcripts included; the
-response lists their ids under `removedSessions`. The branch is retained. Inspect the
-worktree's uncommitted and unpushed counts from `worktrees list` before deleting it.
+`worktrees list` gives each worktree's `sessionCount` and, except for the main checkout, its
+`sessions`: the ones deleting it would delete. Each has `id`, `title`, `project` (null for a
+quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`.
+
+Deletion refuses a project's main checkout. It stops every tab running in the worktree and
+deletes every session whose folder is in it, whatever project it belongs to and archived or
+not, transcripts included. The branch is retained.
+
+Without `--yes`, nothing is removed: the refusal lists the sessions that would go, the tabs
+and shells still running in them, and the git state, and its recovery gives the `--sessions`
+value that names those sessions. `--dry-run` returns the same as JSON (`sessions`, `landed`,
+`needsForce`) and succeeds. `--sessions` names the sessions you were shown, by id or the start
+of one. With it, nothing is removed unless the worktree holds exactly those sessions;
+otherwise the error (`sessions_changed`) names the ones not named and lists what it holds.
+`--sessions ""` says it should hold none. Pass it on every delete:
+
+```text
+terminalx worktrees delete <worktree> --dry-run --json
+terminalx worktrees delete <worktree> --yes --sessions <ids from the dry run> --json
+```
+
+A worktree that is not clean and merged also needs `--force`. Pass it only when losing the
+work the preview lists is intended. The response lists each deleted session under
+`removedSessions` with its `id`, `title`, `project` and `belongsTo`.
 
 ### Issues
 

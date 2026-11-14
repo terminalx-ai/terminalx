@@ -87,6 +87,46 @@ fn liveness(socket: &Path, token: &str, timeout: Duration) -> Result<Value> {
     }
 }
 
+/// What the owner says of its own build (#730).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Build {
+    /// Its TerminalX version, the same as the app it was bundled with. `None`
+    /// when it would not say.
+    pub version: Option<semver::Version>,
+    /// The phone features its owner operations serve: as it names them, or,
+    /// from an owner too old to name them, as its release served them.
+    pub mobile: serde_json::Map<String, Value>,
+}
+
+impl Build {
+    /// From the owner's answer to `runtime.liveness`, or to `status` from an
+    /// owner too old for that. `status` is asked of an owner whose answer
+    /// leaves its version out: TerminalX 0.2.22 says it only there.
+    fn read(answer: &Value, status: impl FnOnce() -> Result<Value>) -> Self {
+        let local = &answer["localRuntime"];
+        let said = |value: &Value| value.as_str().map(str::to_owned);
+        let text = said(&local["version"]).or_else(|| said(&answer["appVersion"])).or_else(|| match status() {
+            Ok(status) => said(&status["appVersion"]),
+            Err(error) => {
+                log::warn!("the local runtime did not say its version: {error:#}");
+                None
+            }
+        });
+        let version = text.and_then(|text| semver::Version::parse(&text)
+            .inspect_err(|error| log::warn!("the local runtime's version {text:?} is not one this desktop reads: {error}")).ok());
+        let mobile = local["mobileFeatures"].as_object().cloned()
+            .or_else(|| super::mobile::released_features(version.as_ref()).as_object().cloned())
+            .unwrap_or_default();
+        Self { version, mobile }
+    }
+
+    /// Whether this build is older than `app`. One that would not say its
+    /// version is: every runtime since #730 says it without being asked.
+    pub fn older_than(&self, app: &semver::Version) -> bool {
+        self.version.as_ref().is_none_or(|version| version < app)
+    }
+}
+
 pub struct Client {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
@@ -94,6 +134,7 @@ pub struct Client {
     event_socket: PathBuf,
     /// The owner's `streamVersion`: 1 from one too old to say.
     streams: u64,
+    build: Build,
     ping: Duration,
     liveness: Duration,
     local_vm: LocalVmCapability,
@@ -201,7 +242,8 @@ impl Client {
         // token and status cannot authorize commands to the replacement.
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+        let build = Build::read(&pinned, || request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT));
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
             local_vm: LocalVmCapability::of(&pinned) }))
     }
 
@@ -210,14 +252,15 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
         Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
-            epoch: epoch.into(), streams: super::STREAM_VERSION, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT, local_vm: LocalVmCapability::default() })
+            epoch: epoch.into(), streams: super::STREAM_VERSION, build: Build::default(), ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+            local_vm: LocalVmCapability::default() })
     }
 
     /// The same owner, pinged every `ping` and given up on after `liveness`
     /// of silence: a test hangs an owner without waiting the full deadline.
     pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
         Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
-            event_socket: self.event_socket.clone(), streams: self.streams, ping, liveness, local_vm: self.local_vm })
+            event_socket: self.event_socket.clone(), streams: self.streams, build: self.build.clone(), ping, liveness, local_vm: self.local_vm })
     }
 
     pub(crate) fn ping_interval(&self) -> Duration { self.ping }
@@ -244,6 +287,13 @@ impl Client {
     }
 
     pub fn epoch(&self) -> &str { &self.epoch }
+
+    /// The owner's build, as it said when this client attached.
+    pub fn build(&self) -> &Build { &self.build }
+
+    /// The owner's full `status`, which every runtime answers: what it runs
+    /// (`runningTabs`) and its version. It may wait on the owner's sessions.
+    pub fn status(&self) -> Result<Value> { self.quick("status", json!({})) }
 
     /// See [`liveness`]: answered while the owner's sessions are held up, so
     /// asking never takes a request place that stays taken.
@@ -351,7 +401,7 @@ mod local_vm_tests {
     #[test]
     fn older_owner_cannot_receive_guided_create_setup_or_actions() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
             let sessions=super::super::sessions::Sessions::new(client);
             for method in ["environment.create","environment.setup","environment.setupReadiness","environment.setupAction","environment.setupAuth"] {
                 let error=sessions.local_vm(method,json!({"confirm":true})).unwrap_err().to_string();
@@ -363,7 +413,7 @@ mod local_vm_tests {
     #[test]
     fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
         for protocol in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
             let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
             assert!(error.contains("no operation was sent"),"{error}");
             assert!(!error.contains("connect to the local runtime"));
@@ -372,7 +422,7 @@ mod local_vm_tests {
     #[test]
     fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
             let sessions=super::super::sessions::Sessions::new(client);
             for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
                 let error=sessions.local_vm(method,params).unwrap_err().to_string();
@@ -462,6 +512,45 @@ mod tests {
         let (unauthorized, _) = owner(&subdir(dir.path(), "refuses"), |request| refusal(request, "unauthorized"));
         let error = request(&unauthorized, "token", "runtime.liveness", json!({}), QUICK_TIMEOUT).unwrap_err();
         assert!(!unanswered(&error), "an owner that answers with a reason is answering: {error:#}");
+    }
+
+    /// #730: what a desktop learns of each runtime still in use, from the
+    /// answer it attached with, and from `status` only when that leaves out
+    /// the version.
+    #[test]
+    fn each_runtimes_build_is_read_from_what_it_says() {
+        let app = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let unasked = || -> Result<Value> { panic!("an owner that said its version is not asked again") };
+        let five = super::super::mobile::released_features(Some(&semver::Version::new(0, 2, 22)));
+
+        // This build: it names both itself.
+        let current = super::super::Lifetime::new(super::super::IDLE_GRACE).status();
+        let build = Build::read(&json!({"localRuntime": current}), unasked);
+        assert_eq!(build.version.as_ref(), Some(&app));
+        assert_eq!(Value::Object(build.mobile.clone()), super::super::mobile::features());
+        assert!(!build.older_than(&app));
+        let named = Build::read(&json!({"localRuntime": {"version": "9.0.0", "mobileFeatures": {"terminal": 2}}}), unasked);
+        assert_eq!(Value::Object(named.mobile), json!({"terminal": 2}), "a runtime's own list, not its release's");
+
+        // 0.2.22 answers liveness without its version, which `status` has.
+        let asked = std::cell::Cell::new(false);
+        let build = Build::read(&json!({"localRuntime": {"epoch": "e"}}), || { asked.set(true); Ok(json!({"appVersion": "0.2.22"})) });
+        assert!(asked.get());
+        assert_eq!(build.version, Some(semver::Version::new(0, 2, 22)));
+        assert_eq!(Value::Object(build.mobile), five);
+
+        // 0.2.21 has no liveness: its `status` was the answer.
+        let build = Build::read(&json!({"appVersion": "0.2.21", "localRuntime": {"epoch": "e"}}), unasked);
+        assert_eq!(build.version, Some(semver::Version::new(0, 2, 21)));
+        assert!(build.mobile.is_empty(), "no terminal, session controls, new sessions, Mac settings or send ids");
+        assert!(build.older_than(&semver::Version::new(0, 2, 22)));
+
+        // One that will not say is taken for older, and offered nothing.
+        let build = Build::read(&json!({"localRuntime": {}}), || anyhow::bail!("timed out"));
+        assert_eq!(build.version, None);
+        assert!(build.mobile.is_empty() && build.older_than(&semver::Version::new(0, 0, 1)));
+        let build = Build::read(&json!({"appVersion": "not a version"}), unasked);
+        assert!(build.version.is_none() && build.mobile.is_empty());
     }
 
     fn subdir(parent: &Path, name: &str) -> PathBuf {

@@ -82,6 +82,7 @@ mod media;
 mod media_types;
 mod git;
 mod github;
+mod unfinished_merge;
 mod pr_associations;
 mod github_identity;
 mod harness;
@@ -136,6 +137,7 @@ mod terminal_perf;
 mod work_claims;
 mod workspaces;
 mod worktree_cleanup;
+mod worktree_control;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
@@ -174,6 +176,8 @@ pub struct AppState {
     runtime_supervisor: local_runtime::supervisor::Supervisor,
     /// Whether the attached runtime still answers (#661).
     runtime_health: local_runtime::ui::Health,
+    /// Whether the attached runtime is older than this app, and replacing it (#730).
+    runtime_replacement: local_runtime::replace::Replacement,
     window_endpoint: std::sync::OnceLock<hooks::ControlEndpoint>,
 }
 
@@ -266,6 +270,7 @@ pub fn run() {
         runtime_error: std::sync::Mutex::new("The background runtime is not attached.".into()),
         runtime_supervisor: Default::default(),
         runtime_health: Default::default(),
+        runtime_replacement: Default::default(),
         window_endpoint: std::sync::OnceLock::new(),
     };
 
@@ -384,6 +389,7 @@ pub fn run() {
                 }
             }
             local_runtime::ui::watch(app.handle());
+            local_runtime::replace::watch(app.handle());
             work_claims.start(app.handle().clone());
             Ok(())
         })
@@ -391,6 +397,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_status,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
+            local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
@@ -593,7 +600,9 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::report_send_shown,
             commands::resend_unsent,
+            commands::resend_message,
             commands::submit_waiting_prompt,
             commands::interrupt_turn,
             commands::stop_tab,
@@ -635,6 +644,9 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
+            commands::unfinished_merge,
+            commands::commit_merge,
+            commands::abort_merge,
             commands::git_checkout,
             commands::working_changes,
             commands::pr_list,

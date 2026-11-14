@@ -10,7 +10,7 @@ const ok = (value: unknown = null) => ({ ok: true, value });
 const refused = (message: string) => ({ ok: false, refusal: { code: "refused", message } });
 function api(reply: (method: string, params: Record<string, unknown>) => unknown) {
   const request = vi.fn(async (method: string, params: Record<string, unknown> = {}) => reply(method, params));
-  return { request, api: new HostApi({ request } as unknown as HostConnection) };
+  return { request, api: new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection) };
 }
 const models = [
   { id: "opus", label: "Opus", harness: "claude", efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null, alias: true },

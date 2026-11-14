@@ -75,6 +75,7 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
@@ -99,6 +100,9 @@ log = "0.4"
 env_logger = "0.11"
 which = "7"
 regex = "1"
+# The screen an agent CLI has drawn, kept as it draws: what is in its input
+# box before a prompt is typed into it (#722).
+vt100 = "0.18"
 salsa20 = "0.10"
 ignore = "0.4"
 nucleo-matcher = "0.3"

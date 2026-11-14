@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { GitSource } from "@/lib/gitSource";
 import type { AgentEvent } from "@/types/events";
@@ -183,4 +183,119 @@ it("refreshes while idle without requiring a new agent turn", async () => {
     await screen.findByRole("button", { name: /terminal-edit/ });
     view.unmount();
   } finally { vi.useRealTimers(); }
+});
+
+// ---- a merge left in progress (#736) ----------------------------------------
+
+const HEAD = "1111111111111111111111111111111111111111";
+const BASE = "5555555555555555555555555555555555555555";
+const mergeFiles = [
+  { path: "CHANGELOG.md", status: "modified" as const, additions: 3, deletions: 1 },
+  { path: "notes.txt", status: "added" as const, additions: 1, deletions: 0 },
+  { path: "src/a.rs", status: "added" as const, additions: 40, deletions: 0 },
+  { path: "src/b.rs", status: "modified" as const, additions: 12, deletions: 4 },
+  { path: "src/late.rs", status: "added" as const, additions: 2, deletions: 0 },
+];
+
+/** A local checkout part way through merging origin/main: one conflict left, one file edited while merging, two as Git merged them. */
+function merging(key: string, conflicted = ["CHANGELOG.md"]) {
+  const source = fakeSource(key);
+  source.cloud = false;
+  source.canWrite = true;
+  source.changesBetween.mockResolvedValue(mergeFiles);
+  const merge = { head: HEAD, mergeHead: BASE, names: ["origin/main", "main"], incoming: 14, conflicted, changedHere: ["notes.txt", ...(conflicted.length ? [] : ["CHANGELOG.md"])], fromBase: ["src/a.rs", "src/b.rs"] };
+  return Object.assign(source, {
+    unfinishedMerge: vi.fn(async () => merge),
+    commitMerge: vi.fn(async () => {}),
+    abortMerge: vi.fn(async () => {}),
+    merge,
+  });
+}
+
+it("tells the base's files apart from conflicts and from what was changed while merging", async () => {
+  const source = merging("merge-split");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  expect(within(banner).getByText("Merging origin/main into this branch: not committed yet.")).toBeTruthy();
+  expect(within(banner).getByText("5555555 brings in 14 commits. 2 files as Git merged them, 1 file changed here, 1 file with unresolved conflicts.")).toBeTruthy();
+  await screen.findByRole("region", { name: "Unresolved conflicts" });
+  expect(screen.getByText("Unresolved conflicts · 1")).toBeTruthy();
+  // A file the merge was read without (src/late.rs) is never claimed for the base.
+  expect(screen.getByText("Changed here · 2")).toBeTruthy();
+  expect(screen.getByText("From origin/main, as Git merged them · 2")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Unresolved conflicts" })).getByRole("button", { name: /CHANGELOG.md/ })).toBeTruthy();
+  const here = within(screen.getByRole("region", { name: "Changed here" }));
+  expect(here.getByRole("button", { name: /notes.txt/ }) && here.getByRole("button", { name: /late.rs/ })).toBeTruthy();
+  const base = within(screen.getByRole("region", { name: "From origin/main, as Git merged them" }));
+  expect(base.getByRole("button", { name: /a.rs/ }) && base.getByRole("button", { name: /b.rs/ })).toBeTruthy();
+  // The totals are still the whole of what is uncommitted.
+  expect(screen.getByText("Uncommitted changes · 5 files")).toBeTruthy();
+  // Nothing is committed with a conflict left.
+  expect((within(banner).getByRole("button", { name: "Commit merge" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(banner).getByText("Resolve the conflicts and stage them to commit the merge.")).toBeTruthy();
+  expect(source.commitMerge).not.toHaveBeenCalled();
+});
+
+it("commits the merge that was read once nothing is conflicted, and says why if it cannot", async () => {
+  const source = merging("merge-commit", []);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  source.commitMerge.mockRejectedValueOnce("HEAD moved since the merge was read");
+  fireEvent.click(within(banner).getByRole("button", { name: "Commit merge" }));
+  expect(await within(banner).findByRole("alert")).toHaveProperty("textContent", "source: HEAD moved since the merge was read");
+  const reads = source.unfinishedMerge.mock.calls.length;
+  source.unfinishedMerge.mockResolvedValue(null as never);
+  fireEvent.click(within(banner).getByRole("button", { name: "Commit merge" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Merge in progress" })).toBeNull());
+  expect(source.commitMerge).toHaveBeenLastCalledWith(source.merge);
+  expect(source.unfinishedMerge.mock.calls.length).toBeGreaterThan(reads);
+  expect(source.abortMerge).not.toHaveBeenCalled();
+});
+
+it("aborts the merge only after a confirmation that says what goes and what stays", async () => {
+  const source = merging("merge-abort");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  fireEvent.click(within(banner).getByRole("button", { name: "Abort merge…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Abort the merge of origin/main?" });
+  expect(within(dialog).getByText("The checkout goes back to 1111111, as it was before the merge (git merge --abort).")).toBeTruthy();
+  const said = within(within(dialog).getByRole("list", { name: "What aborting does" })).getAllByRole("listitem").map((item) => item.textContent);
+  expect(said).toEqual([
+    "What was done while merging is lost, in CHANGELOG.md, notes.txt.",
+    "2 files from origin/main leave the checkout. origin/main still has them.",
+    "Untracked files stay. Git changes nothing if aborting would throw away an edit it cannot put back.",
+  ]);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep the merge" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(source.abortMerge).not.toHaveBeenCalled();
+
+  fireEvent.click(within(banner).getByRole("button", { name: "Abort merge…" }));
+  source.unfinishedMerge.mockResolvedValue(null as never);
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Abort merge" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Merge in progress" })).toBeNull());
+  expect(source.abortMerge).toHaveBeenCalledWith(source.merge);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("says what is being merged in every scope, and splits only the uncommitted files", async () => {
+  const source = merging("merge-all");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  expect(within(banner).getByText(/Until it is committed, this counts what the merge brings in as the branch's own work/)).toBeTruthy();
+  expect(screen.getByText("All changes · 5 files")).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "Changed here" })).toBeNull();
+});
+
+it("shows no merge for a source that cannot tell, and a merge that cannot be read in its words", async () => {
+  const cloud = fakeSource("merge-cloud");
+  render(<ChangesPanel source={cloud} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  await screen.findByRole("button", { name: /turn.ts/ });
+  expect(screen.queryByRole("region", { name: "Merge in progress" })).toBeNull();
+  cleanup();
+  const local = merging("merge-unreadable");
+  local.unfinishedMerge.mockRejectedValue("index.lock exists");
+  render(<ChangesPanel source={local} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+  expect((await screen.findByRole("alert")).textContent).toBe("Whether a merge is in progress could not be read: source: index.lock exists");
+  expect(screen.getByText("All changes · 5 files")).toBeTruthy();
 });

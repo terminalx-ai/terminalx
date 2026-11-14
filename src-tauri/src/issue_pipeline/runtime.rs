@@ -63,6 +63,13 @@ impl SessionObserver for RuntimeObserver {
         let detail = engine::turn_failure(message.contains("interrupted"));
         self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, detail));
     }
+
+    /// Off the sender's thread, which may hold the checkout's admission or a
+    /// pipeline's own step: the answer is taken once that step is done.
+    fn answered(&self, session_id: &str, tab_id: &str) {
+        let (session, tab) = (session_id.to_string(), tab_id.to_string());
+        self.off_thread(session_id, tab_id, move |host| engine::answered(host, &session, &tab));
+    }
 }
 
 /// Pick up the workspace's pipelines where they were and watch the pull
@@ -121,6 +128,7 @@ mod tests {
             state: State::Working,
             reason: None,
             note: None,
+            answered: None,
             pr: None,
             round: 0,
             max_rounds: 3,

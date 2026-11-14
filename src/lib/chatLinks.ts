@@ -162,8 +162,21 @@ function canOpenInternally(info: LocalPathInfo): boolean {
   return fileKind(info.rel) !== "text" || (info.text && !EXTERNAL_DOCUMENT_EXTENSIONS.has(ext));
 }
 
-/** The default route for one real click/keyboard activation. */
-export async function openChatLink(destination: ChatLinkDestination, context: ChatLinkContext): Promise<void> {
+/**
+ * Sent from a link to a place in the transcript that is not drawn: a chat
+ * draws only the turns near its view (#727), and the one the link is in looks
+ * for the place among the rest. `detail` is the element id.
+ */
+export const SEEK_ANCHOR_EVENT = "terminalx:seek-anchor";
+
+/** The element with this id under `root`, without building a selector from it. */
+export function elementWithId(root: ParentNode, id: string): HTMLElement | null {
+  for (const node of root.querySelectorAll<HTMLElement>("[id]")) if (node.id === id) return node;
+  return null;
+}
+
+/** The default route for one real click/keyboard activation. `from`: the link itself, where it is on screen. */
+export async function openChatLink(destination: ChatLinkDestination, context: ChatLinkContext, from?: Element | null): Promise<void> {
   if (destination.kind === "web") {
     const browser = getPrefs().linkBrowser;
     // The rendered link owns the chooser; never silently open a browser in ask mode.
@@ -175,9 +188,13 @@ export async function openChatLink(destination: ChatLinkDestination, context: Ch
     return;
   }
   if (destination.kind === "anchor") {
+    const id = destination.href.slice(1);
+    // The link's own chat first: every open tab's chat is in the document, and their ids can be the same.
+    const chat = from?.closest("[data-chat-scroller]");
+    const target = (chat && elementWithId(chat, id)) ?? document.getElementById(id);
     // Within the transcript only: a plain scrollIntoView() also scrolls every ancestor it can.
-    const target = document.getElementById(destination.href.slice(1));
     if (target) scrollToInOwnScroller(target);
+    else from?.dispatchEvent(new CustomEvent(SEEK_ANCHOR_EVENT, { bubbles: true, detail: id }));
     return;
   }
   if (destination.kind === "rejected") throw new Error(destination.reason);

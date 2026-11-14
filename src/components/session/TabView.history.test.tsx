@@ -19,8 +19,13 @@ vi.mock("@/lib/tabViews", () => ({
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
-// The transcript is not under test; the real composer in its footer is.
-vi.mock("@/components/chat/Chat", () => ({ Chat: ({ footer }: { footer: React.ReactNode }) => <div>{footer}</div> }));
+// The transcript is not under test; the real composer in its footer is, and
+// the message it hands the chat to draw as sending (#727).
+vi.mock("@/components/chat/Chat", () => ({
+  Chat: ({ footer, sending }: { footer: React.ReactNode; sending?: { text: string } | null }) => (
+    <div>{sending && <div role="status" data-text={sending.text}>Sending…</div>}{footer}</div>
+  ),
+}));
 vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
@@ -201,8 +206,9 @@ describe.each(["local", "cloud"] as const)("composer history in a %s tab", (kind
 });
 
 // #637: exercise the real local backend/composer with a deferred runtime reply.
+// #727: the message is in the chat as sending at once, and the composer is free.
 describe("detached runtime send acknowledgment", () => {
-  it.each(["accepted", "queued", "refused"])("shows progress before a %s runtime reply and preserves edits", async (outcome) => {
+  it.each(["accepted", "queued", "refused"])("shows the message as sending before a %s runtime reply and preserves edits", async (outcome) => {
     let resolve!: (value: { queued: boolean; events: AgentEvent[] }) => void;
     let reject!: (error: Error) => void;
     const delivery = new Promise<{ queued: boolean; events: AgentEvent[] }>((yes, no) => { resolve = yes; reject = no; });
@@ -214,19 +220,19 @@ describe("detached runtime send acknowledgment", () => {
     const view = render(<LocalTab />);
     fireEvent.change(field(), { target: { value: "hello" } });
     fireEvent.click(view.getByRole("button", { name: "Send" }));
-    expect(view.getByText("Sending…")).toBeTruthy();
+    expect(view.getByText("Sending…").dataset.text).toBe("hello");
+    expect(field().value).toBe("");
     expect(sends).toEqual(["hello"]);
-    expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: "hello", images: [] }));
+    expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: "hello", images: [], pressedAt: expect.any(Number) }));
     press("Enter");
     fireEvent.change(field(), { target: { value: "next" } });
-    // Explicitly clearing a draft must survive a late delivery error too.
-    if (outcome === "refused") fireEvent.change(field(), { target: { value: "" } });
     await act(async () => {
       if (outcome === "refused") reject(new Error("delivery uncertain"));
       else resolve({ queued: outcome === "queued", events: [] });
     });
     expect(view.queryByText("Sending…")).toBeNull();
-    expect(field().value).toBe(outcome === "refused" ? "" : "next");
+    // A message that was not sent comes back, ahead of what was written meanwhile.
+    expect(field().value).toBe(outcome === "refused" ? "hello\n\nnext" : "next");
     expect(sends).toEqual(["hello"]);
   });
 });
@@ -265,7 +271,9 @@ describe("pending send ownership across session remounts", () => {
         else delivery.resolve({ queued: outcome === "queued", events: [] });
       });
       expect(view.queryByText("Sending…")).toBeNull();
-      expect(field().value).toBe(next ?? (outcome === "refused" ? "P" : ""));
+      // Refused, P comes back to the draft, ahead of whatever was written there since.
+      const refused = next === undefined || next === "" || next === "P" ? "P" : `P\n\n${next}`;
+      expect(field().value).toBe(outcome === "refused" ? refused : (next ?? ""));
       expect(sends).toEqual(["P"]);
       if (outcome === "refused") {
         expect(view.getAllByText("The connection was lost. The process outcome is unknown.").length).toBeGreaterThan(0);
@@ -417,11 +425,12 @@ describe("cloud send ownership across connection generations", () => {
     press("Enter");
     expect(second.send).toHaveBeenCalledTimes(1);
     await act(async () => first.reject(new Error("old destination refused")));
-    expect(view.getByText("Sending…")).toBeTruthy();
+    expect(view.getByText("Sending…").dataset.text).toBe("N");
     expect(view.queryByText(/Could not queue the command/)).toBeNull();
-    expect(field().value).toBe("N");
+    // The tab's draft is the tab's, whichever destination: the refused P is not lost (#727).
+    expect(field().value).toBe("P");
     await act(async () => second.resolve({ queued: true, events: [] }));
-    expect(field().value).toBe("");
+    expect(field().value).toBe("P");
     expect(first.send).toHaveBeenCalledTimes(1);
     expect(second.send).toHaveBeenCalledTimes(1);
   });

@@ -232,7 +232,17 @@ Waiting status so the reader knows to look at the terminal view.
 `send_message` on a Claude tab writes into the pane, on its own thread under a
 per-pane lock:
 
-1. `Ctrl+U`, so a half-typed line in the terminal view is not glued to the front.
+1. Nothing, until the CLI's input box is empty (#722). The app keeps the screen
+   each agent pane has drawn (`vt100`) and reads the box from it
+   (`claude::pty::composer`, `codex::pty::composer`): what is drawn faint is the
+   box's own suggestion, anything else is text in it. If it holds something —
+   a line the reader typed in the terminal view, or a prompt Claude Code put
+   back after dropping a turn before its first reply — the message waits, the
+   chat says so (`input_occupied`), and it goes in once the reader has sent or
+   cleared that text. The app used to clear the box with `Ctrl+U`, but that
+   deletes only back to the start of the cursor's row: a wrapped prompt lost
+   its last row, and the rest went with the next message glued to it. A box
+   that cannot be seen at all (a CLI drawing something else) is typed into.
 2. Any image attachments, each as its own bracketed paste of its path — a typed
    path is read as prose, only a paste becomes an attachment.
 3. The body, as a bracketed paste (`\x1b[200~` … `\x1b[201~`), with newlines
@@ -353,6 +363,22 @@ reader's message where the agent read it, and never folded away with the
 tool calls; `turn_started` naming it for one that starts the next turn. A
 log from before `prompt_absorbed` does not say a message was taken mid-turn,
 so there it is shown as it was sent.
+
+Claude Code can also drop a turn before its first reply and put the prompt
+back in its input box (#722; Escape does it, and so did something unrecorded
+on 2026-11-01). It keeps the dropped prompt's record, and the next prompt it
+records follows the same record (`parentUuid`) the dropped one did. The
+transcript reader keeps each prompt's place (`tui::Lineage`), and a prompt
+that follows the same record as an earlier one the agent did no work on took
+its place: the chat is told `prompt_replaced` for the earlier message, drawn
+as never answered with "Send again" (`resend_message`). One that says the
+same words is that message sent again from the box, and is not drawn twice.
+A prompt the agent did work on is not replaced by one that follows the same
+record: that is the reader rewinding the conversation. And a composer
+message whose words turn up inside a longer recorded prompt reached the agent
+there: its queued bubble clears, and the chat is told `prompt_changed` with
+the recorded text, which it shows once, in that message's place, with what
+was sent behind it.
 
 The headless agents (ACP and OpenCode, still driven for the tabs that have
 them) have no screen and no queue. Their interrupt is their protocol's own

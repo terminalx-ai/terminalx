@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Token } from "marked";
 import type { Turn } from "@terminalx/portable/transcript";
 import { markdownBlocks, textChunks } from "./markdown-blocks";
-import { turnRows } from "./transcript-rows";
+import { deliveryNote, turnRows } from "./transcript-rows";
 
 const turn: Turn = { key: "t1", seq: 1, ts: "", prompt: { text: "Prompt", seq: 1, ts: "" }, work: [], toolCount: 0, editedFiles: 0, live: false };
 const visibleText = (token: Token): string => "tokens" in token && token.tokens?.length ? token.tokens.map(visibleText).join("") : token.type === "br" ? "\n" : "text" in token ? token.text : token.raw;
@@ -86,5 +86,29 @@ describe("large individual messages", () => {
     expect(table.length).toBeGreaterThan(1);
     expect(table.every((token) => token.type === "table" && token.header[0].text === "Name" && token.rows.length <= 8)).toBe(true);
     expect(table.flatMap((token) => token.type === "table" ? token.rows : [])).toHaveLength(100);
+  });
+});
+
+describe("what became of a message on its way to the agent (#722)", () => {
+  it("says it under the last row of the message, and nowhere else", () => {
+    const long = "word ".repeat(2_000).trim();
+    const rows = turnRows({ ...turn, prompt: { text: long, seq: 1, ts: "", replaced: true }, work: [
+      { kind: "message", key: "m3", seq: 3, text: "what the agent received", sent: "what was sent" },
+      { kind: "message", key: "m4", seq: 4, text: "as sent" },
+    ] });
+    const prompts = rows.filter((row) => row.kind === "prompt");
+    const notes = prompts.map((row) => (row.kind === "prompt" ? row.note : undefined));
+    const promptRows = textChunks(long).length;
+    expect(promptRows).toBeGreaterThan(1);
+    expect(notes.slice(0, promptRows - 1).every((note) => note === undefined)).toBe(true);
+    expect(notes[promptRows - 1]).toMatch(/^Not answered/);
+    expect(notes[promptRows]).toMatch(/^Changed on the way/);
+    expect(notes[promptRows + 1]).toBeUndefined();
+  });
+
+  it("puts what is in the agent's input box ahead of a change, and a replacement ahead of both", () => {
+    expect(deliveryNote({})).toBeUndefined();
+    expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
+    expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
   });
 });

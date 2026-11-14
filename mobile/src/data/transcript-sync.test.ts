@@ -46,7 +46,7 @@ function host(initial = 20, supported = true) {
     return { ok: true, value };
   });
   const subscribe = vi.fn((_method, _params, callback) => { listener = callback; ready = () => callback({ subscriptionId: "subscription" }); return () => { listener = () => {}; }; });
-  const connection = { request, subscribe, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
+  const connection = { request, subscribe, onEvent: () => () => {}, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
   let api = new HostApi(connection);
   const updates: { state: TranscriptCache; replace: boolean }[] = [];
   const error = vi.fn();

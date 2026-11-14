@@ -4,10 +4,10 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
-import { getPrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
+import { activateLatestTerminal, closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import { bootTabLayouts } from "@/lib/tabLayouts";
 import { isFloatingWindow } from "@/lib/appWindow";
@@ -422,7 +422,18 @@ export function startSessionIn(projectPath: string, cwd: string | null) {
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
 
-/** Open a checkout without starting an agent, reusing its open session. */
+/**
+ * Show a checkout opened without an agent: its session, on its shell, with
+ * the panel open on its files. Selecting a session opens nothing in it by
+ * itself (#721); opening a checkout is asking for its shell.
+ */
+function showCheckout(session: SessionEntry) {
+  selectSession(session.id);
+  if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
+  void activateLatestTerminal(session.id, session.cwd).catch((error) => console.error("terminal open failed", error));
+}
+
+/** Open a checkout without starting an agent, on its shell, reusing its open session. */
 export function openWorkspace(projectPath: string, cwd: string): Promise<SessionEntry> {
   const pathKey = cwd.replace(/\/+$/, "");
   const existing = state.sessions.find(
@@ -434,7 +445,7 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
       s.cwd.replace(/\/+$/, "") === pathKey,
   );
   if (existing) {
-    selectSession(existing.id);
+    showCheckout(existing);
     return Promise.resolve(existing);
   }
 
@@ -445,7 +456,7 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
     .createSession({ projectPath, cwd, useWorktree: false })
     .then((session) => {
       upsertSession(session);
-      selectSession(session.id);
+      showCheckout(session);
       return session;
     })
     .finally(() => openingWorkspaces.delete(key));

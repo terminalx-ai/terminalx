@@ -25,6 +25,7 @@ import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { useHostFeatures } from "@mobile/state/host-features";
 import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
 import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
 
@@ -51,14 +52,10 @@ export default function SessionScreen() {
   const summary = app.sessions.find((item) => item.id === sessionId);
   const tabId = params.tabId ?? summary?.tabs[0]?.id ?? "";
   const [view, setView] = useState<"chat" | "terminal">("chat");
-  // An older Mac neither sizes its terminal output nor opens a tab's terminal: it gets no Terminal view.
-  const [terminalOffered, setTerminalOffered] = useState(false);
-  useEffect(() => {
-    let active = true;
-    setTerminalOffered(false);
-    void app.api?.features().then((features) => { if (active) setTerminalOffered(features.terminal === 1); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [app.api, app.activeHost?.id]);
+  // An older Mac, or one whose runtime is older than its app (#730), neither
+  // sizes its terminal output nor opens a tab's terminal: it gets no Terminal
+  // view. One that gains it while this is open offers it then.
+  const terminalOffered = useHostFeatures(app.api, app.activeHost?.id)?.terminal === 1;
   const terminal = terminalOffered && view === "terminal";
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
