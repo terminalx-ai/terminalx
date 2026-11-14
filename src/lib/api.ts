@@ -1,3 +1,6 @@
+import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
+import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -24,9 +27,12 @@ import type {
   SessionEntry,
   Workspace,
   WorkspaceDisposition,
+  WorkspaceRestorePreview,
   TabEntry,
   TabStatus,
   UnfinishedMerge,
+  ConflictChoice,
+  ConflictFile,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -37,6 +43,8 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { RepositoryFilesPreview } from "@/types/repositorySettings";
+import type { RepositoryFolders } from "@/types/repositoryFolders";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -85,6 +93,7 @@ export function isCloudRepositoryKey(value: string): boolean {
 
 /** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
 export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  if (privacyBlocksCommand(command)) return Promise.reject(new Error(PRIVACY_MESSAGE));
   if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
     const record = args as Record<string, unknown>;
     try {
@@ -209,12 +218,15 @@ export interface NewSession {
   worktreeName?: string | null;
   /** An existing branch to check out in the new worktree, instead of a new branch. */
   checkoutBranch?: string | null;
+  checkoutPr?: number | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
   automation?: AutomationRef | null;
   /** The first agent conversation. Omit to open the checkout by itself. */
   tab?: NewTab;
+  /** Started with Orchestrate (PRO-337): any run the session leads waits for the person's Approve. */
+  orchestrate?: boolean;
 }
 
 export interface WorkspaceRename {
@@ -264,6 +276,8 @@ export interface ShellPane {
   title: string | null;
   /** The reader named it; `title` is otherwise the name it was opened with. */
   renamed?: boolean;
+  /** Explicit placement; absent for terminals opened by older runtimes. */
+  docked?: boolean | null;
   cwd: string;
   exited: boolean;
   /** When it was opened, so every window lists it in the same place. */
@@ -281,6 +295,12 @@ export interface PaneAgent {
  * session a tab belongs to. A tab is named `agent:<tab id>`,
  * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
  */
+export interface TabPane {
+  id: "left" | "right";
+  tabs: string[];
+  active: string | null;
+}
+
 export interface TabLayout {
   /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
   order: string[];
@@ -290,6 +310,10 @@ export interface TabLayout {
   muted: string[];
   /** The reader's own title for a tab. */
   titles: Record<string, string>;
+  /** Optional for layouts saved before split panes. Preserved by the backend's extension fields. */
+  panes?: TabPane[];
+  focusedPane?: TabPane["id"];
+  splitRatio?: number;
 }
 
 /** An agent tab the reader closed, kept with its conversation so it can be reopened. */
@@ -303,6 +327,14 @@ export interface ClosedTab {
 export interface TabState {
   workspaces: Record<string, TabLayout>;
   closed: ClosedTab[];
+}
+
+/** One local repository's mirror; source stays set when cleanup is needed. */
+export interface RepoMirrorStatus {
+  root: string;
+  source: string | null;
+  active: boolean;
+  error: string | null;
 }
 
 /** How a workspace is removed. */
@@ -530,12 +562,23 @@ export const api = {
   pairingRetryRelay: () => invoke<PairingStatus>("pairing_retry_relay"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
+  /** Let the phone waiting on this Mac finish pairing (docs/PAIRING-APPROVAL.md). */
+  pairingApprove: (requestId: string) => invoke<PairingStatus>("pairing_approve", { requestId }),
+  /** Refuse it: the unclaimed device, its token and the active code are discarded. */
+  pairingDecline: (requestId: string) => invoke<PairingStatus>("pairing_decline", { requestId }),
+  /** End a device's live connections and keep its pairing; the phone stops reconnecting. */
+  pairingDisconnect: (deviceId: string) => invoke<PairingStatus>("pairing_disconnect", { deviceId }),
+  /** Keep this Mac awake while a phone is connected. */
+  pairingSetKeepAwake: (enabled: boolean) => invoke<PairingStatus>("pairing_set_keep_awake", { enabled }),
   /** This Mac's name as the user's other devices show it (#686). */
   machineName: () => invoke<MachineName>("machine_name"),
   /** Name this Mac; null lets it follow the computer's own name again. */
   setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
+  repositoryFilesPreview: (path: string, patterns?: string[], snapshot?: string) => invoke<RepositoryFilesPreview>("repository_files_preview", { path, patterns, snapshot }),
+  /** The repository's top-level folders (and one level down) for choosing a sparse checkout; `measure` also sums their sizes at HEAD, which takes longer. */
+  repositoryFolders: (path: string, measure: boolean) => invoke<RepositoryFolders>("repository_folders", { path, measure }),
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   chatsDir: () => invoke<string>("chats_dir"),
@@ -544,6 +587,9 @@ export const api = {
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
   setProjectLogo: (path: string, source: string | null) => invoke<Project>("set_project_logo", { path, source }),
   listWorkspaces: (projectPath: string) => invoke<Workspace[]>("list_workspaces", { projectPath }),
+  repoMirrorStatus: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_status", { sessionId }),
+  repoMirrorStart: (sessionId: string, confirmed: boolean) => invoke<RepoMirrorStatus>("repo_mirror_start", { sessionId, confirmed }),
+  repoMirrorStop: (sessionId: string) => invoke<RepoMirrorStatus>("repo_mirror_stop", { sessionId }),
   previewWorkspaceName: (projectPath: string, requested?: string | null) =>
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
@@ -579,8 +625,13 @@ export const api = {
   removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
+  previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
+  sessionRowStatuses: (ids: string[]) => invoke<Record<string, import("@terminalx/portable/sessionStatus").SessionStatusInput>>("session_row_statuses", { ids }),
   /** Card snippets for the agent dashboard; every session when no ids are given. */
   sessionSummaries: (sessionIds?: string[]) => invoke<SessionSummary[]>("session_summaries", { sessionIds: sessionIds ?? null }),
   statsUsageSnapshot: () => invoke<StatsUsageState>("stats_usage_snapshot"),
@@ -633,6 +684,7 @@ export const api = {
    * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
    */
   archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
+  setSessionStatus: (sessionId: string, status: import("@/types/session").ManualStatus) => invoke<void>("set_session_status", { sessionId, status }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */
@@ -665,10 +717,11 @@ export const api = {
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
   /** `base`: the ref the session's worktree was made from, read against instead of the default branch. */
-  branchOverview: (cwd: string, base?: string | null) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null }),
+  branchOverview: (cwd: string, base?: string | null, localOnly = false) => invoke<BranchOverview>("branch_overview", { cwd, base: base ?? null, localOnly }),
+  projectForge: (cwd: string) => invoke<ProjectForge>("project_forge", { cwd }),
   /** Brings the remote's branches up to date; false when it could not (offline, no remote). */
   branchFetch: (cwd: string) => invoke<boolean>("branch_fetch", { cwd }),
-  /** Merges the checked-out branch into the local branch `into`; says what it did. */
+  /** Retained for command clients; the Branch panel sends an agent prompt instead. */
   branchMergeInto: (cwd: string, into: string) => invoke<string>("branch_merge_into", { cwd, into }),
   // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
   // None of these takes a local path: the native side derives the mirror's
@@ -1821,8 +1874,8 @@ export type LocalRuntimeState =
   | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
-  /** Retrying cannot help until something outside this window changes. */
-  | { state: "unavailable"; message: string }
+  /** Retrying cannot help until something outside this window changes. `startFailed`: the runtime the desktop started exited before it attached (PRO-287). */
+  | { state: "unavailable"; message: string; startFailed?: LocalRuntimeStartFailed }
   /** There, but not answering: reconnecting reaches the same wedged runtime (#661). `keeps`: restarting it hands what it runs to a fresh runtime first (#765). */
   | { state: "unresponsive"; message: string; epoch: string | null; keeps: boolean }
   /** The runtime is being replaced with the one bundled with this app (#730). `from`: its version, when it said. `keeping`: it is handed over, and its agents and terminals keep running (#765). */
@@ -1848,6 +1901,28 @@ export interface LocalRuntimeOutdated {
   keeps: boolean;
   /** When it `keeps`: what `work` names, as the runtime names it. Restart now sends it back, so that only what was shown stops. */
   unkept: LocalRuntimeWorkItem[];
+}
+
+/** A runtime the desktop started that exited, or never ran, before it attached (PRO-287, `launch.rs`). */
+export interface LocalRuntimeStartFailed {
+  /** The executable that was started: "terminalx-serve". */
+  process: string;
+  /** Its exit code, when it exited. */
+  code: number | null;
+  /** The signal that ended it, when one did. With no code either, it never ran. */
+  signal: number | null;
+  /** How long it ran. */
+  ranMs: number;
+  /** The last error it logged while starting, or why it could not be started. */
+  error: string | null;
+  /** Where its log is, when it has one. */
+  log: string | null;
+  /** When it failed, in milliseconds since the Unix epoch. */
+  at: number;
+  /** This app's version. */
+  app: string;
+  /** "macOS 26.1 (25B78)", when it could be read. */
+  os: string | null;
 }
 
 /** One thing a runtime runs, as it names it (`session::retire::Work`). Sent back as it came, never built here. */
@@ -1886,6 +1961,8 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** The end of the runtime's log, as it wrote it, for Copy logs (PRO-287). */
+  log: () => invoke<string>("local_runtime_log"),
   /** Restart a runtime that stopped answering; the desktop attaches a fresh one. One that can be handed over keeps what it runs unless `how` says otherwise (#765); a refusal is a `LocalRuntimeRestartRefused`, with nothing stopped. */
   restart: (epoch: string | null, how: LocalRuntimeRestart = "keeping", stop: LocalRuntimeWorkItem[] = []) =>
     invoke<LocalRuntimeState>("local_runtime_restart", { epoch, how, stop }),
@@ -1917,13 +1994,51 @@ export const statusBar = {
 };
 
 // ---- agent tabs
-import type { AgentEvent } from "@/types/events";
+import type { AgentEvent, FileRef } from "@/types/events";
 
 export interface ImageInput {
   mediaType: string;
   data: string;
   name?: string;
 }
+
+/**
+ * A file for a message before it is stored (PRO-290): a path on this computer
+ * (picked, or dropped on the window), or the base64 bytes of a browser `File`
+ * (pasted, or dropped on the DOM). Exactly one of `path` and `data` is set.
+ */
+export interface FileInput {
+  name: string;
+  path?: string;
+  data?: string;
+  mediaType?: string;
+}
+
+/** What `attachments.inspect` learns about a path before it is attached. */
+export interface FileFacts {
+  path: string;
+  name: string;
+  size: number;
+  mediaType?: string;
+  /** Not a regular file (a folder, a socket) or unreadable: never attached. */
+  unreadable?: boolean;
+}
+
+/**
+ * Files attached to a message (PRO-290). They are copied into the session's
+ * attachments folder (`$TERMINALX_HOME/attachments/<session>/<folder>/<name>`,
+ * removed with the session) before the message is sent, and the message
+ * carries the stored `FileRef`s. The rules (10 files, reserved names, size)
+ * are in `@/lib/attachmentRules`; the store enforces them again.
+ */
+export const attachments = {
+  /** Size and media type of dropped or picked paths, in the order given. */
+  inspect: (paths: string[]) => invoke<FileFacts[]>("inspect_attachments", { paths }),
+  /** Copy the files into one new folder of the session's attachments folder. Refuses reserved names, files over the size limit, and more than 10. */
+  store: (sessionId: string, files: FileInput[]) => invoke<FileRef[]>("store_attachments", { sessionId, files }),
+  /** Write a copy of a stored attachment to `to` (the file tab's Download). `path` must be inside an attachments folder. */
+  saveCopy: (path: string, to: string) => invoke<void>("save_attachment_copy", { path, to }),
+};
 
 export interface QueuedMessage {
   id: string;
@@ -1987,9 +2102,12 @@ export const agent = {
   prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
+  /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[]) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
+  reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
+    invoke<void>("report_terminal_view", { sessionId, tabId, report }),
   reportSendShown: (sessionId: string, tabId: string, seq: number, timings: { pressedAt?: number; drawnAt?: number; answeredAt?: number; shownAt: number }) =>
     invoke<void>("report_send_shown", { sessionId, tabId, seq, timings }),
   /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
@@ -2000,7 +2118,7 @@ export const agent = {
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
-  tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
+  tabToTerminal: (sessionId: string, tabId: string, transitionId?: string) => invoke<boolean | void>("tab_to_terminal", { sessionId, tabId, transitionId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /**
@@ -2015,12 +2133,15 @@ export const agent = {
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
-  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean) =>
-    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles }),
+  /** `confirm`: the token from an overlap refusal, to go ahead with exactly the plan that was shown. */
+  resetChat: (sessionId: string, tabId: string, endSeq: number | null, resetFiles: boolean, confirm?: string | null) =>
+    invoke<string | null>("reset_chat", { sessionId, tabId, endSeq, resetFiles, confirm: confirm ?? null }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
   /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
   sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
+  changeHeldQueue: (sessionId: string, tabId: string, change: import("@/lib/heldQueue").HeldQueueChange) =>
+    invoke<SendOutcome>("change_held_queue", { sessionId, tabId, change }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
@@ -2031,6 +2152,7 @@ export const agent = {
     invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),
   setEffort: (sessionId: string, tabId: string, effort: string | null) =>
     invoke<void>("set_tab_effort", { sessionId, tabId, effort }),
+  setUnread: (sessionId: string, tabId: string, unread: boolean) => invoke<void>("set_tab_unread", { sessionId, tabId, unread }),
   markRead: (sessionId: string, tabId: string) => invoke<void>("mark_tab_read", { sessionId, tabId }),
   listModels: (refresh?: boolean) => invoke<ModelInfo[]>("list_models", { refresh: refresh ?? false }),
 };
@@ -2049,8 +2171,24 @@ export interface SlashCommand {
   source: "builtin" | "plugin" | "user";
 }
 
+/** Every file the All files tree shows (hidden ones too, `.gitignore`d ones not), cut at `limit`. */
+export interface FileCount {
+  files: number;
+  truncated: boolean;
+}
+
+export interface FileList {
+  paths: string[];
+  truncated: boolean;
+}
+
 export const files = {
-  search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
+  /** `includeIgnored` searches the files Git ignores as well. */
+  search: (cwd: string, query: string, limit = 40, includeIgnored = false) =>
+    invoke<FileHit[]>("search_files", includeIgnored ? { cwd, query, limit, includeIgnored } : { cwd, query, limit }),
+  /** How many files `search` looks through; `truncated`: at least that many. */
+  count: (cwd: string, includeIgnored = false) => invoke<FileCount>("count_files", { cwd, includeIgnored }),
+  list: (cwd: string, limit?: number) => invoke<FileList>("list_files", { cwd, limit: limit ?? null }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
@@ -2069,6 +2207,17 @@ export interface PrCheck {
   name: string;
   state: string;
   url?: string | null;
+  actions?: { runId: number; jobId: number | null } | null;
+  /** When it started and finished, as GitHub gave them with the check (RFC 3339). */
+  startedAt?: string | null;
+  completedAt?: string | null;
+  /** The line GitHub carries with it: a check run's output title, a status's description. */
+  summary?: string | null;
+}
+
+export interface CheckLog {
+  text: string;
+  truncated: boolean;
 }
 
 export interface BranchContributor {
@@ -2079,12 +2228,20 @@ export interface BranchContributor {
   last: string;
 }
 
+export type ProjectForge = "github" | "githubUnavailable" | "localOnly";
+
 /** A checkout's branch against the branch it merges into, read from refs already here. */
 export interface BranchOverview {
+  /** Resolved by the same native function as the session header. */
+  nextStep: "pull" | "reconcile" | "detached" | "conflicts" | "commit" | "empty" | "local" | "push" | null;
   branch: string | null;
   /** `origin/main`, else the local default branch; null outside a repository or without one. */
   base: string | null;
   onBase: boolean;
+  /** Main checkout path reported by Git. */
+  mainCheckout: string | null;
+  /** Compared using canonical checkout roots, including sessions reached through symlinks. */
+  inMainCheckout: boolean;
   forkPoint: CommitInfo | null;
   /** Commits only on the branch, and on the base since the fork. */
   ahead: number;
@@ -2132,18 +2289,38 @@ export interface PullRequest {
 }
 
 export const git = {
+  hasRemote: (cwd: string) => invoke<boolean>("git_has_remote", { cwd }),
+  addRemote: (cwd: string, url: string) => invoke<void>("git_add_remote", { cwd, url }),
   commit: (cwd: string, message: string, paths?: string[]) => invoke<string>("git_commit", { cwd, message, paths: paths ?? null }),
   push: (cwd: string) => invoke<string>("git_push", { cwd }),
   pull: (cwd: string) => invoke<string>("git_pull", { cwd }),
   discard: (cwd: string, path: string, base: string | null = null, oldPath: string | null = null) => invoke<void>("git_discard", { cwd, path, base, oldPath }),
   checkout: (cwd: string, name: string, create: boolean) => invoke<void>("git_checkout", { cwd, name, create }),
+  /** On a detached HEAD, make a branch at the commit it is on, named from `name`, and check it out (PRO-295); returns the branch. */
+  branchHere: (projectPath: string, cwd: string, name: string | null) => invoke<string>("git_branch_here", { projectPath, cwd, name }),
   workingChanges: (cwd: string, hideWhitespace = false) => invoke<[string, ChangedFile[]]>("working_changes", { cwd, hideWhitespace }),
+  workingChangeSets: (cwd: string, hideWhitespace = false) => invoke<[string, string, ChangedFile[], ChangedFile[]]>("working_change_sets", { cwd, hideWhitespace }),
+  stagePaths: (cwd: string, paths: string[]) => invoke<void>("git_stage_paths", { cwd, paths }),
+  unstagePaths: (cwd: string, paths: string[]) => invoke<void>("git_unstage_paths", { cwd, paths }),
+  unstageAll: (cwd: string) => invoke<void>("git_unstage_all", { cwd }),
+  applyHunk: (cwd: string, path: string, oldPath: string | undefined, index: number, reverse: boolean) => invoke<void>("git_apply_hunk", { cwd, path, oldPath: oldPath ?? null, index, reverse }),
+  hunkCount: (cwd: string, path: string, oldPath: string | undefined, staged: boolean) => invoke<number>("git_hunk_count", { cwd, path, oldPath: oldPath ?? null, staged }),
+  generateCommitMessage: (cwd: string, agent: "claude" | "codex") => invoke<string>("generate_commit_message", { cwd, agent }),
   /** The merge left in progress in the checkout, with what each uncommitted file is; null when none is. */
   unfinishedMerge: (cwd: string) => invoke<UnfinishedMerge | null>("unfinished_merge", { cwd }),
   /** Commit the merge that was read; refused if the checkout moved on or a file is still conflicted. */
   commitMerge: (cwd: string, head: string, mergeHead: string) => invoke<string>("commit_merge", { cwd, head, mergeHead }),
   /** `git merge --abort` of the merge that was read, and no other. */
   abortMerge: (cwd: string, head: string, mergeHead: string) => invoke<void>("abort_merge", { cwd, head, mergeHead }),
+  /** A conflicted file of the merge that was read, cut into its conflicts (PRO-293). */
+  conflictFile: (cwd: string, head: string, mergeHead: string, path: string) =>
+    invoke<ConflictFile>("merge_conflict_file", { cwd, head, mergeHead, path }),
+  /** Replace one conflict with a side, or both, and return the file as written. Refused when the file changed since `version`. */
+  resolveConflict: (cwd: string, head: string, mergeHead: string, path: string, version: string, index: number, choice: ConflictChoice) =>
+    invoke<ConflictFile>("resolve_merge_conflict", { cwd, head, mergeHead, path, version, index, choice }),
+  /** Stage a file with no conflict markers left (`git add`). Refused when it changed since `version` or still has markers. */
+  markResolved: (cwd: string, head: string, mergeHead: string, path: string, version: string) =>
+    invoke<void>("mark_conflict_resolved", { cwd, head, mergeHead, path, version }),
 };
 
 export type PrScope = { kind: "local"; cwd: string } | { kind: "cloud"; workspace: string; repo: string };
@@ -2152,9 +2329,54 @@ export interface PrAssociation {
   number: number;
   head: string;
   scope: PrScope;
+  /** Chosen with "Link pull request…" (PRO-294), not opened from this session; only a link can be unlinked. */
+  linked?: boolean;
+}
+
+/** An open pull request as "Link pull request…" lists it. */
+export interface OpenPr extends PullRequest {
+  /** `owner:branch` for a head on a fork, else the branch. */
+  headLabel: string;
+}
+
+/** The repository's open pull requests, and which ones a session already shows. */
+export interface PrLinkCandidates {
+  /** `owner/name`. */
+  repository: string;
+  /** Every open pull request; `prs` holds at most the first 100. */
+  total: number;
+  prs: OpenPr[];
+  /** Canonical URLs this session shows already. */
+  here: string[];
+  /** Canonical URLs another session shows. */
+  elsewhere: string[];
+}
+
+/** Owner-issued privacy provenance for one Actions click, reused unchanged
+ * across its IPC continuations. It holds no native lease or credentials. */
+export type CheckAuthority = Readonly<{ owner: string; epoch: number | null }>;
+
+export interface GitHubConnectionStatus {
+  state: "missing" | "signed_out" | "connected" | "unavailable";
+  details: string | null;
+  hostname?: string;
 }
 
 export const gh = {
+  checkAuthority: () => invoke<CheckAuthority>("pr_check_authority"),
+  search: (cwd: string, query: string) => invoke<PullRequest[]>("pr_search", { cwd, query }),
+  attach: (cwd: string, number: number) => invoke<string>("pr_attach", { cwd, number }),
+  connectionStatus: (cwd?: string) => invoke<GitHubConnectionStatus>("gh_connection_status", { cwd: cwd ?? null }),
+  loginStart: (id: string, hostname: string) => invoke<void>("gh_login_start", { id, hostname }),
+  createRepository: (cwd: string, name: string, privateRepo: boolean) => invoke<void>("gh_create_repository", { cwd, name, private: privateRepo }),
+  conversation: (url: string): PrConversationAccess => ({
+    read: () => invoke("pr_conversation", { url }),
+    act: (action) => invoke("pr_conversation_action", { url, action }),
+    search: (query) => invoke("pr_reviewer_search", { url, query }),
+  }),
+  checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
+  rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean, authority: CheckAuthority) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed, authority }),
+  fixAttachment: (sessionId: string, tabId: string, prUrl: string, authority: CheckAuthority) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl, authority }),
   reviewFiles: (url: string, head: string, base: string) => invoke<import("./reviewThreads").ReviewFile[]>("pr_review_files", { url, head, base }),
   reviewThreads: (url: string) => invoke<import("./reviewThreads").ReviewThreads>("pr_review_threads", { url }),
   resolveReview: (url: string, threadId: string, resolved: boolean) => invoke<void>("pr_review_resolve", { url, threadId, resolved }),
@@ -2163,8 +2385,11 @@ export const gh = {
   available: () => invoke<boolean>("gh_available"),
   associationsBatch: (sessionIds: string[]) => invoke<Record<string, PrAssociation[]>>("pr_associations_batch", { sessionKeys: sessionIds }),
   associations: (sessionId: string, additions: PrAssociation[] = []) => invoke<PrAssociation[]>("pr_associations", { sessionKey: sessionId, additions }),
-  list: (cwd: string, branch: string) => invoke<PullRequest[]>("pr_list", { cwd, branch }),
-  details: (cwd: string, number: number, url?: string) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}) }),
+  linkCandidates: (cwd: string, sessionId: string) => invoke<PrLinkCandidates>("pr_link_candidates", { cwd, sessionKey: sessionId }),
+  link: (sessionId: string, association: PrAssociation) => invoke<PrAssociation[]>("pr_link", { sessionKey: sessionId, association }),
+  unlink: (sessionId: string, url: string) => invoke<PrAssociation[]>("pr_unlink", { sessionKey: sessionId, url }),
+  list: (cwd: string, branch: string, authority?: CheckAuthority) => invoke<PullRequest[]>("pr_list", { cwd, branch, ...(authority ? { authority } : {}) }),
+  details: (cwd: string, number: number, url?: string, authority?: CheckAuthority) => invoke<PullRequest>("pr_details", { cwd, number, ...(url ? { url } : {}), ...(authority ? { authority } : {}) }),
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
@@ -2295,6 +2520,7 @@ export const agentSetup = {
 
 // ---- terminals
 export const pty = {
+  localLinks: (id: string) => invoke<{ sessionId: string; cwd: string; urls: string[] } | null>("pty_local_links", { id }),
   /** `title` names a shell tab for every window that lists it. */
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string, title?: string) =>
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
@@ -2303,6 +2529,9 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Sessions with a TCP listener working in their checkout, including detached servers. */
+  listeningSessions: (sessions: Pick<SessionEntry, "id" | "cwd">[]) => invoke<string[]>("listening_sessions", { sessions }),
+  setDocked: (id: string, docked: boolean) => invoke<ShellPane>("pty_set_docked", { id, docked }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
@@ -2396,18 +2625,24 @@ export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  /** A file's whole text, past the 4 MB the editor shows (the file tab's Copy file contents). */
+  readWholeText: (path: string) => invoke<string>("read_whole_text_file", { path }),
+  /** Save a copy at `to`: the exact bytes of the local file `from`, or `content`. */
+  exportFile: (to: string, source: { from: string } | { content: string }) =>
+    invoke<number>("export_file", { to, from: "from" in source ? source.from : null, content: "content" in source ? source.content : null }),
   mtime: (path: string) => invoke<number | null>("file_mtime", { path }),
   inspectPath: (base: string, path: string) => invoke<LocalPathInfo>("inspect_local_path", { base, path }),
   /** Native default-app opening, restricted to existing local files/folders. */
   openPath: (path: string) => invoke<void>("open_local_path", { path }),
-  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string) =>
-    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, limit, replacement: replacement ?? null }),
+  /** `wholeWord` skips matches inside a longer word, as the editor's find does. */
+  searchText: (root: string, query: string, regex: boolean, caseSensitive: boolean, limit = 500, replacement?: string, wholeWord = false) =>
+    invoke<TextSearch>("search_text", { root, query, regex, caseSensitive, wholeWord, limit, replacement: replacement ?? null }),
   /**
    * Rewrite matches on disk. Without `targets` every searchable file under
    * the root is a candidate except those in `skip`.
    */
-  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = []) =>
-    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, targets, skip }),
+  replaceText: (root: string, query: string, replacement: string, regex: boolean, caseSensitive: boolean, targets: ReplaceTarget[] | null, skip: string[] = [], wholeWord = false) =>
+    invoke<ReplaceReport>("replace_text", { root, query, replacement, regex, caseSensitive, wholeWord, targets, skip }),
 };
 
 // ---- issues (GitHub through gh, Linear through its API)
@@ -2565,12 +2800,18 @@ export interface WorkStatusSettings {
 export interface ExperimentalSettings {
   /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
   nativeCodex: boolean;
+  /** The session header shows the session's estimated cost and its tokens by model (PRO-273). */
+  sessionCost?: boolean;
+  /** Show orchestration runs: a session's Run view and Settings → Orchestrator (PRO-274). */
+  orchestratorRuns?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
 export const experimental = {
   settings: () => invoke<ExperimentalSettings>("experimental_settings"),
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
+  setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;
@@ -2580,6 +2821,46 @@ export const experimental = {
       return false;
     }
   },
+};
+
+/** Orchestration runs (PRO-274). Approve, stop and edit are the person's: no `terminalx` command approves a run. */
+export const orchestration = {
+  /** The run a session leads, as it is now, or `null`. */
+  runForSession: (sessionId: string) => invoke<Run | null>("orchestration_run_for_session", { sessionId }),
+  runs: () => invoke<Run[]>("orchestration_runs"),
+  /** Store a plan a person chose from a file as a run of `sessionId`; refused as `runs create` refuses. */
+  create: (sessionId: string, plan: unknown) => invoke<Run>("orchestration_create", { sessionId, plan }),
+  /** What holds for runs in one project: its own answers, the app's where it gave none. */
+  limits: (projectPath: string) => invoke<OrchestratorLimits>("orchestrator_limits", { projectPath }),
+  /** The model each tier of the routing table runs on today, per agent. */
+  tierModels: (refresh = false) => invoke<TierModels>("orchestrator_tier_models", { refresh }),
+  approve: (id: string) => invoke<RunStart>("orchestration_approve", { id }),
+  /** Stop a run, or discard a plan nobody approved. */
+  stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),
+  updatePlan: (id: string, plan: RunPlan) => invoke<Run>("orchestration_update_plan", { id, plan }),
+  /** Merge every accepted piece into the lead's branch, in dependency order; `skip` leaves pieces out of this pass.
+   * Answers once the pass has begun: the run's events say how it goes. */
+  merge: (id: string, options: { skip?: string[]; recheck?: boolean } = {}) => invoke<Run>("orchestration_merge", { id, skip: options.skip ?? [], recheck: options.recheck ?? false }),
+  /** Give a piece whose accepted result could not be merged back to its worker, with the conflict as its brief. */
+  sendBack: (id: string, piece: string) => invoke<Run>("orchestration_send_back", { id, piece }),
+  /** Have the lead resolve a piece's conflict: it is sent both sides and the pieces' goals. */
+  resolveInLead: (id: string, piece: string) => invoke<Run>("orchestration_resolve_in_lead", { id, piece }),
+  /** A blocked piece (PRO-361, 18.03): the lead takes it over and finishes it in its own checkout. */
+  takeOver: (id: string, piece: string) => invoke<Run>("orchestration_take_over", { id, piece }),
+  /** Check what the lead committed for a piece it took over; done once its checks pass there. */
+  finish: (id: string, piece: string) => invoke<Run>("orchestration_finish", { id, piece }),
+  /** Give a blocked piece more files (its report's outside files when `own` is empty) and a fresh worker. */
+  widen: (id: string, piece: string, own: string[] = []) => invoke<Run>("orchestration_widen", { id, piece, own }),
+  /** Send a blocked piece's worker a note: its try opens again. */
+  note: (id: string, piece: string, text: string) => invoke<Run>("orchestration_note", { id, piece, text }),
+  /** Leave a blocked piece out, with the pieces that depend on it and have not started. */
+  skip: (id: string, piece: string) => invoke<Run>("orchestration_skip", { id, piece }),
+  /** One run's worker limit and budget, set by the person (PRO-280). */
+  setLimits: (id: string, limits: RunLimits) => invoke<Run>("orchestration_set_limits", { id, limits }),
+  /** Let a run that reached its budget go on: now, or once the window that stopped it resets. */
+  resume: (id: string, afterReset: boolean) => invoke<RunStart>("orchestration_resume", { id, afterReset }),
+  settings: () => invoke<OrchestratorSettings>("orchestrator_settings"),
+  setSettings: (patch: OrchestratorPatch) => invoke<OrchestratorSettings>("set_orchestrator_settings", { patch }),
 };
 
 /** Settings → Storage: what is kept about the warnings tabs raise (#815). */
@@ -2958,3 +3239,32 @@ export function closeWorkspaceConnectionsIn(orgId: string): void {
 
 export interface TurnCheckpoint { number: number; reviewed: boolean; undone: boolean; files: ChangedFile[]; restored?: boolean; backupRef?: string | null; unavailableReason?: string | null }
 export interface TurnUndoResult { overlap: string[]; token: string; undone: boolean; backupRef?: string | null }
+
+/** A saved action's run in a terminal tab of a local session (PRO-363). */
+export interface ActionRun {
+  sessionId: string;
+  actionId: string;
+  name: string;
+  /** The terminal tab's pane id: focus it to show the run. */
+  paneId: string;
+  state: "running" | "exited";
+  /** The program's own exit code once it exited; null while it runs, when a signal ended it, or when its exit was not heard. */
+  exitCode: number | null;
+  started: string;
+  ended: string | null;
+}
+
+export interface ActionRunOutcome {
+  run: ActionRun;
+  /** False when a non-concurrent action was already running: `run` is that tab and nothing new started. */
+  started: boolean;
+}
+
+/** Saved project actions (PRO-363). Local sessions only. */
+export const actions = {
+  /** Start `actionId` in a new terminal tab of `sessionId`; `restart` replaces a running non-concurrent run. */
+  run: (sessionId: string, actionId: string, restart = false) =>
+    invoke<ActionRunOutcome>("action_run", { sessionId, actionId, restart }),
+  /** The session's runs, oldest first: one per action tab still open, running or exited. */
+  states: (sessionId: string) => invoke<ActionRun[]>("action_states", { sessionId }),
+};

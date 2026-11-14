@@ -10,21 +10,34 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+#[path = "git_ssh.rs"]
+pub(crate) mod ssh;
+
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[path = "git_checkpoints.rs"]
 pub mod checkpoints;
 
-fn git() -> Command {
+pub(crate) fn git() -> Command {
     let mut c = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     c.env("PATH", crate::binpath::login_path());
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // Inspection must not turn a missing partial-clone object into a transfer.
+    // Explicit fetches still use their admission boundary. This environment is
+    // scoped to our Git child, never the application or an agent's process.
+    c.env("GIT_NO_LAZY_FETCH", "1");
     c.env("LC_ALL", "C");
     c
 }
 
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
+    if transfer_args(args) { return transfer(cwd, args); }
+    run_command(git().current_dir(cwd), args)
+}
+
+pub(crate) fn run_command(command: &mut Command, args: &[&str]) -> Result<String> {
+    let out = command.args(args).output().with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
@@ -32,11 +45,89 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn transfer_args(args: &[&str]) -> bool {
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        if matches!(arg, "-c" | "--config-env") { args.next(); continue; }
+        if arg.starts_with("-c") || arg.starts_with("--config-env=") { continue; }
+        return matches!(arg, "fetch" | "pull" | "push" | "clone" | "ls-remote");
+    }
+    false
+}
+
+/// Refresh this project's comparison branch for landed/cleanup verification.
+/// Submodules are outside that check (and prevent a verified safe deletion).
+/// Never recurse: child repositories are outside this verification contract.
+/// The SSH boundary is shared with ordinary transfers, including its proxy
+/// refusal; agent processes keep their own runners.
+pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
+    let _request = crate::github_process::scope();
+    let mut command = git();
+    command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
+    let output = crate::github_process::git_verification_output(command, timeout)?;
+    if !output.status.success() {
+        bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+/// A bounded ignored-file scan. Stop Git when its output reaches the byte
+/// limit; never decode a partial NUL-delimited name at that boundary.
+pub(crate) fn file_names_bounded(mut command: Command, args: &[&str], max_files: usize, max_bytes: usize) -> Result<(Vec<String>, bool)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command.args(args).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut bytes = Vec::new();
+    let read = child.stdout.take().context("Missing Git output")?.take(max_bytes as u64 + 1).read_to_end(&mut bytes);
+    let byte_limit = bytes.len() > max_bytes;
+    if read.is_err() || byte_limit { let _ = child.kill(); }
+    let status = child.wait()?;
+    read?;
+    anyhow::ensure!(byte_limit || status.success(), "Git ignored-file listing failed");
+    if byte_limit {
+        bytes.truncate(max_bytes);
+        bytes.truncate(bytes.iter().rposition(|byte| *byte == 0).map_or(0, |index| index + 1));
+    }
+    let names = String::from_utf8(bytes).context("A file name is not valid UTF-8")?;
+    let mut all = names.split('\0').filter(|name| !name.is_empty());
+    let files = all.by_ref().take(max_files).map(String::from).collect();
+    Ok((files, byte_limit || all.next().is_some()))
+}
+
+/// Unlike --no-index, check-ignore's default also rejects tracked paths,
+/// including tracked files absent from disk. Both conditions must hold before
+/// copying secrets into a checkout whose ignore rules may differ from the source.
+pub(crate) fn ignored_untracked_paths(mut command: Command, paths: &[String]) -> Result<std::collections::BTreeSet<String>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = command.args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut stdin = child.stdin.take().context("Missing Git input")?;
+    let input = paths.join("\0") + "\0";
+    // Feed stdin while wait_with_output drains stdout, avoiding pipe deadlocks.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output();
+    let written = writer.join().map_err(|_| anyhow!("Git input writer stopped"))?;
+    let output = output?;
+    anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "Git ignore check failed: {}", String::from_utf8_lossy(&output.stderr));
+    written?;
+    Ok(String::from_utf8(output.stdout)?.split('\0').filter(|name| !name.is_empty()).map(String::from).collect())
+}
+
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
-    let out = git().current_dir(cwd).args(args).output().ok()?;
+    let mut command = git(); command.current_dir(cwd).args(args);
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
+        else { command.output().ok()? };
     Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+/// Inspect local objects while retaining exit status and diagnostic output.
+/// Missing promised objects are errors, never an implicit network request.
+pub(crate) fn inspect_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
+    anyhow::ensure!(!transfer_args(args), "a transfer is not a local Git inspection");
+    git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))
 }
 
 /// Why `run_within` did not succeed.
@@ -70,77 +161,31 @@ pub fn run_within_reporting(
     stop: &dyn Fn() -> bool,
     on_line: impl Fn(&str) + Send + 'static,
 ) -> std::result::Result<(), RunError> {
-    use std::io::Read;
+    let _request = crate::github_process::scope();
     let mut command = git();
-    command.current_dir(cwd).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
-    // Read as it comes, so a full pipe never blocks git.
-    let stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let Some(mut stderr) = stderr else { return text };
-        let mut pending = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let emit = |raw: &[u8], redrawn: bool, text: &mut String| {
-            let line = String::from_utf8_lossy(raw);
-            let line = line.trim();
-            if line.is_empty() {
-                return;
-            }
-            on_line(line);
-            // A redrawn line is progress, replaced by the next one.
-            if !redrawn {
-                text.push_str(line);
-                text.push('\n');
-            }
-        };
-        loop {
-            let read = match stderr.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            for &byte in &chunk[..read] {
-                if byte == b'\r' || byte == b'\n' {
-                    emit(&pending, byte == b'\r', &mut text);
-                    pending.clear();
-                } else {
-                    pending.push(byte);
-                }
-            }
-        }
-        emit(&pending, false, &mut text);
-        text
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let outcome = loop {
-        let ended = match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() >= deadline => RunError::TimedOut,
-            Ok(None) if stop() => RunError::Stopped,
-            Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                continue;
-            }
-            Err(error) => RunError::Spawn(error),
-        };
-        #[cfg(unix)]
-        // SAFETY: signals the process group this function just created.
-        unsafe {
-            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        break Err(ended);
-    };
-    let err = reader.join().unwrap_or_default();
-    match outcome? {
-        status if status.success() => Ok(()),
-        status => Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() })),
-    }
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_reporting(command, timeout, crate::github_process::ticket(), stop, Some(Box::new(on_line)))
+        .map_err(transfer_error)?;
+    transfer_result(out).map(|_| ())
+}
+
+fn transfer_error(error: anyhow::Error) -> RunError {
+    if error.is::<crate::github_process::TimedOut>() { RunError::TimedOut }
+    else if error.is::<crate::github_process::Stopped>() { RunError::Stopped }
+    else { match error.downcast::<std::io::Error>() { Ok(error) => RunError::Spawn(error), Err(error) => RunError::Failed(error.to_string()) } }
+}
+
+fn transfer_result(out: std::process::Output) -> std::result::Result<String, RunError> {
+    if out.status.success() { return Ok(String::from_utf8_lossy(&out.stdout).into_owned()); }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(RunError::Failed(if err.trim().is_empty() { format!("exit {}", out.status) } else { err.trim().to_string() }))
+}
+
+pub(crate) fn transfer_output(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let _request = crate::github_process::scope();
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    transfer_result(crate::github_process::git_output_admitted(command, timeout, crate::github_process::ticket()).map_err(transfer_error)?)
 }
 
 /// Run `command` to its end or to the deadline, whichever comes first, and
@@ -211,6 +256,7 @@ pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration)
 
 /// `run` with a deadline.
 pub fn run_bounded(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    if transfer_args(args) { return transfer_output(cwd, args, timeout); }
     let mut command = git();
     command.current_dir(cwd).args(args);
     output_within(command, timeout)
@@ -248,7 +294,9 @@ pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
 
 /// Run git with extra environment variables.
 pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    let mut command = git(); command.current_dir(cwd).args(args).envs(env.iter().copied());
+    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())? }
+        else { command.output().with_context(|| format!("git {}", args.join(" ")))? };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
@@ -257,6 +305,7 @@ pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String
 }
 
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
+    if transfer_args(args) { return transfer(cwd, args).is_ok(); }
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
@@ -294,7 +343,7 @@ pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
 }
 
 /// The paths `git status --porcelain -z` lists as unmerged.
-fn unmerged_in(porcelain: &str) -> Vec<String> {
+pub(crate) fn unmerged_in(porcelain: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
     while let Some(entry) = entries.next() {
@@ -363,6 +412,38 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
 /// cwd are refreshed; checkpoint callers explicitly pass the checkout root.
 pub fn snapshot_tree(cwd: &Path) -> Result<String> {
     snapshot_tree_including(cwd, &[])
+}
+
+/// Return staged and unstaged changes. During a conflict, keep the checkout
+/// reviewable by comparing HEAD with a temporary snapshot of the worktree;
+/// Git cannot write a tree from an index containing unmerged entries.
+pub fn working_change_sets(
+    cwd: &Path,
+    hide_whitespace: bool,
+) -> Result<(String, String, Vec<ChangedFile>, Vec<ChangedFile>)> {
+    let head = head_tree(cwd)?;
+    if !run(cwd, &["ls-files", "-u", "--"])?.is_empty() {
+        let worktree = snapshot_tree(cwd)?;
+        let changes = if head == worktree {
+            Vec::new()
+        } else {
+            changes_between_options(cwd, &head, Some(&worktree), hide_whitespace)?
+        };
+        return Ok((head.clone(), head, Vec::new(), changes));
+    }
+    let index = run(cwd, &["write-tree"])?.trim().to_string();
+    let worktree = snapshot_tree(cwd)?;
+    let staged = if head == index {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &head, Some(&index), hide_whitespace)?
+    };
+    let unstaged = if index == worktree {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &index, Some(&worktree), hide_whitespace)?
+    };
+    Ok((head, index, staged, unstaged))
 }
 
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
@@ -469,6 +550,10 @@ pub struct ChangedFile {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// Content identity at the reviewed head. Deletions retain the removed blob's
+    /// identity with a prefix; live diffs without a snapshot have no identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_hash: Option<String>,
     pub status: ChangeStatus,
     pub additions: u32,
     pub deletions: u32,
@@ -493,14 +578,15 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             bail!("bad head tree id");
         }
     }
-    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--name-status", "-z", base];
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--raw", "--no-abbrev", "-z", base];
     if let Some(h) = head {
         args.push(h);
     }
     args.push("--");
-    // --numstat and --name-status can't be combined in one call; run both.
+    // Read raw statuses separately from line counts, keeping identities independent
+    // of the whitespace display option. -z preserves tabs/newlines in file names.
     let status_out = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
-    let mut num_args = args.iter().filter(|a| **a != "--name-status").copied().collect::<Vec<_>>();
+    let mut num_args = args.iter().filter(|a| **a != "--raw").copied().collect::<Vec<_>>();
     if hide_whitespace { num_args.insert(1, "-w"); }
     let num_out = run(cwd, &num_args)?;
 
@@ -530,13 +616,18 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             i += 1;
             continue;
         }
-        let code = st.chars().next().unwrap_or('M');
+        let raw: Vec<&str> = st.split_whitespace().collect();
+        if raw.len() != 5 || !st.starts_with(':') {
+            bail!("Malformed git diff raw record");
+        }
+        let code = raw[4].chars().next().unwrap_or('M');
+        let blob_hash = head.map(|_| if code == 'D' { format!("deleted:{}", raw[2]) } else { raw[3].to_string() });
         match code {
             'R' | 'C' => {
                 let old = fields.get(i + 1).copied().unwrap_or("").to_string();
                 let new = fields.get(i + 2).copied().unwrap_or("").to_string();
                 let (a, d) = counts.get(&new).copied().unwrap_or((0, 0));
-                out.push(ChangedFile { path: new, old_path: Some(old), status: ChangeStatus::Renamed, additions: a, deletions: d });
+                out.push(ChangedFile { path: new, old_path: Some(old), blob_hash, status: ChangeStatus::Renamed, additions: a, deletions: d });
                 i += 3;
             }
             _ => {
@@ -547,7 +638,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
                     'D' => ChangeStatus::Deleted,
                     _ => ChangeStatus::Modified,
                 };
-                out.push(ChangedFile { path: p, old_path: None, status, additions: a, deletions: d });
+                out.push(ChangedFile { path: p, old_path: None, blob_hash, status, additions: a, deletions: d });
                 i += 2;
             }
         }
@@ -555,20 +646,50 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
     Ok(out)
 }
 
-/// Contents of `path` at `tree`, or `None` if it doesn't exist there.
-pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+pub(crate) enum BlobContents {
+    Bytes(Vec<u8>),
+    TooLarge,
+}
+
+/// Read only local objects. The tree proves absence; a missing promised blob
+/// (or an unavailable tree) is an error, never the empty side of a comparison.
+/// Shared by text/SVG and binary media so none can implicitly fetch a revision.
+pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<Option<BlobContents>> {
     if !is_tree_id(tree) {
         bail!("bad tree id");
     }
-    let spec = format!("{tree}:{path}");
-    let out = git().current_dir(cwd).args(["cat-file", "-p", &spec]).output()?;
-    if !out.status.success() {
-        return Ok(None);
+    if path.is_empty() || path.contains('\0') || !Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        bail!("Invalid repository-relative revision path");
     }
-    if out.stdout.len() > 4 * 1024 * 1024 {
-        return Ok(Some(String::from("<file too large to show>")));
+    // An unborn repository need not have written the well-known empty tree.
+    if tree == EMPTY_TREE { return Ok(None); }
+    let unavailable = || format!("Revision of {path} is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+    let listing = git().current_dir(cwd).env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["ls-tree", "--full-tree", "-z", tree, "--", path]).output()?;
+    if !listing.status.success() { bail!("{}", unavailable()); }
+    if listing.stdout.is_empty() { return Ok(None); }
+    let listing = std::str::from_utf8(&listing.stdout)?;
+    let (header, found) = listing.split_once('\t').context("Invalid revision tree entry")?;
+    let fields: Vec<_> = header.split_whitespace().collect();
+    if found.strip_suffix('\0') != Some(path) || fields.len() != 3 || fields[1] != "blob" {
+        bail!("Not a regular revision blob");
     }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    let oid = fields[2];
+    let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
+    if !size.status.success() { bail!("{}", unavailable()); }
+    let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+    if size > limit { return Ok(Some(BlobContents::TooLarge)); }
+    let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
+    if !content.status.success() { bail!("{}", unavailable()); }
+    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge } else { BlobContents::Bytes(content.stdout) }))
+}
+
+/// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
+pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
+    Ok(blob_bytes_at(cwd, tree, path, 4 * 1024 * 1024)?.map(|content| match content {
+        BlobContents::TooLarge => "<file too large to show>".into(),
+        BlobContents::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    }))
 }
 
 pub fn working_file(cwd: &Path, path: &str) -> Option<String> {
@@ -601,17 +722,28 @@ pub struct WorkStatus {
     pub conflicted: Vec<String>,
 }
 
-pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
-    if run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).is_err() {
-        return (0, 0);
+/// Worktrees are created with --no-track. The published branch still counts
+/// even when Git has no branch.<name>.merge configuration.
+pub(crate) fn comparison_ref(cwd: &Path) -> Option<String> {
+    if let Ok(upstream) = run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]) {
+        return Some(upstream.trim().into());
     }
-    run(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .ok()
-        .and_then(|s| {
-            let mut it = s.split_whitespace();
-            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-        })
-        .unwrap_or((0, 0))
+    let branch = current_branch(cwd)?;
+    let remote = format!("refs/remotes/origin/{branch}");
+    run(cwd, &["rev-parse", "--verify", "--quiet", &remote]).ok()?;
+    Some(remote)
+}
+
+pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
+    comparison_ref(cwd).and_then(|reference| {
+        run(cwd, &["rev-list", "--left-right", "--count", &format!("HEAD...{reference}")]).ok()
+            .and_then(|s| parse_upstream_counts(&s))
+    }).unwrap_or((0, 0))
+}
+
+pub(crate) fn parse_upstream_counts(output: &str) -> Option<(u32, u32)> {
+    let mut it = output.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
 /// One command answering everything the header and handoff row need, so no
@@ -650,14 +782,15 @@ pub fn worktree_path(project: &Path, name: &str) -> PathBuf {
     worktree_root(project).join(name)
 }
 
-pub fn worktree_branch(name: &str) -> String {
-    format!("{}{}", crate::store::settings::load().branch_prefix, name)
+pub fn worktree_branch_for(project: &Path, name: &str) -> Result<String> {
+    Ok(format!("{}{}", crate::store::configuration::branch_prefix(project)?, name))
 }
 
 /// Every `raccoon/*` branch, local and remote-tracking, so a name whose PR
 /// already landed is never redrawn.
 pub fn worktree_branch_names(project: &Path) -> Vec<String> {
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project) else { return Vec::new(); };
+    if prefix.is_empty() { return Vec::new(); }
     run(project, &["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"])
         .map(|s| {
             s.lines()
@@ -714,6 +847,9 @@ pub struct WorktreeBase {
     /// an existing branch, and for sessions made before it was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// Copy outcome at creation, retained for clients that were not connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_copy: Option<crate::worktree_files::CopyReport>,
 }
 
 const WORKTREE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -774,22 +910,24 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
 }
 
 fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration) -> Result<CreatedWorktree> {
+    let _request = crate::github_process::scope();
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
+    let branch = worktree_branch_for(project, name)?;
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    let branch = worktree_branch(name);
-    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
+    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
     let from = Some(base.clone()).filter(|b| b != "HEAD");
     Ok(CreatedWorktree {
         name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched, warning, from }),
+        worktree_base: Some(WorktreeBase { commit, fetched, warning, from, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
@@ -797,6 +935,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
 /// branch is checked out as it is, its commits and upstream kept. A remote
 /// branch (`origin/fix-x`) gets a local branch of its name tracking it.
 pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<CreatedWorktree> {
+    crate::store::configuration::branch_prefix(project)?;
     if name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
@@ -804,9 +943,11 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         bail!("bad branch name");
     }
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
+    let sparse = sparse.as_deref();
     std::fs::create_dir_all(worktree_root(project))?;
     let local = if branch_exists(project, branch) {
-        add_checkout(project, &path, &[branch], branch)?;
+        add_checkout(project, &path, &[branch], branch, sparse)?;
         branch.to_string()
     } else {
         let remote = format!("refs/remotes/{branch}");
@@ -815,9 +956,9 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         }
         let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
         if branch_exists(project, &local) {
-            add_checkout(project, &path, &[&local], &local)?;
+            add_checkout(project, &path, &[&local], &local, sparse)?;
         } else {
-            run(project, &["worktree", "add", "--track", "-b", &local, arg(&path)?, branch])?;
+            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local), true)?;
         }
         local
     };
@@ -830,15 +971,75 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         branch: local,
         base: commit.clone(),
         base_tree,
-        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None }),
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None, from: None, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
     })
 }
 
+/// Begin detached so gh can create a uniquely named branch directly at the PR head.
+pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<CreatedWorktree> {
+    checkout_pr_worktree_with(project, name, number, crate::github::checkout_pr)
+}
+
+pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
+    if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
+    let branch = worktree_branch_for(project, name)?;
+    if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
+    let path = worktree_path(project, name);
+    if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
+    std::fs::create_dir_all(worktree_root(project))?;
+    // Narrowed before the PR's branch is checked out, which then keeps to the same folders.
+    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
+    // Before the file copy below: it refuses to stage inside an unignored folder.
+    ensure_worktree_dir_ignored(project);
+    let result = (|| {
+        checkout(&path, number, &branch)?;
+        let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+        let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+        Ok(CreatedWorktree {
+            name: name.into(), path: path.to_string_lossy().into_owned(), branch: branch.clone(),
+            base: commit.clone(), base_tree,
+            worktree_base: Some(WorktreeBase { commit, fetched: true, warning: None, from: None, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
+        })
+    })();
+    if result.is_err() {
+        // Only the checkout allocated above is removed; it has never hosted a session.
+        if run(project, &["worktree", "remove", "--force", arg(&path)?]).is_ok() && branch_exists(project, &branch) {
+            let _ = run(project, &["branch", "-D", &branch]);
+        }
+    }
+    result
+}
+
+/// `git worktree add` with `args` (its options, the path and the commit).
+/// With `sparse`, the repository's `sparseCheckout` folders, the new
+/// worktree checks out only those folders and the root files: it is added
+/// without a checkout, narrowed in its own configuration, then checked out,
+/// so the primary checkout and other worktrees are left as they are. One that
+/// cannot be narrowed is removed again, with the branch `-b` made for it (`created`).
+/// Without `hooks`, the repository's checkout hooks do not run (a restore).
+pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[String]>, created: Option<&str>, hooks: bool) -> Result<()> {
+    let mut command = if hooks { vec![] } else { vec!["-c", "core.hooksPath=/dev/null"] };
+    command.extend(["worktree", "add"]);
+    if sparse.is_some() { command.push("--no-checkout"); }
+    command.extend_from_slice(args);
+    run(project, &command)?;
+    let Some(folders) = sparse else { return Ok(()) };
+    if let Err(error) = crate::sparse_checkout::populate(path, folders, hooks) {
+        // Only the checkout made just now, which has never hosted a session.
+        if run(project, &["worktree", "remove", "--force", arg(path)?]).is_ok() {
+            if let Some(branch) = created { let _ = run(project, &["branch", "-D", branch]); }
+        }
+        bail!("Could not check out only the chosen folders: {error:#}");
+    }
+    Ok(())
+}
+
 /// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
-fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
-    let mut args = vec!["worktree", "add", arg(path)?];
+fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse: Option<&[String]>) -> Result<()> {
+    let mut args = vec![arg(path)?];
     args.extend_from_slice(rest);
-    run(project, &args).map(|_| ()).map_err(|e| {
+    worktree_add(project, &args, path, sparse, None, true).map_err(|e| {
         let text = e.to_string();
         if text.contains("already checked out") || text.contains("already used by worktree") {
             anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")
@@ -864,7 +1065,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
         bail!("only TerminalX-managed workspaces can be renamed");
     }
     let old_name = path.file_name().and_then(|part| part.to_str()).ok_or_else(|| anyhow::anyhow!("workspace has no usable name"))?;
-    let old_branch = worktree_branch(old_name);
+    let old_branch = worktree_branch_for(&project, old_name)?;
     let branch = current_branch(&path).ok_or_else(|| anyhow::anyhow!("workspace has no branch"))?;
     if branch != old_branch {
         bail!("workspace branch does not match its TerminalX name");
@@ -877,7 +1078,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
     if destination.exists() {
         bail!("workspace {name} already exists");
     }
-    let new_branch = worktree_branch(name);
+    let new_branch = worktree_branch_for(&project, name)?;
     run(&project, &["worktree", "move", arg(&path)?, arg(&destination)?])?;
     if let Err(rename_error) = run(&destination, &["branch", "-m", &new_branch]) {
         let rollback = run(&project, &["worktree", "move", arg(&destination)?, arg(&path)?]);
@@ -973,7 +1174,7 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     if std::fs::symlink_metadata(&path).is_err() {
         return WorktreeDisposition::default();
     }
-    let branch = worktree_branch(name);
+    let Ok(branch) = worktree_branch_for(project, name) else { return WorktreeDisposition { exists: true, ..Default::default() }; };
     let unchecked = WorktreeDisposition { exists: true, checked: false, uncommitted: 0, unpushed: 0, branch: Some(branch.clone()) };
     if !is_worktree_of(project, &path) {
         return unchecked;
@@ -1158,7 +1359,7 @@ pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<Strin
     if unheld == 0 {
         return None;
     }
-    let branch = format!("{}rescued/{name}-{}", crate::store::settings::load().branch_prefix, &commit[..8]);
+    let branch = format!("{}rescued/{name}-{}", crate::store::configuration::branch_prefix(project).ok()?, &commit[..8]);
     run(project, &["branch", "--", &branch, commit]).ok().map(|_| branch)
 }
 
@@ -1226,7 +1427,7 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
         }
     }
     let _ = run(project, &["worktree", "prune"]);
-    let branch = worktree_branch(name);
+    let Ok(branch) = worktree_branch_for(project, name) else { return Ok(removal); };
     if !branch_exists(project, &branch) {
         return Ok(removal);
     }
@@ -1327,18 +1528,318 @@ pub fn commit_all(cwd: &Path, message: &str, paths: Option<&[String]>) -> Result
     Ok(head_commit(cwd).unwrap_or_default())
 }
 
+/// Commit the explicit index when it has changes; otherwise preserve the
+/// repository panel's historical add-all behavior.
+pub fn commit_staged_or_all(cwd: &Path, message: &str) -> Result<String> {
+    let staged = match raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--"]) {
+        Some((0, _)) => false,
+        Some((1, _)) => true,
+        _ => bail!("Could not inspect the Git index before committing."),
+    };
+    if staged {
+        run(cwd, &["commit", "-m", message])?;
+        return Ok(head_commit(cwd).unwrap_or_default());
+    }
+    commit_all(cwd, message, None)
+}
+
+/// Add paths to the index without changing their working-tree contents.
+pub fn stage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to stage.");
+    anyhow::ensure!(run(cwd, &["ls-files", "-u", "--"])?.is_empty(), "Resolve merge conflicts before staging files.");
+    let mut args = vec!["--literal-pathspecs", "add", "-A", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+/// Remove paths from the index while preserving every working-tree edit.
+pub fn unstage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to unstage.");
+    let mut args = vec!["--literal-pathspecs", "reset", "-q", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+pub fn unstage_all(cwd: &Path) -> Result<()> {
+    run(cwd, &["reset", "-q"]).map(|_| ())
+}
+
+/// Apply one hunk from Git's own working-tree or cached diff. The patch is
+/// generated here so callers cannot redirect it to another path. `reverse`
+/// removes a selected cached hunk; neither operation touches the worktree.
+pub fn apply_hunk(
+    cwd: &Path,
+    path: &str,
+    old_path: Option<&str>,
+    index: usize,
+    reverse: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    if !reverse && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let staged_old = raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--", old]);
+            anyhow::ensure!(matches!(staged_old, Some((0, _))), "Unstage existing changes to the original file before staging rename hunks.");
+            let before = hunk_diff(cwd, path, old_path, false)?;
+            let count = hunk_starts(&before).len();
+            anyhow::ensure!(index < count, "That hunk is no longer available. Refresh the diff and try again.");
+            stage_paths(cwd, &[old.to_string(), path.to_string()])?;
+            let result = (|| {
+                let diff = hunk_diff(cwd, path, old_path, true)?;
+                let staged_count = hunk_starts(&diff).len();
+                anyhow::ensure!(index < staged_count, "That hunk is no longer available. Refresh the diff and try again.");
+                for other in (0..staged_count).rev().filter(|other| *other != index) {
+                    apply_patch(cwd, &hunk_patch(&diff, other)?, true)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if let Err(rollback_error) = unstage_paths(cwd, &[old.to_string(), path.to_string()]) {
+                    bail!("Could not finish staging this rename hunk ({error}); the worktree is unchanged, but unstage {path} and {old} to restore the index: {rollback_error}");
+                }
+                return Err(error);
+            }
+            return Ok(());
+        }
+    }
+    let diff = hunk_diff(cwd, path, old_path, reverse)?;
+    apply_patch(cwd, &hunk_patch(&diff, index)?, reverse)
+}
+
+fn hunk_starts(diff: &str) -> Vec<usize> {
+    let mut starts: Vec<usize> = diff.match_indices("\n@@ -").map(|(i, _)| i + 1).collect();
+    if diff.starts_with("@@ -") {
+        starts.insert(0, 0);
+    }
+    starts
+}
+
+fn hunk_patch(diff: &str, index: usize) -> Result<String> {
+    let starts = hunk_starts(diff);
+    let header_end = starts.first().copied().ok_or_else(|| anyhow!("This file has no text hunks to apply."))?;
+    let selected = starts.get(index).ok_or_else(|| anyhow!("That hunk is no longer available. Refresh the diff and try again."))?;
+    let end = starts.get(index + 1).copied().unwrap_or(diff.len());
+    let patch = format!("{}{}", &diff[..header_end], &diff[*selected..end]);
+    Ok(keep_rename_path_for_hunk(&patch))
+}
+
+/// Apply a selected rename hunk as a content edit at the destination path.
+/// Keeping Git's rename metadata would move the whole file on reverse apply.
+fn keep_rename_path_for_hunk(patch: &str) -> String {
+    let Some(plus) = patch.lines().find(|line| {
+        line.starts_with("+++ b/") || line.starts_with("+++ \"b/")
+    }) else {
+        return patch.to_string();
+    };
+    if !patch.lines().any(|line| line.starts_with("rename from ")) {
+        return patch.to_string();
+    }
+    let new_path = &plus[4..];
+    let old_path = if let Some(stripped) = new_path.strip_prefix("\"b/") {
+        format!("\"a/{stripped}")
+    } else {
+        format!("a/{}", new_path.strip_prefix("b/").unwrap_or(new_path))
+    };
+    let mut lines = Vec::new();
+    for (i, line) in patch.lines().enumerate() {
+        match i {
+            0 => lines.push(format!("diff --git {old_path} {new_path}")),
+            _ if line.starts_with("similarity index ") || line.starts_with("rename from ") || line.starts_with("rename to ") => continue,
+            _ if line.starts_with("--- a/") || line.starts_with("--- \"a/") => lines.push(format!("--- {old_path}")),
+            _ if line.starts_with("+++ b/") || line.starts_with("+++ \"b/") => lines.push(format!("+++ {new_path}")),
+            _ => lines.push(line.to_string()),
+        }
+    }
+    lines.join("\n") + if patch.ends_with('\n') { "\n" } else { "" }
+}
+
+fn apply_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut command = git();
+    let args: &[&str] = if reverse {
+        &["apply", "--cached", "--reverse", "--recount", "--"]
+    } else {
+        &["apply", "--cached", "--recount", "--"]
+    };
+    command
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Git input unavailable"))?;
+    let write_result = stdin.write_all(patch.as_bytes());
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    write_result?;
+    if !output.status.success() {
+        bail!(
+            "git apply: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn hunk_count(cwd: &Path, path: &str, old_path: Option<&str>, staged: bool) -> Result<usize> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    let diff = hunk_diff(cwd, path, old_path, staged)?;
+    Ok(hunk_starts(&diff).len())
+}
+
+fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Result<String> {
+    if !cached && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let index = run(cwd, &["write-tree"])?.trim().to_string();
+            let previous = run(cwd, &["show", &format!("{index}:{old}")])?;
+            let temp = tempfile::tempdir()?;
+            let baseline = temp.path().join("baseline");
+            std::fs::write(&baseline, previous)?;
+            let output = git()
+                .current_dir(cwd)
+                .args([
+                    "--literal-pathspecs", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color",
+                    "--unified=3", "--", baseline.to_str().ok_or_else(|| anyhow!("Invalid temporary path"))?, path,
+                ])
+                .output()?;
+            anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "git diff could not read the renamed file: {}", String::from_utf8_lossy(&output.stderr).trim());
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+        "--unified=3",
+    ];
+    if cached {
+        args.push("--cached");
+    }
+    args.push("--");
+    if let Some(old) = old_path {
+        args.push(old);
+    }
+    args.push(path);
+    let diff = run(cwd, &args)?;
+    if !diff.is_empty() || cached {
+        return Ok(diff);
+    }
+    // Git's ordinary diff omits untracked files. Build their patch from /dev/null;
+    // this still lets `git apply --cached` select only one hunk.
+    let tracked = path_is_tracked(cwd, path);
+    if tracked {
+        return Ok(diff);
+    }
+    use std::process::Stdio;
+    let output = git()
+        .current_dir(cwd)
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--unified=3",
+            "--",
+            "/dev/null",
+            path,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    anyhow::ensure!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "git diff could not read the untracked file: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn path_is_tracked(cwd: &Path, path: &str) -> bool {
+    raw(cwd, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).is_some_and(|(code, _)| code == 0)
+}
+
+pub fn staged_diff(cwd: &Path, limit: usize) -> Result<String> {
+    let diff = run(
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--",
+            ".",
+        ],
+    )?;
+    anyhow::ensure!(
+        !diff.trim().is_empty(),
+        "Stage changes before generating a commit message."
+    );
+    anyhow::ensure!(
+        diff.len() <= limit,
+        "The staged diff is too large to send for a commit message. Stage a smaller selection."
+    );
+    Ok(diff)
+}
+
 pub fn push(cwd: &Path) -> Result<String> {
+    let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
     let has_upstream = run_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if has_upstream {
-        run(cwd, &["push"])
+        transfer(cwd, &["push"])
     } else {
-        run(cwd, &["push", "-u", "origin", &branch])
+        transfer(cwd, &["push", "-u", "origin", &branch])
     }
 }
 
+pub fn has_remote(cwd: &Path) -> Result<bool> {
+    Ok(!run(cwd, &["remote"])?.trim().is_empty())
+}
+
+pub fn add_remote(cwd: &Path, url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
+        bail!("Enter a remote URL.");
+    }
+    // Arguments, never a shell command. Git refuses an existing origin rather
+    // than silently replacing a destination another window just configured.
+    run(cwd, &["remote", "add", "origin", url]).map(|_| ())
+}
+
 pub fn pull(cwd: &Path) -> Result<String> {
+    let _request = crate::github_process::scope();
+    // The Branch tab also offers incoming commits for --no-track worktrees.
+    // Pull the published branch explicitly without changing its configuration.
+    if run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).is_err()
+        && comparison_ref(cwd).is_some() {
+        if let Some(branch) = current_branch(cwd) {
+            return run(cwd, &["pull", "--ff-only", "--", "origin", &branch]);
+        }
+    }
     run(cwd, &["pull", "--ff-only"])
+}
+
+fn transfer(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    let out = crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())?;
+    if !out.status.success() {
+        bail!("git {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
@@ -1351,6 +1852,26 @@ pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
         run(cwd, &["checkout", name])?;
     }
     Ok(())
+}
+
+/// Put a checkout on a detached HEAD onto a new branch at the commit it is on
+/// (PRO-295), named `name` under the project's branch prefix as a new
+/// worktree's branch is: nobody has named it yet, so it reads as a drawn name
+/// until it is renamed. Uncommitted work stays where it is. Refused when the
+/// checkout is already on a branch, has no commit, or the branch exists.
+pub fn branch_here(project: &Path, cwd: &Path, name: &str) -> Result<String> {
+    if let Some(branch) = current_branch(cwd) {
+        bail!("This checkout is already on {branch}.");
+    }
+    if head_commit(cwd).is_none() {
+        bail!("This checkout has no commit to make a branch at.");
+    }
+    let branch = worktree_branch_for(project, name)?;
+    if branch.starts_with('-') || branch_exists(cwd, &branch) {
+        bail!("A branch named {branch} already exists.");
+    }
+    run(cwd, &["checkout", "-b", &branch])?;
+    Ok(branch)
 }
 
 /// This person's Git identity (`user.name`, `user.email` from their global
@@ -1375,11 +1896,25 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 /// `pushRemote`, else `remote.pushDefault`, else the branch's `remote`. Often
 /// a fork when the work goes to someone else's repository by pull request.
 pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
-    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let remote = config(format!("branch.{branch}.pushRemote"))
-        .or_else(|| config("remote.pushDefault".into()))
-        .or_else(|| config(format!("branch.{branch}.remote")))?;
+    let remote = push_remote(cwd, branch)?;
     run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub(crate) fn push_remote(cwd: &Path, branch: &str) -> Option<String> {
+    let config = |key: String| run(cwd, &["config", "--get", &key]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    config(format!("branch.{branch}.pushRemote"))
+        .or_else(|| config("remote.pushDefault".into()))
+        .or_else(|| config(format!("branch.{branch}.remote")))
+}
+
+/// A single explicit destination, before Git's transport URL rewrites. Multiple
+/// push URLs are refused: pipeline automation must write to exactly one repo.
+pub(crate) fn configured_push_url(cwd: &Path, remote: &str) -> Result<String> {
+    let configured = run(cwd, &["config", "--get-all", &format!("remote.{remote}.pushurl")])
+        .or_else(|_| run(cwd, &["config", "--get-all", &format!("remote.{remote}.url")]))?;
+    let urls: Vec<_> = configured.lines().filter(|url| !url.is_empty()).collect();
+    if urls.len() != 1 { anyhow::bail!("Remote {remote} must have exactly one push URL for conflict resolution."); }
+    Ok(urls[0].into())
 }
 
 #[cfg(test)]
@@ -1420,6 +1955,253 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn staging_one_hunk_preserves_other_worktree_edits_and_commit_uses_only_index() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "fixture", None).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("a.txt"), &changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(
+            run(p, &["diff", "--cached", "--numstat", "--", "a.txt"])
+                .unwrap()
+                .trim(),
+            "1\t1\ta.txt"
+        );
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        commit_staged_or_all(p, "only first hunk").unwrap();
+        let committed = run(p, &["show", "HEAD:a.txt"]).unwrap();
+        assert!(committed.contains("changed 2"));
+        assert!(committed.contains("line 22"));
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        apply_hunk(p, "a.txt", None, 0, true).unwrap();
+        assert!(run(p, &["diff", "--cached", "--quiet", "--"]).is_ok());
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+    }
+
+    #[test]
+    fn hunk_patches_support_untracked_and_renamed_files() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        let new_file = (1..=24).map(|n| format!("new {n}\n")).collect::<String>();
+        std::fs::write(
+            p.join("fresh.txt"),
+            new_file
+                .replace("new 2\n", "changed 2\n")
+                .replace("new 22\n", "changed 22\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            hunk_count(p, "fresh.txt", None, false).unwrap(),
+            1,
+            "an untracked file is one all-additions hunk"
+        );
+        apply_hunk(p, "fresh.txt", None, 0, false).unwrap();
+        assert!(
+            run(p, &["diff", "--cached", "--name-only", "--", "fresh.txt"])
+                .unwrap()
+                .contains("fresh.txt")
+        );
+        unstage_all(p).unwrap();
+
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "rename fixture", None).unwrap();
+        std::fs::rename(p.join("a.txt"), p.join("renamed.txt")).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("renamed.txt"), changed).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), false).unwrap(),
+            2
+        );
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, false).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(),
+            1
+        );
+        assert_rename_is_staged(p);
+
+        unstage_all(p).unwrap();
+        stage_paths(p, &["a.txt".into(), "renamed.txt".into()]).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 2);
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, true).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 1);
+        assert_rename_is_staged(p);
+        assert!(p.join("renamed.txt").exists());
+        assert!(!p.join("a.txt").exists());
+    }
+
+    fn assert_rename_is_staged(cwd: &Path) {
+        let status = run(cwd, &["diff", "--cached", "--name-status", "-M", "--"]).unwrap();
+        let fields: Vec<_> = status.trim().split('\t').collect();
+        assert_eq!(fields.len(), 3, "expected one staged rename, got {status:?}");
+        assert!(fields[0].starts_with('R'), "expected rename status, got {status:?}");
+        assert_eq!(&fields[1..], ["a.txt", "renamed.txt"]);
+    }
+
+    #[test]
+    fn hunk_boundaries_only_match_line_starts() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=32).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "hunk boundary fixture", None).unwrap();
+        let changed = original.replace("line 2\n", "see @@ -1,2 +1,2 @@ here\n").replace("line 30\n", "changed 30\n");
+        std::fs::write(p.join("a.txt"), changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn hunk_staging_handles_missing_final_newline_and_crlf() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\r\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "crlf fixture", None).unwrap();
+        let changed = original.replace("line 2\r\n", "changed 2\r\n").replace("line 24\r\n", "changed final");
+        std::fs::write(p.join("a.txt"), changed.as_bytes()).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 1, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+        assert!(run(p, &["diff", "--cached", "--", "a.txt"]).unwrap().contains("\\ No newline at end of file"));
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        unstage_all(p).unwrap();
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn working_change_sets_keep_conflicted_worktree_reviewable() {
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "base\n").unwrap();
+        commit_all(p, "conflict base", None).unwrap();
+        run(p, &["checkout", "-qb", "other"]).unwrap();
+        std::fs::write(p.join("a.txt"), "theirs\n").unwrap();
+        commit_all(p, "theirs", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("a.txt"), "ours\n").unwrap();
+        commit_all(p, "ours", None).unwrap();
+        assert!(run(p, &["merge", "other"]).is_err());
+
+        assert!(!run(p, &["ls-files", "-u", "--"]).unwrap().is_empty());
+        let (_, index, staged, unstaged) = working_change_sets(p, false).unwrap();
+        assert!(!index.is_empty());
+        assert!(staged.is_empty());
+        assert!(unstaged.iter().any(|file| file.path == "a.txt"));
+    }
+
+
+    #[test]
+    fn a_branch_here_is_made_at_the_detached_commit_and_checked_out() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = dir.path();
+        std::fs::write(project.join("b.txt"), "two\n").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "second"]).unwrap();
+        let detached = run(project, &["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+        run(project, &["checkout", "-q", "--detach", &detached]).unwrap();
+        std::fs::write(project.join("a.txt"), "edited, not committed\n").unwrap();
+        assert!(current_branch(project).is_none());
+
+        let branch = branch_here(project, project, "calm-moss-robin").unwrap();
+        assert_eq!(branch, worktree_branch_for(project, "calm-moss-robin").unwrap());
+        assert_eq!(current_branch(project).as_deref(), Some(branch.as_str()));
+        // At the commit it was detached at, not main's tip, with the uncommitted edit kept.
+        assert_eq!(run(project, &["rev-parse", "HEAD"]).unwrap().trim(), detached);
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "edited, not committed\n");
+
+        // On a branch now, so there is nothing to make; and a name already a branch is never taken over.
+        assert!(branch_here(project, project, "tidy-sage-wren").unwrap_err().to_string().contains("already on"));
+        run(project, &["checkout", "-q", "--detach", "main"]).unwrap();
+        assert!(branch_here(project, project, "calm-moss-robin").unwrap_err().to_string().contains("already exists"));
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert!(current_branch(project).is_none());
+    }
+
+    #[test]
+    fn pr_checkout_uses_the_fetched_head_and_cleans_up_a_failed_checkout() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = dir.path();
+        // An ignored file named by .worktreeinclude is copied into a PR worktree as into any other.
+        let excludes = project.join(".git/test-global-ignore");
+        std::fs::write(&excludes, "").unwrap();
+        run(project, &["config", "core.excludesFile", excludes.to_str().unwrap()]).unwrap();
+        std::fs::write(project.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(project.join(".worktreeinclude"), ".env\n").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "worktree files"]).unwrap();
+        std::fs::write(project.join(".env"), "LOCAL=1\n").unwrap();
+        let original = run(project, &["rev-parse", "HEAD"]).unwrap();
+        run(project, &["checkout", "-qb", "fork-head"]).unwrap();
+        std::fs::write(project.join("fork.txt"), "from a fork").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "fork change"]).unwrap();
+        let head = run(project, &["rev-parse", "HEAD"]).unwrap();
+        run(project, &["checkout", "main"]).unwrap();
+        let wt = checkout_pr_worktree_with(project, "pr-12", 12, |cwd, number, branch| {
+            assert_eq!(number, 12);
+            assert_ne!(cwd, project);
+            assert!(current_branch(cwd).is_none());
+            run(cwd, &["checkout", "-b", branch, head.trim()]).map(|_| ())
+        }).unwrap();
+        assert_eq!(run(Path::new(&wt.path), &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(run(project, &["rev-parse", "HEAD"]).unwrap(), original);
+        assert!(Path::new(&wt.path).join("fork.txt").exists());
+        assert_eq!(std::fs::read_to_string(Path::new(&wt.path).join(".env")).unwrap(), "LOCAL=1\n");
+        assert_eq!(wt.worktree_base.as_ref().and_then(|base| base.file_copy.as_ref()).map(|copy| copy.copied_count), Some(1));
+        assert!(checkout_pr_worktree_with(project, "broken-pr", 12, |cwd, _, branch| {
+            run(cwd, &["checkout", "-b", branch])?;
+            bail!("GitHub unavailable")
+        }).is_err());
+        assert!(!worktree_path(project, "broken-pr").exists());
+        assert!(!branch_exists(project, &worktree_branch_for(project, "broken-pr").unwrap()));
+        // A collision never deletes the earlier worktree or branch.
+        assert!(checkout_pr_worktree_with(project, "pr-12", 12, |_, _, _| unreachable!()).is_err());
+        assert!(Path::new(&wt.path).exists());
+    }
+
+    #[test]
+    fn adding_a_remote_resolves_a_local_only_repository_and_pushes() {
+        let local = repo();
+        let remote = tempfile::tempdir().unwrap();
+        run(remote.path(), &["init", "--bare", "-q"]).unwrap();
+        assert!(!has_remote(local.path()).unwrap());
+        add_remote(local.path(), remote.path().to_str().unwrap()).unwrap();
+        assert!(has_remote(local.path()).unwrap());
+        push(local.path()).unwrap();
+        assert_eq!(run(remote.path(), &["rev-parse", "main"]).unwrap(), run(local.path(), &["rev-parse", "HEAD"]).unwrap());
+        assert!(add_remote(local.path(), "https://example.com/another.git").is_err());
+        assert_eq!(remote_url(local.path()).as_deref(), remote.path().to_str());
+    }
+
+    #[test]
+    fn invalid_remote_urls_do_not_change_git_configuration() {
+        let local = repo();
+        for url in ["", " ", "--upload-pack=bad", "https://example.com/repo\nnext"] {
+            assert!(add_remote(local.path(), url).is_err());
+            assert!(!has_remote(local.path()).unwrap());
+        }
     }
 
     #[test]
@@ -1467,6 +2249,70 @@ mod tests {
         let ws = work_status(p);
         assert!(ws.is_repo && ws.dirty);
         assert_eq!(ws.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn review_blob_identities_cover_renames_deletions_binary_and_live_changes() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("old name"), "a unique file to rename\n").unwrap();
+        std::fs::write(p.join("gone"), "removed\n").unwrap();
+        commit_all(p, "fixtures", None).unwrap();
+        let base = head_tree(p).unwrap();
+        let renamed = "new\tname\n.txt";
+        std::fs::rename(p.join("old name"), p.join(renamed)).unwrap();
+        std::fs::remove_file(p.join("gone")).unwrap();
+        std::fs::write(p.join("binary"), [0, 1, 255, 2]).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmodified\n").unwrap();
+        let head = snapshot_tree(p).unwrap();
+        let files = changes_between(p, &base, Some(&head)).unwrap();
+        assert_eq!(files.len(), 4);
+        for file in &files {
+            let expected = if file.status == ChangeStatus::Deleted {
+                format!("deleted:{}", run(p, &["rev-parse", &format!("{base}:{}", file.path)]).unwrap().trim())
+            } else {
+                run(p, &["rev-parse", &format!("{head}:{}", file.path)]).unwrap().trim().to_string()
+            };
+            assert_eq!(file.blob_hash.as_deref(), Some(expected.as_str()));
+        }
+        let rename = files.iter().find(|file| file.path == renamed).unwrap();
+        assert_eq!(rename.old_path.as_deref(), Some("old name"));
+        assert_eq!(rename.status, ChangeStatus::Renamed);
+        std::fs::write(p.join("binary"), [0, 3, 255, 2]).unwrap();
+        let next = snapshot_tree(p).unwrap();
+        let updated = changes_between_options(p, &base, Some(&next), true).unwrap();
+        for file in &files {
+            let changed = updated.iter().find(|other| other.path == file.path).unwrap();
+            assert_eq!(file.blob_hash == changed.blob_hash, file.path != "binary");
+        }
+        assert!(changes_between(p, &base, None).unwrap().iter().all(|file| file.blob_hash.is_none()));
+    }
+
+    #[test]
+    fn commit_scope_counts_match_git_show_for_root_regular_and_merge_commits() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let mut commits = log_commits(p, None, 1).unwrap();
+        std::fs::write(p.join("a.txt"), "hello\nmore\n").unwrap();
+        commit_all(p, "regular", None).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        run(p, &["checkout", "-b", "other"]).unwrap();
+        std::fs::write(p.join("other.txt"), "other branch\n").unwrap();
+        commit_all(p, "other", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("main.txt"), "main branch\n").unwrap();
+        commit_all(p, "main", None).unwrap();
+        run(p, &["merge", "--no-ff", "other", "-m", "merge"]).unwrap();
+        commits.extend(log_commits(p, None, 1).unwrap());
+        for commit in commits {
+            let base = commit.parent.as_deref().map(|sha| log_commits(p, Some(sha), 1).unwrap()[0].tree.clone()).unwrap_or_else(|| EMPTY_TREE.into());
+            let files = changes_between(p, &base, Some(&commit.tree)).unwrap();
+            let expected = run(p, &["show", "--format=", "--numstat", &commit.sha, "--"]).unwrap();
+            let actual = files.iter().map(|file| format!("{}\t{}\t{}\n", file.additions, file.deletions, file.path)).collect::<String>();
+            assert_eq!(actual.trim(), expected.trim(), "commit {}", commit.sha);
+        }
     }
 
     #[test]

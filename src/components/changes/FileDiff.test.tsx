@@ -20,7 +20,9 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 it("hides whitespace highlights without changing the displayed or copied new text", async () => {
   const { container } = render(<><DiffOptions /><FileDiff {...props} /></>);
   await screen.findByRole("button", { name: "Copy file" });
-  expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+  // The header and the editor are not drawn in the same step: the button is
+  // there once the file is read, the editor once its effect has run.
+  await waitFor(() => expect(container.querySelector(".cm-changedLine")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
   expect(container.querySelector(".cm-changedLine")).toBeNull();
   expect(container.querySelector(".cm-content")?.textContent).toContain("const x=1;");
@@ -35,12 +37,12 @@ it("hides whitespace highlights without changing the displayed or copied new tex
 it("applies file wrap overrides independently of the global default", async () => {
   const { container, rerender } = render(<><DiffOptions /><FileDiff {...props} /></>);
   const select = await screen.findByLabelText("Wrap lines for this file");
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.change(select, { target: { value: "false" } });
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   rerender(<><DiffOptions /><FileDiff {...props} path="other.ts" /></>);
   await screen.findByLabelText("Wrap lines for this file");
-  expect(container.querySelector(".cm-lineWrapping")).not.toBeNull();
+  await waitFor(() => expect(container.querySelector(".cm-lineWrapping")).not.toBeNull());
   fireEvent.click(screen.getByLabelText("Wrap lines by default"));
   expect(container.querySelector(".cm-lineWrapping")).toBeNull();
   fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "true" } });
@@ -104,6 +106,25 @@ it("does not copy a truncation marker as file contents", async () => {
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
 
+it.each(["png", "svg"])("reports an unavailable historical %s object without claiming the file was absent, and retries after it is fetched", async (extension) => {
+  const unavailable = new Error("Revision is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+  if (extension === "png") {
+    vi.mocked(source.mediaContentAt!).mockImplementation(async (_path, tree) => {
+      if (tree === "base") throw unavailable;
+      return { data: btoa("after"), mime: "image/png" };
+    });
+  } else vi.mocked(source.fileContentsAt).mockRejectedValueOnce(unavailable);
+  render(<FileDiff {...props} path={`image.${extension}`} />);
+  expect((await screen.findByRole("alert")).textContent).toContain("unavailable locally");
+  expect(screen.queryByText("File does not exist in this revision.")).toBeNull();
+  expect(screen.queryByRole("region", { name: "Before" })).toBeNull();
+  if (extension === "png") {
+    vi.mocked(source.mediaContentAt!).mockImplementation(async (_path, tree) => ({ data: btoa(tree ?? "working"), mime: "image/png" }));
+  } else vi.mocked(source.fileContentsAt).mockResolvedValue({ before: "<svg/>", after: "<svg/>" });
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findAllByRole("img")).toHaveLength(2);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
 
 it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside its viewer", async (path) => {
   vi.mocked(source.mediaContentAt!).mockResolvedValue({ data: btoa("image"), mime: "image/png" });
@@ -113,4 +134,12 @@ it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside
   else await screen.findByRole("region", { name: "After" });
   fireEvent.click(screen.getByRole("button", { name: `Discard changes to ${path}` }));
   expect(onDiscard).toHaveBeenCalledTimes(1);
+});
+
+it("offers one stage action for each Git hunk in the diff header", async () => {
+  const hunkSource = { ...source, hunkCount: vi.fn().mockResolvedValue(2), applyHunk: vi.fn() } as unknown as GitSource;
+  const onHunk = vi.fn();
+  render(<FileDiff {...props} source={hunkSource} staging={{ staged: false, onHunk }} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Stage hunk 2" }));
+  expect(onHunk).toHaveBeenCalledWith(1);
 });

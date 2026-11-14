@@ -6,8 +6,7 @@
 // menu offers the file's actions.
 // pnpm build && pnpm exec playwright install webkit && node scripts/webkit/file-citations.mjs
 import assert from "node:assert/strict";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const longName = `Quarterly revenue model with every regional breakdown and the full ${"assumptions ".repeat(4)}appendix.xlsx`;
 const reply = [
@@ -21,7 +20,7 @@ const reply = [
 const server = await serve();
 let browser;
 try {
-  browser = await webkit.launch();
+  browser = await launch();
   for (const floating of [false, true]) {
     const extra = `(() => {
       window.__PW_FILE_ACTIONS__ = [];
@@ -37,7 +36,7 @@ try {
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating }, { width: 1100, height: 800 }, { extra });
     if (!floating) {
-      await openConversation(page, "claude tab");
+      await openConversation(page, "Local long session");
       await tab(page, "gemini tab").click();
     }
     const chip = page.locator("[data-chat-scroller] a[data-file-chip]:visible").first();
@@ -51,7 +50,7 @@ try {
         await page.emulateMedia({ colorScheme });
         await page.evaluate((zoom) => { document.documentElement.style.zoom = String(zoom); }, zoom);
         const result = await page.evaluate(() => {
-          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0);
+          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const prose = root.querySelector(".prose-chat");
           const box = prose.getBoundingClientRect();
           const inside = (r) => r.left >= box.left - 1 && r.right <= box.right + 1;

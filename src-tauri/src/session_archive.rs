@@ -6,7 +6,7 @@
 //! Show archived, found by the command palette and by
 //! `terminalx sessions list --archived`. Every way in or out goes through
 //! [`set_archived`]: a row's menu, the sidebar's bulk bar, removing a
-//! project, the CLI, the idle sweep, and a new message, so whichever did it
+//! project, the CLI, the idle sweep, a completed automation run, and a new message, so whichever did it
 //! the windows hear of it the same way (`session_updated`) at once.
 //!
 //! **The idle sweep.** A session nobody has written in for the limit in
@@ -48,6 +48,9 @@ pub enum By {
     Person,
     /// The idle sweep.
     Idle,
+    /// An automation whose run completed (#887). Set aside on purpose, so
+    /// retention leaves it alone, as for a person.
+    Automation,
     /// A new message in it.
     Message,
 }
@@ -212,6 +215,7 @@ pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
     }
     // As the index last had it: a runtime that has not looked at the tab since still says so.
     for tab in &session.tabs {
+        if tab.marked_unread { return Some(Kept::Unread); }
         match tab.status {
             TabStatus::InProgress => return Some(Kept::Working),
             TabStatus::Waiting => return Some(Kept::WaitingForYou),
@@ -303,6 +307,11 @@ pub fn busy(manager: &crate::session::SessionManager, session: &SessionEntry, li
     if let Some(why) = taken_up(manager, session) {
         return Some(why);
     }
+    // A queue survives its runtime. Before the tab is opened after a restart,
+    // wait_view has no runtime to report it from. Keep that session visible.
+    if session.tabs.iter().any(|tab| manager.has_held_queue(&session.id, &tab.id).unwrap_or(true)) {
+        return Some(Kept::Queued);
+    }
     // Work a turn left running: a file to read, and the process table.
     if session.tabs.iter().any(|tab| manager.background_work(&session.id, &tab.id).is_some()) {
         return Some(Kept::Working);
@@ -326,7 +335,7 @@ pub fn taken_up(manager: &crate::session::SessionManager, session: &SessionEntry
         if view.status == TabStatus::InProgress || !manager.pipeline_idle(&session.id, &tab.id) {
             return Some(Kept::Working);
         }
-        if view.status == TabStatus::Completed {
+        if tab.marked_unread || view.status == TabStatus::Completed {
             return Some(Kept::Unread);
         }
     }

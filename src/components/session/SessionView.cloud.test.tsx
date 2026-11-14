@@ -387,6 +387,9 @@ function cloudHandlers() {
     },
     // Reading a Git identity is local but pathless: commits carry it.
     git_identity: () => ({ name: "Ada", email: "ada@example.com" }),
+    // Personal review notes live in desktop app data, keyed by workspace/repo.
+    // The command does not read checkout files; those still go through runtime Git.
+    review_comments: () => [],
   };
 }
 
@@ -822,6 +825,12 @@ describe("the right panel of a cloud session", () => {
 
     fireEvent.change(screen.getByRole("combobox", { name: "Repository" }), { target: { value: "web" } });
     await waitFor(() => expect(runtime.methods("git.status").some((frame) => (frame.params as { repo: string }).repo === "web")).toBe(true));
+    const reviewCalls = () => guard.calls.filter((call) => call.command === "review_comments").map((call) => call.args);
+    await waitFor(() => expect(reviewCalls()).toContainEqual({ workspace: `cloud:${ORG}:${WS}|web`, action: { type: "list" } }));
+    expect(reviewCalls()).toContainEqual({ workspace: `cloud:${ORG}:${WS}|api`, action: { type: "list" } });
+    for (const args of reviewCalls()) {
+      expect(["api", "web"].map((repo) => ({ workspace: `cloud:${ORG}:${WS}|${repo}`, action: { type: "list" } }))).toContainEqual(args);
+    }
     expect(guard.violations).toEqual([]);
   });
 });

@@ -1,10 +1,12 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";
-import type { EditorEntry } from "@/lib/editors";
+import type { FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
+import { AttachmentToolbar } from "./AttachmentToolbar";
 
 const PdfSurface = lazy(() => import("./PdfSurface"));
 
@@ -30,11 +32,11 @@ export function MediaPreview({ data, svg, mime, name }: { data?: string; svg?: s
 }
 
 /** A media tab never mounts CodeMirror or registers a saveable buffer. */
-export function MediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+export function MediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   return entry.source ? <CloudMediaPane entry={entry} visible={visible} /> : <LocalMediaPane entry={entry} visible={visible} />;
 }
 
-function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+function LocalMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   const pane = useRef<HTMLDivElement>(null);
   const [media, setMedia] = useState<MediaFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,12 +96,14 @@ function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boole
     <div ref={pane} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" onKeyDownCapture={(e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); e.stopPropagation(); }
     }}>
-      <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
-        <span className="min-w-0 truncate text-muted-foreground" title={abs}>{entry.rel}</span>
-        <span className="ml-auto shrink-0 text-faint">Read-only</span>
-        <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
-        <Button variant="ghost" size="icon-xs" aria-label="Reveal file" onClick={reveal}><FolderOpen /></Button>
-      </div>
+      {entry.attachment ? <AttachmentToolbar path={entry.attachment.path} name={entry.name} sentAt={entry.attachment.sentAt} /> : (
+        <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
+          <span className="min-w-0 truncate text-muted-foreground" title={abs}>{entry.rel}</span>
+          <span className="ml-auto shrink-0 text-faint">Read-only</span>
+          <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
+          <Button variant="ghost" size="icon-xs" aria-label="Reveal file" onClick={reveal}><FolderOpen /></Button>
+        </div>
+      )}
       {changed && !error && <div className="flex items-center gap-2 bg-warning/10 px-3 py-2 text-xs">
         File changed on disk. Reload to view the latest version.
         <Button variant="outline" size="xs" onClick={reload}>Reload</Button>
@@ -126,7 +130,7 @@ function LocalMediaPane({ entry, visible }: { entry: EditorEntry; visible: boole
  * A cloud workspace's media file (PRO-24): read from the runtime in parts
  * into an object URL, dropped when the tab closes or the file is reloaded.
  */
-function CloudMediaPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+function CloudMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: boolean }) {
   const pane = useRef<HTMLDivElement>(null);
   const source = useFileSource(entry.source, entry.root);
   const [media, setMedia] = useState<{ url: string; state: FileState } | null>(null);
@@ -219,7 +223,7 @@ function ImageSurface({ src, name, onError }: { src: string; name: string; onErr
     </div>
     <div ref={host} className="min-h-0 flex-1 overflow-auto" style={{ backgroundColor: "#e5e5e5", backgroundImage: "conic-gradient(#c4c4c4 25%, transparent 0 50%, #c4c4c4 0 75%, transparent 0)", backgroundSize: "20px 20px" }}>
       <div className="flex min-h-full min-w-full w-max items-center justify-center" style={zoom === null ? { width: "100%", height: "100%" } : undefined}>
-        <img ref={image} src={src} alt={name} draggable={false} onError={onError}
+        <PrivacyImage ref={image} src={src} alt={name} draggable={false} onError={onError}
           onLoad={(e) => setSize({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
           style={zoom === null ? { maxWidth: "100%", maxHeight: "100%", objectFit: "contain" } : { width: size ? size.width * zoom : undefined, maxWidth: "none", flexShrink: 0 }} />
       </div>

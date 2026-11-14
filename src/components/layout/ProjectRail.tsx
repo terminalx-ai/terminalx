@@ -1,3 +1,5 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
+import { SessionRowData } from "./SessionRowExtras";
 import { useMemo, useState, type ReactNode } from "react";
 import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, LayoutGrid } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -36,7 +38,7 @@ export interface RailProps {
 /** The sidebar in the shape the reader chose: the projects with their conversations, or one flat list of chats. */
 export function ProjectRail(props: RailProps) {
   const { sidebarLayout } = usePrefs();
-  return sidebarLayout === "list" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />;
+  return <SessionRowData>{sidebarLayout !== "simple" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />}</SessionRowData>;
 }
 
 /**
@@ -135,13 +137,13 @@ export function ProjectGlyph({ project, size = 16 }: { project: Project; size?: 
   const identity = useGithubIdentity(project.logo || project.mascot || project.kind === "folder" ? null : project.path);
   const [unavailable, setUnavailable] = useState<string | null>(null);
   if (project.logo) {
-    return <img src={convertFileSrc(project.logo)} alt="" width={size} height={size} className="shrink-0 rounded-sm object-cover" style={{ width: size, height: size }} />;
+    return <PrivacyImage src={convertFileSrc(project.logo)} alt="" width={size} height={size} className="shrink-0 rounded-sm object-cover" style={{ width: size, height: size }} />;
   }
   if (project.mascot) return <PixelMascot id={project.mascot} color={project.color} size={size} />;
   const owner = identity?.repo?.split("/")[0];
   if (owner && unavailable !== owner) {
     return (
-      <img
+      <PrivacyImage
         src={githubAvatarUrl(owner, size * 2)}
         alt=""
         title={`On GitHub as ${identity?.repo}`}

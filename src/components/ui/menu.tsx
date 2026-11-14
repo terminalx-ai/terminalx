@@ -4,7 +4,25 @@ import { Check, ChevronRight } from "@/icons";
 import { cn } from "@/lib/cn";
 import { isContextMenuKey, isContextMenuTextField, openContextMenu } from "@/lib/contextMenu";
 
+const CloseMenu = React.createContext<(() => void) | null>(null);
+
+/** Close the owning root after an asynchronous menu action succeeds. */
+export const useCloseMenu = () => React.useContext(CloseMenu);
+
+function useMenuState({ open, defaultOpen = false, onOpenChange }: { open?: boolean; defaultOpen?: boolean; onOpenChange?: (open: boolean) => void }) {
+  const [ownOpen, setOwnOpen] = React.useState(defaultOpen);
+  const change = React.useCallback((value: boolean) => { setOwnOpen(value); onOpenChange?.(value); }, [onOpenChange]);
+  const close = React.useCallback(() => change(false), [change]);
+  return { open: open ?? ownOpen, onOpenChange: change, close };
+}
+
 export const DropdownMenu = Prim.Root;
+
+/** Opt in only when an action must close its menu after asynchronous work. */
+export function AsyncDropdownMenu(props: React.ComponentProps<typeof Prim.Root>) {
+  const { close, ...state } = useMenuState(props);
+  return <Prim.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Prim.Root>;
+}
 export const DropdownMenuTrigger = Prim.Trigger;
 export const DropdownMenuGroup = Prim.Group;
 export const DropdownMenuSub = Prim.Sub;
@@ -18,7 +36,7 @@ export const DropdownMenuRadioGroup = Prim.RadioGroup;
 const COLLISION_PADDING = 8;
 
 const contentClass =
-  "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
+  "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
 
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof Prim.Content>,
@@ -68,10 +86,23 @@ export const DropdownMenuItem = React.forwardRef<
 ));
 DropdownMenuItem.displayName = "DropdownMenuItem";
 
+/**
+ * A toggle row. `indicator="box"` draws a checkbox ahead of the label (a
+ * list of view options), instead of a check mark at the row's end.
+ */
 export const DropdownMenuCheckboxItem = React.forwardRef<
   React.ComponentRef<typeof Prim.CheckboxItem>,
-  React.ComponentPropsWithoutRef<typeof Prim.CheckboxItem>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof Prim.CheckboxItem> & { indicator?: "end" | "box" }
+>(({ className, children, indicator = "end", ...props }, ref) => indicator === "box" ? (
+  <Prim.CheckboxItem ref={ref} className={cn(itemClass, "group/check", className)} {...props}>
+    <span aria-hidden className="grid size-3.5 shrink-0 place-items-center rounded-[4px] border border-muted-foreground/60 group-data-[state=checked]/check:border-transparent group-data-[state=checked]/check:bg-accent">
+      <Prim.ItemIndicator className="contents">
+        <Check className="size-2.5! text-accent-foreground!" />
+      </Prim.ItemIndicator>
+    </span>
+    {children}
+  </Prim.CheckboxItem>
+) : (
   <Prim.CheckboxItem ref={ref} className={cn(itemClass, "pr-7", className)} {...props}>
     {children}
     <Prim.ItemIndicator className="absolute right-2">
@@ -115,6 +146,11 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
 // ---- Context menus share the dropdown's look; only the trigger differs.
 
 export const ContextMenu = Ctx.Root;
+
+export function AsyncContextMenu(props: React.ComponentProps<typeof Ctx.Root>) {
+  const { close, ...state } = useMenuState(props);
+  return <Ctx.Root {...props} {...state}><CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider></Ctx.Root>;
+}
 export const ContextMenuTrigger = React.forwardRef<
   React.ComponentRef<typeof Ctx.Trigger>,
   React.ComponentPropsWithoutRef<typeof Ctx.Trigger>

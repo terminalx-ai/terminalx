@@ -3,8 +3,7 @@
 // pnpm build && pnpm exec playwright install webkit && node scripts/webkit/chat-wrapping.mjs
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { webkit } from "playwright";
-import { open, openConversation, serve, tab } from "./harness.mjs";
+import { launch, open, openConversation, serve, tab } from "./harness.mjs";
 
 const text = "Normal paragraph with spaces.\n\n" + "─".repeat(200) + "\n" + "_".repeat(200) + "\n" + "unbrokenIdentifier".repeat(30) + "\n  Explicit indentation\nhttps://example.test/docs";
 const code = "identifier".repeat(100);
@@ -14,7 +13,7 @@ if (clipboard) assert.equal(process.platform, "darwin");
 const server = await serve();
 let browser;
 try {
-  browser = await webkit.launch({ headless: !clipboard });
+  browser = await launch({ headless: !clipboard });
   for (const floating of [false, true]) {
     for (const transcriptLayout of ["chat", "wide"]) {
       const extra = `(() => {
@@ -33,7 +32,7 @@ try {
       })();`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating }, { width: 1100, height: 800 }, { extra });
       if (!floating) {
-        await openConversation(page, "claude tab");
+        await openConversation(page, "Local long session");
         await tab(page, "gemini tab").click();
       }
       await page.locator('[data-testid="queued-message"]:visible').waitFor();
@@ -44,7 +43,8 @@ try {
         await page.setViewportSize({ width, height: 800 });
         await page.evaluate((zoom) => { document.documentElement.style.zoom = String(zoom); }, zoom);
         const result = await page.evaluate(({ text, code }) => {
-          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0);
+          // Workspace panes keep inactive tabs laid out but hidden (PRO-263): measure the chat on screen.
+          const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const readers = [...root.querySelectorAll('[data-testid="reader-message"] > div')];
           const queued = root.querySelector('[data-testid="queued-message"]');
           const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
@@ -59,6 +59,12 @@ try {
             selection.removeAllRanges();
             return { exact: content.textContent === text && selected === text, contained: rects.every((r) => r.left >= box.left - 1 && r.right <= box.right + 1), lines: rects.length, overflow: bubble.scrollWidth - bubble.clientWidth, link: content.querySelector('a')?.getAttribute('href') };
           });
+          const queuedText = queued.querySelector('.whitespace-pre-wrap').getBoundingClientRect();
+          const queuedBox = queued.getBoundingClientRect();
+          const sendNow = [...queued.querySelectorAll('button')].find((button) => button.textContent.includes('Send now'))?.getBoundingClientRect();
+          const queuedControlsFit = queuedText.width > 0 && sendNow
+            && sendNow.left >= queuedBox.left && sendNow.right <= queuedBox.right
+            && sendNow.bottom <= queuedText.top;
           const scroller = root;
           const pre = [...root.querySelectorAll('pre')].find((p) => p.textContent.includes(code));
           let scrollableCode = false;
@@ -66,7 +72,7 @@ try {
             if (p.scrollWidth > p.clientWidth && ['auto', 'scroll'].includes(getComputedStyle(p).overflowX)) scrollableCode = true;
           }
           const image = readers[0].querySelector('img');
-          return { messages, conversationOverflow: scroller.scrollWidth - scroller.clientWidth, image: image?.complete && image.naturalWidth > 0, scrollableCode };
+          return { messages, queuedControlsFit, conversationOverflow: scroller.scrollWidth - scroller.clientWidth, image: image?.complete && image.naturalWidth > 0, scrollableCode };
         }, { text, code });
         const label = `${floating ? 'floating' : 'main'} ${transcriptLayout} ${width}px zoom ${zoom}`;
         assert.equal(result.messages.length, 3, label);
@@ -77,13 +83,14 @@ try {
           assert.ok(message.lines > 8, `${label} message ${i}: long runs did not wrap`);
           assert.equal(message.link, 'https://example.test/docs');
         }
+        assert.ok(result.queuedControlsFit, `${label}: queued text and Send now must fit without overlapping`);
         assert.ok(result.conversationOverflow <= 1, `${label}: conversation overflow ${JSON.stringify(result)}`);
         assert.ok(result.image, `${label}: attachment loaded`);
         assert.ok(result.scrollableCode, `${label}: code retains horizontal scrolling`);
         if (clipboard) {
           for (let index = 0; index < 3; index++) {
             await page.evaluate((index) => {
-              const root = [...document.querySelectorAll('[data-chat-scroller]')].find((el) => el.getBoundingClientRect().width > 0);
+              const root = [...document.querySelectorAll('[data-chat-scroller]')].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
               const contents = [...root.querySelectorAll('[data-testid="reader-message"] > div')].map((bubble) => bubble.lastElementChild);
               contents.push(root.querySelector('[data-testid="queued-message"] .whitespace-pre-wrap'));
               contents[index].scrollIntoView();

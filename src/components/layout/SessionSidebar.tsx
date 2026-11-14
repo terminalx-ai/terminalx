@@ -1,7 +1,9 @@
+import { ArchiveRowButton, DraftPreview, SessionRowExtras, readableBranchName, sidebarConversationTitle, useSessionDraft } from "./SessionRowExtras";
+import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { Fragment, createContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -10,6 +12,8 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
+  AsyncContextMenu,
+  AsyncDropdownMenu,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -33,25 +37,33 @@ import { SidebarTitlebar } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
-import { usePrefs } from "@/lib/prefs";
+import { reportError, showError } from "@/lib/errorToasts";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
-import { branchMerged, conversationBranch } from "@/lib/checkout";
+import { branchMerged, checkoutLabel, conversationBranch } from "@/lib/checkout";
+import { showDetachedRename } from "@/lib/branchToasts";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
-import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
+import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, setSessionUnread, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { copyText } from "@/lib/clipboard";
-import { openRenameSession } from "@/lib/dialogs";
+import { openRenameSession, openWorktreeCleanup } from "@/lib/dialogs";
+import { LOCAL_HOST, mergedNote, useMergedCleanup, useMergedStatus, type HostedStatus } from "@/lib/mergedCleanup";
 import { copyShareLink } from "@/lib/localSharing";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
-import { openSettle } from "@/lib/dialogs";
+import { openSettle, openWorkspaceRestore } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
-import { sessionStatus, type SessionEntry, type TabStatus } from "@/types/session";
-import { RowTime } from "./SidebarRows";
+import type { SessionEntry } from "@/types/session";
 import { useFold } from "./useFold";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { LeadGlyph, LeadHoverCard, LeadTrailing, QueuedPieceRow, RunFamiliesContext, StarterMark, TryMark, WorkerMark, WorkerTier, leadsRun, useLeadFamily, useLeadSummary, useWorkerPiece, type RunFamilies } from "./RunRows";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { showRunView, useRunsByLead } from "@/lib/orchestration";
+import { familyHolds, nestWorkers, workerTitle } from "@/lib/runFamily";
+import { StatusMarkIcon } from "@/components/ui/SessionStatus";
+import { statusText } from "@terminalx/portable/sessionStatus";
+import { useSessionRowStatus } from "@/lib/sessionRowStatus";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
@@ -59,25 +71,31 @@ import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
-import { compareMessageActivity, conversationTime } from "@/lib/messageActivity";
+import { compareSidebarSessions, type SidebarSort } from "@/lib/sidebarView";
+import { ManualStatusMenu } from "@/components/session/ManualStatus";
+import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+import { conversationTime } from "@/lib/messageActivity";
+
+import { bySavedOrder, customSessionOrder, useSidebarOrder, type SidebarOrder } from "@/lib/sidebarOrder";
+import { SidebarSortList, SidebarSortGroup, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 export { conversationTitle };
 
-const byRecency = (a: SessionEntry, b: SessionEntry) => compareMessageActivity(a, b, a.id, b.id);
-
 /**
- * Every live conversation as one list, pinned first, then newest. The open one stays even when archived, unless
+ * Every live conversation as one list, in custom order or pinned first, then newest. The open one stays even when archived, unless
  * Show archived is on (`showArchived`): it is then among the archived, whose fold it keeps open.
  */
-export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false): SessionEntry[] {
-  return sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId)).sort(byRecency);
+export function orderConversations(sessions: SessionEntry[], selectedId: string | null, showArchived = false, sort: SidebarSort = "updated", order?: SidebarOrder): SessionEntry[] {
+  const live = sessions.filter((session) => !session.archived || (!showArchived && session.id === selectedId));
+  return order?.custom ? customSessionOrder(live, order) : live.sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
-/** The archived conversations, as Show archived lists them (#718): pinned first, then newest. */
-export function archivedConversations(sessions: SessionEntry[]): SessionEntry[] {
-  return sessions.filter((session) => session.archived).sort(byRecency);
+/** Archived conversations follow the same ordering choice as the live list. */
+export function archivedConversations(sessions: SessionEntry[], sort: SidebarSort = "updated", order?: SidebarOrder): SessionEntry[] {
+  const archived = sessions.filter((session) => session.archived);
+  return order?.custom ? customSessionOrder(archived, order) : archived.sort((a, b) => compareSidebarSessions(a, b, sort));
 }
 
 /**
@@ -134,6 +152,8 @@ export function groupConversations(
   /** List every open project, one with no conversations yet too: one just added is there at once (off while a filter narrows the list). */
   everyProject = false,
   showArchived = false,
+  sort: SidebarSort = "updated",
+  order?: SidebarOrder,
 ): { groups: ConversationGroup[]; chats: SessionEntry[]; archivedChats: SessionEntry[] } {
   const groups = new Map<string, ConversationGroup>();
   const chats: SessionEntry[] = [];
@@ -150,8 +170,8 @@ export function groupConversations(
     group.branches[session.id] = link.branch;
     groups.set(key, group);
   };
-  for (const session of orderConversations(sessions, selectedId, showArchived)) add(session, false);
-  if (showArchived) for (const session of archivedConversations(sessions)) add(session, true);
+  for (const session of orderConversations(sessions, selectedId, showArchived, sort, order)) add(session, false);
+  if (showArchived) for (const session of archivedConversations(sessions, sort, order)) add(session, true);
   if (everyProject) {
     for (const project of projects) {
       const key = canon(project.path);
@@ -161,10 +181,10 @@ export function groupConversations(
   }
   // A populated group follows its messages; opening its project is not a message.
   const latest = (group: ConversationGroup) => group.sessions.length
-    ? Math.max(...group.sessions.map((session) => Date.parse(conversationTime(session)) || 0))
+    ? Math.max(...group.sessions.map((session) => Date.parse(sort === "created" ? session.created : conversationTime(session)) || 0))
     : Date.parse(group.project?.lastOpened ?? "") || 0;
   const ordered = [...groups.values()].sort((a, b) => Number(!!b.project?.pinned) - Number(!!a.project?.pinned) || latest(b) - latest(a) || a.path.localeCompare(b.path));
-  return { groups: ordered, chats, archivedChats };
+  return { groups: order?.custom ? bySavedOrder(ordered, order.projects, (g) => canon(g.path), (a, b) => a.path.localeCompare(b.path)) : ordered, chats, archivedChats };
 }
 
 /**
@@ -184,7 +204,7 @@ export async function confirmRemoveProject(group: ConversationGroup) {
     await archiveSessions(open.map((session) => session.id), true);
     if (group.project) await removeProject(group.path);
   } catch (error) {
-    console.error("remove project", errorMessage(error));
+    showError(`Couldn't remove “${group.name}” from TerminalX`, error);
   }
 }
 
@@ -215,7 +235,9 @@ const PEEK = 3;
  */
 export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const order = useSidebarOrder();
   const filter = useSidebarFilter();
+  const { sidebarSort } = usePrefs();
   const [error, setError] = useState<string | null>(null);
   // A chat on its way into a project: the dialog that chooses how its new session starts there.
   const [moving, setMoving] = useState<{ session: SessionEntry; source: TabEntry; project: Project; worktree: boolean } | null>(null);
@@ -226,12 +248,12 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   // Unread or Needs you: only the conversations that pass (and the open one), and so only their projects.
   const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
-  const showArchived = store.showArchived && !filter.active;
+  const showArchived = store.showArchived && filter.filter === "all";
   const { sections: localSections } = useLocalSections();
   const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
   const { groups, chats, archivedChats } = useMemo(
-    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived),
-    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort, order),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort, order],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -277,10 +299,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
+      <SidebarOrderError />
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 pb-2 pt-3" aria-label="Conversations" data-testid="conversation-list">
         <LocalSidebarSections
-          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived), ...(showArchived ? archivedConversations(items) : [])] }))}
+          groups={sectionedSessions.sections.map(({ section, items }) => ({ section, items: [...orderConversations(items, store.selectedSessionId, showArchived, sidebarSort, order), ...(showArchived ? archivedConversations(items, sidebarSort, order) : [])] }))}
           filtered={filter.active}
           renderSession={(session) => {
             const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
@@ -303,6 +326,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
           <>
             {groups.length > 0 && (
               <ListSection id="projects" label={sectioned ? "Local" : "Projects"} actions={<AddProjectMenu run={(action) => run(async () => action.run())()} />}>
+                <SidebarSortList kind="projects" items={groups.map((group) => ({ id: canon(group.path), name: group.name }))}>
                 {groups.map((group) => (
                   <ProjectGroup
                     key={group.path}
@@ -314,15 +338,17 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                     onNewSession={(place) => run(() => startChat({ projectPath: group.path, ...place }))()}
                   />
                 ))}
+                </SidebarSortList>
+                <CleanupLine />
               </ListSection>
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
               <ListSection id="chats" label="Chats">
                 <ul className="flex flex-col gap-0.5">
-                  {chats.map(chatRow)}
+                  <SidebarSortList items={chats.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{chats.map(chatRow)}</SidebarSortList>
                   {archivedChats.length > 0 && (
                     <ArchivedSessions id="chats" count={archivedChats.length} opened={archivedChats.some((session) => session.id === store.selectedSessionId)}>
-                      {archivedChats.map(chatRow)}
+                      <SidebarSortList items={archivedChats.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{archivedChats.map(chatRow)}</SidebarSortList>
                     </ArchivedSessions>
                   )}
                 </ul>
@@ -367,7 +393,7 @@ export function FilteredEmpty({ text }: { text: string }) {
   return (
     <div className="px-3 py-6 text-center text-[12px] text-faint" data-testid="sidebar-filter-empty">
       {text}{" "}
-      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => setSidebarFilter("all")}>
+      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => { setSidebarFilter("all"); setPrefs({ sidebarProject: null }); }}>
         Show all sessions
       </button>
     </div>
@@ -478,8 +504,32 @@ function ProjectGroup({
   );
   // The branch whose Rename dialog is open. The project's own checkout keeps its branch; its label can still change.
   const [renaming, setRenaming] = useState<string | null>(null);
-  const renameBranch = (branch: string) => (branch && group.project && group.project.kind !== "folder" ? () => setRenaming(branch) : null);
+  // On a detached HEAD there is no branch to rename: Rename… says so, and offers to make one at the commit (PRO-295).
+  // The row's branch reads "detached at 1a2b3c4" then (or nothing): it is the checkout that says there is no branch.
+  const detachedCheckout = (session: SessionEntry, branch: string) => {
+    if (session.worktreeRemoved) return null;
+    const checkout = workspaces.find((workspace) => canon(workspace.path) === canon(session.cwd));
+    if (!checkout || checkout.branch || !checkout.head || (branch && branch !== checkoutLabel(checkout))) return null;
+    return { ...checkout, head: checkout.head };
+  };
+  // A detached row is one checkout's (see `branches` below), so any live session in it names that checkout: the open
+  // one first, else the next that still is, not just the first, which may be gone (PRO-367).
+  const detachedAt = (branch: string, sessions: SessionEntry[]) => {
+    const selected = sessions.find((entry) => entry.id === selectedId);
+    for (const session of selected ? [selected, ...sessions.filter((entry) => entry !== selected)] : sessions) {
+      const checkout = detachedCheckout(session, branch);
+      if (checkout) return { cwd: checkout.path, head: checkout.head, title: conversationTitle(session) || null };
+    }
+    return null;
+  };
+  const renameBranch = (branch: string, sessions: SessionEntry[]) => {
+    if (!group.project || group.project.kind === "folder") return null;
+    const detached = detachedAt(branch, sessions);
+    if (detached) return () => void showDetachedRename({ projectPath: group.path, ...detached });
+    return branch ? () => setRenaming(branch) : null;
+  };
   const nav = useSessionStore();
+  const sort = useSidebarSortable(canon(group.path));
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
   // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
@@ -491,29 +541,46 @@ function ProjectGroup({
   const { animations } = prefs;
   // A branch's sessions are tabs or sidebar rows, never both: as tabs, the branch is one row here whatever their number.
   const asTabs = branchSessionsAsTabs(prefs);
+  // Orchestration (PRO-281), behind Settings → Experimental: a lead's workers nest under its row, whatever worktree
+  // they run in, instead of each taking a branch row of its own. Off, every session is listed as before.
+  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const runs = useRunsByLead(orchestrating);
+  const nested = useMemo(() => (orchestrating ? nestWorkers(group.sessions, runs) : { top: group.sessions, workersOf: {} }), [orchestrating, group.sessions, runs]);
+  const families = useMemo<RunFamilies>(() => ({ workersOf: nested.workersOf, runs }), [nested.workersOf, runs]);
+  const holds = (session: SessionEntry, id: string | null) => session.id === id || familyHolds(nested.workersOf, session.id, id);
   // One row per branch, newest work first; the conversations come in that order already.
   const branches = useMemo(() => {
     const byBranch = new Map<string, { key: string; branch: string; sessions: SessionEntry[] }>();
-    for (const session of group.sessions) {
+    for (const session of nested.top) {
       const branch = group.branches[session.id] ?? "";
       // A retained history must not join a live checkout merely because its
       // original branch name has been reused (or it now resumes on main).
-      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : `branch:${branch}`;
+      // Checkouts detached at one commit share a label, not a row: each is its own, so its actions act on it (PRO-367).
+      const detached = branch ? detachedCheckout(session, branch) : null;
+      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : detached ? `detached:${canon(detached.path)}` : `branch:${branch}`;
       const entry = byBranch.get(key) ?? { key, branch, sessions: [] };
       entry.sessions.push(session);
       byBranch.set(key, entry);
     }
     return [...byBranch.values()];
-  }, [group]);
+  }, [group, nested.top, workspaces]);
   // A removed workspace's conversations are kept, read and resumed from here, but set apart from the live ones
   // under a fold of their own (#696): left in the list, they sat beside live work for good.
   const live = branches.filter((entry) => !entry.key.startsWith("removed:"));
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
-  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
+  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => holds(session, selectedId)));
   const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
-  const branchRow = (key: string, branch: string, sessions: SessionEntry[]) => (
+  const sortBranch = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) => {
+    const tabbed = asTabs ? sessions.filter((session) => session.tabs.length > 0) : sessions;
+    const represented = tabbed.length ? tabbed : sessions;
+    const current = represented.find((session) => session.id === selectedId) ?? represented[0];
+    const byTitle = (sessions.length === 1 || asTabs) && !current.worktreeRemoved && placeholders.has(branch);
+    return { id: `branch:${key}`, name: byTitle ? conversationTitle(current) : labels[branch] ?? (branch || "No branch"), members: sessions.map((session) => session.id) };
+  };
+  const branchRow = (key: string, branch: string, sessions: SessionEntry[], sortId = `branch:${key}`) => (
     <ConversationRow
       key={key}
+      sortId={sortId}
       // The branch's row opens the session that is open on it, else its latest.
       session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
       peers={sessions}
@@ -523,7 +590,7 @@ function ProjectGroup({
       merged={!sessions[0].worktreeRemoved && merged.has(branch)}
       onNewSession={newSessionOn(branch, sessions)}
       label={labels[branch]}
-      onRenameBranch={renameBranch(branch)}
+      onRenameBranch={renameBranch(branch, sessions)}
       linkTo={null}
     />
   );
@@ -535,8 +602,9 @@ function ProjectGroup({
     const bare = sessions.filter((session) => !session.tabs.length);
     if (!bare.length || sessions.length === 1) return branchRow(key, branch, sessions);
     return (
-      <Fragment key={key}>
-        {tabbed.length > 0 && branchRow(key, branch, tabbed)}
+      <SidebarSortGroup key={key} id={`branch:${key}`}>
+        {tabbed.length > 0 && branchRow(key, branch, tabbed, `display:${key}`)}
+        <SidebarSortList items={bare.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
         {bare.map((session) => (
           <ConversationRow
             key={session.id}
@@ -547,7 +615,8 @@ function ProjectGroup({
             linkTo={null}
           />
         ))}
-      </Fragment>
+        </SidebarSortList>
+      </SidebarSortGroup>
     );
   };
   const row = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) =>
@@ -556,21 +625,24 @@ function ProjectGroup({
     ) : (
       <BranchRow
         key={key}
+        sortId={`branch:${key}`}
         path={group.path}
         branch={branch}
+        foldKey={key.startsWith("branch:") ? branch : key}
         label={labels[branch]}
         sessions={sessions}
         selectedId={selectedId}
         opened={filtered}
         merged={!sessions[0].worktreeRemoved && merged.has(branch)}
         onNewSession={newSessionOn(branch, sessions)}
-        onRename={renameBranch(branch)}
+        onRename={renameBranch(branch, sessions)}
       />
     );
   return (
-    <div role="group" aria-label={group.name} className="mb-3 last:mb-0">
+    <div ref={sort.ref} style={sort.style} role="group" aria-label={group.name} className="mb-3 last:mb-0">
       <DropdownMenu {...menu.root}>
         <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
+          {sort.handle}
           {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
           <button
             type="button"
@@ -618,12 +690,12 @@ function ProjectGroup({
           <DropdownMenuItem onSelect={() => startSessionIn(group.path, null)}>
             <SquarePen /> New chat in {group.name}
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void revealItemInDir(group.path)}>
+          <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
             <FolderOpen /> Reveal in Finder
           </DropdownMenuItem>
           {group.project && (
             <>
-              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned })}>
+              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned }).catch(reportError(`Couldn't ${group.project?.pinned ? "unpin" : "pin"} “${group.name}”`))}>
                 <Pin /> {group.project.pinned ? "Unpin project" : "Pin project"}
               </DropdownMenuItem>
               <DropdownMenuSub>
@@ -658,8 +730,11 @@ function ProjectGroup({
       >
         <div className="-mx-2 min-h-0 overflow-hidden px-2">
       {/* Rows run the full width, so a selection spans it; their content is indented by `--indent` instead. */}
+      <RunFamiliesContext.Provider value={families}>
       <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:10px] [--indent-2:24px]">
-        {shown.map(row)}
+        <SidebarSortList items={shown.map(sortBranch)}>
+          {shown.map(row)}
+        </SidebarSortList>
         {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>}
         {more && (
           <li>
@@ -678,17 +753,20 @@ function ProjectGroup({
             count={removed.length}
             opened={filtered || removed.some((entry) => entry.sessions.some((session) => session.id === selectedId))}
           >
-            {removed.map(row)}
+            <SidebarSortList items={removed.map(sortBranch)}>{removed.map(row)}</SidebarSortList>
           </RemovedWorkspaces>
         )}
         {group.archived.length > 0 && (
           <ArchivedSessions id={canon(group.path)} count={group.archived.length} opened={group.archived.some((session) => session.id === selectedId)}>
+            <SidebarSortList items={group.archived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
             {group.archived.map((session) => (
               <ConversationRow key={session.id} session={session} selected={session.id === selectedId} branch={group.branches[session.id] || null} linkTo={null} inArchive />
             ))}
+            </SidebarSortList>
           </ArchivedSessions>
         )}
       </ul>
+      </RunFamiliesContext.Provider>
         </div>
       </div>
       {renaming !== null && (
@@ -760,7 +838,7 @@ export function ArchivedSessions({ id, count, opened, children }: { id: string; 
 export function UnarchiveButton({ session, title }: { session: SessionEntry; title: string }) {
   return (
     <WithTooltip label="Unarchive">
-      <Button variant="ghost" size="icon-xs" aria-label={`Unarchive ${title}`} onClick={() => void archiveSession(session.id, false)}>
+      <Button variant="ghost" size="icon-xs" aria-label={`Unarchive ${title}`} onClick={() => void archiveSession(session.id, false).catch(reportError(`Couldn't unarchive “${title}”`))}>
         <ArchiveRestore />
       </Button>
     </WithTooltip>
@@ -769,6 +847,7 @@ export function UnarchiveButton({ session, title }: { session: SessionEntry; tit
 
 /** A branch more than one conversation works on: the branch, how many, and the conversations under it. */
 function BranchRow({
+  sortId,
   path,
   branch,
   label: named,
@@ -778,9 +857,13 @@ function BranchRow({
   merged,
   onNewSession,
   onRename,
+  foldKey,
 }: {
+  sortId: string;
   path: string;
   branch: string;
+  /** What its fold is remembered by: the branch, or the one checkout or removed workspace the row stands for. */
+  foldKey: string;
   /** What the reader named the branch, shown instead of it. */
   label?: string;
   onRename: (() => void) | null;
@@ -792,17 +875,20 @@ function BranchRow({
   merged: boolean;
   onNewSession: NewSessionAction | null;
 }) {
-  const holdsSelected = sessions.some((session) => session.id === selectedId);
+  const sort = useSidebarSortable(sortId);
+  const { workersOf } = useContext(RunFamiliesContext);
+  const holdsSelected = sessions.some((session) => session.id === selectedId || familyHolds(workersOf, session.id, selectedId));
   const removed = sessions.every((session) => session.worktreeRemoved);
-  const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
+  const cleanup = useMergedStatus(LOCAL_HOST, removed ? null : sessions[0]?.cwd);
   const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
   const label = `${named ?? (branch || "No branch")}${removed ? " (workspace removed)" : ""}`;
   return (
-    <li>
+    <li ref={sort.ref} style={sort.style}>
       <ContextMenu>
       <ContextMenuTrigger asChild>
       <div className={cn(actionRow, "relative -mx-2 flex h-9 items-center pr-3 text-foreground/90 hover:bg-selected/50")}>
+        {sort.handle}
         <button
           type="button"
           onClick={toggle}
@@ -810,7 +896,7 @@ function BranchRow({
           title={named ? `${named} · ${branch}` : label}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-sm pl-[calc(1rem+var(--indent,0px))] pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          <BranchGlyph merged={merged} />
+          <BranchGlyph merged={merged} cleanup={cleanup} />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
           {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
           <span className={cn("shrink-0 text-[11px] tabular-nums text-faint", yieldsToRowActions)}>{sessions.length}</span>
@@ -830,7 +916,7 @@ function BranchRow({
           </ContextMenuItem>
         )}
         {branch && (
-          <ContextMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
+          <ContextMenuItem onSelect={() => void copyText(branch).catch(reportError(`Couldn't copy the branch name “${branch}”`))}>
             <GitBranch /> Copy branch name
           </ContextMenuItem>
         )}
@@ -838,25 +924,55 @@ function BranchRow({
       </ContextMenu>
       {expanded && (
         <ul className="mt-0.5 flex flex-col gap-0.5 [--indent:var(--indent-2)]">
+          <SidebarSortList items={sessions.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>
           {sessions.map((session) => (
             <ConversationRow key={session.id} session={session} selected={selectedId === session.id} branch={null} linkTo={null} />
           ))}
+          </SidebarSortList>
         </ul>
       )}
     </li>
   );
 }
 
-/** A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. */
-function BranchGlyph({ merged }: { merged: boolean }) {
-  if (!merged) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+/**
+ * A branch row's icon; a merged branch has a tick drawn into its empty corner, in the icon's own stroke. A merged
+ * workspace clean-up has not deleted (`cleanup`) has the tick in amber, and its tooltip says why: the row's quiet
+ * marker, where the full story and its buttons are in the session's Branch tab.
+ */
+function BranchGlyph({ merged, cleanup }: { merged: boolean; cleanup?: HostedStatus }) {
+  const waiting = cleanup && cleanup.phase !== "removed";
+  if (!merged && !waiting) return <GitBranch className="size-4 shrink-0 text-muted-foreground" />;
+  const note = waiting ? mergedNote(cleanup) : "";
+  const title = waiting ? `${note.charAt(0).toUpperCase()}${note.slice(1)}` : "Merged: its commits are in the default branch";
   return (
-    <span className="flex shrink-0" title="Merged: its commits are in the default branch">
+    <span className="flex shrink-0" title={title} data-testid={waiting ? "branch-cleanup-marker" : undefined}>
       <GitBranch className="size-4 text-muted-foreground">
-        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className="text-info" />
+        <path d="M9.25 3.75l1.75 1.75 3.5-3.75" className={waiting && cleanup.phase === "kept" ? "text-warning" : "text-info"} />
       </GitBranch>
-      <span className="sr-only">merged</span>
+      <span className="sr-only">{waiting ? title : "merged"}</span>
     </span>
+  );
+}
+
+/**
+ * Under the projects: how many merged workspaces clean-up kept, as one line that opens the clean-up list. Only
+ * while there are some; nothing pops up for them.
+ */
+function CleanupLine() {
+  const { statuses } = useMergedCleanup();
+  const kept = Object.values(statuses).filter((status) => status.phase === "kept").length;
+  if (!kept) return null;
+  return (
+    <button
+      type="button"
+      onClick={openWorktreeCleanup}
+      data-testid="sidebar-cleanup-line"
+      className="-mx-2 mt-1 flex h-8 w-[calc(100%+1rem)] items-center gap-2.5 px-4 text-left text-[12.5px] text-muted-foreground outline-none hover:bg-selected/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+      <span className="min-w-0 flex-1 truncate">Clean up {kept} merged {kept === 1 ? "workspace" : "workspaces"}</span>
+    </button>
   );
 }
 
@@ -922,12 +1038,16 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   const SubTrigger = contextMenu ? ContextMenuSubTrigger : DropdownMenuSubTrigger;
   const SubContent = contextMenu ? ContextMenuSubContent : DropdownMenuSubContent;
   const IssueItems = contextMenu ? IssueLinkContextItems : IssueLinkMenuItems;
-  const copy = (text: string) => void copyText(text).catch(() => {});
+  const title = conversationTitle(session) || "this conversation";
+  const copy = (text: string, what: string) => void copyText(text).catch(reportError(`Couldn't copy ${what}`));
   const picked = isPicked(ids, usePickedSessions());
+  const store = useSessionStore();
+  const unread = store.sessions.filter((entry) => ids.includes(entry.id)).some(isUnread);
+  const [error, setError] = useState<string | null>(null);
   return (
     <>
       {rename && (
-        <Item onSelect={rename}>
+        <Item data-row-key="n" aria-keyshortcuts="N" onSelect={rename}>
           <Pencil /> Rename…
         </Item>
       )}
@@ -972,34 +1092,48 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Separator />
         </>
       )}
+      <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
       <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
-      <Item onSelect={() => void pinSession(session.id, !session.pinned)}>
+      {session.tabs.length > 0 && <Item data-row-key="r" aria-keyshortcuts="R" onSelect={(event) => {
+        event.preventDefault();
+        setError(null);
+        void setSessionUnread(ids, !unread).catch((cause) => setError(errorMessage(cause)));
+      }}>
+        <CheckSquare /> {unread ? "Mark as read" : "Mark as unread"}<span className="ml-auto text-xs text-faint" aria-hidden>R</span>
+      </Item>}
+      {error && <span role="alert" className="block px-2 text-xs text-destructive">{error}</span>}
+      <Item data-row-key="p" aria-keyshortcuts="P" onSelect={() => void pinSession(session.id, !session.pinned).catch(reportError(`Couldn't ${session.pinned ? "unpin" : "pin"} “${title}”`))}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </Item>
       <Separator />
-      <Item onSelect={() => void revealItemInDir(session.cwd)}>
+      <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
         <FolderOpen /> Reveal in Finder
       </Item>
-      <Item onSelect={() => copy(session.cwd)}>
+      <Item onSelect={() => copy(session.cwd, `the path of “${title}”`)}>
         <Copy /> Copy path
       </Item>
       {branch && (
-        <Item onSelect={() => copy(branch)}>
+        <Item onSelect={() => copy(branch, `the branch name “${branch}”`)}>
           <GitBranch /> Copy branch name
         </Item>
       )}
-      <Item onSelect={() => void copyShareLink(session.id).catch(() => {})}>
+      <Item onSelect={() => void copyShareLink(session.id).catch(reportError(`Couldn't copy a link to “${title}”`))}>
         <Link /> Copy link
       </Item>
       <Separator />
-      <Item onSelect={() => togglePicked(ids)}>
+      <Item data-row-key="s" aria-keyshortcuts="S" onSelect={() => togglePicked(ids)}>
         <CheckSquare /> {picked ? "Deselect" : "Select"}
       </Item>
-      <Item onSelect={() => void archiveSession(session.id, !session.archived)}>
+      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void archiveSession(session.id, !session.archived).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
         <Archive /> {session.archived ? "Unarchive" : "Archive"}
       </Item>
       <IssueItems session={session} />
       <Separator />
+      {session.worktreeRemoved && (
+        <Item onSelect={() => openWorkspaceRestore(session.id)}>
+          <FolderInput /> Restore workspace…
+        </Item>
+      )}
       {session.worktreeName && !session.worktreeRemoved && (
         <Item onSelect={() => openSettle(session)}>
           <Folder /> Remove workspace, keep conversations…
@@ -1012,18 +1146,25 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   );
 }
 
-export function RowContextMenu(props: ConversationMenuProps) {
-  return <ContextMenuContent className="w-56" onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
+/** Activate a row action only in this menu, never while typing in a submenu. */
+export function rowMenuKeys(event: KeyboardEvent<HTMLDivElement>) {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !/^[a-z]$/i.test(event.key)) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("input,textarea,[contenteditable=true]") || target.closest('[role="menu"]') !== event.currentTarget) return;
+  const item = event.currentTarget.querySelector<HTMLElement>(`[data-row-key="${event.key.toLowerCase()}"]`);
+  if (!item || item.hasAttribute("data-disabled")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  item.click();
 }
 
-/** The state that matters most among several: a question waiting, then work in progress, then work done. */
-function pressingStatus(statuses: TabStatus[]): TabStatus {
-  const order: TabStatus[] = ["waiting", "in_progress", "completed", "idle"];
-  return order.find((status) => statuses.includes(status)) ?? "idle";
+export function RowContextMenu(props: ConversationMenuProps) {
+  return <ContextMenuContent className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}><ConversationMenuItems {...props} contextMenu /></ContextMenuContent>;
 }
 
 function ConversationRow({
   session,
+  sortId = session.id,
   peers = [session],
   selected,
   branch,
@@ -1035,8 +1176,10 @@ function ConversationRow({
   onRenameBranch = null,
   linkTo,
   inArchive = false,
+  worker = false,
 }: {
   session: SessionEntry;
+  sortId?: string;
   /** A branch row's sessions (as tabs, the row stands for all of them): the row shows the most pressing state among them. */
   peers?: SessionEntry[];
   selected: boolean;
@@ -1058,76 +1201,136 @@ function ConversationRow({
   linkTo: ConversationLinkActions | null;
   /** Drawn under an Archived fold, which says it already. */
   inArchive?: boolean;
+  /** Drawn under its lead (PRO-281): named by its piece, marked by its piece's state, with its model's tier. */
+  worker?: boolean;
 }) {
-  const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
+  const sort = useSidebarSortable(sortId);
+  const { sessions, selectedSessionId } = useSessionStore();
+  // A lead (PRO-281): its workers nest under it and fold with it; folded, their marks come up to its row. A lead
+  // its coordinator started is one of its coordinator's rows and a lead too, with its own workers (PRO-364).
+  const { workersOf } = useContext(RunFamiliesContext);
+  const family = useLeadFamily(session, inArchive ? NO_PEERS : peers);
+  const summary = useLeadSummary(family);
+  // Only a run's lead has the run's glyph and summary; a session that only started the ones under it has a quieter mark (PRO-337).
+  const runLead = leadsRun(family);
+  const [leadOpen, toggleLead] = useFold(`lead:${session.id}`, true);
+  const leadExpanded = !!family && (leadOpen || peers.some((peer) => familyHolds(workersOf, peer.id, selectedSessionId)));
+  // Its rows are its workers and, before their workers start, its queued pieces (18.03): either folds with it.
+  const folded = !!family && family.rows.length > 0 && !leadExpanded;
+  const { piece, found } = useWorkerPiece(session);
+  // An earlier try at a piece is drawn quieter than the piece's current one (PRO-364).
+  const earlierTry = worker && !!found && !found.current;
+  // A lead goes by its title, as a run's rows are read (18.07): its branch is in its tooltip, its run's glyph leads it.
+  if (family) named = "title";
+  const statusDescriptionId = useId();
+  // A row under its lead goes by its piece, else its session's own title: never its tab's, the brief's first line (PRO-364).
+  const title = worker ? workerTitle(session, found) : family ? conversationTitle(session) : named === "branch" ? (peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session)) : sidebarConversationTitle(session, branch, sessions);
+  const draft = useSessionDraft(peers);
+  const unread = peers.some(isUnread) || (folded && !!summary?.unread);
   // The sessions the row stands for, picked as one for the bulk bar (#718).
   const ids = peers.map((peer) => peer.id);
   const pickedNow = usePickedSessions();
   const picking = pickedNow.length > 0;
   const picked = isPicked(ids, pickedNow);
   const removed = session.worktreeRemoved;
+  const cleanup = useMergedStatus(LOCAL_HOST, removed || named !== "branch" ? null : session.cwd);
   const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
-  const status = pressingStatus(peers.map(sessionStatus));
+  // One status for all the sessions the row stands for: the mark leads the row, its label is the mark's name (02.04).
+  const rowStatus = useSessionRowStatus(peers);
   // A row is its name and its age: which agent runs it is in the chat, not repeated on every row.
   const branchName = locationLabel ?? label ?? branch;
+  const branchLabel = locationLabel ?? label ?? readableBranchName(branch) ?? branch;
   // Rename is of what the row shows: its branch's label, or its conversation's title.
   const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
   return (
-    <li>
-      <DropdownMenu>
-        <ContextMenu>
+    <li ref={sort.ref} style={sort.style} className={family ? "[--own-indent:var(--indent,0px)]" : undefined} data-lead={family ? session.id : undefined} data-worker={worker ? session.id : undefined}
+      data-try={worker && found ? found.number : undefined} data-earlier-try={earlierTry ? "" : undefined}>
+      <AsyncDropdownMenu>
+        <AsyncContextMenu>
         <ContextMenuTrigger asChild>
         <div
           className={cn(
             actionRow,
             // Edge to edge: the row reaches past the list's 8px gutter, and its content keeps to it.
-            "relative -mx-2 flex h-9 items-center gap-2 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            "relative -mx-2 flex items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3",
+            worker ? "min-h-7" : "min-h-9",
             selected ? "bg-selected text-foreground" : "text-foreground/90 hover:bg-selected/50",
             picked && "bg-info/12 ring-1 ring-inset ring-info/45",
           )}
-          title={location ?? (branchName ? `${branchName} · ${title}` : title)}
+          // A folded lead's hover card says more than a title would.
+          title={folded ? undefined : location ?? (branchName ? `${branchName} · ${title}` : title)}
+          data-folded-lead={folded ? "" : undefined}
           {...{ [ROW_ATTRIBUTE]: ids.join(" ") }}
         >
+          {sort.handle}
+          {/* A worker hangs from its lead's glyph by a line. */}
+          {worker && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />}
+          {/* A lead folds its workers by the chevron in front of its glyph; the row itself opens the lead. */}
+          {family && family.rows.length > 0 && (
+            <button
+              type="button"
+              onClick={toggleLead}
+              aria-expanded={leadExpanded}
+              aria-label={leadExpanded ? `Fold the workers of ${title}` : `Unfold the workers of ${title}`}
+              data-testid="lead-fold"
+              className="absolute inset-y-0 left-[calc(var(--indent,0px)+1px)] flex w-3.5 items-center justify-center rounded-sm text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              <ChevronDown aria-hidden className={cn("size-3 transition-transform", !leadExpanded && "-rotate-90")} />
+            </button>
+          )}
+          {withLeadHover(
           <button
             type="button"
             onClick={(event) => {
               if (pickOnClick(event, ids)) return;
               selectSession(session.id);
+              // A lead with a run opens on its run (18.07).
+              if (runLead) showRunView(session.id, true);
             }}
             onDoubleClick={picking ? undefined : (rename ?? undefined)}
             aria-current={selected ? "true" : undefined}
             aria-pressed={picking ? picked : undefined}
+            aria-describedby={statusDescriptionId}
             aria-label={named === "branch" ? `${branchName ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="flex min-w-0 flex-1 flex-col items-start rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-            {named === "branch" ? (
-              <>
-                <BranchGlyph merged={merged} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchName ?? "No branch"}</span>
-                {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
-                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
-                <StatusMark status={status} />
-                {status !== "in_progress" && <RowTime at={conversationTime(session)} />}
-              </>
-            ) : (
-              <>
-                <span className="min-w-0 flex-1 truncate text-[13px]">{title}</span>
-                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                <StatusMark status={status} />
-              </>
-            )}
-            {named === "branch" || status === "in_progress" ? null : locationLabel || branch ? (
-              <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
-                {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
-                <span className="truncate">{locationLabel ?? branch}</span>
-              </span>
-            ) : (
-              <RowTime at={conversationTime(session)} />
-            )}
-          </button>
+            <span className="flex w-full min-w-0 items-center gap-2">
+              {/* The row leads with its session status mark; the reader's own status groups rows and is read out here. */}
+              {runLead ? <LeadGlyph /> : worker ? <WorkerMark piece={earlierTry ? null : piece} status={rowStatus} /> : <StatusMarkIcon status={rowStatus} decorative />}
+              <span id={statusDescriptionId} hidden>{statusText(rowStatus)}. Status: {manualStatusLabel(session.manualStatus)}{runLead && summary?.needs.length ? `. Waiting on you: ${summary.needs.map((need) => need.text).join("; ")}` : ""}</span>
+              {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
+              {named === "branch" ? (
+                <>
+                  <BranchGlyph merged={merged} cleanup={cleanup} />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branchLabel ?? "No branch"}</span>
+                  {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
+                  {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                  {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
+                </>
+              ) : (
+                <>
+                  <span className={cn("min-w-0 flex-1 truncate", worker ? "text-[12.5px]" : "text-[13px]", earlierTry && "text-muted-foreground")}>{title}</span>
+                  {worker && <TryMark found={found} />}
+                  {family && !runLead && <StarterMark />}
+                  {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                  {unread && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
+                </>
+              )}
+              {/* A chat linked from elsewhere says where; any other row's place is its project and branch rows above it. */}
+              {locationLabel && (
+                <span className={cn("flex max-w-[45%] shrink-0 items-center gap-1 font-mono text-[10px] text-faint", yieldsToRowActions)}>
+                  {branch ? <GitBranch className="size-3 shrink-0" /> : <Folder className="size-3 shrink-0" />}
+                  <span className="truncate">{locationLabel}</span>
+                </span>
+              )}
+              {runLead && summary ? <LeadTrailing family={family} folded={folded} summary={summary} fallback={<SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />} />
+                : worker ? <WorkerTier piece={piece} found={found} session={session} />
+                : <SessionRowExtras sessions={peers} selected={selected} status={rowStatus} at={conversationTime(session)} />}
+            </span>
+            <DraftPreview text={draft} />
+          </button>)}
           <RowActions>
+            <ArchiveRowButton session={session} title={title} />
             {session.archived && <UnarchiveButton session={session} title={title} />}
             {onNewSession && <NewSessionButton action={onNewSession} />}
             <DropdownMenuTrigger asChild>
@@ -1139,11 +1342,23 @@ function ConversationRow({
         </div>
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
-        </ContextMenu>
-        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
+        </AsyncContextMenu>
+        <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
-      </DropdownMenu>
+      </AsyncDropdownMenu>
+      {family && leadExpanded && family.rows.length > 0 && (
+        <ul aria-label={`Workers of ${title}`} data-testid="lead-workers" className="mt-0.5 flex flex-col gap-0.5 [--lead-indent:var(--own-indent,0px)] [--indent:calc(var(--own-indent,0px)+16px)]">
+          {family.rows.map((row) => row.kind === "worker"
+            ? <ConversationRow key={row.session.id} session={row.session} selected={row.session.id === selectedSessionId} branch={null} linkTo={null} worker />
+            : <QueuedPieceRow key={`queued:${row.piece.id}`} piece={row.piece} run={family.run!} />)}
+        </ul>
+      )}
     </li>
   );
+
+  function withLeadHover(button: ReactElement) {
+    return folded && runLead && summary ? <LeadHoverCard family={family} summary={summary} title={title}>{button}</LeadHoverCard> : button;
+  }
 }
+const NO_PEERS: SessionEntry[] = [];

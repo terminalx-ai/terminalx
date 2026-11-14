@@ -51,10 +51,25 @@ shows the actual location and offers **Create settings file** when it is absent.
 Keep the file private: it can contain a Linear API key. Do not print or copy the
 whole file into a conversation.
 
-The current precedence is user file → app defaults. A missing key inherits its
-default; removing a key resets it. Repository and organization layers are not
-available yet. The layered resolver and schema follow-up will supply the schema
-and source badges once those features land.
+Precedence, highest first: system managed policy → repository local
+(`<primary checkout>/.terminalx/settings.local.json`) → repository shared
+(`<primary checkout>/.terminalx/settings.json`) → user file → app defaults.
+Repository and managed files take only the keys listed under Layered
+configuration below; every other key lives in the user file. A missing key
+inherits from the layer below; removing a key resets it, and Settings' row menu
+**Reset to inherited value** does the same (`reset_user_setting`), leaving the
+rest of the file as it is. Settings marks each row with the layer its value comes
+from, and **Settings files** lists every file with its path, how many keys it
+sets, its Git state (repository files) and its first problem by key and line.
+
+The file is checked against a JSON schema generated from the app's own validator:
+`schemas/settings.schema.json` in the source, kept current at
+`$TERMINALX_HOME/schemas/settings.schema.json` by each start. Files the app writes
+get `"$schema": "./schemas/settings.schema.json"` so editors complete keys and
+flag typos and wrong values; a `$schema` already in the file is kept. The local
+repository file the app writes gets the published
+`https://raw.githubusercontent.com/terminalx-ai/terminalx/main/schemas/repository-settings.schema.json`;
+the committed shared file does not, because older TerminalX builds warn about it.
 
 User-facing webview choices are under `preferences`, for example:
 
@@ -67,21 +82,53 @@ User-facing webview choices are under `preferences`, for example:
     "mode": "system"
   },
   "agents": { "idleStopMinutes": 60 },
-  "experimental": { "nativeCodex": false }
+  "experimental": { "nativeCodex": false, "sessionCost": false, "orchestratorRuns": false },
+  "orchestrator": {
+    "requireApproval": true,
+    "pieceLimit": 8,
+    "workerMode": "bypassPermissions",
+    "workersPerRun": 4,
+    "workersAtOnce": 8,
+    "budgetDollars": 15,
+    "budgetPoints": 25,
+    "windowCeiling": 85,
+    "stallMinutes": 10,
+    "reviewDiffLines": 400,
+    "triesPerPiece": 3,
+    "effortCeiling": "high",
+    "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
+  }
 }
 ```
+
+`orchestrator` holds the limits of orchestration runs: whether a run waits for approval, the
+most pieces a plan may have (1 to 50), the permission mode workers start in, over how many
+changed lines a result is read by a verifier though its commands pass (`reviewDiffLines`,
+1 to 100000), how many workers run at once (per run, and across every run of the app), each
+run's budget (dollars for workers on an API key; points of a usage window, and the window
+level past which nothing new starts, for workers on a subscription), after how many
+minutes of nothing a worker counts as stalled, how many tries a piece gets before it is
+blocked (`triesPerPiece`, 1 to 6) and the effort escalation raises it no higher than
+(`effortCeiling`: `low`, `medium`, `high`, `xhigh` or `max`). A project may answer for itself under
+`projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
+the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
+value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
+them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
+settings page in the app; the `runs` commands work either way.
 
 The first window migrates existing localStorage preferences once, without
 overwriting choices already in the file. Navigation state and pane sizes stay
 local to the webview. Leave `preferencesMigrated` alone.
 
 Edits reload automatically, including editor saves that replace the file.
-Unknown keys and `$schema` are allowed and preserved when Settings saves.
+Unknown keys and `$schema` are allowed and preserved when Settings saves (the
+schema flags unknown keys, because this build ignores them).
 An invalid type or option produces one error with its key and line in Settings.
 Every valid field still applies, including on a cold start. Only invalid fields
 use their previous value (or their default if none was loaded). Settings refuses
-to overwrite a file containing invalid entries; fix those entries in the editor
-before saving through the UI. Malformed JSON retains the running process's
+to overwrite a file containing invalid entries ("Can't save: ~/.raccoon/settings.json
+has an error on line N"); fix those entries in the editor before saving or
+resetting through the UI. Malformed JSON retains the running process's
 previous settings; a process with no readable object uses defaults.
 
 Deleting the file resets all settings to defaults, including clearing the Linear
@@ -98,7 +145,10 @@ terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
+terminalx sessions list --children-of <session> --json
 terminalx sessions show <session> --json
+terminalx sessions usage <session> --json
+terminalx sessions usage --children-of <session> --json
 terminalx tabs list <session> --json
 ```
 
@@ -110,6 +160,74 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 `--quick`. Each entry carries `archived`, and `autoArchived` when the app archived it for
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
+
+`sessions list` and `sessions show` include `detailedStatus` (id, label, icon,
+colour token and tooltip) and `rowStatus` (the live facts behind it). Agent
+attention takes precedence over the session's associated PR. The existing
+session-PR registry supplies ownership; a shared branch alone never does. A
+local head must match the PR head before a row says Ready to merge or Merged.
+Default branches and detached heads carry agent status only. Local facts refresh
+in the background every 10 seconds; associated PRs are batched once per project
+every 120 seconds, with rate-limit backoff and at least 1,000 points reserved for
+other GitHub work. A first read can return agent status while the cache warms;
+read again to see the result. The existing tab `status` remains the agent's
+lifecycle state.
+
+### Layered configuration
+
+```text
+terminalx config show [--project <project>] --json
+```
+
+Reads supported effective settings with their source layer and managed lock.
+Environment values are redacted. Precedence is managed, repository local,
+repository shared, user, defaults. All workspaces inherit files from the primary
+checkout: `.terminalx/settings.json` and ignored `.terminalx/settings.local.json`.
+Repository and managed files accept `branchPrefix` and `environment` (and
+`$schema`); a key they may not set is ignored and named, with its line, in
+Settings files. Shared environment and branch prefixes require the person's native trust approval;
+the CLI cannot grant it. An untrusted launch directs the person to Settings →
+General → Layered configuration. Setup and archive scripts and files to copy are
+not read from repository files yet. See `docs/layered-configuration.md` for every
+file location, the schemas and scope.
+
+### Sessions a session started (`parent`)
+
+```text
+terminalx sessions list --children-of <session> --json
+terminalx sessions stop --children-of <session> --json
+```
+
+A session started with `sessions create` from inside another session records that session as
+its `parent`: `{"sessionId": …, "tabId": …}`, the session and the tab the command ran in.
+`sessions create` returns it as `parent`, and `sessions list` and `sessions show` carry it on
+the entry. A session nobody else started has no `parent` field. The field is a record of who
+started whom and nothing more: it gives the parent no hold over the session and changes no
+permission. Archiving or deleting the parent leaves the sessions it started, and their
+`parent`, exactly as they are, so a `parent` may name a session that no longer exists.
+
+`sessions list --children-of <session>` returns exactly the sessions that session started
+(its workers), in every project and worktree, quick chats and archived ones included; for
+that reason it does not combine with `--project`, `--worktree`, `--quick`, `--archived` or
+`--cloud`. Only direct children are listed: a worker's own workers are listed under the
+worker. The result has:
+
+- `parent`: the lead's `sessionId` and `title`, and `exists` (`false` once it was deleted;
+  name a deleted lead by its full id).
+- `workers`: one row per session, with `sessionId`, `title`, `kind`, `tabId`, `agent`,
+  `status`, `model`, `effort`, `running`, `worktree` (its name; `null` on the project's own
+  checkout), `path`, `branch`, `archived`, `created` and `parent`. `status`, `model` and
+  `effort` are those of the session's own agent; `running` says whether any of its agents has
+  a live process.
+- `sessions`: the same sessions as full entries.
+
+`sessions stop --children-of <session>` stops every running agent of those sessions, as Stop
+in the app does: the agent's process ends, the conversation stays, and its next prompt
+resumes it. Nothing is deleted or archived, the lead itself is not stopped, and a terminal or
+an agent a person started by hand in one is left running. The result lists `stopped` (each
+with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the rest are still
+stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
+you are, or were asked to manage.
 
 ### Archive sessions
 
@@ -132,6 +250,21 @@ pull request is open. A new message to an archived session brings it back; so do
 `unarchive`. Archive only what the person asked to tidy; do not archive a session you are
 working in, or another agent's.
 
+### Set a session’s manual status
+
+```text
+terminalx sessions status <session> --status backlog|in_progress|in_review|done|canceled --json
+```
+
+This sets the session’s workflow status, independent of its agent’s activity. Unset or
+unrecognized stored values display in Backlog. The change is stored in the session index and reaches
+all windows and paired phones. Sessions sharing a branch keep their own statuses.
+Done and Canceled do not archive the session or stop its agent. The result includes
+`session.manualStatus`; `sessions list` and `sessions show` include it when set.
+Manual status does not exempt a session from idle archiving or reset its last-message
+clock. In progress and In review sessions still follow the configured idle limit;
+Show archived brings archived sessions back into view.
+
 ### Start a session
 
 Keep work in the current conversation by default. Create another session only when the
@@ -151,6 +284,7 @@ terminalx sessions create \
   --prompt <text> \
   [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -179,9 +313,17 @@ terminalx sessions create --project <project> --agent codex --prompt "Fix the ti
 terminalx sessions rename <session> --title "#203 ready for review" --json
 ```
 
-Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`, and
-`path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
-its title without changing its worktree name.
+Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`,
+`path`, and `parent`, alongside the full `session` and prompt delivery `outcome`. Renaming a
+session changes its title without changing its worktree name.
+
+`parent` is the session that started this one (see "Sessions a session started" above). Run
+from inside a TerminalX session, `sessions create` records that session and tab without being
+told; run from any other shell it records none, and `parent` is `null`. `--parent <session>`
+records the named session instead, whoever runs the command; one that matches no session
+fails with `parent_not_found` before anything is created. `--no-parent` records none. The two
+flags are mutually exclusive, and both also apply to `--quick` and `--issue` sessions. A cloud
+session records no parent: `--parent` is refused there.
 
 ### Experimental Codex connection (new local sessions only)
 
@@ -234,6 +376,7 @@ terminalx sessions create --quick \
   --agent <claude|codex> \
   --prompt <text> \
   [--title <text>] [--cwd <directory>] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -311,6 +454,792 @@ still reports that `recovery`.
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
 
+#### Wait on several sessions
+
+```text
+terminalx wait <session-or-tab>... [--any|--all] [--timeout <seconds>] --json
+```
+
+With several targets, one call waits on all of them. `--any`, the default, returns as soon as
+one target stops, asks for a decision or fails. `--all` returns when every target has. Either
+returns at the timeout. The result lists every target, in the order given:
+
+```json
+{"mode": "any", "timedOut": false, "targets": [
+  {"target": "s1", "sessionId": "…", "tabId": "…", "state": "stopped", "reason": "stop", "status": "completed", "changed": true},
+  {"target": "s2", "sessionId": "…", "tabId": "…", "state": "running", "status": "in_progress", "changed": false}
+]}
+```
+
+- `state` is `running`, `stopped`, `needsPermission`, `failed` or `timedOut`. `timedOut` is a
+  target still running when the timeout passed; top-level `timedOut` says whether it did.
+- `reason` is the single-target reason behind a settled state: `stop` or `stopped` for
+  `stopped`, `permission` or `terminal` for `needsPermission`, `recovery` for `failed` (with
+  `recovery` naming the error). It is absent for `running` and `timedOut`.
+- `changed` is true when the target's state differs from when the call began. Read those
+  targets; the others are as you last saw them.
+
+A target that has already settled when the call begins is reported at once and is not waited
+on, so nothing that ended between two calls is missed. To loop on `--any`, handle the targets
+it reports as settled, then leave them out of the next call (or send them more work first):
+a call that still names one returns at once. `--all` returns only while every target is
+settled, so a target waiting on a decision holds it until the timeout unless someone answers;
+use `--any` to react to requests.
+
+One target with neither flag gives the single-target result above. Pass `--any` or `--all`
+with one target to get the list. A target that names no session fails the call before any
+waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
+
+#### Wait on all of a lead's workers
+
+```text
+terminalx wait --children-of <session> [--any|--all] [--timeout <seconds>] --json
+```
+
+Waits on every session that session started, the ones `sessions list --children-of` shows,
+archived workers and quick chats included. The result is the one above, with the workers as
+its targets. The workers are found once, when the call begins: a session the lead starts
+after that is not waited on, so make the call again to include it.
+
+`--children-of` cannot be combined with named targets, an empty value or a cloud session
+(each is refused as on `sessions list`). A lead with no workers returns at once with
+`"targets": []`, `"timedOut": false` and a `reason` saying there was nothing to wait for;
+the exit code is 0.
+### Worker reports
+
+When you start a session to do part of your work (a worker), ask it for a report and read
+that instead of its whole transcript:
+
+```text
+terminalx sessions create --project <project> --agent <agent> --prompt <text> --report --json
+terminalx sessions create --quick --agent <agent> --prompt <text> --report --json
+terminalx wait <session-or-tab> --json
+terminalx sessions report <session-or-tab> --json
+```
+
+`--report` adds the report instructions to the worker's prompt and holds it to them: a worker
+whose turn ends without a readable report is asked for it once more, and after that its report
+stays `missing`. A worker never gets an issue pipeline of its own, so `--report` cannot be
+combined with `--issue`, `--auto-merge` or `--resolve-conflicts`, and it is not available for
+cloud sessions. It needs an agent that runs in its own terminal, `claude` or `codex`: such a
+Codex worker stays on the terminal connection whatever Native Codex is set to, and
+`--experimental-codex-stdio` and other agents are refused, because they could not be reminded.
+Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
+but could not be recorded as owing a report (it is then not reminded).
+
+To read every worker's report at once, name the session that started them:
+
+```text
+terminalx sessions report --children-of <session> --json
+```
+
+It returns `parent` (the lead, as `sessions list --children-of` gives it) and `reports`, one
+row for each session that session started: the same sessions `sessions list --children-of`
+lists, in any project or worktree, quick chats and archived ones included. Each row is what
+`sessions report <session>` returns, described below, plus the session's `title`. A row is
+read from the worker's own agent, the first tab it was given, which is the `tabId` of its
+`workers` row and the tab `--report` holds to a report; to read another tab, name that tab.
+A lead that started nothing gets `"reports": []` and exit code 0. A worker with no agent tab
+is `missing` with reason `noAgent`, and one whose transcript cannot be read is `missing`
+with reason `unreadable`; neither hides the other rows. `--children-of` takes a session on
+this computer and no other target: an empty value and a cloud session are refused.
+
+The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
+
+````text
+```terminalx-report
+{
+  "status": "done",
+  "result": "Two or three sentences on what you did or found.",
+  "evidence": ["cargo test auth: exit 0", "src/auth.rs:42"],
+  "changed": {"files": ["src/auth.rs"], "branch": "fix-login", "commit": "abc1234"},
+  "notDone": [],
+  "couldNotRead": [],
+  "uncertain": []
+}
+```
+````
+
+- `status`: `done`, `partial`, `blocked` or `failed`. Nothing else is accepted.
+- `result`: two or three sentences.
+- `evidence`: commands run with their exit codes, or `file:line` for a claim.
+- `changed`: `files`, `branch` and `commit`, or null when nothing changed.
+- `notDone`: what was skipped, and why.
+- `couldNotRead`: sources the worker tried to read and could not. A failed read is listed
+  here; it is never the same as "nothing found".
+- `uncertain`: claims made without direct evidence.
+
+`status` and `result` are required. A list that is left out is empty. If you write a worker's
+prompt yourself and send it without `--report`, include the block above in it; `sessions
+report` reads any session's last reply, but only a session started with `--report` is reminded.
+
+`sessions report` reads the tab's last turn (a session's active tab, like `read` and `wait`)
+and returns `sessionId`, `tabId` and one of two shapes:
+
+- A report: the seven fields, plus `seq` (the transcript sequence number of the reply that
+  holds the block) and `at` (when the turn ended).
+  - `noEvidence: true` is added when `status` is `done` and `evidence` is empty. Treat such a
+    result as a claim: check it before you rely on it.
+  - A block over 8,000 characters is cut to that much text, and `truncated` says so:
+    `limit`, `chars` (the full size), `seq`, and `cut` (the fields that lost text; `evidence`
+    gives way first). The whole block is in the transcript: `terminalx read <tab> --since <seq - 1>`
+    returns the event that holds it first.
+- Either shape may carry `laterTurn: {"seq": N}`: after the turn this was read from, the
+  agent started a turn of its own (a background task reporting in, a scheduled check) that
+  ended without a report. The report stands; read what it said from `seq` if it matters. A
+  turn of its own that ends with a report block is read as the newer report instead.
+- `"status": "missing"`: there is no readable report. `reason` says why, `detail` says it in
+  a sentence, `tail` is the last 2,000 characters of the reply, and `reminded` is true once
+  the worker has been asked again and still sent none. A status is never guessed from prose.
+  - `noBlock`: the reply has no report block. `malformed`: the block is not JSON, has no
+    valid `status` or `result`, or has a field of the wrong shape.
+  - `reminderPending: true` is added for a `--report` worker whose turn has just ended and
+    whose reminder has not reached it yet. Do not `send` it anything: `wait` again, then ask
+    again. If it is still pending after that, the reminder could not be delivered; treat the
+    report as missing.
+  - `working`: the tab is still in a turn, the reminder's turn included. `wait`, then ask
+    again. `waiting`: its turn has stopped on a permission request, a question or an error;
+    `wait` says which.
+  - `turnAborted`, `turnFailed`: the last turn was interrupted or ended on an error.
+    `noReply`, `noTurn`: it said nothing, or has not finished a turn.
+
+Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
+question. Do not treat it as done, and do not treat it as failed.
+
+### Orchestration runs
+
+A run is one lead session, a plan of pieces, and a worker session for each piece. Use one
+when a task splits into pieces that touch different files and can be worked on at the same
+time, or when the reading alone would fill one session's context. Do not use one when each
+step needs the one before it, or when the whole task fits in one session: a run of one or
+two small pieces costs more than doing the work yourself.
+
+```text
+terminalx runs create --from <plan.json> [--lead <session>] --json
+terminalx runs start [<run>] --json
+terminalx runs show [<run>] --json
+terminalx runs list [--lead <session>] [--all] --json
+terminalx runs stop [<run>] --json
+terminalx runs check-failed <piece> [--run <run>] [--output <file>|-] [--reason <text>] --json
+terminalx runs merge [<run>] [--skip <piece>]... [--recheck] --json
+terminalx runs send-back <piece> [--run <run>] --json
+terminalx runs take-over <piece> [--run <run>] --json
+terminalx runs finish <piece> [--run <run>] --json
+terminalx runs widen <piece> [--own <path>]... [--run <run>] --json
+terminalx runs note <piece> --text <text>|--text-file <file>|- [--run <run>] --json
+terminalx runs skip <piece> [--run <run>] --json
+terminalx runs cleanup [<run>] --yes --json
+```
+
+`<run>` is a run's id or the start of one. Inside the lead's session it may be left out:
+the command then means the run that session leads. `--from -` reads the plan from standard
+input. The lead is the session the command runs in; `--lead` names another. A session leads
+one run at a time (`run_exists` until the first ends), and the lead's project must be a git
+repository.
+
+#### The plan
+
+The plan is a JSON file you write:
+
+```json
+{
+  "goal": "Move settings reads to the typed store",
+  "budget": {"points": 25},
+  "agent": "claude",
+  "integrationCheck": "cargo t && pnpm test",
+  "pieces": [
+    {
+      "id": "store",
+      "title": "Typed store module and migration",
+      "goal": "A typed settings store that every reader can use.",
+      "why": "The three pieces that move call sites need its API.",
+      "scope": "The store module and its tests.",
+      "outOfScope": "Call sites outside the store.",
+      "known": ["41 call sites read settings directly today."],
+      "readFirst": ["docs/SETTINGS.md"],
+      "limits": ["Keep unknown keys when saving."],
+      "owns": ["src-tauri/src/store/settings/", "docs/SETTINGS.md"],
+      "dependsOn": [],
+      "doneChecks": [
+        {"type": "command", "run": "cd src-tauri && cargo t store::settings"},
+        {"type": "review", "text": "Unknown keys in an existing file survive a save."}
+      ],
+      "kind": "code",
+      "permissionMode": "acceptEdits",
+      "readsUntrusted": false,
+      "estimate": {"low": 1.6, "high": 2.4}
+    }
+  ]
+}
+```
+
+- `goal` and `pieces` are required; each piece needs `id`, `title`, `kind` and
+  `doneChecks`. A key the format does not have is refused, not ignored.
+- `kind`: what sort of work the piece is. Its model and effort come from it (see "Model and
+  effort" below), so name the kind that fits and leave `model` and `effort` out:
+  - `search`: finding files, listing call sites. `logs`: reading test output and logs.
+  - `scoped-code`: a bug fix or a change with a clear spec. `code`: everyday engineering.
+  - `refactor`: architecture and large refactors. `research`: deep research and analysis.
+  - `review`: reviewing a diff. `verify`: checking a worker's result.
+- `owns`: the files only this piece changes, as paths or globs relative to the repository's
+  root, written as `git diff --name-only` prints them. A directory means everything in it;
+  `*` and `?` match within one name and `**` across directories. They are stored as globs
+  (`src/store/` becomes `src/store/**`), and a worker's diff is later held to them: a file
+  it changed that it does not own fails its piece. An absolute path or one with `..` is
+  refused (`owns_outside_repository`). Leave it empty for a piece that changes nothing (a
+  search, a review).
+- `dependsOn`: the ids of pieces that must be done before this one starts.
+- `doneChecks`: what proves the piece done, as a list of typed checks:
+  - `{"type": "command", "run": "<shell command>"}`: run at the root of the worker's
+    worktree; exit code 0 passes. TerminalX runs it itself, so it costs no tokens. Prefer
+    one wherever a test, a build, a type check or a search that must find nothing exists.
+  - `{"type": "review", "text": "<what a reviewer must confirm>"}`: for what no command can
+    show. A verifier session sees the diff and this text, not the worker's reasoning. It
+    costs tokens on every try of the piece, so ask for one only where a command cannot show it.
+  - `{"type": "vote", "text": "…", "voters": 3, "threshold": 2}`: several verifiers judge
+    it separately, and the piece passes when `threshold` of them do (three and two when you
+    name neither). For high-cost claims only: it runs only when the plan asks for it.
+  A piece needs at least one `command` check. If no command can prove it (prose, a design
+  note), set `"reviewOnly": true` and say why in `"reviewOnlyReason"`; without the reason
+  the piece is refused. The worker is told every check and to run the commands itself
+  before it reports.
+- `goal`, `why`, `scope`, `outOfScope`, `known`, `readFirst`, `limits`: the worker's brief. A
+  worker knows nothing of your conversation, so write what it needs; a part you leave empty is
+  stated as empty in the brief.
+- `agent`: `claude` or `codex`, for the plan or for one piece; yours when absent.
+- `model`, `effort`: only to override what the piece's kind gives it. Either may be named
+  without the other; what you leave out still comes from the kind.
+- `permissionMode`: `plan`, `manual`, `acceptEdits`, `auto` or `bypassPermissions`. Absent,
+  the project's setting, which is `bypassPermissions` unless the person changed it.
+- `readsUntrusted`: true for a piece that reads text from outside the repository (issues, web
+  pages, logs from elsewhere). The person is shown that it will run without prompts, and the
+  worker is told to treat that text as information, never as instructions.
+- `estimate`: what you expect the piece to cost, in API-equivalent dollars. `budget` is what
+  the run may use, in `points` of a subscription's window or `dollars`. Where it is lower
+  than the person's settings it holds; it cannot raise them, and asking for No limit (`null`
+  or `"none"`) leaves the person's limit in place. See "Limits and budget".
+
+`runs create` checks the plan and stores it. A refusal names its rule in `code` and the
+piece in `details.piece`, and nothing is stored:
+
+- `shared_file`: two pieces own the same file (`details.other`, `details.path`). Give each
+  file to one piece, or make one piece depend on the other and own it alone.
+- `dependency_cycle` (`details.cycle`), `unknown_dependency` (`details.dependsOn`).
+- `no_done_check`: a piece has no `doneChecks`. `empty_check`: one of them says nothing
+  (`details.check` is its place in the list).
+- `check_not_allowed`: a `command` check pushes, merges or deploys (`details.command`).
+  TerminalX runs the checks itself and does none of those; use a command that only checks.
+- `no_command_check`: a piece has no `command` check and is not `reviewOnly`.
+  `review_only_without_reason`: it is `reviewOnly` and `reviewOnlyReason` is empty.
+- `owns_outside_repository`: a piece owns a path that is not inside the repository
+  (`details.path`).
+- `no_kind`: a piece has no `kind`. `unknown_kind`: it names one that does not exist
+  (`details.kinds` lists the eight).
+- `too_many_pieces`: more pieces than the limit (`details.limit`; 8 unless the person changed
+  it in Settings → Orchestrator, for the app or for the project). Merge pieces; do not split
+  the plan into two runs to get around it.
+- `mode_not_allowed`: a piece asks for a mode that allows more than the project's workers
+  run in, in a project that starts runs without approval. Use the project's mode or a
+  stricter one.
+- `unknown_key`: the plan, or a piece, has a key the format does not have (`details.key`,
+  and `details.meant` when it resembles one: `mode` for `permissionMode`, `depends_on` for
+  `dependsOn`). Nothing in a plan is ignored, so a misspelt key is refused rather than
+  dropped.
+- `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`: as named.
+
+It returns `run`, `approvalRequired` and `notes`: one `{piece, note}` for each piece that
+does not run on the model its kind names (see below). Tell the person what a note says when
+you tell them the plan is ready.
+
+#### Model and effort
+
+A routing table gives each kind a model tier and an effort. The tiers are the same four for
+both agents, and a worker uses the column of the agent it runs on:
+
+| Tier | Claude Code | Codex | Kinds that start there |
+| -- | -- | -- | -- |
+| small | Haiku | Luna | `search`, `logs`, at the model's own default effort |
+| mid | Sonnet | Terra | `scoped-code`, `review`, `verify`, at medium |
+| large | Opus | Sol | `code`, at medium |
+| top | Fable | Astra | `refactor`, `research`, at medium |
+
+That is the built-in table. The person may have changed rows in Settings → Orchestrator, for
+the app or for the project, and the project's table is the one used. `runs create` resolves
+each tier against the models the agent has installed, and the run then shows every piece's
+`model`, `effort` and `tier`. When an agent has no model of a tier, the piece runs on your
+own model (or, for a worker on another agent than yours, on that agent's default), and its
+`modelNote` says so.
+
+Do not put every piece on your own model, and do not put everything on the smallest one: a
+search on a top model wastes most of what it costs, and a refactor on a small one fails. Name
+the kind honestly and let the table choose.
+
+#### Approval
+
+By default a new run is `awaitingApproval`: the person sees the plan in the lead session's
+Run view (each piece with its model, effort, mode and estimate) and approves, edits or
+discards it. No command of this CLI approves a run. `runs start` on a run that waits is
+refused with `awaiting_approval`: tell the person the plan is ready, then end your turn. You
+are sent a message when they decide: on approval the first workers are already started, and
+if they changed the plan the message says so (read it again with `runs show`). A discarded
+plan is `stopped`; ask what to change before you plan again.
+
+A project whose setting turns approval off stores the run as `planned`, and `runs start`
+starts it at once. A lead session the person started with Orchestrate is the exception: its
+runs are always `awaitingApproval`, whatever the setting (`approvalRequired` says so).
+
+#### Start, follow, stop
+
+`runs start` starts a worker for every piece whose dependencies are done, up to the worker
+limits, and returns `started` (piece ids), `waiting` (each queued piece with the pieces it
+waits `on`, and `queuedFor` when a limit holds it) and
+`failed` (pieces whose worker could not be started, with the `error`). Call it again
+whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
+whose worker could not be started. Calling it when nothing new is ready starts nothing. A
+piece whose session was made but could not be made safe to brief keeps that session (`held`
+says why) and is tried again with it, never with a second one.
+
+Each worker is a session you started (`sessions list --children-of` lists them), in a
+worktree of its own on a branch cut from your branch as it is committed when the piece
+starts, with the piece's agent, model and effort. Commit what a later piece needs before you
+start it. The worker is sent a brief built from its piece (goal, why, scope and out of
+scope, known facts, files to read first, done-check, limits, report format) and is held to a
+`terminalx-report` block, as with `sessions create --report`.
+
+The loop:
+
+```text
+terminalx runs start --json
+terminalx wait --children-of <your session> --json
+terminalx runs show --json
+terminalx runs start --json
+```
+
+Do not poll, and do not wait on single workers. While your run is under way,
+`wait --children-of <your session>` waits on the run itself: it does not return each time a
+worker's turn ends, but when a piece's result is accepted (`done`), when a piece stops for
+good (`blocked`, `failed`), when a piece is ready for you to start, or when the run has
+ended. It also returns at once when nothing is under way and nothing can start (a piece
+blocked on a question, say): waiting would change nothing. It returns `why` (a line for each
+of those), `ready` (the pieces `runs start` would
+start now), `state`, and every piece with its `state` and whether it `changed` since the
+wait began. `--all` returns only when nothing is under way any more. At the timeout it
+returns `timedOut: true`; wait again.
+
+#### How a result is checked
+
+A worker's `done` is a claim. The piece is `verifying`, not `done`, until TerminalX has
+checked the result itself, and nothing that depends on it starts before then. The checks run
+in this order and stop at the first that fails; the first four use no model:
+
+1. **Report.** The worker's report block parses and says `done`. A worker that ends without
+   a report that can be read, after one reminder, fails here.
+2. **Scope.** `git diff --name-only` against your branch names only files the piece `owns`.
+   A file outside them fails the piece, naming the file.
+3. **Branch state.** The work is committed on the piece's branch, the worktree is clean, and
+   your branch merges into it without conflicts (`git merge-tree`).
+4. **Command checks.** Every `command` done-check, then the project's own check command if
+   it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
+   failure keeps the exit code and the last 100 lines. They are run unasked only where a
+   person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
+   that starts runs without approval and asks its workers before a command, they are left
+   unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
+5. **Review**, only when one of these holds: the piece has no `command` check, or its
+   commands were not run; the diff
+   touches a security area (the ones an issue pipeline runs its security pass for); the diff
+   is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
+   or the plan asks for one with a `review` or `vote` check.
+
+A piece with a passing `command` check, a small diff, no security area and a kind other than
+`refactor` is accepted after step 4 with no verifier session at all. So give every piece a
+command that really proves it, and keep pieces small: that is what keeps checking free.
+
+A verifier is a conversation of its own in the worker's worktree that cannot edit files and
+runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else, and every
+tool of a connected server, is refused. It
+is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
+the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
+medium, unless the person changed it), not on the worker's model, and ends with a verdict:
+pass, or fail with `file:line` evidence.
+
+A result that fails any check is a try that fell short: the piece takes the next step below
+with what the check printed (or the verifier's evidence) as the failure text. You do not
+re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
+answer (the verifier gave no verdict that can be read) leaves the piece `blocked` with that
+in its `note`: nothing says the result is wrong; read the diff yourself, or tell the person.
+
+Each try records its check under `verification`: `gates` (each one that ran, with `passed`,
+`detail`, and for the commands each `run`, `exitCode`, `millis` and, for one that failed,
+its `output`), `facts` (`files`, `changedLines`, `securityAreas`, and the `commit` that was
+checked), `review` when a model was asked (`reasons`, `voters`, `threshold`, and each
+verifier's `model`, `verdict`, `evidence` and `tokens`), and `outcome` (`passed`, `failed`,
+`inconclusive`). `runs show` also returns `verifierTokens`: what every verifier in the run
+used, apart from what the workers used.
+
+#### When a piece falls short
+
+A piece whose worker reports `failed` or `partial`, or whose result fails a check, is tried
+again without you asking, and you do not start, brief or message anything for it. Each try is a new worker session in a
+new worktree, on what the next step names, briefed with the piece again plus what the try
+before fell short on and the branch it left. It never gets the earlier worker's
+conversation. A piece gets the run's `maxTries` tries (three unless Settings say otherwise):
+
+1. The first, on its kind's model and effort.
+2. The same model with the failure text, and the effort raised one level, never past
+   `high` or the run's `effortCeiling` when Settings set another (at the ceiling or above,
+   or on a model with no effort levels, the same effort again).
+3. One model tier up, at one effort level lower.
+
+Past three the last two steps alternate: the fourth try raises the effort on the model the
+third moved to, the fifth moves up a tier again, and so on. With one try per piece the piece
+is blocked after its first; with two it gets step 2 only. Once its tries are used, or at a
+move up when no model tier above it is installed, the piece is `blocked` and its `note` says
+what was tried and what failed last. The tries are also the most rounds of checking and
+fixing a piece gets: each try is checked once, and there is no further one unless the person
+widens the piece (below). A run keeps the tries and the ceiling it was created with: changing
+them in Settings affects runs created afterwards. The run does not fail on a blocked piece: it
+stays `running` and waits on the person, who sees four choices in the Run view. Each is a
+`runs` command too; `wait` tells you when nothing else is under way.
+
+#### A blocked piece
+
+- **Take over in lead.** `terminalx runs take-over <piece> --json` hands the piece to you:
+  you are sent its goal, what each try came to and where its work is, its worker's last
+  report and the files it names outside the piece's own. The piece is `lead`. Finish it in
+  your own checkout (you are not held to its files), commit, then run
+  `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
+  your checkout, and when they pass the piece is `done` and what waits for it can start. It
+  is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
+  `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
+  run's budget from the moment you are asked until the piece is settled. Nothing is merged
+  while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
+  counts only what you committed.
+- **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
+  files to what the piece owns and starts a fresh worker on its last try's model and effort
+  (step `widened`), briefed with what went before. Without `--own` it takes the files the
+  piece's last report and check name outside its scope (`outside` in `runs show`, each with
+  the `owner` piece when one owns it). It returns `run`, `piece`, `added`, `started` and
+  `failed`. A try after a widening that falls short blocks the piece again: there is no
+  ladder after it. A person approved the files each piece owns, so in a run they approved
+  only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
+  So are taking a piece over and skipping one in a run they approved: from the CLI those are
+  for a run that asked for no approval.
+- **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
+  piece's last worker the note in its own session and worktree, as yours (a person's note
+  says it is theirs). The piece is `running`
+  again and takes its next report, which is checked as any is.
+- **Skip piece.** `terminalx runs skip <piece> --json` leaves the piece out: no worker works
+  on it again and it is not merged. Pieces that depend on it and have not started are left
+  out with it (`skipped` lists them all). The run is done once every other piece is merged.
+  It asks no model, so it works while the run is paused on its budget.
+
+The person's choice is told to you in your session. Do not act on a blocked piece yourself
+unless the person asks you to; a piece you took over is yours to finish or skip.
+
+So after `wait` returns, read the run, not only the reports: `sessions report` still lists
+the worker that fell short with its `failed` report (or with a `done` report whose result
+failed a check), while `runs show` says the piece is `queued` or `running` on its next try.
+Do not `send` a worker whose piece moved on.
+
+A worker that reports `blocked`, sends no report or waits on a person is not tried again: a
+different model would not have what it lacks. That piece is `blocked` after one try and
+waits on you.
+
+TerminalX runs the done-checks, so you seldom need to. When a piece is `done` and you find
+something its checks did not catch, say so instead of fixing it yourself or messaging the
+worker:
+
+```text
+terminalx runs check-failed <piece> --output check.log --reason "exit 101" --json
+```
+
+`--output` is a file with what the check printed (`-` for standard input); `--reason` is a
+line of your own; give at least one. The piece takes the same next step as above, with that
+text as what its next worker is told failed. It returns `run`, `piece`, `retried` (a worker
+was started for the next try) and `blocked` (the piece ran out of tries). Run the check
+before you call `runs start` for the pieces that depend on it: they are cut from what is
+committed when they start. It is refused with `piece_not_done` for a piece that did not
+report `done`, and a run's worker cannot call it (`not_the_lead`).
+
+`runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
+pieces the next `runs start` would start), `waiting`, `estimate` with `unestimated` (how
+many pieces carry none), `maxTries` and `effortCeiling` (the run's own ladder), `costUsd` (what its workers used so far, at API list
+prices, as `sessions usage` counts it; `null` before any was read), `limits`, `usage`,
+`pause`, `inTurn` (its workers in a turn now) and `fit`. Each piece has its plan fields and
+`state`, `tier`, `modelNote`, `modelByKind` and `effortByKind` (true when the plan left that
+one to the piece's kind), `attempts`, `worker` (`sessionId`, `tabId`), `branch`,
+`startedMode`, `login` (`apiKey` or `subscription`), `queuedFor`, `note`, `costUsd` and
+`tries`. `model`, `effort`, `worker` and `branch` are those of its current try.
+
+`tries` is every try, oldest first: `step` (`first`, `retry`, `effort`, `tier`, `widened` or
+`lead`: what made it differ from the one before), `model`, `effort`, `tier`, `worker`,
+`branch`, `outcome` (`done`, `failed`, `partial`, `checkFailed`, `blocked`, `stopped`;
+absent while it runs), `detail` (the result line, or the failure text the next try was
+given), `report` (its worker's report: `result`, `evidence`, `changed`, `notDone`,
+`couldNotRead`, `uncertain`), `costUsd`, `outputTokens`, `verification` (how its result was
+checked, above; its `facts.changes` lists each changed file with lines `added` and
+`removed`), `fromCommit` (a try you took over: where your branch was then), `started` and
+`ended`.
+
+- Run `state`: `planned`, `awaitingApproval`, `running`, `needsYou`, `verifying`, `merging`,
+  `done`, `stopped`, `failed`. A run is `merging` when every piece's result is accepted, and
+  `done` once `runs merge` has merged them all into your branch and the checks passed on the
+  merged result (below), counting a skipped piece as settled. A blocked piece leaves it
+  `running`, waiting on the person. It is `failed` only for a run stored before tries were
+  kept, whose piece's worker reported `failed` and nothing else can run. `needsYou`: it reached its
+  budget (see below).
+- Piece `state` follows its worker's last report, each time the run is read: `queued` (no
+  worker yet, or its next try waits for one), `running`, `verifying` (it reported `done`
+  and its result is being checked), `done` (its result passed every check), `blocked` (it
+  ran out of tries, reported `blocked`, waits on a person, its review could not be finished,
+  or its session was deleted; `note` says which), `failed` (its worker could not be
+  started), `stopped`, `skipped` (a person left it out) and `lead` (you took it over). A
+  `done` piece stays done when its worker's session is deleted afterwards.
+
+#### Limits and budget
+
+A run has `limits`: `workers` (in a turn at once), `dollars`, `points` and `ceiling`. They are
+the project's settings when the run is made, with your plan's `budget` where it asks for
+less; the person can change them for the run in the approval view, or when it stops. Each of
+`dollars`, `points` and `ceiling` may be `"none"`: No limit, which never pauses the run for
+that limit (a `ceiling` of `"none"` lets the run use the whole window). Cost is still recorded
+in `usage`.
+
+- **Worker limits.** At most `limits.workers` of the run's workers are in a turn at once, and
+  at most the app-wide limit across every run. `runs start` starts what fits and leaves the
+  rest `queued` with `queuedFor: "runLimit"` or `"appLimit"`. Those start by themselves when
+  a worker's turn ends, in this run or another: do not call `runs start` for them, and do not
+  poll. A piece that becomes ready only because a piece it depends on finished still waits
+  for your `runs start`, so you can collect that branch first. A retry or an escalated try
+  (`tries`) takes a slot like any other worker: it queues when none is free, and starts by
+  itself when one is. A stalled worker still holds its slot. A `verifying` piece does not:
+  its worker's turn has ended, its verifiers are not counted, and a result that fails its
+  checks goes to a fresh try that waits for a slot. Sessions a person starts by hand are
+  never counted, queued or refused.
+- **Budget.** A worker on an API key (Settings → Agents) draws on `dollars`: `usage.dollars`
+  sums the recorded cost (`costUsd`) of every try of its pieces, not only the current one. A worker on a subscription draws on its account's usage windows,
+  and on the model windows of its own model (`usage.windows`, each with the `percent` it is
+  at, the `start` it was at when the run began, the run's `points` and `resetsAt`). The run's
+  points are an estimate: the window is shared with everything the person runs. The run
+  stops starting new pieces when a window it draws on reaches `ceiling` percent, when its own
+  points of a window reach `points`, or when `usage.dollars` reaches `dollars`; a run with
+  workers on both logins keeps both and stops on whichever comes first. It becomes
+  `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
+  time), and you are told once. Workers already in a turn finish it. `runs start` is then
+  refused with `needs_you`; what you asked for starts when the person resumes the run
+  (raising the budget alone does not), or by itself once the window has reset and been read
+  again, if they asked for that, and you are told. Tell the person and end your turn; do not get the work done another way.
+- **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
+  minutes unless the person changed it), no command or background task of its running, and
+  its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is
+  not a stall. Look at it, `send` it what it needs, or stop it; it is `running` again as soon
+  as it does something.
+- `fit`, before a run starts: warnings that what the run may use would not fit in what is
+  left of a window, or that your estimate is over the dollar budget. The person sees them.
+
+
+A `done` piece passed its checks; that is as much as they prove. When you find something
+they did not catch, report it with `runs check-failed`. A `blocked` piece is the person's
+to decide (above); `runs note` is how a note reaches its worker, so the piece follows it.
+
+`runs stop` stops every running worker and marks the run `stopped`; pieces that were not
+done become `stopped`. It returns `stopped` (pieces whose worker was running) and `failed`
+(workers that would not stop; the run is stopped all the same). Sessions, worktrees and
+branches stay as they are. `runs list` lists the runs that have not ended; `--all` includes
+the ended ones, `--lead` only one session's.
+
+#### Merging the accepted pieces
+
+Do not merge workers' branches by hand. `terminalx runs merge` does it, with git and no
+model, for every piece whose result is accepted: one at a time, each after the pieces it
+depends on (`mergeOrder` in `runs show`), into the branch your checkout is on.
+
+```bash
+terminalx runs merge --json
+```
+
+For each piece, in order:
+
+1. **Probe.** `git merge-tree` computes the merge without touching your branch. A conflict
+   marks the piece `conflict` and **stops the merge there**: your branch is exactly where
+   it was, and no later piece is tried.
+2. **Merge.** The commit the piece was accepted as is merged with one merge commit
+   (`git merge --no-ff`). A branch that moved after acceptance is not what is merged.
+3. **Check.** The run's integration check (`integrationCheck` in the plan; the project's
+   own check command when the plan names none) is run in your checkout; exit code 0 passes.
+   When it fails, **that merge alone is undone**, the piece is marked `integrationFailed`
+   with what the check printed, and the merge goes on with the pieces that do not depend
+   on it.
+
+When every piece is in, each piece's `command` done-checks are run once more on the merged
+result. Only then is the run `done`. A check that fails there undoes nothing (no one merge
+is known to be at fault): the run stays `merging` and `reason` names the command and the
+piece. Fix it on your branch, commit, and run `runs merge` again.
+
+The merge never pushes, never touches any branch but yours, and never deletes a worker's
+branch or worktree. While it runs, your checkout is held: no pipeline check or conflict
+resolver starts there, and no other conversation in it starts a turn. It is refused, with
+nothing merged, when the checkout is not free (`checkout_busy`), has uncommitted changes
+in tracked files (`lead_checkout_dirty`), is part way through a merge or rebase
+(`lead_checkout_unfinished`), is on no branch (`lead_detached`) or on another branch than
+the merge began on (`lead_branch_changed`). It merges only into a branch of your own: on
+the repository's default branch, a branch that tracks it, the base of an open pull request,
+or a branch whose upstream has commits someone else pushed, it is refused with
+`lead_on_shared_branch` before git changes anything (`details.shared.kind` says which:
+`base`, `tracksBase`, `pullRequestBase`, `pushedByOthers`). Create a branch of your own
+there (`git switch -c <name>`) and merge again. It runs the plan's commands, so with nobody's
+approval of the plan and a lead that is asked before it runs commands it is refused with
+`checks_not_approved`: the person presses Merge in the Run view instead.
+
+A merge is git work and asks no model, so it also runs while the run is paused on its
+budget (`needsYou`): a conflict you resolve by hand is merged, and `--skip` leaves a piece
+out, as in a running run. What asks a model waits for the budget: the lead resolving a
+conflict (`budget_reached`) and a piece sent back to its worker. Neither is asked of a run
+that was stopped or is done (`run_ended`).
+
+The checks can take long. Give the command a long timeout and wait for it. Do not work in
+your checkout meanwhile: until the merge has ended your other tool calls there are refused,
+and so is a `runs merge` from any other session while you are in a turn. A merge that fails
+its check is undone without discarding uncommitted work: changes in files the merge did not
+touch are kept, and when a file it did touch has changes the merge is left in and the piece
+is marked `failed` with why. The merge goes on in the app when the command stops waiting, `runs show` says how far it
+is (`mergeUnderWay`, and `merge` on the run and on each piece), and a second
+`runs merge` meanwhile is refused with `merge_in_progress`.
+
+The answer:
+
+- `into` (your branch), `head` (the commit it is at now), `integrationCheck`, `pushed`
+  (always `false`), `done`.
+- `merged`: every piece in your branch, in the order merged, each with `piece`, `commit`
+  (what it was accepted as), `mergeCommit` and `range` (`before..after`, that piece's
+  commits). `nothingToMerge` marks a piece that changed no file; `byHand` one you merged
+  yourself.
+- `conflicts`, `integrationFailed`, `skipped`, `failed` (git could not merge it for a
+  reason that is not a conflict): piece ids. `waiting`: each piece not merged, the pieces
+  it waits `on`, and `why`. `stoppedAt`: the piece the merge stopped at.
+- `next`: what to do now, in a sentence or two.
+
+Each piece's `merge` in `runs show` has its `state` (`merged`, `nothingToMerge`,
+`conflict`, `integrationFailed`, `skipped`, `failed`), `commit`, `before` (where your
+branch was; after a conflict or a failed check it is there still), `after` (the merge
+commit), `files` for a conflict (each with `path`, `hunks`, the first conflicting place as
+`excerpt` from `line`, the merged pieces that changed it under `with`, and the piece the
+plan gives it to under `owner`) and `check` (the integration check as it ran: `run`,
+`exitCode`, `passed`, `millis`, and the last 100 lines of `output` when it failed).
+
+When the merge stops on a conflict, choose one, then run `runs merge` again:
+
+- **Send it back.** `terminalx runs send-back <piece> --json` gives the conflict to the
+  piece's worker as its brief: the files, both sides of the first conflicting place of
+  each, and which merged pieces changed them. The worker rebases onto your branch in its
+  own worktree, resolves it, and reports again; its result goes through the same checks,
+  and the piece is merged by the next `runs merge`. If its session is gone, a fresh worker
+  takes it, as the next try of the piece. `send-back` works the same for a piece that is
+  `integrationFailed`: the worker is given what the check printed.
+- **Resolve it yourself.** `git merge <commit>` in your checkout (the piece's `merge.commit`),
+  resolve, commit. The next `runs merge` finds the piece in your branch (`byHand`), runs
+  the integration check on it, and goes on. It does not undo a merge you made.
+- **Leave it out.** `terminalx runs merge --skip <piece> --json` merges the pieces that do
+  not depend on it. The run is not done without it; a later `runs merge` tries it again.
+
+Limits and budget (above) and the merge. Merging holds no worker slot and uses none of the
+budget: it is git and the checks, and a run that waits to be merged counts no worker in a
+turn. The two things that start a model do count:
+
+- `send-back` starts a worker's turn. It is refused with `no_free_worker` when the run, or
+  the app, has as many workers in a turn as it may; send it back when one has ended. A
+  fresh worker for a piece whose session is gone queues for a slot like any next try.
+- Having a conflict resolved by a model (a person pressing Resolve in lead, or `send-back`)
+  counts toward the run's budget: the worker's try by its recorded cost, the lead's turn by
+  what its session costs from the moment it is asked until that piece's merge is settled.
+  A run past its budget starts neither. The command is refused with `budget_reached`, the
+  run becomes `needsYou` with the limit in `pause.message`, and it stays there while a
+  merge needs resolving, until the person raises the budget and resumes it. Resolving the
+  conflict yourself by hand, and `runs merge`, are not held back by the budget.
+
+A run that is `needsYou` when its last piece is accepted, with no merge to resolve, becomes
+`merging` by itself.
+
+A piece whose merge failed the integration check is not checked again until its commit or
+your branch has changed; `--recheck` runs the check again all the same (a flaky test).
+
+`terminalx runs cleanup --yes --json` removes the workers' worktrees, each with its
+session, once you no longer need them. It is separate and explicit: without `--yes` it
+removes nothing and lists what would go. It refuses, per worktree and with the reason, one
+with uncommitted work, one with commits that are not in your branch (a try that fell
+short, a worker that went on after its result was accepted), one whose piece is still
+being worked on or checked, and one with an agent running in it. Branches are always kept.
+It returns `removed` and `refused`.
+
+#### What a worker may not do
+
+Workers run in bypass mode by default, so nothing asks before they edit or run a command.
+Three limits hold in every mode and are not theirs, or yours, to lift: a worker does not
+push, does not merge, and does not deploy, publish or open a pull request. They are enforced
+outside the worker's judgment: deny rules handed to its agent at launch, TerminalX's own
+check of every tool call, a git configuration in which every push goes nowhere, and a branch
+with no upstream. A refused command tells the worker to stop and report what is ready.
+Do not ask a worker to push or to merge: `terminalx runs merge` brings the accepted branches
+into yours (above). A worker gets no issue pipeline
+(a pipeline would push and merge on its behalf, so every `pipelines` command but `list` and
+`show` is refused for it) and starts no sessions or runs of its own; a session started for
+it all the same has the worker's limits.
+
+### Tokens and cost (`sessions usage`)
+
+```text
+terminalx sessions usage <session> --json
+terminalx sessions usage --children-of <session> --json
+```
+
+Each agent tab keeps running totals of what its agents used: input (uncached), output,
+cache-read and cache-write tokens, and an estimated cost, **per model**, because a tab can
+change model mid-conversation. The totals are read from the agent's own usage records (Claude's
+transcript and its subagents' transcripts, Codex's rollout) at each turn end, parsing only what
+was appended since the last read, and cover every
+conversation the tab holds or has held. A fork does not count the records it copied from its
+parent. Costs use the same price table as Stats & Usage, each request at its own rates (cache
+reads at the cache-read rate). Everything is computed on this computer.
+
+The cost is an **estimate at API list prices**. On a subscription login (Claude account,
+ChatGPT account) nothing is billed per token: it is what the same tokens would cost on an API
+key, not money spent. A model missing from the price table, or a request on a service tier
+without a published price, keeps its tokens and has `costUsd: null`, never `0`.
+
+`sessions usage <session>` reads the transcripts again as it answers, so a turn under way counts
+as far as it has got, and stores what it read. It returns:
+
+```json
+{
+  "sessionId": "…", "title": "…", "estimate": true,
+  "tabs": [
+    { "tabId": "…", "title": "…", "agent": "codex", "updated": "2026-11-11T10:00:00.000Z",
+      "models": [ { "model": "gpt-6.1-sol", "inputTokens": 38000, "outputTokens": 21000,
+                    "cacheReadTokens": 412000, "cacheWriteTokens": 0, "costUsd": 0.71 } ],
+      "total": { "inputTokens": 38000, "outputTokens": 21000, "cacheReadTokens": 412000,
+                 "cacheWriteTokens": 0, "costUsd": 0.71, "unpricedModels": [] } }
+  ],
+  "models": [ … every tab's rows merged by model, costliest first … ],
+  "total": { … the same fields as a tab's total … }
+}
+```
+
+A `total` sums every model's tokens. Its `costUsd` is the sum of the priced models;
+`unpricedModels` names the models it leaves out, and `costUsd` is `null` only when there are
+tokens and none of them is priced. A tab with no agent usage to read (a terminal) is not listed.
+
+`sessions usage --children-of <lead>` covers a lead and the sessions it started, as `sessions
+list --children-of` finds them: `parent` (as there), `lead` (the lead's own report as above;
+`null` once it was deleted), `workers` (one such report per worker), `models` (everyone's rows
+merged) and `total`, the grand total of the lead and its workers.
+
+`sessions list` (every form) and `sessions show` carry `estimatedCostUsd` on each session: its
+total `costUsd` as of each tab's last turn end, or `null` before any was read. Beside it,
+`estimatedCostUnpricedModels` names the models that cost leaves out; when it is not empty the
+cost is partial (the header shows it as "≈ $0.13+"). Each tab entry
+carries the stored totals as `usage` (`models`, `updated`). The session header shows the cost
+when Settings → Experimental → Session cost is on.
+
 ### Permissions
 
 ```text
@@ -363,6 +1292,42 @@ A worktree that is not clean and merged also needs `--force`. Pass it only when 
 work the preview lists is intended. The response lists each deleted session under
 `removedSessions` with its `id`, `title`, `project` and `belongsTo`.
 
+### Review comments
+
+From a pipeline's recorded reviewer tab, while its review is active:
+
+```text
+terminalx review comment --file src/foo.ts --line 40 --body "Explain the defect and when it occurs." --json
+terminalx review comment --file src/foo.ts --line 40-43 --body "One finding on this range." --json
+terminalx review comments --json
+```
+
+Comments are local annotations, persisted per workspace outside the checkout. They do not
+post to GitHub or Linear. The tab's stored workspace and name are used; changing the shell's
+directory does not change that workspace. Both commands need the tab's `RACCOON_SESSION_ID`
+and `RACCOON_TAB_ID`, set when TerminalX launches the agent. Writing also requires that
+tab's current `RACCOON_HOOK_TOKEN`; the CLI sends it automatically. Author tabs, ordinary
+chats and calls claiming a different tab are refused. Listing remains available to other
+agent tabs. The commands work on the headless local owner too. Cloud workspaces return `unsupported` until they share the desktop comment store.
+
+`--file` is relative to that workspace root, or an absolute path inside it. Parent traversal
+and symlinks resolving outside it are refused. `--line` is one-based and inclusive on the
+current file (the after side), and must not exceed its last line. Empty, binary, non-UTF-8
+and files larger than 4 MiB cannot be annotated; `--body` is nonempty and at most 32 KiB.
+Ranges are limited to 10,000 lines and 1,000,000 bytes of quoted text. Deleted files and
+before-side lines are not supported by these commands.
+
+The result includes the saved `comment`, with its quoted `lineText`, range, `note`, revision,
+and shared `author` (`kind: agent`, `role: reviewer`) with the tab's id and name. It uses the same workspace key
+and store as user diff comments. Agent notes appear on their diff lines with the agent's name
+and are included by “Add all to chat”; editing, Sent and Outdated work as for user comments.
+Each new comment also appears as a card in the caller's chat. `review comments` lists all user
+and agent comments in file and line order. Read that list before retrying an uncertain write:
+an identical retry for the same reviewer and reviewed commit returns that note with
+`created: false`, preserving its state and avoiding another chat card. Note text uses the
+store's whitespace trimming. The anchor records the PR comparison tree, surrounding source
+lines and `reviewedCommit`; changed checkout commits or quoted lines are refused.
+
 ### Issues
 
 For a request to file an issue, gather any needed context directly in the current conversation
@@ -409,18 +1374,24 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX shows a pending request in the main
-window, whoever runs the command. The person chooses Review to see the reported session,
+Reading and creating issues need no confirmation. When the person asks to file an issue,
+`issues create --provider github|linear` validates and submits it using the configured provider
+credentials, then returns the created issue, including its identifier and URL. Creation needs
+no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
+failures are reported without automatically retrying creation; check the provider before
+retrying an uncertain result to avoid duplicates.
+
+Other issue writes show a pending request in the main window, whoever runs the command.
+The person chooses Review to see the reported session,
 project, target, action and complete text in a bounded, scrollable dialog. Background requests
 do not open the dialog or switch conversations. Only the explicit action button approves;
 Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
 40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
-lines is refused before anyone is asked; link to the details instead. A project can let comments and
+what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
+new issue title or description still applies; link to the details instead. A project can let comments and
 status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels, new issues and Linear issues always ask.
+the project menu); assigning, labels and edits to existing Linear issues always ask.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -463,12 +1434,42 @@ The response carries `pipeline` (or `null`, with the reason in `pipelineNote`, w
 has the pipeline turned off or the session is not on a branch of its own).
 
 ```text
+terminalx pipelines start <existing-session-or-author-tab> [--adopt-pr] \
+  [--auto-merge|--no-auto-merge] [--resolve-conflicts|--no-resolve-conflicts] --json
+terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`start` (`attach` is an alias) activates Autopilot in an existing local session. A session
+selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the
+session, conversation, checkout and branch. No new author is created. The project must allow
+pipelines and the checkout must be on a non-base branch; experimental stdio tabs are refused.
+With no existing pipeline, launch switches take the project's issue/session defaults unless
+specified. Repeating the command returns the same pipeline and does not resend the author brief
+or change its switches. Use the switch commands below to change an existing pipeline.
+
+Use `--adopt-pr` when the branch already has an open PR. TerminalX verifies the clean checkout
+matches that PR's branch and exact head before attaching it. It never pushes, rewrites history,
+edits the PR body or creates a replacement PR during adoption. The original author yields its
+turn; TerminalX then independently reviews the same PR, with the existing review, security,
+local-check and CI gates. Prior reviews are not imported as a fabricated TerminalX verdict.
+An existing pipeline at Work with no PR can adopt too; one already attached to a PR is returned
+unchanged. Reviewer/resolver tabs cannot take over as author. A stopped pipeline needs `resume`.
+
+Without `--adopt-pr`, a new pipeline sends its handoff brief to the original author once (queued
+when busy). The response includes `pipeline` and `authorBrief`; inspect its state/note if delivery
+fails. An existing open PR is reused later when the author reports completion. After attaching
+from the author tab, finish the turn so review can proceed. These commands need no UI grant and
+never authorize human-only confirmations, review extensions or security overrides.
+
+For explicitly authorized operation of the visible session controls, use
+`terminalx computer self-ui` as documented in `terminalx skills get computer-use`. Its expiring
+grant names one session, tab, main window and control allowlist. Raw self-app screenshots,
+accessibility trees and coordinate/keyboard actions remain protected.
 
 `<pipeline>` is a pipeline id or its unique prefix, the issue (`433`, `ENG-42`; the newest
 pipeline when an issue has several), or the author session's id. When more than one project
@@ -540,7 +1541,9 @@ cloud workspaces" in Settings (`cloud status` then says `enabled: false`). Turni
 authorizes routine compute within the person's existing organization and workspace permissions:
 session launches, resume, send-wake and new workspace creation can incur billing without another
 native confirmation. The switch does not grant a new role or repository access.
-Stopping a workspace still requires `--yes` and the person's native confirmation. Enabling the
+Agents can stop and resume workspaces without another native confirmation. Stopping still
+requires `--yes` to acknowledge that running agent turns end; creating a new machine still
+requires `--confirm-spend`. Enabling the
 switch also requires native confirmation. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
@@ -549,7 +1552,8 @@ open, `terminalx computer` actions answer `confirmation_pending`: only the perso
 Do not try to work around any of this, and do not answer it for them: ask the person.
 
 What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
-TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
+TerminalX's raw computer use protects its own windows (`own_app_protected`). The scoped
+`computer self-ui` route exposes approved session controls only, never confirmations. On
 macOS this version's helper serves only the app itself: an agent that talks to it directly, or
 starts its own copy of it, is refused. It does not stop a hostile program that drives the
 screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
@@ -634,7 +1638,8 @@ request an explicit complete guide; the embedded guide is complete either way.
 
 The built-in browser is TerminalX's own Chromium, opened as a headed window the reader can see
 and take over, with tabs scoped to TerminalX workspaces. It is not the reader's Chrome or
-Safari and not TerminalX's own app chrome; for those use a desktop-control tool, not these
+Safari or TerminalX's own app chrome. Use desktop computer use for Safari, and scoped
+`computer self-ui` for approved TerminalX session controls, rather than these
 commands. Tabs and cookies persist in a browser profile under `$TERMINALX_HOME/browser`, so a
 login survives across commands and sessions.
 
@@ -753,7 +1758,36 @@ JSON failures have this shape:
   it receives the new launch environment.
 - `not_found`: refresh the relevant list and use an id from the result.
 - `ambiguous_selector`: use the full id or exact project path.
+- `parent_not_found`: `sessions create --parent` named a session the app does not have.
+  Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
+- `shared_file`, `dependency_cycle`, `unknown_dependency`, `no_done_check`, `too_many_pieces`,
+  `mode_not_allowed`, `no_command_check`, `review_only_without_reason`, `empty_check`,
+  `owns_outside_repository`, `unknown_key`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:
+  `runs create` refused the plan. `details` names the piece and the rule's particulars;
+  nothing was stored. Correct the plan and create the run again.
+- `awaiting_approval`: the run waits for the person to approve its plan in the app. Tell
+  them, end your turn, and do not retry: you are told when they decide.
+- `run_exists`: this session already leads a run that has not ended (`details.run`).
+- `run_ended`: the run is done, stopped or failed; nothing more starts in it.
+- `merge_in_progress`, `checkout_busy`, `lead_checkout_dirty`, `lead_checkout_unfinished`,
+  `lead_detached`, `lead_branch_changed`, `checks_not_approved`, `run_not_started`:
+  `runs merge` merged nothing; `message` and `recovery` say what to change first.
+- `nothing_to_send_back`: the piece has no failed merge; `runs send-back` is for a piece
+  whose accepted result conflicts or failed the integration check.
+- `piece_not_blocked`: `take-over`, `widen`, `note` and `skip` are for a piece that is
+  `blocked` (or `failed`; `skip` also takes one you took over). `details.state` says where
+  it is.
+- `nothing_to_widen`, `owned_by_another`, `invalid_path`, `person_only`: `runs widen` added nothing. Name
+  the files with `--own`, wait until the piece that owns a file is done, or give a path
+  relative to the repository's root.
+- `worker_gone`, `empty_note`, `note_not_taken`: `runs note` reached no worker; widen the
+  piece to start a fresh one.
+- `lead_busy`: you already have a piece of this run to finish. `not_taken_over`,
+  `uncommitted`, `nothing_committed`, `checks_failed`: `runs finish` did not make the piece
+  done; commit your work, or fix what the check printed (`details.check`), and finish again.
+- `lead_required`, `lead_not_found`, `not_a_repository`: a run needs a lead session the app
+  knows, in a project that is a git repository.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.
 - `request_lapsed`: refresh `permissions list`; never reuse the old request id.
@@ -769,9 +1803,9 @@ JSON failures have this shape:
 - `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
   them the setting named in `recovery`; do not retry.
 - `declined`: the person refused the request in the app window. Do not retry.
-- `expired`, `busy`, `backoff`: an issue write was not answered in time, another question was
+- `expired`, `busy`, `backoff`: an edit to an existing issue was not answered in time, another question was
   already on screen, or the person refused one a moment ago. Nothing was changed.
-- `confirmation_unavailable`: an issue write needs the person's answer and this runtime has no
+- `confirmation_unavailable`: an edit to an existing issue needs the person's answer and this runtime has no
   window to ask in. Nothing was changed; ask the person.
 - `account_signed_out`: sign in to TerminalX in the app.
 - `cloud_unavailable`: the app's window did not answer. Check the session with `read` before

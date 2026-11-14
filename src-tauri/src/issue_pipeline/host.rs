@@ -57,6 +57,16 @@ impl LocalHost {
         Self { sink, manager, place: Place::Desktop }
     }
 
+    /// A turn ended in a tab that owes a report (`worker_report`): it is asked
+    /// once more when the reply has none.
+    pub(crate) fn worker_turn_completed(&self, session_id: &str, tab_id: &str, final_message: Option<&str>) {
+        let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
+        crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
+        // A run's worker: its piece follows what it just reported.
+        // A try that fell short is followed by the next without anything more from here: the read of the run asks its host for that.
+        crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
+    }
+
     /// The host of a cloud workspace's runtime.
     pub fn cloud_workspace(sink: Arc<dyn EventSink>, manager: SessionManager, tab_added: TabAdded) -> Self {
         Self { sink, manager, place: Place::CloudWorkspace { tab_added } }
@@ -89,18 +99,11 @@ pub(crate) fn pr_number(url: &str) -> Option<u64> {
 
 /// A transcript's last finished turn: when it ended, and its reply (the
 /// turn's final text, else its last message). A subagent's turns are not the tab's.
-fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
+pub(crate) fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
     use crate::events::{Payload, TurnStatus};
     let end = events.iter().rposition(|event| event.subagent.is_none() && matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }))?;
     let at = DateTime::parse_from_rfc3339(&events[end].ts).ok()?.with_timezone(&Utc);
-    let said = |event: &crate::events::AgentEvent| match &event.payload {
-        Payload::AssistantText { text, .. } if event.subagent.is_none() && !text.trim().is_empty() => Some(text.clone()),
-        _ => None,
-    };
-    let reply = match &events[end].payload {
-        Payload::TurnCompleted { final_text: Some(text), .. } if !text.trim().is_empty() => text.clone(),
-        _ => events[..end].iter().rev().take_while(|event| !matches!(event.payload, Payload::TurnStarted { .. })).find_map(said)?,
-    };
+    let (_, reply) = crate::reply_block::turn_reply(events, end)?;
     Some((at, reply))
 }
 
@@ -146,9 +149,25 @@ fn diff(cwd: &Path, base: &str, head: &str) -> Result<Diff> {
 /// How long a push may take before it is given up on.
 const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+#[cfg(test)]
+pub(crate) fn privacy_transfer_entry(cwd: &Path, action: &str) -> Result<()> {
+    match action {
+        "push" => push(cwd),
+        "read" => remote_head(cwd, "origin", "main").map(|_| ()),
+        "fetch" => resolution_needed(cwd, "main", "main", false, None).map(|_| ()),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn privacy_resolution(cwd: &Path) -> Result<Option<super::Resolution>> {
+    resolution_needed(cwd, "privacy-conflict", "main", false, None)
+}
+
 /// Push the checkout's branch, setting its upstream the first time. Never
 /// forced, and with a deadline: a push that hangs must not hold the pipeline.
 fn push(cwd: &Path) -> Result<()> {
+    let _request = crate::github_process::scope();
     let branch = crate::git::current_branch(cwd).context("the checkout is not on a branch")?;
     let has_upstream = crate::git::run(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok();
     let args: Vec<&str> = if has_upstream { vec!["push"] } else { vec!["push", "-u", "origin", &branch] };
@@ -160,50 +179,152 @@ fn push(cwd: &Path) -> Result<()> {
     })
 }
 
+fn push_destination(cwd: &Path, remote: &str, url: &str) -> Result<(String, String)> {
+    use sha2::Digest;
+    // Pin transport rewrites too, without saving potentially credentialed URLs.
+    let expanded = crate::git::run(cwd, &["remote", "get-url", "--push", "--all", remote])?;
+    let urls: Vec<_> = expanded.lines().filter(|url| !url.is_empty()).collect();
+    if urls.len() != 1 { bail!("Conflict resolution requires exactly one push destination."); }
+    let mut hash = sha2::Sha256::new();
+    hash.update(url.as_bytes());
+    hash.update([0]);
+    hash.update(expanded.as_bytes());
+    Ok((urls[0].into(), format!("{:x}", hash.finalize())))
+}
+
+fn resolution_target(cwd: &Path, branch: &str, pr: Option<&PrSnapshot>) -> Result<super::ResolutionTarget> {
+    let repository = pr.map(|pr| pr.head_repository.clone().context("GitHub did not identify the PR head repository. Refresh the pull request before resolving conflicts.")).transpose()?;
+    let (remote, url) = match &repository {
+        Some(repo) => crate::github::head_push_destination(cwd, branch, repo)?,
+        None => {
+            let remote = crate::git::push_remote(cwd, branch).unwrap_or_else(|| "origin".into());
+            let url = crate::git::configured_push_url(cwd, &remote)?;
+            (remote, url)
+        }
+    };
+    let (_, url_hash) = push_destination(cwd, &remote, &url)?;
+    Ok(super::ResolutionTarget { remote, repository, url_hash })
+}
+
+fn resolution_push_url(cwd: &Path, resolution: &super::Resolution) -> Result<String> {
+    let target = resolution.target.as_ref().context("This resolution has no verified push destination. Start conflict resolution again before pushing.")?;
+    let url = crate::git::configured_push_url(cwd, &target.remote)?;
+    let (push_url, hash) = push_destination(cwd, &target.remote, &url)?;
+    if hash != target.url_hash {
+        bail!("The conflict-resolution push destination changed. Nothing was pushed; start resolution again.");
+    }
+    if target.repository.is_some() && resolution.remote_head.is_none() {
+        bail!("The pull request branch was not observed at its verified push destination. Nothing was pushed.");
+    }
+    Ok(push_url)
+}
+
 fn verify_resolution(cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
+    let _request = crate::github_process::scope();
         // Exactly one merge, with the two pinned inputs. An extra author or
         // human commit changes the parents and is never silently pushed.
         let parents = crate::git::run(cwd, &["show", "-s", "--format=%P", head, "--"])?;
         if parents.split_whitespace().collect::<Vec<_>>() != [resolution.head.as_str(), resolution.base_commit.as_str()] {
             bail!("The checkout changed during resolution, or the result is not one merge of the pinned inputs. Review the commits manually.");
         }
-        if remote_head(cwd, branch)? != resolution.remote_head {
+        let url = resolution_push_url(cwd, resolution)?;
+        if remote_head(cwd, &url, branch)? != resolution.remote_head {
             bail!("Someone pushed to this branch during conflict resolution. Nothing was pushed; reconcile the new remote head manually.");
         }
         Ok(())
 }
 
-fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
+fn remote_head(cwd: &Path, url: &str, branch: &str) -> Result<Option<String>> {
+    let _request = crate::github_process::scope();
     let reference = format!("refs/heads/{branch}");
-    let mut command = std::process::Command::new("git");
-    command.args(["ls-remote", "--heads", "origin", &reference]).current_dir(cwd);
-    let output = crate::git::output_within(command, std::time::Duration::from_secs(30)).map_err(|error| anyhow!("Reading the remote branch failed: {error:?}"))?;
+    let output = crate::git::transfer_output(cwd, &["ls-remote", "--heads", "--", url, &reference], std::time::Duration::from_secs(30)).map_err(|error| anyhow!("Reading the remote branch failed: {error:?}"))?;
     Ok(output.lines().find_map(|line| {
         let (sha, name) = line.split_once('\t')?;
         (name == reference).then(|| sha.to_string())
     }))
 }
 
+/// The base branch's commit as the remote has it now, fetched: the pull
+/// request's base repository when there is a pull request, `origin` when not.
+fn fetch_base(cwd: &Path, base: &str, pr: Option<&PrSnapshot>) -> Result<String> {
+    let _request = crate::github_process::scope();
+    Ok(if let Some(pr) = pr {
+        if pr.base != base { bail!("The requested base branch does not match the pull request."); }
+        let url = crate::github::base_fetch_destination(cwd, pr)?;
+        let commit = remote_head(cwd, &url, base)?.context("The pull request's base branch is missing from its repository.")?;
+        // Fetch the exact observed base object. Neither stale origin refs nor
+        // another fetch replacing FETCH_HEAD can select a different merge input.
+        crate::git::run_within(cwd, &["fetch", "--no-tags", "--no-write-fetch-head", "--", &url, &commit], PUSH_TIMEOUT, &|| false)
+            .map_err(|error| anyhow!("Fetching the pull request base failed: {error:?}"))?;
+        crate::git::run(cwd, &["rev-parse", "--verify", &format!("{commit}^{{commit}}")])?.trim().to_string()
+    } else {
+        crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
+        let base_ref = format!("refs/remotes/origin/{base}");
+        crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string()
+    })
+}
+
+/// Whether the commits after `reviewed` only merge the pull request's base,
+/// against the base as GitHub has it now (#947).
+fn base_merges(cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+    let base_commit = fetch_base(cwd, &pr.base, Some(pr))?;
+    super::carry::classify(cwd, &base_commit, reviewed, head)
+}
+
 /// `required`: GitHub asks for the merge, the branch behind or in conflict,
 /// whatever `git merge-tree` says. The two can differ: with more than one
 /// merge base, git merges the bases into one first and GitHub does not.
-fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
-    crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
-    let base_ref = format!("refs/remotes/origin/{base}");
-    let base_commit = crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string();
+fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+    let _request = crate::github_process::scope();
+    let base_commit = fetch_base(cwd, base, pr)?;
     let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
     let ahead = crate::git::run(cwd, &["rev-list", "--count", &format!("{base_commit}..{head}")])?;
     let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
     if ahead.trim() == "0" || behind_count.trim() == "0" { return Ok(None); }
     // merge-tree computes conflicts without changing the index or checkout.
-    let output = std::process::Command::new("git").args(["merge-tree", "--write-tree", &head, &base_commit]).current_dir(cwd).output()?;
+    let output = crate::git::inspect_output(cwd, &["merge-tree", "--write-tree", &head, &base_commit])?;
     let conflicting = match output.status.code() {
         Some(0) => false,
         Some(1) => true,
-        _ => bail!("Could not compare the branch with its base: {}", String::from_utf8_lossy(&output.stderr)),
+        _ => bail!("Could not compare the branch with its locally available base objects: {}", String::from_utf8_lossy(&output.stderr)),
     };
     if !conflicting && !required { return Ok(None); }
-    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work, waiting_since: None }))
+    let target = resolution_target(cwd, branch, pr)?;
+    let url = crate::git::configured_push_url(cwd, &target.remote)?;
+    let (push_url, hash) = push_destination(cwd, &target.remote, &url)?;
+    if hash != target.url_hash { bail!("The push destination changed while preparing conflict resolution."); }
+    let remote_head = remote_head(cwd, &push_url, branch)?;
+    if let Some(pr) = pr {
+        if pr.head != branch || pr.state != "OPEN" || remote_head.as_deref() != Some(pr.head_sha.as_str()) {
+            bail!("The pull request branch is missing or changed at its verified push destination. Refresh the pull request before resolving conflicts.");
+        }
+    }
+    Ok(Some(super::Resolution { head, remote_head, target: Some(target), base: base.to_string(), base_commit, return_stage: super::Stage::Work, waiting_since: None }))
+}
+
+fn push_resolution(cwd: &Path, resolution: &super::Resolution, branch: &str, head: &str) -> Result<()> {
+    // Recheck at the write boundary and pass the pinned URL directly: changing
+    // the upstream, push.default or a remote name cannot redirect the write.
+    verify_resolution(cwd, resolution, head, branch)?;
+    let url = resolution_push_url(cwd, resolution)?;
+    let target = format!("{head}:refs/heads/{branch}");
+    crate::git::run_within(cwd, &["push", "--", &url, &target], PUSH_TIMEOUT, &|| false)
+        .map_err(|error| anyhow!("Pushing the verified resolution failed: {error:?}"))
+}
+
+impl LocalHost {
+    /// A conversation of its own in the author's session, named `title`: no fork, and none
+    /// of the author's transcript. On `chosen`'s model and effort, else the author's.
+    fn open_tab(&self, author: &SessionEntry, tab: &index::TabEntry, title: &str, chosen: Option<(String, Option<String>)>) -> Result<SessionRef> {
+        let (model, effort) = chosen.unwrap_or_else(|| (tab.model.clone(), tab.effort.clone()));
+        let opened = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(), harness: tab.harness.clone(), model, effort, permission_mode: Some(tab.permission_mode.clone()) })?;
+        crate::session_ops::rename_tab_entry(&author.id, &opened.id, Some(title.into())).map_err(anyhow::Error::msg)?;
+        self.sink.emit("session_updated", &index::get(&author.id)?);
+        if let Place::CloudWorkspace { tab_added } = &self.place {
+            tab_added(&opened.id);
+        }
+        Ok(SessionRef { session_id: author.id.clone(), tab_id: opened.id })
+    }
 }
 
 impl Host for LocalHost {
@@ -260,19 +381,23 @@ impl Host for LocalHost {
     /// reused by the engine, including legacy separate sessions.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        let reviewer = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(),
-            harness: tab.harness.clone(), model: tab.model.clone(), effort: tab.effort.clone(), permission_mode: Some(tab.permission_mode.clone()),
-        })?;
-        crate::session_ops::rename_tab_entry(&author.id, &reviewer.id, Some("Reviewer".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        if let Place::CloudWorkspace { tab_added } = &self.place {
-            tab_added(&reviewer.id);
-        }
-        Ok(SessionRef { session_id: author.id.clone(), tab_id: reviewer.id })
+        // The project's reviewer model and effort, when it set them: a review need not run on
+        // what the author ran on. The agent's list is read only for a project that chose.
+        let chosen = crate::store::projects::issue_pipeline_settings(&author.project_path).ok().filter(|settings| settings.reviewer_model.is_some() || settings.reviewer_effort.is_some()).map(|settings| {
+            let models = match tab.harness.as_str() {
+                "claude" => crate::harness::claude::models::get(false),
+                "codex" => self.manager.codex_models().get(false),
+                _ => crate::models::catalog(),
+            };
+            settings.reviewer_choice(&tab.harness, &tab.model, tab.effort.as_deref(), &models)
+        });
+        self.open_tab(author, tab, "Reviewer", chosen)
     }
 
     fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
         let cwd = cwd.canonicalize()?;
+        // Closed for work that is no conversation's turn: an orchestration run is being merged into it.
+        if super::admission::closed(&cwd) { return Ok(false); }
         for session in index::load()? {
             if Path::new(&session.cwd).canonicalize().ok().as_ref() != Some(&cwd) { continue; }
             for tab in &session.tabs {
@@ -283,19 +408,22 @@ impl Host for LocalHost {
         Ok(true)
     }
 
-    fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
-        resolution_needed(cwd, branch, base, required)
+    fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+        resolution_needed(cwd, branch, base, required, pr)
     }
 
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
-        let resolver = self.open_reviewer(pipeline, author)?;
-        crate::session_ops::rename_tab_entry(&author.id, &resolver.tab_id, Some("Conflict resolver".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        Ok(resolver)
+        // A resolver writes the merge the author would have: it runs on the author's model.
+        let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
+        self.open_tab(author, tab, "Conflict resolver", None)
     }
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn base_merges(&self, cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+        base_merges(cwd, reviewed, head, pr)
     }
 
     fn abort_merge(&self, cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
@@ -305,10 +433,27 @@ impl Host for LocalHost {
     fn defer_local_check(&self, pipeline_id: &str) -> bool {
         let host = self.clone();
         let id = pipeline_id.to_string();
-        std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(move || super::engine::run_local_checks(&host, &id)).is_ok()
+        std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(crate::github_process::queued(move || super::engine::run_local_checks(&host, &id))).is_ok()
     }
 
-    fn run_local_check(&self, cwd: &Path, command: &str) -> Result<()> {
+    fn startup_blocker(&self, pipeline: &Pipeline, new_validation: bool) -> Result<Option<String>> {
+        if self.cloud() { return Ok(None); }
+        let state = crate::startup::snapshot()?;
+        let Some(incident) = state.active() else { return Ok(None) };
+        let affected = new_validation || incident.blocked_pipelines.contains(&pipeline.id) || state.launches.iter().any(|launch|
+            incident.launches.contains(&launch.id) && [Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().any(|who|
+                launch.pane == SessionManager::pane_id(&who.tab_id) || crate::pty::shell_session(&launch.pane) == Some(who.session_id.as_str())));
+        if affected { crate::startup::validation_blocker(Some(&pipeline.id)) } else { Ok(None) }
+    }
+
+    fn validation_pending(&self, pipeline: &Pipeline) -> Result<bool> {
+        if self.cloud() { Ok(false) } else { crate::startup::validation_pending(&pipeline.id) }
+    }
+
+    fn run_local_check(&self, pipeline: &Pipeline, cwd: &Path, command: &str) -> Result<()> {
+        if !self.cloud() {
+            return crate::startup::run_validation(&SessionManager::pane_id(&pipeline.author.tab_id), &pipeline.id, cwd, command);
+        }
         let mut process = std::process::Command::new("/bin/sh");
         process.args(["-c", command]).current_dir(cwd);
         crate::git::output_within(process, std::time::Duration::from_secs(1800))
@@ -335,12 +480,8 @@ impl Host for LocalHost {
         push(cwd)
     }
 
-    fn push_resolution(&self, cwd: &Path, branch: &str, head: &str) -> Result<()> {
-        // Neither a changed checkout nor Git's push.default/upstream settings
-        // may redirect this push. The exact verified commit goes to one ref.
-        let target = format!("{head}:refs/heads/{branch}");
-        crate::git::run_within(cwd, &["push", "origin", &target], PUSH_TIMEOUT, &|| false)
-            .map_err(|error| anyhow!("Pushing the verified resolution failed: {error:?}"))
+    fn push_resolution(&self, cwd: &Path, resolution: &super::Resolution, branch: &str, head: &str) -> Result<()> {
+        push_resolution(cwd, resolution, branch, head)
     }
 
     fn open_pull_request(&self, cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
@@ -456,6 +597,55 @@ mod tests {
         assert!(host.merge(Path::new("/unused"), 1, "merge", "head").unwrap_err().to_string().contains("does not merge"));
     }
 
+    #[test]
+    fn a_pipeline_with_a_reviewer_model_set_opens_its_reviewer_on_that_model() {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::store::projects::add(repo.path().to_str().unwrap()).unwrap();
+        let author: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": project.path, "cwd": project.path, "title": "Issue",
+            "created": "2026-11-11T00:00:00Z", "modified": "2026-11-11T00:00:00Z",
+            "tabs": [{"id": "t1", "harness": "claude", "model": "opus", "effort": "xhigh", "permissionMode": "bypassPermissions", "created": "2026-11-11T00:00:00Z"}]
+        })).unwrap();
+        index::save(std::slice::from_ref(&author)).unwrap();
+        let pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        let host = LocalHost::new(sink, manager);
+        let set = |model: Option<&str>, effort: Option<&str>| {
+            let settings = IssuePipelineSettings { reviewer_model: model.map(str::to_owned), reviewer_effort: effort.map(str::to_owned), ..Default::default() };
+            crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() }).unwrap();
+        };
+        let opened = |who: SessionRef| {
+            let tab = index::get("author").unwrap().tab(&who.tab_id).cloned().unwrap();
+            (tab.title.clone().unwrap_or_default(), tab.harness.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone())
+        };
+        let on = |title: &str, model: &str, effort: Option<&str>| (title.to_string(), "claude".to_string(), model.to_string(), effort.map(str::to_owned), "bypassPermissions".to_string());
+        // No choice made: the author's model and effort, as before.
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("xhigh")));
+        // The project's reviewer model and effort: the reviewer runs on them, the author's mode kept.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", Some("medium")));
+        // A model with no effort named runs at its own default, not at the author's xhigh.
+        set(Some("sonnet"), None);
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", None));
+        // Only an effort: the author's model at that effort.
+        set(None, Some("low"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("low")));
+        // A model the author's agent does not offer cannot be launched: the author's stands.
+        set(Some("gpt-6.1-terra"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("medium")));
+        // A conflict resolver writes code: it stays on the author's model whatever the reviewer's is.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_resolver(&pipeline, &author).unwrap()), on("Conflict resolver", "opus", Some("xhigh")));
+        // The author's own tab is untouched by any of it.
+        assert_eq!(index::get("author").unwrap().tabs[0], author.tabs[0]);
+    }
+
     fn git(cwd: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .current_dir(cwd)
@@ -496,7 +686,7 @@ mod tests {
         git(root, &["commit", "-qam", "base"]);
         git(root, &["push", "-q", "origin", "main"]);
         git(root, &["checkout", "-q", "raccoon/433-work"]);
-        let resolution = resolution_needed(root, "raccoon/433-work", "main", false).unwrap().unwrap();
+        let resolution = resolution_needed(root, "raccoon/433-work", "main", false, None).unwrap().unwrap();
         assert_eq!(workspace(root).unwrap().head, original.head);
         assert!(workspace(root).unwrap().dirty.is_empty());
         assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "branch intent\n");
@@ -523,6 +713,171 @@ mod tests {
         git(root, &["add", "extra.txt"]);
         git(root, &["commit", "-qm", "another writer"]);
         assert!(verify_resolution(root, &resolution, &git(root, &["rev-parse", "HEAD"]), "raccoon/433-work").is_err());
+    }
+
+    /// Real upstream/fork repositories, with Git URL rewrites keeping all
+    /// transport local while preserving the GitHub repository identities.
+    fn fork_with_conflicts() -> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir, PrSnapshot) {
+        let dir = repository();
+        let root = dir.path();
+        let upstream = tempfile::tempdir().unwrap();
+        let fork = tempfile::tempdir().unwrap();
+        for (name, repo, bare) in [("origin", "acme/widgets", &upstream), ("fork", "me/widgets", &fork)] {
+            git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+            let url = format!("https://github.com/{repo}.git");
+            git(root, &["remote", "add", name, &url]);
+            git(root, &["config", &format!("url.{}.insteadOf", bare.path().display()), &url]);
+        }
+        git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["push", "-q", "fork", "main"]);
+        std::fs::write(root.join("README.md"), "branch intent\n").unwrap();
+        git(root, &["commit", "-qam", "branch"]);
+        git(root, &["push", "-q", "fork", "raccoon/433-work"]);
+        git(root, &["config", "branch.raccoon/433-work.pushRemote", "fork"]);
+        let pr = crate::github::parse_snapshot(&serde_json::json!({
+            "number":7,"url":"https://github.com/acme/widgets/pull/7","state":"OPEN",
+            "headRefName":"raccoon/433-work","baseRefName":"main","headRefOid":git(root, &["rev-parse", "HEAD"]),
+            "isCrossRepository":true,"headRepositoryOwner":{"login":"me"},"headRepository":{"name":"widgets"}
+        }));
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("README.md"), "base intent\n").unwrap();
+        git(root, &["commit", "-qam", "base"]);
+        git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["checkout", "-q", "raccoon/433-work"]);
+        (dir, upstream, fork, pr)
+    }
+
+    #[test]
+    fn fork_resolution_verifies_and_pushes_only_the_pinned_pr_repository() {
+        let (dir, upstream, fork, pr) = fork_with_conflicts();
+        let root = dir.path();
+        let branch = "raccoon/433-work";
+        let reference = "refs/heads/raccoon/433-work";
+        let resolution = resolution_needed(root, branch, "main", true, Some(&pr)).unwrap().unwrap();
+        assert_eq!(resolution.remote_head.as_deref(), Some(pr.head_sha.as_str()));
+        assert_eq!(resolution.target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+        assert_eq!(resolution.target.as_ref().unwrap().remote, "fork");
+        // The destination survives the resolver's turn and an app restart.
+        let json = serde_json::to_string(&resolution).unwrap();
+        assert!(!json.contains("https://"));
+        let resolution: super::super::Resolution = serde_json::from_str(&json).unwrap();
+        let merge = std::process::Command::new("git").current_dir(root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+        assert!(!merge.status.success());
+        std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-qm", "preserve both intents"]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        verify_resolution(root, &resolution, &head, branch).unwrap();
+        // Two missing observations must never authorize an existing PR push.
+        let mut unverified = resolution.clone();
+        unverified.remote_head = None;
+        assert!(push_resolution(root, &unverified, branch, &head).is_err());
+        // Legacy stored resolutions have no verified destination; fail closed.
+        unverified.target = None;
+        assert!(push_resolution(root, &unverified, branch, &head).is_err());
+        // Changes at the fork (including deletion) invalidate the merge even
+        // though origin's same-name branch is absent throughout this test.
+        let ancestor = git(root, &["rev-parse", &format!("{}^", pr.head_sha)]);
+        git(fork.path(), &["update-ref", reference, &ancestor]);
+        assert!(verify_resolution(root, &resolution, &head, branch).unwrap_err().to_string().contains("Someone pushed"));
+        assert!(push_resolution(root, &resolution, branch, &head).is_err());
+        git(fork.path(), &["update-ref", "-d", reference]);
+        assert!(push_resolution(root, &resolution, branch, &head).is_err());
+        git(fork.path(), &["update-ref", reference, &pr.head_sha]);
+        // A changed remote URL cannot redirect the already-verified result.
+        git(root, &["config", "remote.fork.pushurl", "https://github.com/acme/widgets.git"]);
+        assert!(push_resolution(root, &resolution, branch, &head).unwrap_err().to_string().contains("destination changed"));
+        git(root, &["config", "--unset", "remote.fork.pushurl"]);
+        // Transport rewrites are part of the pin as well as remote URLs.
+        let fork_rewrite = format!("url.{}.insteadOf", fork.path().display());
+        let upstream_rewrite = format!("url.{}.insteadOf", upstream.path().display());
+        git(root, &["config", "--unset", &fork_rewrite]);
+        git(root, &["config", "--add", &upstream_rewrite, "https://github.com/me/widgets.git"]);
+        assert!(push_resolution(root, &resolution, branch, &head).unwrap_err().to_string().contains("destination changed"));
+        git(root, &["config", "--unset", "--fixed-value", &upstream_rewrite, "https://github.com/me/widgets.git"]);
+        git(root, &["config", &fork_rewrite, "https://github.com/me/widgets.git"]);
+        // Changing Git's default push remote also cannot redirect this push.
+        git(root, &["config", "branch.raccoon/433-work.pushRemote", "origin"]);
+        push_resolution(root, &resolution, branch, &head).unwrap();
+        assert_eq!(git(fork.path(), &["rev-parse", reference]), head);
+        assert!(git(root, &["ls-remote", upstream.path().to_str().unwrap(), reference]).is_empty());
+        assert_eq!(git(upstream.path(), &["rev-parse", "main"]), resolution.base_commit);
+    }
+
+    #[test]
+    fn fork_resolution_rejects_missing_or_unverified_heads_and_ambiguous_push_urls() {
+        let (dir, upstream, fork, mut pr) = fork_with_conflicts();
+        let root = dir.path();
+        let branch = "raccoon/433-work";
+        pr.head_repository = None;
+        assert!(resolution_needed(root, branch, "main", true, Some(&pr)).is_err());
+        pr.head_repository = Some("someone/widgets".into());
+        assert!(resolution_needed(root, branch, "main", true, Some(&pr)).is_err());
+        pr.head_repository = Some("me/widgets".into());
+        git(root, &["config", "--add", "remote.fork.pushurl", "https://github.com/me/widgets.git"]);
+        git(root, &["config", "--add", "remote.fork.pushurl", "https://github.com/acme/widgets.git"]);
+        assert!(resolution_needed(root, branch, "main", true, Some(&pr)).is_err());
+        git(root, &["config", "--unset-all", "remote.fork.pushurl"]);
+        git(fork.path(), &["update-ref", "-d", "refs/heads/raccoon/433-work"]);
+        let error = resolution_needed(root, branch, "main", true, Some(&pr)).unwrap_err();
+        assert!(error.to_string().contains("missing or changed"));
+        assert!(git(root, &["ls-remote", upstream.path().to_str().unwrap(), "refs/heads/raccoon/433-work"]).is_empty());
+    }
+
+    #[test]
+    fn fork_origin_resolves_the_actual_upstream_base_even_when_its_own_main_is_stale() {
+        for configured_upstream in [true, false] {
+            let (dir, upstream, fork, pr) = fork_with_conflicts();
+            let root = dir.path();
+            let branch = "raccoon/433-work";
+            git(root, &["remote", "rename", "origin", "upstream"]);
+            git(root, &["remote", "rename", "fork", "origin"]);
+            let stale_base = git(root, &["rev-parse", "origin/main"]);
+            let actual_base = git(upstream.path(), &["rev-parse", "main"]);
+            assert_ne!(stale_base, actual_base);
+            assert_eq!(git(root, &["rev-list", "--count", "HEAD..origin/main"]), "0");
+            if configured_upstream {
+                let alias = "git@github-work:acme/widgets.git";
+                git(root, &["remote", "set-url", "upstream", alias]);
+                git(root, &["config", "--add", &format!("url.{}.insteadOf", upstream.path().display()), alias]);
+                assert_eq!(crate::github::base_fetch_destination(root, &pr).unwrap(), alias);
+            } else {
+                git(root, &["remote", "remove", "upstream"]);
+                assert_eq!(crate::github::base_fetch_destination(root, &pr).unwrap(), "https://github.com/acme/widgets.git");
+            }
+            let resolution = resolution_needed(root, branch, "main", true, Some(&pr)).unwrap().expect("the upstream main really conflicts");
+            assert_eq!(resolution.base_commit, actual_base);
+            assert_eq!(resolution.target.as_ref().unwrap().remote, "origin");
+            assert_eq!(resolution.target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+            let merge = std::process::Command::new("git").current_dir(root)
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+            assert!(!merge.status.success());
+            assert_eq!(workspace(root).unwrap().merging.as_slice(), std::slice::from_ref(&actual_base));
+            std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+            git(root, &["add", "README.md"]);
+            git(root, &["commit", "-qm", "resolve against upstream"]);
+            let head = git(root, &["rev-parse", "HEAD"]);
+            verify_resolution(root, &resolution, &head, branch).unwrap();
+            push_resolution(root, &resolution, branch, &head).unwrap();
+            assert_eq!(git(fork.path(), &["rev-parse", &format!("refs/heads/{branch}")]), head);
+            assert_eq!(git(fork.path(), &["rev-parse", "main"]), stale_base);
+            assert_eq!(git(upstream.path(), &["rev-parse", "main"]), actual_base);
+            assert!(git(root, &["ls-remote", upstream.path().to_str().unwrap(), &format!("refs/heads/{branch}")]).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_missing_pr_base_never_falls_back_to_the_forks_main() {
+        let (dir, upstream, _fork, mut pr) = fork_with_conflicts();
+        let root = dir.path();
+        git(root, &["remote", "rename", "origin", "upstream"]);
+        git(root, &["remote", "rename", "fork", "origin"]);
+        git(upstream.path(), &["update-ref", "-d", "refs/heads/main"]);
+        let error = resolution_needed(root, "raccoon/433-work", "main", true, Some(&pr)).unwrap_err();
+        assert!(error.to_string().contains("base branch is missing"));
+        pr.url = "https://github.com/acme/widgets/pull/8".into();
+        assert!(resolution_needed(root, "raccoon/433-work", "main", true, Some(&pr)).unwrap_err().to_string().contains("does not match"));
     }
 
     /// #748: the branch merged another pull request's branch before main
@@ -560,8 +915,8 @@ mod tests {
         let from_one_base = |base: &str| std::process::Command::new("git").current_dir(root).args(["merge-tree", "--write-tree", &format!("--merge-base={base}"), "origin/main", "HEAD"]).output().unwrap().status.code();
         assert_eq!(from_one_base(&base_then), Some(1), "GitHub's view: a conflict");
 
-        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", false).unwrap(), None, "git's view: nothing to resolve");
-        let resolution = resolution_needed(root, "raccoon/433-work", "main", true).unwrap().unwrap();
+        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", false, None).unwrap(), None, "git's view: nothing to resolve");
+        let resolution = resolution_needed(root, "raccoon/433-work", "main", true, None).unwrap().unwrap();
         assert_eq!(resolution.base_commit, git(root, &["rev-parse", "origin/main"]));
         git(root, &["merge", "-q", "--no-ff", "--no-edit", &resolution.base_commit]);
         let head = git(root, &["rev-parse", "HEAD"]);
@@ -569,7 +924,7 @@ mod tests {
         assert_eq!(git(root, &["merge-base", "--all", "origin/main", "HEAD"]), resolution.base_commit, "one merge base left");
         assert_eq!(std::fs::read_to_string(root.join("usage.txt")).unwrap(), "a\nother\nwork\nb\n");
         // With the base merged in, nothing more is asked for.
-        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", true).unwrap(), None);
+        assert_eq!(resolution_needed(root, "raccoon/433-work", "main", true, None).unwrap(), None);
     }
 
     #[test]

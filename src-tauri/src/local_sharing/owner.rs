@@ -349,6 +349,7 @@ pub(crate) fn execute(
             }
             let (cancel, _cancelled) = tokio::sync::mpsc::unbounded_channel();
             let guest = Guest {
+                privacy: Default::default(),
                 connection_id: connection,
                 link_id: text(&params, "linkId")?.into(),
                 person: serde_json::from_value(params["person"].clone())?,

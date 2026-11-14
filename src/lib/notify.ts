@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
@@ -14,6 +15,8 @@ import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from 
 import type { AutomationRun } from "@/types/automations";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import { noticesDeferred, subscribeNoticeDeferral } from "./noticeDeferral";
+import { isMac } from "./shortcuts";
+import { clearNotificationsOff, notificationsOffHidden, showNotificationsOff } from "@/components/ui/NotificationsOffCard";
 
 /**
  * Attention, graded by where the reader is. A turn finishing or an agent
@@ -173,6 +176,7 @@ function presenceElsewhere(): Presence | null {
 let raised: { sessionId: string; tabId: string } | null = null;
 
 function onReturn() {
+  recheckNotifications();
   const wasAway = !looking() && !presenceElsewhere()?.focused;
   focused = true;
   publishPresence();
@@ -211,12 +215,21 @@ function sendsBanner(): boolean {
 
 // ---- sounds, synthesised so there is nothing to ship
 
-let audio: AudioContext | null = null;
+let audio: { ctx: AudioContext; pending: number } | null = null;
+
+function closeAudio(current: NonNullable<typeof audio>) {
+  if (audio !== current) return;
+  // Detach immediately: a chime arriving while close() settles needs a new context.
+  audio = null;
+  void current.ctx.close().catch(() => {});
+}
 function tone(notes: { f: number; at: number; len: number }[], gain = 0.06) {
+  let current: typeof audio = null;
   try {
-    audio ??= new AudioContext();
-    const ctx = audio;
-    if (ctx.state === "suspended") void ctx.resume();
+    current = audio ??= { ctx: new AudioContext(), pending: 0 };
+    const { ctx } = current;
+    const playing = current;
+    if (ctx.state === "suspended") void ctx.resume().catch(() => closeAudio(playing));
     const t0 = ctx.currentTime;
     for (const n of notes) {
       const o = ctx.createOscillator();
@@ -227,10 +240,18 @@ function tone(notes: { f: number; at: number; len: number }[], gain = 0.06) {
       g.gain.linearRampToValueAtTime(gain, t0 + n.at + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.at + n.len);
       o.connect(g).connect(ctx.destination);
+      // Count all scheduled notes, including overlapping chimes and their tails.
+      playing.pending++;
+      o.onended = () => {
+        o.disconnect();
+        g.disconnect();
+        if (--playing.pending === 0) closeAudio(playing);
+      };
       o.start(t0 + n.at);
       o.stop(t0 + n.at + n.len + 0.05);
     }
   } catch {
+    if (current) closeAudio(current);
     /* no audio device */
   }
 }
@@ -256,6 +277,40 @@ async function canNotify(): Promise<boolean> {
   return permission;
 }
 
+// ---- notifications turned off in macOS (PRO-327)
+
+/**
+ * macOS can have banners and the dock badge off for the app, and then a
+ * session that needs the reader waits unseen. The notification plugin cannot
+ * tell: on desktop it always answers "granted". The app's own command reads
+ * the system setting; until it answers "denied" nothing is said.
+ */
+let blocked = false;
+async function notificationsBlocked(): Promise<boolean> {
+  try {
+    blocked = (await invoke<string>("notification_permission")) === "denied";
+  } catch {
+    blocked = false;
+  }
+  return blocked;
+}
+
+/** A session needs the reader: if macOS blocks the banner, the card says so and names it. Main window, macOS only. */
+function noteNeedsReader(sessionId: string, sessionTitle: string) {
+  if (!isMac || appWindow() !== "main" || notificationsOffHidden()) return;
+  void notificationsBlocked().then((off) => {
+    if (off && !notificationsOffHidden()) showNotificationsOff({ sessionId, sessionTitle });
+  });
+}
+
+/** Back in the app, perhaps from System Settings: allowed now, the card goes. */
+function recheckNotifications() {
+  if (!blocked || appWindow() !== "main") return;
+  void notificationsBlocked().then((off) => {
+    if (!off) clearNotificationsOff();
+  });
+}
+
 function summarise(_session: SessionEntry, tab: TabEntry, kind: AttentionKind): { title: string; body: string } {
   const agent = getSessions().harnesses.find((h) => h.id === tab.harness)?.name ?? "Agent";
   const status = kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`;
@@ -269,9 +324,13 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   if (next === "waiting" && prev !== "waiting") kind = "waiting";
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
+  // Helpers report through their parent, not directly to the reader. This also
+  // covers retry workers and verifier tabs, without waiting for run metadata.
+  if (session.parent) return;
   // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
   if (isTabMuted(session, tab.id, getSessions().chatsPath)) return;
   const { title, body } = summarise(session, tab, kind);
+  if (kind === "waiting") noteNeedsReader(session.id, session.title);
   const onScreen = looking() && getSessions().selectedSessionId === session.id;
   if (!looking()) {
     // The other window has the reader, or this is not the window that sends banners.
@@ -376,6 +435,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`}`;
   const where = `${session.title} · ${session.orgName} cloud`;
   const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : kind === "failed" ? `${where}. Open the session to review its recovery actions.` : `${where}. Open the session to review the conversation.`;
+  if (kind === "waiting") noteNeedsReader(session.key, session.title);
   if (!focused) {
     if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;

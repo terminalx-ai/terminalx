@@ -27,7 +27,7 @@ beforeEach(() => {
   mocks.listeners.clear();
   mocks.invoke.mockReset();
   migrated = false;
-  file = { path: "/fixture/settings.json", exists: false, error: null, preferences: {} };
+  file = { path: "/fixture/settings.json", displayPath: "/fixture/settings.json", exists: false, error: null, problem: null, setKeys: [], preferences: {} };
   mocks.invoke.mockImplementation(async (command: string, args?: { patch: Record<string, unknown>; migrate: boolean }) => {
     if (command === "settings_file_status") return structuredClone(file);
     if (command === "create_settings_file") file.exists = true;
@@ -60,6 +60,23 @@ describe("user preference files", () => {
     expect(document.documentElement.dataset.theme).toBe("moss");
     await settings.bootSettingsFile();
     expect(mocks.invoke.mock.calls.filter(([command, args]) => command === "update_user_preferences" && args.migrate)).toHaveLength(1);
+  });
+
+  it("unfolds tool calls once for a file that still holds the old default, and never again", async () => {
+    file = { ...file, exists: true, preferences: { foldToolCalls: true } };
+    const prefs = await import("./prefs");
+    const settings = await import("./settingsFile");
+    await settings.bootSettingsFile();
+    await waitFor(() => expect(file.preferences.foldToolCalls).toBe(false));
+    expect(prefs.getPrefs().foldToolCalls).toBe(false);
+
+    // Turned back on by the reader: the next start leaves it on.
+    file.preferences = { foldToolCalls: true };
+    vi.resetModules();
+    const again = await import("./settingsFile");
+    await again.bootSettingsFile();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(file.preferences.foldToolCalls).toBe(true);
   });
 
   it("keeps every bundled default consistent with the existing preference defaults", async () => {

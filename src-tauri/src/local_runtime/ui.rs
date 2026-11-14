@@ -185,6 +185,21 @@ pub struct RestartRefused {
 /// How long an unresponsive runtime has to say it is handing over.
 const RESTART_HANDOVER: Duration = Duration::from_secs(30);
 
+/// The end of the runtime's log, for "Copy logs" when it failed to start
+/// (PRO-287): as the runtime wrote it, file paths and branch names included,
+/// which the window says before it is copied.
+#[tauri::command]
+pub async fn local_runtime_log(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let log = super::supervisor::runtime_log(&app).ok_or("TerminalX has no log directory.")?;
+        super::log_file::tail(&log, COPIED_LOG).map_err(|error| format!("Could not read {}: {error}", log.display()))
+    }).await.map_err(|error| error.to_string())?
+}
+
+/// How much of the runtime's log "Copy logs" copies: the latest lines, enough
+/// for a failed start and what led to it, without pasting megabytes.
+const COPIED_LOG: u64 = 256 * 1024;
+
 /// Off the main thread: reading an attachment can wait on a socket write.
 #[tauri::command]
 pub async fn local_runtime_status(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
@@ -416,7 +431,7 @@ mod tests {
         assert_eq!(judged(connected(), finding(), Some("wedged"), true),
             ConnectionState::Unresponsive { message: finding().unwrap(), epoch: Some("wedged".into()), keeps: true });
         // Quitting, or another desktop holding the runtime: no restart is offered.
-        let stopping = || ConnectionState::Unavailable { message: "TerminalX is stopping its background runtime.".into() };
+        let stopping = || ConnectionState::Unavailable { message: "TerminalX is stopping its background runtime.".into(), start_failed: None };
         assert_eq!(judged(stopping(), finding(), Some("wedged"), true), stopping());
     }
 
@@ -430,7 +445,7 @@ mod tests {
         let all: Restart = serde_json::from_value(serde_json::json!("stoppingAll")).unwrap();
         assert_eq!(all, Restart::StoppingAll);
         let gemini = crate::session::retire::Work { kind: crate::session::retire::WorkKind::Turn, session_id: Some("s1".into()), tab_id: Some("t1".into()),
-            harness: Some("gemini".into()), title: None };
+            harness: Some("gemini".into()), title: None, pane: None };
         let refused = RestartRefused { message: "kept but these".into(), unkept: vec!["Gemini in \u{201c}Web\u{201d}".into()], stop: vec![gemini] };
         assert_eq!(serde_json::to_value(&refused).unwrap(), serde_json::json!({ "message": "kept but these", "unkept": ["Gemini in \u{201c}Web\u{201d}"],
             "stop": [{ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "gemini" }] }), "what is sent back to stop only it");

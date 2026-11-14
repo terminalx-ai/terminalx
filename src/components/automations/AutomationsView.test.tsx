@@ -68,12 +68,14 @@ vi.mock("@/lib/prefs", () => ({
   getPrefs: () => prefs,
   subscribePrefs: () => () => {},
 }));
+// The store lists archived sessions too, flagged: only the sidebar filters them out.
+const sessionList = vi.hoisted(() => ({ archived: false }));
 vi.mock("@/lib/sessions", () => ({
   selectSession,
   useSessionStore: () => ({
     projects: [{ path: "/repo", name: "Raccoon" }, { path: "/docs", name: "Docs", kind: "folder" }],
     harnesses: discovery.harnesses,
-    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: false }],
+    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: sessionList.archived }],
   }),
 }));
 
@@ -95,6 +97,8 @@ function automation(id: string, name: string): Automation {
     workspace: "newWorktree",
     sessionId: null,
     reuseSession: false,
+    archiveOnComplete: false,
+    keepLatestRunVisible: false,
     baseRef: null,
     schedule: {
       kind: "preset",
@@ -152,6 +156,7 @@ beforeEach(() => {
   ];
   automationStore.runs = { "automation-1": [run()] };
   automationStore.loadingRuns = {};
+  sessionList.archived = false;
   prefs.lastMode = "auto";
   prefs.lastModel = {};
   prefs.lastEffort = {};
@@ -504,5 +509,82 @@ describe("automation launch controls", () => {
     })));
     expect(setPrefs).not.toHaveBeenCalled();
     expect(prefs.lastModel).toEqual({ claude: "retired", codex: "sonnet" });
+  });
+});
+
+describe("archiving a run when it completes", () => {
+  const archive = () => screen.getByRole("switch", { name: "Archive each run when it completes" });
+  const keepLatest = () => screen.queryByRole("switch", { name: "Keep the latest run visible" });
+
+  it("is on for a new automation and saves with it", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    expect(archive().getAttribute("aria-checked")).toBe("true");
+    expect(keepLatest()?.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Nightly audit" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Run the nightly audit." } });
+    fireEvent.click(keepLatest()!);
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Nightly audit" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ archiveOnComplete: true, keepLatestRunVisible: true }));
+  });
+
+  it("leaves an existing automation as it was until the switch is turned on", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit automation" });
+    expect(archive().getAttribute("aria-checked")).toBe("false");
+    expect(keepLatest()).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByRole("table", { name: "Automation runs" });
+    expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ archiveOnComplete: false, keepLatestRunVisible: false }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit automation" });
+    fireEvent.click(archive());
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByRole("table", { name: "Automation runs" });
+    expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ archiveOnComplete: true }));
+  });
+
+  it("keeps the switches through Disable and Enable in the list", async () => {
+    automationStore.automations[0] = { ...automationStore.automations[0], archiveOnComplete: true, keepLatestRunVisible: true };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(screen.getByRole("switch", { name: "Disable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, archiveOnComplete: true, keepLatestRunVisible: true })));
+  });
+
+  it("says there is nothing to archive when every run reuses one session", async () => {
+    automationStore.automations[0] = { ...automationStore.automations[0], workspace: "session", sessionId: "session-7", reuseSession: true, archiveOnComplete: true };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByRole("heading", { name: "Edit automation" });
+    expect(screen.queryByRole("switch", { name: "Archive each run when it completes" })).toBeNull();
+    expect(screen.getByText(/nothing to archive/)).toBeTruthy();
+  });
+
+  it("lists an archived run in the history and opens its session", async () => {
+    sessionList.archived = true;
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText("Archived")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand run 7" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open run session" }));
+    expect(selectSession).toHaveBeenCalledWith("session-7");
+  });
+
+  it("marks no run archived while its session is in the sidebar", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    await screen.findByRole("table", { name: "Automation runs" });
+    expect(screen.queryByText("Archived")).toBeNull();
   });
 });

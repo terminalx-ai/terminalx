@@ -1,8 +1,39 @@
+vi.mock("@/lib/dataPrivacy", () => ({
+  getDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
+  PRIVACY_MESSAGE: "Turned off by data privacy mode",
+  bootDataPrivacy: () => Promise.resolve(),
+  privacyEnabled: () => false,
+  privacyBlocksCommand: () => false,
+  subscribeDataPrivacy: () => () => {},
+  useDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
+}));
 import "@testing-library/dom";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { announceProjectAdded } from "@/lib/projectAdded";
+
+// The native side of setting links (PRO-127): the link `settings_link_take` hands out once, and the ping
+// a link arriving while the app runs sends. Every other command fails as it does outside the app.
+const native = vi.hoisted(() => ({ pending: [] as unknown[], listeners: new Map<string, Set<() => void>>() }));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  invoke: vi.fn(async (command: string) => {
+    if (command === "settings_link_take") return native.pending.shift() ?? null;
+    throw new Error(`${command} is not available in this test`);
+  }),
+}));
+vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/event")>()),
+  listen: vi.fn(async (event: string, handler: () => void) => {
+    const set = native.listeners.get(event) ?? new Set();
+    set.add(handler);
+    native.listeners.set(event, set);
+    return () => set.delete(handler);
+  }),
+}));
+const pingSettingsLink = () => { for (const handler of native.listeners.get("settings_link_requested") ?? []) handler(); };
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
@@ -39,7 +70,7 @@ const { sessionStore } = vi.hoisted(() => ({
       ],
     },
     workspacesLoading: {},
-    newSessionQuick: false,
+    newSessionChat: false,
     newSessionPreset: { projectPath: "/repo", cwd: "/outside/feature" } as { projectPath: string; cwd: string | null } | null,
   },
 }));
@@ -65,6 +96,14 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeys: () => [],
   useShortcutKeycaps: () => () => [],
 }));
+// PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+vi.mock("@/lib/orchestration", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/orchestration")>()),
+  showRunView: runShortcut.showRunView,
+  useRun: (sessionId: string | undefined, enabled = true) => (enabled && sessionId ? runShortcut.runs[sessionId] ?? null : undefined),
+}));
 vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
 vi.mock("@/components/layout/StatusBar", () => ({
   StatusBar: ({ onOpenAgentSettings }: { onOpenAgentSettings: () => void }) => (
@@ -88,13 +127,20 @@ vi.mock("@/lib/cloudConnections", async (importOriginal) => ({
     return () => connectedListeners.delete(listener);
   },
 }));
-vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
+const agentSettingsRequests = vi.hoisted(() => new Set<() => void>());
+vi.mock("@/lib/models", () => ({
+  loadModels: vi.fn(),
+  onAgentSettingsRequest: (listener: () => void) => {
+    agentSettingsRequests.add(listener);
+    return () => agentSettingsRequests.delete(listener);
+  },
+}));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
-vi.mock("@/lib/pairing", () => ({ bootPairing: vi.fn() }));
+vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
@@ -129,8 +175,8 @@ vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
 vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack, initialTab, openRequest }: { onBack: () => void; initialTab?: unknown; openRequest?: number }) => (
-    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-open-request={openRequest}>
+  SettingsPage: ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
+    <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-project-path={initialProjectPath ?? ""} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
   ),
@@ -154,12 +200,15 @@ vi.mock("@/components/cleanup/CleanupIndicator", () => ({
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
+const { forgetSettingToasts, getSettingToasts } = await import("@/lib/settingsToasts");
+const { openSettingRow } = await import("@/lib/settingsLinks");
+const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
-  sessionStore.newSessionQuick = false;
+  sessionStore.newSessionChat = false;
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
   sessionStore.selectedSessionId = null;
   sessionStore.selectedAutomationId = null;
@@ -169,13 +218,17 @@ beforeEach(() => {
 
 afterEach(async () => {
   cleanup();
+  native.pending = [];
+  native.listeners.clear();
+  forgetSettingToasts();
+  dismissUnknownSettingLink();
   await closeAllEditors("checkout:/outside/feature");
 });
 
 describe("new-session right panel", () => {
   it("opens a project-less composer with no projects and no project panel", () => {
     sessionStore.projects = [];
-    sessionStore.newSessionQuick = true;
+    sessionStore.newSessionChat = true;
     sessionStore.newSessionPreset = null;
     render(<AppShell />);
     expect(screen.getByTestId("new-session")).toBeTruthy();
@@ -292,6 +345,24 @@ describe("start screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Agent settings from start" }));
     expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
   });
+
+  it("opens Agent settings when the empty model picker asks for them (PRO-292)", async () => {
+    render(<AppShell />);
+    act(() => agentSettingsRequests.forEach((listener) => listener()));
+    expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
+  });
+
+  it("opens the added project's scripts from the Project added notice, and no project for other ways in (PRO-285)", async () => {
+    render(<AppShell />);
+    act(() => announceProjectAdded({ path: "/repo", name: "Raccoon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Project settings" }));
+    const page = await screen.findByTestId("settings-page");
+    expect(page.getAttribute("data-initial-tab")).toBe("repositories.scripts");
+    expect(page.getAttribute("data-project-path")).toBe("/repo");
+    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect((await screen.findByTestId("settings-page")).getAttribute("data-project-path")).toBe("");
+  });
 });
 
 describe("automation navigation", () => {
@@ -302,6 +373,38 @@ describe("automation navigation", () => {
     render(<AppShell />);
 
     expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
+  });
+});
+
+describe("the Run view shortcut (PRO-362)", () => {
+  const lead = { id: "lead", projectPath: "/repo", cwd: "/repo", title: "Lead", tabs: [], activeTab: null };
+  const show = (sessionId: string, runs: boolean, run: unknown) => {
+    sessionStore.sessions = [lead as never];
+    sessionStore.selectedSessionId = sessionId as never;
+    sessionStore.view = "session" as never;
+    runShortcut.orchestratorRuns = runs;
+    runShortcut.runs = run ? { lead: run } : {};
+    runShortcut.showRunView.mockReset();
+    render(<AppShell />);
+    act(() => shortcuts.get("app.runView")!());
+  };
+  afterEach(() => {
+    sessionStore.sessions = [];
+    runShortcut.orchestratorRuns = false;
+    runShortcut.runs = {};
+  });
+
+  it("opens the open session's Run view when it leads a run", () => {
+    show("lead", true, { id: "run-1", state: "running" });
+    expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
+  });
+
+  it("does nothing for a session that leads no run, or while runs are off", () => {
+    show("lead", true, null);
+    expect(runShortcut.showRunView).not.toHaveBeenCalled();
+    cleanup();
+    show("lead", false, { id: "run-1", state: "running" });
+    expect(runShortcut.showRunView).not.toHaveBeenCalled();
   });
 });
 
@@ -393,6 +496,74 @@ describe("settings page navigation", () => {
     expect(await section()).toBe("agents");
     pressSettingsShortcut();
     await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account"));
+  });
+});
+
+describe("setting links (PRO-127)", () => {
+  const settings = () => screen.findByTestId("settings-page");
+  const opened = async () => {
+    const page = await settings();
+    return { tab: page.dataset.initialTab, request: Number(page.dataset.openRequest) };
+  };
+
+  it("opens Settings on the row a link that launched the app names, once the shell starts", async () => {
+    native.pending = [{ id: "general.sounds", enable: false }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.sounds");
+    expect(native.pending).toEqual([]);
+  });
+
+  it("focuses Settings on the row a link names while the app runs, each time one arrives", async () => {
+    sessionStore.view = "issues";
+    render(<AppShell />);
+    expect(screen.getByTestId("issues")).toBeTruthy();
+    await waitFor(() => expect(native.listeners.get("settings_link_requested")?.size).toBe(1));
+
+    native.pending = [{ id: "general.promptMap", enable: false }];
+    act(() => pingSettingsLink());
+    const first = await opened();
+    expect(first.tab).toBe("general.promptMap");
+
+    // The same row again, with Settings open: a new request, so Settings goes back to it.
+    native.pending = [{ id: "general.promptMap", enable: false }];
+    act(() => pingSettingsLink());
+    await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first.request + 1));
+    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("general.promptMap");
+  });
+
+  it("turns a linkable row on from an enable link and says so", async () => {
+    setPrefs({ sounds: false });
+    native.pending = [{ id: "general.sounds", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.sounds");
+    await waitFor(() => expect(getPrefs().sounds).toBe(true));
+    expect(getSettingToasts().map((toast) => toast.message)).toEqual(["Turned on Sounds"]);
+  });
+
+  it("changes nothing for an enable link to a row that is not linkable, and says so", async () => {
+    setPrefs({ animations: false });
+    const before = getPrefs();
+    native.pending = [{ id: "general.animations", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("general.animations");
+    await waitFor(() => expect(getSettingToasts().map((toast) => toast.message)).toEqual(["That link can’t turn on Pixel raccoon from outside the app"]));
+    expect(getPrefs()).toBe(before);
+  });
+
+  it("opens Settings at its default page for a link to no row, changes nothing, and says no setting matches", async () => {
+    const before = getPrefs();
+    native.pending = [{ id: "no.such.row", enable: true }];
+    render(<AppShell />);
+    expect((await opened()).tab).toBe("account");
+    expect(await screen.findByRole("status", { name: "No setting matches that link" })).toBeTruthy();
+    expect(getPrefs()).toBe(before);
+    expect(getSettingToasts()).toEqual([]);
+  });
+
+  it("opens the row a toast's Open setting asks for", async () => {
+    render(<AppShell />);
+    act(() => openSettingRow("general.sounds"));
+    expect((await opened()).tab).toBe("general.sounds");
   });
 });
 

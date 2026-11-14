@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 
 const { ProjectSearch } = await import("./ProjectSearch");
+const { openProjectSearch } = await import("@/lib/projectSearch");
 
 const hit = (path: string, line: number, text: string, matches: [number, number][]): TextHit => ({ path, line, col: matches[0][0], text, matches });
 
@@ -28,6 +29,7 @@ function openWith(chord: "f" | "h") {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   invoke.mockReset();
   ask.mockReset();
   invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
@@ -77,6 +79,7 @@ describe("ProjectSearch", () => {
         replacement: "bar",
         regex: false,
         caseSensitive: false,
+        wholeWord: false,
         targets: [{ path: "src/a.ts", lines: [1] }, { path: "b.md" }],
         skip: [],
       }),
@@ -111,5 +114,70 @@ describe("ProjectSearch", () => {
       expect(invoke).toHaveBeenCalledWith("replace_text", expect.objectContaining({ targets: [{ path: "b.md" }] })),
     );
     expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("sends Whole word to search and replace", async () => {
+    ask.mockResolvedValue(true);
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("h");
+    fireEvent.click(await screen.findByRole("button", { name: "Whole word" }));
+    fireEvent.change(screen.getByPlaceholderText("Search in project"), { target: { value: "foo" } });
+    fireEvent.change(screen.getByLabelText("Replace with"), { target: { value: "bar" } });
+    await screen.findByText("src/a.ts");
+    expect(invoke).toHaveBeenCalledWith("search_text", expect.objectContaining({ query: "foo", wholeWord: true }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Replace 4$/ }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("replace_text", expect.objectContaining({ query: "foo", wholeWord: true })));
+  });
+
+  it("names the toggles behind a search that finds nothing and turns exactly those off", async () => {
+    invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command !== "search_text") throw new Error(`Unexpected command: ${command}`);
+      return args.caseSensitive || args.wholeWord || args.regex ? { hits: [], files: 0, capped: false } : answer(null);
+    });
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    fireEvent.click(await screen.findByRole("button", { name: "Match case" }));
+    fireEvent.click(screen.getByRole("button", { name: "Whole word" }));
+    fireEvent.change(screen.getByPlaceholderText("Search in project"), { target: { value: "archive_script" } });
+    await screen.findByText("No matches for “archive_script”");
+    expect(screen.getByText("0 matches")).toBeTruthy();
+    expect(screen.getByText("Match case and Whole word are on.")).toBeTruthy();
+    expect(screen.getByText("Toggles stay on for the next search")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Turn off Match case and Whole word" }));
+    await screen.findByText("src/a.ts");
+    expect(invoke).toHaveBeenLastCalledWith("search_text", expect.objectContaining({ query: "archive_script", caseSensitive: false, wholeWord: false, regex: false }));
+    expect(screen.getByRole("button", { name: "Match case" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("offers no toggle hint when nothing is on", async () => {
+    invoke.mockResolvedValue({ hits: [], files: 0, capped: false });
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    fireEvent.change(await screen.findByPlaceholderText("Search in project"), { target: { value: "nothing" } });
+    await screen.findByText("No matches for “nothing”");
+    expect(screen.queryByText(/ (is|are) on\.$/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Turn off/ })).toBeNull();
+  });
+
+  it("keeps the toggles for the next time the dialog opens", async () => {
+    const first = render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    fireEvent.click(await screen.findByRole("button", { name: "Whole word" }));
+    fireEvent.click(screen.getByRole("button", { name: "Regular expression" }));
+    first.unmount();
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    expect((await screen.findByRole("button", { name: "Whole word" })).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Regular expression" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Match case" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("opens filled in and searching from openProjectSearch", async () => {
+    expect(openProjectSearch("nobody")).toBe(false);
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    expect(openProjectSearch("foo")).toBe(true);
+    expect(((await screen.findByPlaceholderText("Search in project")) as HTMLInputElement).value).toBe("foo");
+    await screen.findByText("src/a.ts");
+    expect(invoke).toHaveBeenCalledWith("search_text", expect.objectContaining({ query: "foo" }));
   });
 });

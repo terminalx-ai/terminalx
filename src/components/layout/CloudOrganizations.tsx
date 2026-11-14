@@ -1,3 +1,5 @@
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeftRight, ArrowUp, Check, ChevronDown, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -67,6 +69,7 @@ import { useFold } from "./useFold";
  * desktop's caches; nothing connects or wakes a workspace.
  */
 export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganizations?: () => void }) {
+  const privacy = useDataPrivacy();
   const cloud = useOrganizationVisibility();
   const catalog = useCloudCatalog();
   const [dialog, setDialog] = useState<LifecycleRequest | null>(null);
@@ -74,6 +77,7 @@ export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganization
   // Live session lists follow the connections other surfaces open; a local mirror (PRO-25) too. Neither opens one.
   useEffect(() => bootCloudSessions(), []);
   useEffect(() => bootCloudMirrors(), []);
+  if (privacy.enabled) return <PrivacyEmptyState />;
   if (!cloud.all.length) return null;
   const hiddenRunning = cloud.hidden.reduce((count, org) => count + organizationRunningCount(org.id, catalog), 0);
   return (
@@ -377,9 +381,10 @@ function OrgProjects({
   onLifecycle: (request: LifecycleRequest) => void;
 }) {
   const filter = useSidebarFilter();
-  // Unread or Needs you: only the projects with such a session, and no archive (nothing archived runs or answers).
+  // Unread and Needs you hide the archive; a project filter keeps matching archived workspaces.
   const projects = filtered ? all.filter((project) => filter.showsProject(project.key)) : all;
-  if (filtered && !projects.length) {
+  const visibleArchived = filter.filter === "all" ? archived.filter((node) => filter.showsWorkspace(node.key)) : [];
+  if (filtered && !projects.length && !visibleArchived.length) {
     return (
       <p className="px-2 py-1 text-[12px] text-faint" data-testid="cloud-org-filtered-empty">
         {empty}
@@ -405,7 +410,7 @@ function OrgProjects({
       {grouped.ungrouped.map((project) => (
         <CloudProjectGroup key={project.key} project={project} onLifecycle={onLifecycle} />
       ))}
-      {!filtered && archived.length > 0 && <ArchivedWorkspaces orgId={orgId} nodes={archived} onLifecycle={onLifecycle} />}
+      {visibleArchived.length > 0 && <ArchivedWorkspaces orgId={orgId} nodes={visibleArchived} onLifecycle={onLifecycle} />}
     </>
   );
 }

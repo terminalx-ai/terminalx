@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Chat, visibleTurns } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
@@ -86,7 +86,11 @@ const overSpacer = () =>
 const shortTurn = (index: number) => 180 + (index % 7) * 60;
 /** Every third turn 3000–6000 px, far taller than the drawn band reaches past the view (#771). */
 const tallTurn = (index: number) => (index % 3 === 1 ? 3000 + (index % 4) * 1000 : shortTurn(index));
-const latestShown = () => screen.getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
+const latestShown = () => {
+  // Keep the role/name check local: a long transcript has thousands of prompt-map buttons.
+  const button = screen.getByText("Latest", { selector: "button" });
+  return within(button.parentElement!).getByRole("button", { name: /latest/i }).parentElement!.classList.contains("opacity-100");
+};
 
 function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
   const transcript = buildTranscript(log, true);
@@ -121,6 +125,25 @@ function setup(turnCount: number, log = syntheticLog(turnCount, true)) {
 }
 
 describe("chat scroll follow", () => {
+  it("shows a reported goal above the scroller before the first turn and hides a cleared goal", () => {
+    const event: AgentEvent = { id: "goal", seq: 1, sessionId: "s", tabId: "t", harness: "codex", ts: "",
+      payload: { type: "goal_updated", goal: { objective: "Finish the migration", status: "active", tokenBudget: 1000, tokensUsed: 0 } } };
+    const props = { sessionId: "s", live: false, progressing: false, answering: false, stream: [], onAnswerPermission: () => {}, onAnswerQuestions: () => {}, footer: null };
+    const view = render(<Chat {...props} transcript={buildTranscript([event], false)} />, { wrapper: TooltipProvider });
+    const banner = screen.getByRole("region", { name: "Codex goal" });
+    expect(banner.textContent).toContain("Finish the migration");
+    expect(view.container.querySelector("[data-chat-scroller]")?.contains(banner)).toBe(false);
+    // The banner shares main's focusable chat root; it must not replace search.
+    fireEvent.pointerDown(banner);
+    const region = view.container.querySelector('[data-find-scope="chat"]');
+    expect(document.activeElement).toBe(region);
+    fireEvent.keyDown(document.activeElement!, { key: "f", ctrlKey: true });
+    expect(screen.getByRole("textbox", { name: "Find in chat" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Codex goal" })).toBe(banner);
+    view.rerender(<Chat {...props} transcript={buildTranscript([event, { ...event, id: "clear", seq: 2, payload: { type: "goal_cleared" } }], false)} />);
+    expect(screen.queryByRole("region", { name: "Codex goal" })).toBeNull();
+  });
+
   it("shows confirmed compaction while ordinary work is idle", () => {
     const scope = { sessionId: "s", tabId: "t", conversationId: null, provider: "claude", threadId: "thread", subagentId: null };
     const events: AgentEvent[] = [
@@ -334,6 +357,7 @@ describe("chat scroll follow", () => {
   // a step or once the reader holds still. Its 510 steps redraw a 200-turn
   // chat four times each: about 2 s alone, 6–7 s in CI's full run, and over
   // 30 s in a loaded shared VM. Allow for that without reducing the steps.
+  // VITEST_SLOW_TEST_TIMEOUT_MS can raise this bound further on a busy host.
   it("never leaves the view over spacers while scrolling past turns taller than the overscan", () => {
     const keys = buildTranscript(syntheticLog(200, true), true).turns.map((turn) => turn.key);
     keys.forEach((key, index) => heights.set(key, tallTurn(index)));
@@ -357,11 +381,12 @@ describe("chat scroll follow", () => {
         expect(overSpacer(), `${run}, step ${step} (${delta} px) at ${top}: settled`).toBe(0);
       });
     }
-  }, 120_000);
+  }, Math.max(120_000, Number(process.env.VITEST_SLOW_TEST_TIMEOUT_MS) || 0));
 
   // #727: a turn scrolled far from the view is not drawn. What the reader
   // opened in it is the chat's to keep, so it comes back as they left it.
   it("keeps a turn's tool calls unfolded after it was scrolled out of the drawn band and back", () => {
+    setPrefs({ foldToolCalls: true });
     const { transcript } = setup(200);
     const key = transcript.turns.at(-2)!.key;
     const fold = () => content.querySelector<HTMLElement>(`[data-turn="${key}"]`)?.querySelector<HTMLElement>("button[aria-expanded]") ?? null;

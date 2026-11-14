@@ -181,7 +181,8 @@ pub enum Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct ItemResult {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub archive_failure: Option<crate::archive_script::Failure>,
+    // Boxed: a failure carries its log and detail, and Progress::Finished holds this result.
+    pub archive_failure: Option<Box<crate::archive_script::Failure>>,
     pub project_path: String,
     pub path: String,
     pub outcome: Outcome,
@@ -457,6 +458,7 @@ pub(crate) struct Repository<'a> {
     pub(crate) primary: PathBuf,
     pub(crate) listed: Vec<Listed>,
     fetch: Fetch,
+    privacy: crate::data_privacy::Ticket,
     /// What unpushed commits are compared with, read (and fetched) only
     /// when some worktree has any.
     base: OnceCell<(Option<String>, bool)>,
@@ -466,21 +468,23 @@ pub(crate) struct Repository<'a> {
 
 impl<'a> Repository<'a> {
     pub(crate) fn open(project: &'a Project, fetch: Fetch) -> Result<Self, String> {
+        let privacy = crate::github_process::ticket();
         let root = std::fs::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
         if !root.is_dir() || !git::is_repo(&root) {
             return Err("Not a Git repository, so it has no worktrees.".into());
         }
         let listed = list_worktrees(&root).map_err(|error| format!("Git could not list its worktrees: {error:#}"))?;
         let primary = listed.first().map(|entry| canonical(Path::new(&entry.path))).ok_or("Git lists no worktree for it.")?;
-        Ok(Self { project, root, primary, listed, fetch, base: OnceCell::new(), declared: OnceCell::new() })
+        Ok(Self { project, root, primary, listed, fetch, privacy, base: OnceCell::new(), declared: OnceCell::new() })
     }
 
     /// `(base, verified against the remote as it is now)`.
-    fn base(&self) -> &(Option<String>, bool) {
-        self.base.get_or_init(|| {
+    fn base(&self) -> (Option<String>, bool) {
+        let (base, verified) = self.base.get_or_init(|| crate::github_process::with_ticket(self.privacy.clone(), || {
             let (base, not_verified, fresh) = landed::base_for(&self.root, self.fetch);
             (base, fresh && not_verified.is_none())
-        })
+        }));
+        (base.clone(), *verified && self.privacy.valid())
     }
 
     /// The patterns of [`DECLARED_FILE`] on the default branch, as the remote
@@ -778,13 +782,13 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             Some(0) => {}
             Some(count) => {
                 let (base, verified) = repository.base();
-                let merged = match base {
-                    Some(base) if *verified => matches!(landed::merged_rev(&path, base, "HEAD"), Some((Some(_), _))),
+                let merged = match &base {
+                    Some(base) if verified => matches!(landed::merged_rev(&path, base, "HEAD"), Some((Some(_), _))),
                     _ => false,
                 };
                 if !merged {
-                    let against = match base {
-                        Some(base) if *verified => format!("and not merged into {base}"),
+                    let against = match &base {
+                        Some(base) if verified => format!("and not merged into {base}"),
                         _ => "and whether they were merged could not be verified".to_string(),
                     };
                     candidate.brief = Some(plural(count, "unpushed commit", "unpushed commits"));
@@ -859,6 +863,7 @@ fn token(candidate: &Candidate, listing: &str) -> String {
 /// `scope` narrows the listing to those projects; protection always covers
 /// all of them.
 pub fn scan(host: &Host<'_>, scope: Option<&[String]>) -> anyhow::Result<Vec<ProjectScan>> {
+    let _github_request = crate::github_process::scope();
     let sessions = index::load()?;
     let live = (host.live)(&sessions);
     let roots = Roots::of(host, &sessions);
@@ -961,7 +966,7 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
             return result(item, Outcome::Failed, format!("It was already removed, but its sessions' agents could not be stopped, so its sessions were left as they were. {}", failed.join("; ")));
         }
     }
-    match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
+    match session_ops::mark_workspace_sessions_removed(&repository.root, &left, None) {
         Ok(moved) => {
             let mut done = result(item, Outcome::AlreadyRemoved, "It was already removed; its conversations are now filed under the project.".to_string());
             done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
@@ -1038,7 +1043,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         Err(error) => {
             let failure = crate::archive_script::Failure::from_error(&error.to_string());
             let mut failed = result(item, Outcome::Failed, failure.as_ref().map_or_else(|| error.to_string(), |failure| failure.message()));
-            failed.archive_failure = failure;
+            failed.archive_failure = failure.map(Box::new);
             return failed;
         }
     };
@@ -1070,6 +1075,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
             return result(item, Outcome::Skipped, "It changed during its archive script. Review it again before removing it.".to_string());
         }
     }
+    let removed_workspace = crate::workspace_restore::removal_record(&repository.root, &target);
     step(Step::Removing);
     // Never forced, never deleted directly: git removes it or says why not.
     let options = crate::workspaces::DeleteOptions { delete_branch: false, direct: git::DirectDelete::Never, verified_head: Some(head) };
@@ -1090,7 +1096,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         session_ops::notify_workspace_deleted(sink, &repository.project.path, &affected);
         done.sessions_deleted = affected.iter().map(|session| session.id.clone()).collect();
     } else {
-        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected) {
+        match session_ops::mark_workspace_sessions_removed(&repository.root, &affected, Some(&removed_workspace)) {
             Ok(moved) => {
                 session_ops::notify_workspace_settled(sink, &repository.project.path, &moved);
                 done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
@@ -1108,6 +1114,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
 /// that fails or is skipped never stops the others. `watch` hears about each
 /// as it goes; the list returned is what happened.
 pub fn remove(host: &Host<'_>, sink: &dyn EventSink, items: &[RemoveItem], watch: Watch<'_>) -> Vec<ItemResult> {
+    let _github_request = crate::github_process::scope();
     let repositories: Vec<Repository<'_>> = host.projects.iter().filter_map(|project| Repository::open(project, host.fetch).ok()).collect();
     let mut seen = HashSet::new();
     let items: Vec<&RemoveItem> = items.iter().filter(|item| seen.insert(item.path.clone())).collect();

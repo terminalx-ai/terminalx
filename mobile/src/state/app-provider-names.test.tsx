@@ -36,6 +36,7 @@ vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener:
 vi.mock("react-native", () => ({
   AppState: { addEventListener: () => ({ remove: () => undefined }) },
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
+  Platform: { OS: "ios", constants: { interfaceIdiom: "phone" } },
 }));
 vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => null, refreshStoredSession: vi.fn(), signOut: vi.fn() }));
 vi.mock("../auth/protocol", () => ({ isAuthCallbackUrl: () => false }));
@@ -123,6 +124,23 @@ it("restores the most recently connected Mac when more than one is paired", asyn
   await settle();
   expect(app.activeHost?.id).toBe(recent.id);
   expect(fake.start).toHaveBeenCalledExactlyOnceWith(recent, { v: 1, deviceToken: "other-token" });
+});
+
+// PRO-314: Disconnect on the Mac keeps the pairing; the phone connects again only when the person asks.
+it("does not reconnect on launch to a Mac that disconnected this phone, and does once it is chosen", async () => {
+  await act(async () => root.unmount());
+  fake.storage.clear();
+  const held = { ...HOST, disconnectedOnMacAt: 5 };
+  await savePairedHost(held, { v: 1, deviceToken: "token" });
+  fake.start.mockClear();
+  root = createRoot(document.createElement("div"));
+  await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
+  await settle();
+  expect(app.ready).toBe(true);
+  expect(app.activeHost).toBeNull();
+  expect(fake.start).not.toHaveBeenCalled();
+  await act(async () => { await app.connectHost(app.hosts[0]!); });
+  expect(fake.start).toHaveBeenCalledExactlyOnceWith(held, { v: 1, deviceToken: "token" });
 });
 
 it("leaves launch usable when there are no saved Macs or the saved credential is missing", async () => {

@@ -121,16 +121,22 @@ fn owner_permission_decisions_still_require_an_answer() {
 }
 
 #[test]
-fn owner_read_only_approval_preserves_the_replacement_through_the_hook_process() {
+fn owner_read_only_approval_answers_with_the_result_through_the_hook_process() {
     let (world, serve, launch) = start("manual");
     let reply = Hook::start(&serve, &world, &launch, "PermissionRequest").reply();
     let decision = &reply["hookSpecificOutput"]["decision"];
-    assert_eq!(decision["behavior"], "allow");
-    let command = decision["updatedInput"]["command"].as_str().expect("approval must carry the sanitized command");
-    assert!(command.starts_with("LD_PRELOAD=''"));
-    assert!(command.contains("'/usr/bin/env' '-i'"));
-    assert_eq!(decision["updatedInput"]["description"], "Inspect the current directory");
+    // TerminalX ran it without a shell and answers in the CLI's place: the
+    // CLI is given nothing to run in the user's startup-loaded shell (PRO-330).
+    assert_eq!(decision["behavior"], "deny");
+    assert!(decision.get("updatedInput").is_none());
+    let message = decision["message"].as_str().expect("the result is the hook's message");
+    assert!(message.starts_with("TerminalX approved this read-only command and ran it itself, without a shell. Exit status: 0.\n"), "{message}");
+    let printed = message.split_once("\n\nOutput:\n").expect("the output follows").1.trim_end();
+    let project = std::fs::canonicalize(&world.project).unwrap();
+    assert!(printed == world.project.to_str().unwrap() || std::path::Path::new(printed) == project, "pwd ran in the project: {message}");
+    // PRO-267's check that the returned command, run from another directory,
+    // exits 125 has nothing left to run: the reply carries no command. The
+    // read-only security tests cover 125 for a swapped approved directory.
+    assert!(message.contains(&format!("\nDirectory: {}\n", world.project.display())), "it ran in the approved directory only: {message}");
     assert_eq!(serve.control("permissions.list", json!({}))["permissions"], json!([]));
-    let output = Command::new("/bin/sh").current_dir(&world.project).args(["-c", command]).output().unwrap();
-    assert!(output.status.success());
 }

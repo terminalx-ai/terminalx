@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -137,6 +137,9 @@ describe("verifyProposal, with a scripted runner", () => {
 const bash = spawnSync("bash", ["-c", "git --version"]).status === 0;
 describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const base = mkdtempSync(join(tmpdir(), "tx-verify-"));
+  // The sudo install step must traverse this synthetic fixture even when Linux
+  // root lacks CAP_DAC_OVERRIDE. No user data or credentials live here.
+  chmodSync(base, 0o711);
   const github = join(base, "github");
   const root = join(base, "workspace");
   mkdirSync(github);

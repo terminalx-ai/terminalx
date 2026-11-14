@@ -1,5 +1,7 @@
 //! Local environment overrides. The index contains names and opaque revisions,
-//! never values (nor hashes of values). Each revision is one Keychain item.
+//! never Keychain values (nor hashes of values). Each revision is one Keychain
+//! item. Values the user chose to store plainly (PRO-144: they do not look like
+//! secrets, or the Keychain switch was off) live in the index's `plain` map.
 //! A transaction switches the index only after the new item is safely stored.
 //! No repository file is evaluated or trusted implicitly.
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,8 +20,15 @@ type Index = BTreeMap<String, Scope>;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Scope {
+    /// Names held in this revision's Keychain item.
     names: BTreeSet<String>,
     revision: String,
+    /// Values kept outside the Keychain, by the user's choice when saving.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    plain: Values,
+    /// Fields a newer build wrote, kept as they are so saving here never drops them.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,14 +63,48 @@ impl Launch {
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     name: String,
+    /// "user" or "repository" (this store), or the repository file layer the
+    /// name comes from: "repositoryShared", "repositoryLocal" or "managed".
     scope: &'static str,
     overridden: bool,
+    /// Whether the value is in the Keychain. File values are never sent here.
+    secret: bool,
+    /// Only a value the user chose to store plainly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    /// For a Personal variable: the Git common directories of the
+    /// repositories whose own variable of this name overrides it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    overridden_in: Vec<String>,
 }
 
 #[derive(Deserialize)]
 pub struct Input {
     pub name: String,
     pub value: String,
+    /// Keep the value in the Keychain. Older callers never sent it: Keychain.
+    #[serde(default = "keychain_by_default")]
+    pub secret: bool,
+}
+
+fn keychain_by_default() -> bool {
+    true
+}
+
+/// Both kinds of value of one scope. A name is in at most one of them.
+#[derive(Default)]
+struct Entries {
+    secret: Values,
+    plain: Values,
+}
+
+impl Entries {
+    fn remove(&mut self, name: &str) -> bool {
+        self.secret.remove(name).is_some() | self.plain.remove(name).is_some()
+    }
+    fn contains(&self, name: &str) -> bool {
+        self.secret.contains_key(name) || self.plain.contains_key(name)
+    }
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -184,21 +227,34 @@ impl Store<'_> {
         Ok(values)
     }
 
+    #[cfg(test)]
     fn change(&self, key: &str, update: impl Fn(&mut Values) -> Result<()>) -> Result<()> {
+        self.change_entries(key, |entries| update(&mut entries.secret))
+    }
+
+    fn change_entries(&self, key: &str, update: impl Fn(&mut Entries) -> Result<()>) -> Result<()> {
         // Keychain may wait on OS consent. All reads, writes and deletes happen
         // outside the file lock; only the compare-and-swap of metadata is locked.
         for _ in 0..16 {
             let old = self.index()?.get(key).cloned();
-            let mut values = match self.values(old.as_ref()) {
+            let secret = match self.values(old.as_ref()) {
                 Ok(values) => values,
                 Err(_) if self.index()?.get(key) != old.as_ref() => continue,
                 Err(error) => return Err(error),
             };
-            update(&mut values)?;
-            validate_values(&values)?;
+            let mut entries = Entries { secret, plain: old.as_ref().map(|scope| scope.plain.clone()).unwrap_or_default() };
+            update(&mut entries)?;
+            let Entries { secret: values, plain } = entries;
+            ensure!(
+                !values.keys().any(|name| plain.contains_key(name)),
+                "A variable with this name already exists in this scope."
+            );
+            validate_values(&values.iter().chain(&plain).map(|(k, v)| (k.clone(), v.clone())).collect())?;
             let scope = Scope {
                 names: values.keys().cloned().collect(),
                 revision: uuid::Uuid::new_v4().to_string(),
+                plain,
+                extra: old.as_ref().map(|scope| scope.extra.clone()).unwrap_or_default(),
             };
             if !values.is_empty() {
                 self.secrets
@@ -242,19 +298,17 @@ impl Store<'_> {
             previous.is_none() || inputs.len() == 1,
             "Edit one variable at a time."
         );
-        self.change(key, |values| {
+        self.change_entries(key, |entries| {
             if let Some(previous) = previous {
-                ensure!(
-                    values.remove(previous).is_some(),
-                    "Variable no longer exists."
-                );
+                ensure!(entries.remove(previous), "Variable no longer exists.");
             }
-            for Input { name, value } in &inputs {
+            for Input { name, value, secret } in &inputs {
                 validate_name(name)?;
                 ensure!(
-                    !values.contains_key(name),
+                    !entries.contains(name),
                     "A variable with this name already exists in this scope."
                 );
+                let values = if *secret { &mut entries.secret } else { &mut entries.plain };
                 values.insert(name.clone(), value.clone());
             }
             Ok(())
@@ -381,9 +435,13 @@ impl Cache {
         let mut stamp = stamp(index, repository);
         let mut values = Values::new();
         for key in std::iter::once(USER).chain(stamp.repository.as_deref()) {
-            let Some(scope) = index.get(key).filter(|scope| !scope.names.is_empty()) else {
+            let Some(scope) = index.get(key) else {
                 continue;
             };
+            values.extend(scope.plain.clone());
+            if scope.names.is_empty() {
+                continue;
+            }
             match self
                 .scopes
                 .get(key)
@@ -519,14 +577,21 @@ pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -
 // Runtime launches use only the in-memory cache, never the Keychain. A missing
 // or failed read deliberately degrades to no overrides and a per-tab notice.
 #[cfg(not(test))]
-pub fn launch(cwd: &str) -> Launch {
+pub fn launch(cwd: &str) -> Result<Launch> {
     let repo = if cfg!(target_os = "macos") {
         repository(Path::new(cwd))
     } else {
         None
     };
     let index = store().and_then(|store| store.index());
-    cache().lock().unwrap().resolve(index.as_ref().ok(), repo)
+    let cache = cache().lock().unwrap();
+    let mut launch = cache.resolve(index.as_ref().ok(), repo.clone());
+    drop(cache);
+    let local_names: Option<BTreeSet<String>> = repo.as_ref().and_then(|key| index.as_ref().ok()?.get(key)).map(|scope| scope.names.iter().chain(scope.plain.keys()).cloned().collect());
+    let repository = super::configuration::repository(Path::new(cwd)).ok();
+    let resolution = super::configuration::Store::current()?.resolve(repository.as_ref())?;
+    apply_configuration(&mut launch, resolution, local_names.as_ref())?;
+    Ok(launch)
 }
 
 // PTY fixtures must never read the developer's saved names or depend on the
@@ -538,13 +603,35 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub fn launch(_cwd: &str) -> Launch {
-    TEST_LAUNCH
+pub fn launch(_cwd: &str) -> Result<Launch> {
+    Ok(TEST_LAUNCH
         .with(|slot| slot.borrow_mut().take())
         .unwrap_or_else(|| Launch {
             values: Values::new(),
             stamp: Stamp::default(),
-        })
+        }))
+}
+
+
+/// Keychain repository entries are a legacy local layer: they override shared
+/// file values, while explicit local-file entries and managed policy win.
+fn apply_configuration(launch: &mut Launch, mut resolution: super::configuration::Resolution, local_names: Option<&BTreeSet<String>>) -> Result<()> {
+    resolution.values.retain(|key, resolved| {
+        !(resolved.source == super::configuration::Layer::RepositoryShared
+            && key.strip_prefix("environment.").is_some_and(|name| local_names.is_some_and(|names| names.contains(name))))
+    });
+    resolution.refresh_trust();
+    resolution.require_trust()?;
+    // Preserve the existing all-or-nothing behavior for unavailable Keychain values.
+    if launch.stamp.unavailable {
+        ensure!(!resolution.values.keys().any(|key| key.starts_with("environment.")), "Environment overrides are unavailable; no partial layered environment was applied.");
+        return Ok(());
+    }
+    for (key, resolved) in resolution.values {
+        let Some(name) = key.strip_prefix("environment.") else { continue; };
+        if let Some(value) = resolved.value.as_str() { launch.values.insert(name.into(), value.into()); }
+    }
+    Ok(())
 }
 
 fn wait_until_ready(mut ready: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -591,28 +678,104 @@ fn check_unattended(ready: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
-    let key = scope_key(project)?;
-    let index = store()?.index()?;
-    let own = index.get(&key);
+/// This store's rows for one scope: inherited Personal names first (in a
+/// repository), then the scope's own. Values only for plainly stored ones.
+fn rows(index: &Index, key: &str) -> Vec<Row> {
+    let row = |name: &String, scope: &'static str, plain: Option<&String>| Row {
+        name: name.clone(),
+        scope,
+        overridden: false,
+        secret: plain.is_none(),
+        value: plain.cloned(),
+        overridden_in: Vec::new(),
+    };
+    let own = index.get(key);
+    let has = |scope: &Scope, name: &String| scope.names.contains(name) || scope.plain.contains_key(name);
     let mut rows = Vec::new();
+    let add = |scope: &Scope, label: &'static str| {
+        let mut own_rows: Vec<Row> = scope.names.iter().map(|name| row(name, label, None))
+            .chain(scope.plain.iter().map(|(name, value)| row(name, label, Some(value)))).collect();
+        own_rows.sort_by(|a, b| a.name.cmp(&b.name));
+        own_rows
+    };
     if key != USER {
         if let Some(user) = index.get(USER) {
-            rows.extend(user.names.iter().map(|name| Row {
-                name: name.clone(),
-                scope: "user",
-                overridden: own.is_some_and(|s| s.names.contains(name)),
+            rows.extend(add(user, "user").into_iter().map(|mut row| {
+                row.overridden = own.is_some_and(|own| has(own, &row.name));
+                row
             }));
         }
     }
-    if let Some(own) = own {
-        rows.extend(own.names.iter().map(|name| Row {
-            name: name.clone(),
-            scope: if key == USER { "user" } else { "repository" },
-            overridden: false,
+    if let Some(scope) = own {
+        rows.extend(add(scope, if key == USER { "user" } else { "repository" }).into_iter().map(|mut row| {
+            if key == USER {
+                row.overridden_in = index.iter()
+                    .filter(|(other, scope)| other.as_str() != USER && has(scope, &row.name))
+                    .filter_map(|(other, _)| other.strip_prefix("repository:").map(String::from))
+                    .collect();
+            }
+            row
         }));
     }
+    rows
+}
+
+/// Merge the repository files' (and managed policy's) environment names, as
+/// Layered configuration lists them, with the same precedence as a launch:
+/// this store's repository variables override the shared file only; the local
+/// file and managed policy override everything here. File values stay out.
+fn merge_file_rows(rows: &mut Vec<Row>, resolution: &super::configuration::Resolution) {
+    use super::configuration::Layer;
+    for (key, resolved) in &resolution.values {
+        let Some(name) = key.strip_prefix("environment.") else { continue };
+        let scope = match resolved.source {
+            Layer::RepositoryShared => "repositoryShared",
+            Layer::RepositoryLocal => "repositoryLocal",
+            Layer::Managed => "managed",
+            _ => continue,
+        };
+        let local = rows.iter().any(|row| row.scope == "repository" && row.name == name);
+        for row in rows.iter_mut().filter(|row| row.name == name) {
+            if row.scope == "user" || scope != "repositoryShared" {
+                row.overridden = true;
+            }
+        }
+        rows.push(Row {
+            name: name.into(),
+            scope,
+            overridden: scope == "repositoryShared" && local,
+            secret: false,
+            value: None,
+            overridden_in: Vec::new(),
+        });
+    }
+}
+
+fn private_rows(project: Option<&str>) -> Result<Vec<Row>> {
+    let key = scope_key(project)?;
+    Ok(rows(&store()?.index()?, &key))
+}
+
+pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
+    let mut rows = private_rows(project)?;
+    // Best effort: an unreadable repository file must not hide private rows;
+    // Layered configuration reports why it is unreadable.
+    if let Ok(resolution) = super::configuration::resolve(project) {
+        merge_file_rows(&mut rows, &resolution);
+    }
     Ok(rows)
+}
+
+pub(super) fn configuration_sources(project: Option<&str>, values: &mut BTreeMap<String, super::configuration::ResolvedValue>) -> Result<()> {
+    use super::configuration::{Layer, ResolvedValue};
+    for row in private_rows(project)? {
+        let key = format!("environment.{}", row.name);
+        let local = row.scope == "repository";
+        if values.get(&key).is_none_or(|value| local && matches!(value.source, Layer::User | Layer::RepositoryShared)) {
+            values.insert(key, ResolvedValue { value: serde_json::Value::Null, source: if local { Layer::RepositoryLocal } else { Layer::User }, locked: false, redacted: true });
+        }
+    }
+    Ok(())
 }
 
 pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
@@ -621,6 +784,9 @@ pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
     let store = store()?;
     let index = store.index()?;
     let scope = index.get(&key).context("Variable no longer exists.")?;
+    if let Some(value) = scope.plain.get(name) {
+        return Ok(value.clone());
+    }
     store
         .snapshot(&key, &scope.revision)?
         .values
@@ -628,14 +794,25 @@ pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
         .context("Variable no longer exists.")
 }
 
+
+fn refuse_managed_names<'a>(project: Option<&str>, names: impl Iterator<Item = &'a str>) -> Result<()> {
+    let resolved = super::configuration::resolve(project)?;
+    for name in names {
+        ensure!(!resolved.values.get(&format!("environment.{name}")).is_some_and(|value| value.locked), "This variable is locked by managed configuration.");
+    }
+    Ok(())
+}
+
 pub fn save(project: Option<&str>, inputs: Vec<Input>, previous: Option<&str>) -> Result<()> {
+    refuse_managed_names(project, inputs.iter().map(|input| input.name.as_str()).chain(previous))?;
     store()?.save(&scope_key(project)?, inputs, previous)
 }
 
 pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
+    refuse_managed_names(project, std::iter::once(name))?;
     validate_name(name)?;
-    store()?.change(&scope_key(project)?, |values| {
-        ensure!(values.remove(name).is_some(), "Variable no longer exists.");
+    store()?.change_entries(&scope_key(project)?, |entries| {
+        ensure!(entries.remove(name), "Variable no longer exists.");
         Ok(())
     })
 }
@@ -657,7 +834,7 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
         "Choose a .env or .env.* file inside this repository."
     );
     use std::io::Read;
-    let file = open_env_file(&root, &path)
+    let file = crate::workspace_file::open(&root, &path)
         .map_err(|_| anyhow::anyhow!("Could not open the .env file."))?;
     ensure!(file.metadata()?.is_file(), "Choose a regular .env file.");
     let mut bytes = Vec::new();
@@ -671,52 +848,31 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("The .env file must be UTF-8 text."))
 }
 
-#[cfg(unix)]
-fn open_env_file(root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::MetadataExt;
-    let before = root.metadata()?;
-    // root was canonicalized too: reject a symlink swapped into any of its
-    // ancestors, rather than following one while opening the root descriptor.
-    let directory = open_env_relative(std::fs::File::open("/")?,
-        root.strip_prefix("/").map_err(std::io::Error::other)?)?;
-    let opened = directory.metadata()?;
-    if before.dev() != opened.dev() || before.ino() != opened.ino() {
-        return Err(std::io::Error::other("Repository directory changed."));
-    }
-    let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
-    open_env_relative(directory, relative)
-}
-
-#[cfg(unix)]
-fn open_env_relative(mut directory: std::fs::File, relative: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        let std::path::Component::Normal(name) = component else {
-            return Err(std::io::Error::other("Invalid environment path."));
-        };
-        let name = std::ffi::CString::new(name.as_bytes()).map_err(std::io::Error::other)?;
-        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
-            | if components.peek().is_some() { libc::O_DIRECTORY } else { 0 };
-        // SAFETY: directory is an owned, open fd and name is NUL-terminated.
-        // Every component is resolved against the previous fd with no symlinks,
-        // so replacing a parent after canonicalization cannot escape the root.
-        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if fd < 0 { return Err(std::io::Error::last_os_error()); }
-        // SAFETY: openat returned a new descriptor, owned only by this File.
-        directory = unsafe { std::fs::File::from_raw_fd(fd) };
-    }
-    Ok(directory)
-}
-
-#[cfg(not(unix))]
-fn open_env_file(_root: &Path, path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
-}
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_environment_cannot_reach_a_launch_until_trusted_and_local_credentials_win() {
+        use super::super::configuration::{Layer, ResolvedValue, Resolution, Trust, REGISTRY};
+        let resolution = |required| Resolution {
+            values: [("environment.API_URL".into(), ResolvedValue { value: serde_json::json!("$(echo literal)"), source: Layer::RepositoryShared, locked: false, redacted: false })].into(),
+            registry: REGISTRY, warnings: Vec::new(), trust: Some(Trust { hash: "hash".into(), required, keys: vec!["environment.API_URL".into()] }),
+        };
+        let mut launch = Launch { values: [("API_URL".into(), "private".into())].into(), stamp: Stamp::default() };
+        assert!(apply_configuration(&mut launch, resolution(true), None).is_err());
+        assert_eq!(launch.values["API_URL"], "private", "declining applies no shared value");
+        let names = ["API_URL".into()].into();
+        apply_configuration(&mut launch, resolution(true), Some(&names)).unwrap();
+        assert_eq!(launch.values["API_URL"], "private");
+        apply_configuration(&mut launch, resolution(false), None).unwrap();
+        assert_eq!(launch.values["API_URL"], "$(echo literal)");
+        launch.stamp.unavailable = true;
+        assert!(apply_configuration(&mut launch, resolution(false), None).is_err());
+    }
+
     use super::*;
     use crate::keychain::testing::MemorySecrets;
 
@@ -778,27 +934,6 @@ mod tests {
         refresh_cache(&cache, &store, &mut attempts, |key, revision| store.snapshot(key, revision)).unwrap();
         assert!(attempts.is_empty());
         assert!(!cache.lock().unwrap().resolve(Some(&store.index().unwrap()), None).stamp.unavailable);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn importing_rejects_a_parent_replaced_by_a_symlink_after_canonicalization() {
-        use std::io::Read;
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let parent = root.path().join("nested");
-        std::fs::create_dir(&parent).unwrap();
-        std::fs::write(parent.join(".env"), "KEY=inside").unwrap();
-        std::fs::write(outside.path().join(".env"), "KEY=outside").unwrap();
-        let path = parent.join(".env").canonicalize().unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
-        let pinned = std::fs::File::open(&parent).unwrap();
-        std::fs::rename(&parent, root.path().join("original")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
-        assert!(open_env_file(&canonical_root, &path).is_err());
-        let mut inside = String::new();
-        open_env_relative(pinned, Path::new(".env")).unwrap().read_to_string(&mut inside).unwrap();
-        assert_eq!(inside, "KEY=inside");
     }
 
     #[test]
@@ -1038,6 +1173,7 @@ mod tests {
         let input = |name: &str| Input {
             name: name.into(),
             value: "secret".into(),
+            secret: true,
         };
         store
             .save(

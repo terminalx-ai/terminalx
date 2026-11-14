@@ -1643,9 +1643,11 @@ async fn shells_and_agent_terminals_need_the_same_right_on_every_call() {
 /// A session in the index, made by the same `session_ops` the runtime uses.
 fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry {
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        parent: None,
         section_id: None,
         project_path: project.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: false,
         base_ref: None,
@@ -1655,6 +1657,7 @@ fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry
         automation: None,
         cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     })
     .unwrap()
 }
@@ -1971,7 +1974,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
         &f.rpc,
         &manager,
         "session.update",
-        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "clientRequestId": "request-upd-1" }),
+        json!({ "sessionId": session.id, "title": "  Fix the login  ", "pinned": true, "manualStatus": "in_review", "clientRequestId": "request-upd-1" }),
     )
     .await
     .unwrap();
@@ -1979,13 +1982,16 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     let pushed = next_event(&mut events, "session.sessions").await;
     assert_eq!(pushed["sessions"].as_array().unwrap().len(), 1, "only this workspace's sessions");
     assert_eq!(pushed["sessions"][0]["title"], "Fix the login");
+    assert_eq!(pushed["sessions"][0]["manualStatus"], "in_review");
     call(&f.rpc, &manager, "session.update", json!({ "sessionId": session.id, "archived": true, "clientRequestId": "request-upd-2" }))
         .await
         .unwrap();
     let stored = index::get(&session.id).unwrap();
     assert!(stored.archived && stored.pinned && stored.title == "Fix the login");
+    assert_eq!(stored.manual_status, Some(index::ManualStatus::InReview));
     for (params, expected) in [
         (json!({ "sessionId": session.id, "clientRequestId": "request-upd-3" }), "invalid_params"),
+        (json!({ "sessionId": session.id, "manualStatus": "invalid", "clientRequestId": "request-status-invalid" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "   ", "clientRequestId": "request-upd-4" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x".repeat(201), "clientRequestId": "request-upd-5" }), "invalid_params"),
         (json!({ "sessionId": session.id, "title": "x" }), "invalid_params"),
@@ -2144,6 +2150,29 @@ async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
     assert_eq!(listed["terminals"][0]["sessionId"], session.id.as_str());
     let attached = call(&f.rpc, &manager, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
     assert_eq!(attached["sessionId"], session.id.as_str());
+}
+
+/// #467 review: closing a session leaves an idle tab as it is, as main did:
+/// no "Session closed" in its log, an unread reply still unread, and no
+/// refusal from a stop it never needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_session_leaves_its_idle_tabs_alone() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    let session = seed_session(&f.root, "Read later", None);
+    let tab_id = session.tabs[0].id.clone();
+    manager.set_status_for_test(&session.id, &tab_id, crate::store::index::TabStatus::Completed);
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
+    assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
+    let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
+        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
+    assert!(!closed, "nothing was stopped, so nothing says the session closed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2306,6 +2335,7 @@ case "$1" in
   *) exec sleep 10 ;;
 esac
 while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
   id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
@@ -2313,6 +2343,9 @@ while read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}' ;;
+    *'"method":"turn/interrupt"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}}' ;;
   esac
 done
 "#;
@@ -2371,9 +2404,10 @@ async fn native_terminal_child() {
         (peer, events)
     };
     let mut requests = 0;
-    let mut move_as = |peer: Arc<Peer>| {
+    let mut move_as = |peer: Arc<Peer>, defer: bool| {
         requests += 1;
-        let params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        let mut params = json!({ "sessionId": session, "tabId": tab, "clientRequestId": format!("to-terminal-{requests}") });
+        if defer { params["deferUntilIdle"] = json!(true); }
         let rpc = f.rpc.clone();
         async move { call(&rpc, &peer, "session.toTerminal", params).await }
     };
@@ -2381,19 +2415,46 @@ async fn native_terminal_child() {
     // Viewers, and drivers who may not approve, cannot start its terminal.
     let (bob, _bob_events) = agent_person(f.rpc.clone(), "d-bob", "bob").await;
     let (erin, _erin_events) = agent_person(f.rpc.clone(), "d-erin", "erin").await;
-    assert_eq!(code(move_as(bob).await), "forbidden");
-    assert_eq!(code(move_as(erin).await), "forbidden");
+    assert_eq!(code(move_as(bob, false).await), "forbidden");
+    assert_eq!(code(move_as(erin, false).await), "forbidden");
     assert_eq!(transport(), Native);
 
-    // Never mid-turn.
+    // Active work defers the switch, without fencing protocol progress.
     let (alice, _alice_events) = agent_person(f.rpc.clone(), "d-alice", "alice").await;
     manager.send(&session, &tab, "hello".into(), Vec::new()).unwrap();
-    assert_eq!(code(move_as(alice.clone()).await), "conflict");
+    assert_eq!(code(move_as(alice.clone(), false).await), "conflict", "older clients must not mistake deferred work for a completed handoff");
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
     assert_eq!(transport(), Native);
-    manager.stop(&session, &tab).unwrap();
+    let log = crate::store::log_path(&session, &tab).unwrap();
+    let events = || crate::store::read_lines::<crate::events::AgentEvent>(&log).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnStarted { .. })) {
+        assert!(std::time::Instant::now() < until, "the deferred switch must allow the native prompt to start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(move_as(alice.clone(), true).await.unwrap()["waitingForTurn"], true);
+    assert!(manager.interrupt(&session, &tab).unwrap());
+    while !events().iter().any(|event| matches!(event.payload, crate::events::Payload::TurnCompleted { .. })) {
+        assert!(std::time::Instant::now() < until, "interrupt must remain writable while the switch waits");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    assert_eq!(events().iter().filter(|event| matches!(event.payload, crate::events::Payload::UserMessage { .. })).count(), 1);
 
-    // A driver who may approve moves it, and its terminal starts.
-    move_as(alice.clone()).await.unwrap();
+
+    // No terminal may silently start a new conversation when the native
+    // thread has not saved its rollout yet. The refusal keeps Chat usable.
+    let refused = move_as(alice.clone(), true).await.unwrap_err();
+    assert!(refused.1.contains("saved conversation is not available"), "{refused:?}");
+    assert_eq!((transport(), terminal_launches()), (Native, 0));
+    assert_eq!(index::get(&session).unwrap().tab(&tab).unwrap().provider_session_id.as_deref(), Some("thread-1"));
+    assert!(!events().iter().any(|event| matches!(event.payload, crate::events::Payload::Error { .. })));
+    let saved = home.join("user-codex/sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(saved, "{}\n").unwrap();
+
+    // A driver who may approve retries, and the same conversation starts.
+    move_as(alice.clone(), true).await.unwrap();
     assert_eq!(transport(), Pty);
     let until = std::time::Instant::now() + Duration::from_secs(5);
     while terminal_launches() == 0 {
@@ -2401,8 +2462,12 @@ async fn native_terminal_child() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Asking again changes nothing and starts nothing more.
-    move_as(alice).await.unwrap();
+    let legacy = move_as(alice, false).await.unwrap();
+    assert!(legacy.get("waitingForTurn").is_none(), "a legacy success only means a completed handoff");
     assert_eq!((transport(), terminal_launches()), (Pty, 1));
+    assert!(launches().lines().any(|line| line.contains("resume thread-1")), "the terminal resumes the same conversation");
+    let frames = std::fs::read_to_string(bin.join("received")).unwrap();
+    assert_eq!(frames.lines().filter(|line| line.contains("\"method\":\"turn/start\"")).count(), 1, "the transition never replays the prompt");
     manager.stop(&session, &tab).unwrap();
 }
 
@@ -3543,4 +3608,232 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     f.rpc.set_agents(crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap());
     assert_eq!(call(&f.rpc, &manager, "session.interrupt", params).await.unwrap()["interrupted"], true);
     assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn privacy_raw_pty_queues_and_partial_writes_retain_authority() {
+    for kind in ["personal", "managed"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "remote::server::tests::privacy_raw_pty_child", "--nocapture"])
+            .env("TERMINALX_TEST_RAW_PTY_PRIVACY", kind).output().unwrap();
+        assert!(output.status.success(), "{kind}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn privacy_raw_pty_child() {
+    let Ok(kind) = std::env::var("TERMINALX_TEST_RAW_PTY_PRIVACY") else { return };
+    let _home = crate::store::temp_home();
+    let managed = kind == "managed";
+    let policy = move |enabled| {
+        if managed && enabled { std::env::set_var("TERMINALX_TEST_MANAGED_PRIVACY", "1"); }
+        else { std::env::remove_var("TERMINALX_TEST_MANAGED_PRIVACY"); }
+        crate::store::write_json(&crate::store::root().unwrap().join("data-privacy.json"), &json!({"enabled":enabled && !managed})).unwrap();
+        assert_eq!(crate::data_privacy::refresh().enabled, enabled);
+    };
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < end, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    struct Partial {
+        inner: Box<dyn std::io::Write + Send>,
+        pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    }
+    impl std::io::Write for Partial {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some((entered, release)) = self.pause.take() {
+                let n = self.inner.write(&bytes[..1])?;
+                assert_eq!(n, 1);
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(30)).unwrap();
+                Ok(n)
+            } else { self.inner.write(bytes) }
+        }
+        fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).max_blocking_threads(2).enable_all().build().unwrap();
+    let _entered = runtime.enter();
+    for agent in [false, true] {
+        policy(false);
+        let f = fixture();
+        with_tab(&f);
+        let (peer, _events) = runtime.block_on(agent_person(&f.rpc, "raw-privacy", Authority::Manage, "admin"));
+        let id = if agent {
+            start_agent_cli(&f); AGENT_TERMINAL.to_string()
+        } else {
+            runtime.block_on(call(&f.rpc, &peer, "pty.create", json!({"cols":80,"rows":24,"clientRequestId":"raw-privacy-create"}))).unwrap()["ptyId"].as_str().unwrap().to_string()
+        };
+        runtime.block_on(call(&f.rpc, &peer, "pty.attach", json!({"ptyId":id}))).unwrap();
+        runtime.block_on(call(&f.rpc, &peer, "pty.control", json!({"ptyId":id}))).unwrap();
+        let input = f.root.join("raw-input");
+        let ready = f.root.join("ready");
+        f.terminals.write(&id, format!("stty raw -echo; touch '{}'; exec cat > '{}'\n", ready.display(), input.display()).as_bytes()).unwrap();
+        wait("real PTY reader ready", &|| ready.exists() && input.exists());
+        let mut seq = 0;
+        let mut send = |text: &str| {
+            seq += 1;
+            runtime.block_on(call(&f.rpc, &peer, "pty.write", json!({"ptyId":id,"data":text,"seq":seq,"writerId":"raw"}))).unwrap()
+        };
+        let drained = || f.rpc.ptys.lock().unwrap().get(&id).unwrap().input_pending.load(Ordering::SeqCst) == 0;
+        let mut expected = Vec::new();
+        for cycle in [false, true] {
+            let (entered, arrived) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let terminals = f.terminals.clone(); let pane = id.clone();
+            let blocker = std::thread::spawn(move || terminals.with_input_lock_for_test(&pane, || {
+                entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(30)).unwrap();
+            }));
+            arrived.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert_eq!(send("stale-first")["applied"], true);
+            assert_eq!(send("stale-second")["applied"], true);
+            // Neither a writer waiting for its physical lock nor its backlog
+            // owns admission. Acknowledgement is possible before release.
+            policy(true);
+            if cycle { policy(false); }
+            release.send(()).unwrap(); blocker.join().unwrap();
+            wait("stale raw queue drained", &drained);
+            assert_eq!(std::fs::read(&input).unwrap(), expected, "agent={agent}, cycle={cycle}");
+            // Desktop input stays useful while privacy is enabled.
+            f.terminals.write(&id, b"local").unwrap(); expected.extend(b"local");
+            wait("local terminal input", &|| std::fs::read(&input).unwrap() == expected);
+            policy(false);
+            send("fresh"); expected.extend(b"fresh");
+            wait("fresh raw request restored", &|| std::fs::read(&input).unwrap() == expected);
+        }
+        let (entered, arrived) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        f.terminals.wrap_input_for_test(&id, |inner| Box::new(Partial { inner, pause: Some((entered, released)) }));
+        send("active");
+        arrived.recv_timeout(Duration::from_secs(30)).unwrap();
+        let mut first = expected.clone(); first.push(b'a');
+        wait("first physical byte reached the reader", &|| std::fs::read(&input).unwrap() == first);
+        send("stale-behind-active");
+        let (done, ack) = std::sync::mpsc::channel();
+        let activation = std::thread::spawn(move || { policy(true); done.send(()).unwrap(); });
+        wait("authority invalidated during partial write", &crate::data_privacy::enabled);
+        assert!(ack.recv_timeout(Duration::from_millis(100)).is_err(), "acknowledged a partial raw write, agent={agent}");
+        release.send(()).unwrap();
+        ack.recv_timeout(Duration::from_secs(30)).unwrap(); activation.join().unwrap();
+        wait("active and expired raw writes drained", &drained);
+        expected.extend(b"active");
+        wait("active delivery finished before acknowledgement", &|| std::fs::read(&input).unwrap() == expected);
+        policy(false); send("restored"); expected.extend(b"restored");
+        wait("fresh input after partial delivery", &|| std::fs::read(&input).unwrap() == expected);
+        assert_eq!(runtime.block_on(call(&f.rpc, &peer, "pty.write", json!({"ptyId":id,"data":"restored","seq":seq,"writerId":"raw"}))).unwrap()["applied"], false);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
+    for method in ["session.delete", "session.close"] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "retained", None);
+        let other = seed_session(&f.root, "unrelated", None);
+        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"retention-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        let _attached = call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let subscriptions = f.rpc.ptys.lock().unwrap()[id].subscribers.len();
+        let pid = f.terminals.pid(id).unwrap();
+        let failure = f.terminals.inspection_failure_for_test(id);
+        failure.store(true, Ordering::SeqCst);
+        f.terminals.write(id, b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::harness::host::group_or_process_alive(pid) {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let result = call(&f.rpc, &manager, method, json!({"sessionId":session.id,"remove":true,"clientRequestId":"retention-first"})).await;
+        assert!(result.as_ref().is_err_and(|(_, message)| message.contains("PTY process exit could not be confirmed")), "{method}: {result:?}");
+        assert!(index::get(&session.id).is_ok());
+        assert!(index::get(&other.id).is_ok());
+        {
+            let ptys = f.rpc.ptys.lock().unwrap();
+            assert!(!ptys[id].closed, "unconfirmed wait destroyed retry metadata");
+            assert_eq!(ptys[id].subscribers.len(), subscriptions);
+        }
+        failure.store(false, Ordering::SeqCst);
+        call(&f.rpc, &manager, method, json!({"sessionId":session.id,"remove":true,"clientRequestId":"retention-retry"})).await.unwrap();
+        assert!(index::get(&session.id).is_err());
+        assert!(index::get(&other.id).is_ok());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_stop_completion_refuses_a_replaced_pane_before_closing_metadata() {
+    for detach_replacement in [false, true] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "replacement", None);
+        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"replacement-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let identities = {
+            let mut ptys = f.rpc.ptys.lock().unwrap();
+            let pty = ptys.get_mut(id).unwrap();
+            pty.stop_pending = true;
+            vec![(id.to_string(), pty.input_pending.clone(), pty.pid)]
+        };
+        f.terminals.kill_and_wait_confirmed(id, Duration::from_secs(5)).unwrap();
+        // The wait completed, but a successor now owns the same pane name before
+        // the metadata continuation. No timing/scheduler assumption is needed.
+        f.terminals.spawn(f.rpc.sink.clone(), id, crate::pty::PaneSpec {
+            cwd: f.root.to_str().unwrap(), cols: 80, rows: 24,
+            command: Some("sh -c 'read line'"), env: &[],
+        }).unwrap();
+        let successor = f.terminals.pid(id).unwrap();
+        let failure = f.terminals.inspection_failure_for_test(id);
+        if detach_replacement {
+            failure.store(true, Ordering::SeqCst);
+            f.terminals.begin_stop_all(&[id.to_string()]);
+            assert!(!f.terminals.is_live(id));
+        }
+        let result = f.rpc.finish_selected_ptys_stop(identities);
+        assert!(result.as_ref().is_err_and(|error| error.contains("terminal changed")), "{result:?}");
+        if !detach_replacement { assert!(crate::harness::host::is_alive(successor)); }
+        {
+            let ptys = f.rpc.ptys.lock().unwrap();
+            assert!(!ptys[id].closed);
+            assert!(ptys[id].stop_pending);
+            assert!(!ptys[id].subscribers.is_empty());
+        }
+        failure.store(false, Ordering::SeqCst);
+        f.rpc.close_selected_ptys_waiting(&[id.to_string()], Duration::from_secs(5)).unwrap();
+        assert!(!crate::harness::host::is_alive(successor));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
+    for waiting in [false, true] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "exit retention", None);
+        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"exit-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let identities = {
+            let mut ptys = f.rpc.ptys.lock().unwrap();
+            let pty = ptys.get_mut(id).unwrap();
+            pty.closed = true; // An earlier nonwaiting request already closed it.
+            pty.stop_pending = waiting;
+            vec![(id.to_string(), pty.input_pending.clone(), pty.pid)]
+        };
+        f.terminals.kill_and_wait_confirmed(id, Duration::from_secs(5)).unwrap();
+        // Apply the exit event at this exact boundary; the real emitter can
+        // also report it, and both paths must leave the same retention state.
+        f.rpc.on_pty_exit(PtyExit { id: id.to_string(), code: None });
+        assert_eq!(f.rpc.ptys.lock().unwrap().contains_key(id), waiting);
+        if waiting {
+            assert!(!f.rpc.ptys.lock().unwrap()[id].subscribers.is_empty());
+            f.rpc.finish_selected_ptys_stop(identities).unwrap();
+            assert!(!f.rpc.ptys.lock().unwrap().contains_key(id));
+        }
+    }
 }

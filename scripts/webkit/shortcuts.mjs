@@ -8,6 +8,7 @@
 //   the dictation row with its two bindings;
 // - a shortcut changed in the tab is the shortcut at the next keypress, its old
 //   keys do nothing, and the command palette shows the new keys;
+// - the Run view is listed on keys of its own (⌘⇧O), with Automations kept on ⌘⇧R;
 // - holding Right Option in the composer opens the microphone and releasing it
 //   closes it; Left Option and a Right Option combination never do.
 //
@@ -73,6 +74,12 @@ const fits = (layout) => ({
   let layout = await measure(page);
   failed += report("shortcuts tab at 960 px", fits(layout), layout);
 
+  // PRO-362: the Run view has keys of its own, listed here; Automations keeps ⌘⇧R, which the drafts had drawn for it.
+  const keysOf = (id) => page.locator(`[data-shortcut="${id}"] button[data-binding]`).allTextContents();
+  const runView = await keysOf("app.runView");
+  const automations = await keysOf("app.automations");
+  failed += report("the Run view's keys in the Shortcuts tab", { "Run view is listed, on ⌘⇧O": runView.join(" | ") === "⌘⇧O", "Automations keeps ⌘⇧R": automations.join(" | ") === "⌘⇧R" }, { runView, automations });
+
   // The longest label, with keys another action has: the recorder and its longest message.
   const long = page.locator('[data-shortcut="session.toggleTerminalView"]');
   await long.locator("button[data-binding]").click();
@@ -119,7 +126,7 @@ const fits = (layout) => ({
   // A changed shortcut works at the next keypress.
   await openShortcuts(page);
   await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').click();
-  await page.keyboard.press("Meta+Shift+Y");
+  await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
   await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
@@ -129,11 +136,11 @@ const fits = (layout) => ({
   // and for the slide to end after the new ones.
   await page.keyboard.press("Meta+B");
   await page.waitForTimeout(600);
-  const afterOld = await sidebarShown();
-  await page.keyboard.press("Meta+Shift+Y");
+  const afterOld = await sidebarShown() && await page.locator('[data-testid="panel-presence"][data-side="left"]').getAttribute("data-state") === "open";
+  await page.keyboard.press("Meta+Shift+V");
   const afterNew = await page.locator('[data-testid="sidebar-rail"]').waitFor({ state: "hidden", timeout: 2000 }).then(() => false, () => true);
-  await page.keyboard.press("Meta+Shift+Y");
-  await sidebar(page);
+  await page.keyboard.press("Meta+Shift+V");
+  await page.locator('[data-testid="panel-presence"][data-side="left"][data-state="open"]').waitFor();
   // The command palette shows the keys in force.
   await page.keyboard.press("Meta+K");
   await page.getByRole("dialog").locator("input").fill("Toggle sidebar");
@@ -144,16 +151,16 @@ const fits = (layout) => ({
   failed += report(
     "a changed shortcut",
     {
-      "the tab shows the new keys": shown === "⌘⇧Y",
+      "the tab shows the new keys": shown === "⌘⇧V",
       "the old keys do nothing": afterOld === true,
       "the new keys run the action": afterNew === false,
-      "the command palette shows the new keys": paletteKeys === "⌘⇧Y",
+      "the command palette shows the new keys": paletteKeys === "⌘⇧V",
     },
     { shown, afterOld, afterNew, paletteKeys },
   );
 
   // Hold Right Option to talk, in a chat tab's composer.
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   await tab(page, "gemini tab").click();
   const composer = page.locator('[role="tabpanel"]:not([aria-hidden="true"]) textarea[data-composer]');
   await composer.waitFor();

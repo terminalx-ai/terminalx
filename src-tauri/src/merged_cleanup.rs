@@ -6,7 +6,7 @@
 //! VM. Whoever drives it says only which projects it is on for and how long
 //! the grace period is; everything a removal rests on is read here.
 //!
-//! [`sweep`] is one pass. It looks at the worktrees TerminalX made in those
+//! [`sweep_fallible`] is one pass. It looks at the worktrees TerminalX made in those
 //! projects (never the repository's main directory, a worktree made by hand,
 //! a detached HEAD or the default branch) and asks GitHub for the pull
 //! request of each one's branch, in one request per project. Only a pull
@@ -126,6 +126,10 @@ pub struct Record {
     pub sessions_deleted: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_at: Option<String>,
+    /// The folders it checked out when it was a sparse workspace, so an undo
+    /// brings it back with them; absent for a full checkout and older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
 /// A removal with whether it can still be undone.
@@ -208,6 +212,7 @@ pub struct Scope {
 pub type PullRequests<'a> = &'a dyn Fn(&Path, &[String]) -> anyhow::Result<HashMap<String, BranchPr>>;
 
 /// Everything one pass reads about its host.
+#[cfg(test)]
 pub struct Sweep<'a> {
     pub host: &'a Host<'a>,
     pub sink: &'a dyn EventSink,
@@ -250,7 +255,7 @@ struct Seen {
     archive_pause: Option<ArchivePause>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Ledger {
     /// By the workspace's path on this host.
@@ -460,8 +465,8 @@ impl Pass<'_> {
             (status.reason, status.detail, status.fresh, status.sessions) = (Some(reason), detail, fresh, sessions);
         };
 
-        let script = match crate::store::projects::scripts(&repository.root) {
-            Ok(scripts) => scripts.archive,
+        let script = match crate::store::configuration::archive_script(&repository.root) {
+            Ok(archive) => archive.script,
             Err(error) => return keep(self, Vec::new(), "its scripts could not be read".into(), Some(error.to_string())),
         };
         let fingerprint = if script.trim().is_empty() { None } else {
@@ -678,6 +683,7 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         sessions_kept,
         sessions_deleted,
         restored_at: None,
+        sparse_checkout: removed.sparse_checkout,
     })
 }
 
@@ -717,12 +723,14 @@ fn delete_remote_branch(project: &Path, branch: &str, merged: &str) -> BranchFat
 /// One pass over the projects in `scope`: see what merged, keep what is not
 /// safe and say why, and remove what is safe and due. With no project in
 /// scope it removes nothing and forgets what it had seen.
+#[cfg(test)]
 pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     sweep_fallible(&FallibleSweep { host: run.host, sink: run.sink,
         stop: &|entry| { (run.stop)(entry); Ok(()) }, pull_requests: run.pull_requests, now: run.now }, scope)
 }
 
 pub(crate) fn sweep_fallible(run: &FallibleSweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
+    let _github_request = crate::github_process::scope();
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let wanted: Vec<PathBuf> = scope.projects.iter().map(|path| cleanup::canonical(Path::new(path))).collect();
     let on_for = |path: &str| {
@@ -772,6 +780,41 @@ pub fn hold(path: &str, held: bool, now: DateTime<Utc>) -> anyhow::Result<()> {
         seen.first_seen = stamp(now);
     }
     ledger.save()
+}
+
+/// Session-driven restores share the sweep's lock and hold any checkout it
+/// previously removed. Save before creating files: a failed ledger write must
+/// not leave a restored workspace eligible for immediate automatic removal.
+pub(crate) fn with_workspace_restore<T>(path: &str, project: &str, commit: &str, restore: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut ledger = Ledger::load()?;
+    let before = ledger.clone();
+    let now = stamp(Utc::now());
+    let at_path = |record: &&Record| record.path == path && record.project_path == project;
+    let record = ledger.removed.iter().rev().filter(at_path).find(|record| record.commit == commit)
+        .or_else(|| ledger.removed.iter().rev().find(at_path)).cloned();
+    if let Some(record) = record {
+        // A path can have been reused since this conversation was removed.
+        // Holding it must not mark a different removal's commit as restored.
+        if record.commit == commit {
+            if let Some(saved) = ledger.removed.iter_mut().find(|saved| saved.id == record.id && saved.restored_at.is_none()) {
+                saved.restored_at = Some(now.clone());
+            }
+        }
+        let archive_pause = ledger.seen.get(path).and_then(|seen| seen.archive_pause.clone());
+        ledger.seen.insert(path.into(), Seen { project_path: record.project_path, pr: record.pr, first_seen: now, held: true, archive_pause });
+    } else if let Some(seen) = ledger.seen.get_mut(path) {
+        seen.held = true;
+    }
+    ledger.save()?;
+    match restore() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut before = before;
+            before.save().map_err(|rollback| anyhow::anyhow!("{error:#}; restoring the cleanup record also failed: {rollback:#}"))?;
+            Err(error)
+        }
+    }
 }
 
 /// Where a recorded removal can be put back, or why it cannot.
@@ -831,6 +874,7 @@ pub struct Restored {
 /// old path, the branch on the remote if this deleted it, and the sessions
 /// that have not been used since. The workspace is held afterwards.
 pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Utc>) -> anyhow::Result<Restored> {
+    let _request = crate::github_process::scope();
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut ledger = Ledger::load()?;
     let record = ledger.removed.iter().find(|record| record.id == id).cloned().ok_or_else(|| anyhow::anyhow!("no such removal is recorded here"))?;
@@ -838,10 +882,11 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
     let root = cleanup::canonical(Path::new(&project.path));
     let target = path.to_str().ok_or_else(|| anyhow::anyhow!("its path is not a name git can be given"))?;
     let exists = git::run(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", record.branch)]).is_ok();
+    let sparse = record.sparse_checkout.as_deref();
     if exists {
-        git::run(&root, &["worktree", "add", "--", target, &record.branch])?;
+        git::worktree_add(&root, &["--", target, &record.branch], &path, sparse, None, true)?;
     } else {
-        git::run(&root, &["worktree", "add", "--no-track", "-b", &record.branch, "--", target, &record.commit])?;
+        git::worktree_add(&root, &["--no-track", "-b", &record.branch, "--", target, &record.commit], &path, sparse, Some(&record.branch), true)?;
     }
 
     let mut notes = Vec::new();

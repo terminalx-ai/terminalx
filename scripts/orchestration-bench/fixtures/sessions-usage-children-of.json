@@ -1,0 +1,366 @@
+{
+  "id": "01a1cf0c-c5d4-79c3-9ad7-dfb60a771cf6",
+  "ok": true,
+  "result": {
+    "estimate": true,
+    "lead": {
+      "estimate": true,
+      "models": [
+        {
+          "cacheReadTokens": 3170967,
+          "cacheWriteTokens": 113665,
+          "costUsd": 1.0703666999999997,
+          "inputTokens": 60,
+          "model": "claude-sonnet-5-5",
+          "outputTokens": 29849
+        }
+      ],
+      "sessionId": "01a1cef3-9b7b-7242-b2fb-ad6daac74d43",
+      "tabs": [
+        {
+          "agent": "claude",
+          "models": [
+            {
+              "cacheReadTokens": 3170967,
+              "cacheWriteTokens": 113665,
+              "costUsd": 1.0703666999999997,
+              "inputTokens": 60,
+              "model": "claude-sonnet-5-5",
+              "outputTokens": 29849
+            }
+          ],
+          "tabId": "01a1cef3-9b7b-7242-b2fb-ad70af6fc1f2",
+          "title": "Orchestrator: a lead session that splits work",
+          "total": {
+            "cacheReadTokens": 3170967,
+            "cacheWriteTokens": 113665,
+            "costUsd": 1.0703666999999997,
+            "inputTokens": 60,
+            "outputTokens": 29849,
+            "unpricedModels": []
+          },
+          "updated": "2026-11-12T09:18:03.196Z"
+        }
+      ],
+      "title": "PRO-269 Orchestrator: a lead session that splits work across worker sessions",
+      "total": {
+        "cacheReadTokens": 3170967,
+        "cacheWriteTokens": 113665,
+        "costUsd": 1.0703666999999997,
+        "inputTokens": 60,
+        "outputTokens": 29849,
+        "unpricedModels": []
+      }
+    },
+    "models": [
+      {
+        "cacheReadTokens": 16255160,
+        "cacheWriteTokens": 634204,
+        "costUsd": 10.751980000000003,
+        "inputTokens": 294,
+        "model": "claude-opus-5-5",
+        "outputTokens": 121307
+      },
+      {
+        "cacheReadTokens": 3378764,
+        "cacheWriteTokens": 195364,
+        "costUsd": 1.4621243999999995,
+        "inputTokens": 66,
+        "model": "claude-sonnet-5-5",
+        "outputTokens": 34266
+      }
+    ],
+    "parent": {
+      "exists": true,
+      "sessionId": "01a1cef3-9b7b-7242-b2fb-ad6daac74d43",
+      "title": "PRO-269 Orchestrator: a lead session that splits work across worker sessions"
+    },
+    "total": {
+      "cacheReadTokens": 19633924,
+      "cacheWriteTokens": 829568,
+      "costUsd": 12.214104400000004,
+      "inputTokens": 360,
+      "outputTokens": 155573,
+      "unpricedModels": []
+    },
+    "workers": [
+      {
+        "estimate": true,
+        "models": [
+          {
+            "cacheReadTokens": 1660577,
+            "cacheWriteTokens": 102077,
+            "costUsd": 2.0611994000000005,
+            "inputTokens": 32,
+            "model": "claude-opus-5-5",
+            "outputTokens": 45617
+          },
+          {
+            "cacheReadTokens": 207797,
+            "cacheWriteTokens": 81699,
+            "costUsd": 0.3917577,
+            "inputTokens": 6,
+            "model": "claude-sonnet-5-5",
+            "outputTokens": 4417
+          }
+        ],
+        "sessionId": "01a1ceff-adef-7630-ac43-1122d2f5f099",
+        "tabs": [
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 1660577,
+                "cacheWriteTokens": 102077,
+                "costUsd": 2.0611994000000005,
+                "inputTokens": 32,
+                "model": "claude-opus-5-5",
+                "outputTokens": 45617
+              }
+            ],
+            "tabId": "01a1ceff-adef-7630-ac43-1134371430f9",
+            "title": "You are a worker in a run led",
+            "total": {
+              "cacheReadTokens": 1660577,
+              "cacheWriteTokens": 102077,
+              "costUsd": 2.0611994000000005,
+              "inputTokens": 32,
+              "outputTokens": 45617,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:11:11.591Z"
+          },
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 207797,
+                "cacheWriteTokens": 81699,
+                "costUsd": 0.3917577,
+                "inputTokens": 6,
+                "model": "claude-sonnet-5-5",
+                "outputTokens": 4417
+              }
+            ],
+            "tabId": "01a1cf06-9bdf-71b3-9458-0f827490483a",
+            "title": "Verifier",
+            "total": {
+              "cacheReadTokens": 207797,
+              "cacheWriteTokens": 81699,
+              "costUsd": 0.3917577,
+              "inputTokens": 6,
+              "outputTokens": 4417,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:11:57.522Z"
+          }
+        ],
+        "title": "Benchmark contract: task format, result record, one command, clean-worktree check",
+        "total": {
+          "cacheReadTokens": 1868374,
+          "cacheWriteTokens": 183776,
+          "costUsd": 2.4529571000000003,
+          "inputTokens": 38,
+          "outputTokens": 50034,
+          "unpricedModels": []
+        }
+      },
+      {
+        "estimate": true,
+        "models": [
+          {
+            "cacheReadTokens": 2118973,
+            "cacheWriteTokens": 109711,
+            "costUsd": 1.7215986,
+            "inputTokens": 44,
+            "model": "claude-opus-5-5",
+            "outputTokens": 20997
+          }
+        ],
+        "sessionId": "01a1cf07-7d50-7d93-9368-e5df97608697",
+        "tabs": [
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 2118973,
+                "cacheWriteTokens": 109711,
+                "costUsd": 1.7215986,
+                "inputTokens": 44,
+                "model": "claude-opus-5-5",
+                "outputTokens": 20997
+              }
+            ],
+            "tabId": "01a1cf07-7d50-7d93-9368-e5e9a03458ee",
+            "title": "You are a worker in a run led",
+            "total": {
+              "cacheReadTokens": 2118973,
+              "cacheWriteTokens": 109711,
+              "costUsd": 1.7215986,
+              "inputTokens": 44,
+              "outputTokens": 20997,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:18:03.264Z"
+          }
+        ],
+        "title": "Seven wide search and audit tasks from real history",
+        "total": {
+          "cacheReadTokens": 2118973,
+          "cacheWriteTokens": 109711,
+          "costUsd": 1.7215986,
+          "inputTokens": 44,
+          "outputTokens": 20997,
+          "unpricedModels": []
+        }
+      },
+      {
+        "estimate": true,
+        "models": [
+          {
+            "cacheReadTokens": 3363186,
+            "cacheWriteTokens": 143671,
+            "costUsd": 2.0947532000000004,
+            "inputTokens": 62,
+            "model": "claude-opus-5-5",
+            "outputTokens": 13625
+          }
+        ],
+        "sessionId": "01a1cf07-84f7-7e30-9866-de0f4c6b4acb",
+        "tabs": [
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 3363186,
+                "cacheWriteTokens": 143671,
+                "costUsd": 2.0947532000000004,
+                "inputTokens": 62,
+                "model": "claude-opus-5-5",
+                "outputTokens": 13625
+              }
+            ],
+            "tabId": "01a1cf07-84f7-7e30-9866-de1070f0e6ac",
+            "title": "You are a worker in a run led",
+            "total": {
+              "cacheReadTokens": 3363186,
+              "cacheWriteTokens": 143671,
+              "costUsd": 2.0947532000000004,
+              "inputTokens": 62,
+              "outputTokens": 13625,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:18:03.279Z"
+          }
+        ],
+        "title": "Seven multi-module feature tasks from real history",
+        "total": {
+          "cacheReadTokens": 3363186,
+          "cacheWriteTokens": 143671,
+          "costUsd": 2.0947532000000004,
+          "inputTokens": 62,
+          "outputTokens": 13625,
+          "unpricedModels": []
+        }
+      },
+      {
+        "estimate": true,
+        "models": [
+          {
+            "cacheReadTokens": 5045228,
+            "cacheWriteTokens": 141182,
+            "costUsd": 2.5962216000000007,
+            "inputTokens": 90,
+            "model": "claude-opus-5-5",
+            "outputTokens": 22868
+          }
+        ],
+        "sessionId": "01a1cf07-8cb3-7b90-b2c5-979c38a56015",
+        "tabs": [
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 5045228,
+                "cacheWriteTokens": 141182,
+                "costUsd": 2.5962216000000007,
+                "inputTokens": 90,
+                "model": "claude-opus-5-5",
+                "outputTokens": 22868
+              }
+            ],
+            "tabId": "01a1cf07-8cb3-7b90-b2c5-97a270e57571",
+            "title": "You are a worker in a run led",
+            "total": {
+              "cacheReadTokens": 5045228,
+              "cacheWriteTokens": 141182,
+              "costUsd": 2.5962216000000007,
+              "inputTokens": 90,
+              "outputTokens": 22868,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:18:03.291Z"
+          }
+        ],
+        "title": "Six dependent-chain control tasks from real history",
+        "total": {
+          "cacheReadTokens": 5045228,
+          "cacheWriteTokens": 141182,
+          "costUsd": 2.5962216000000007,
+          "inputTokens": 90,
+          "outputTokens": 22868,
+          "unpricedModels": []
+        }
+      },
+      {
+        "estimate": true,
+        "models": [
+          {
+            "cacheReadTokens": 4067196,
+            "cacheWriteTokens": 137563,
+            "costUsd": 2.2782072,
+            "inputTokens": 66,
+            "model": "claude-opus-5-5",
+            "outputTokens": 18200
+          }
+        ],
+        "sessionId": "01a1cf07-9559-7ff1-8be9-155ac5903e60",
+        "tabs": [
+          {
+            "agent": "claude",
+            "models": [
+              {
+                "cacheReadTokens": 4067196,
+                "cacheWriteTokens": 137563,
+                "costUsd": 2.2782072,
+                "inputTokens": 66,
+                "model": "claude-opus-5-5",
+                "outputTokens": 18200
+              }
+            ],
+            "tabId": "01a1cf07-9559-7ff1-8be9-156c55253c98",
+            "title": "You are a worker in a run led",
+            "total": {
+              "cacheReadTokens": 4067196,
+              "cacheWriteTokens": 137563,
+              "costUsd": 2.2782072,
+              "inputTokens": 66,
+              "outputTokens": 18200,
+              "unpricedModels": []
+            },
+            "updated": "2026-11-12T09:18:03.302Z"
+          }
+        ],
+        "title": "Runner: one task in one arrangement, recorded with cost",
+        "total": {
+          "cacheReadTokens": 4067196,
+          "cacheWriteTokens": 137563,
+          "costUsd": 2.2782072,
+          "inputTokens": 66,
+          "outputTokens": 18200,
+          "unpricedModels": []
+        }
+      }
+    ]
+  }
+}

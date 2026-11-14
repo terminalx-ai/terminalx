@@ -3,6 +3,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { cloudPipelineSettings, pipelineSettings, switchChoiceOf, switchDefaultOf, type SwitchDefault } from "@/lib/issuePipeline";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { EFFORT_LABEL, useModels } from "@/lib/models";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { updateProject } from "@/lib/sessions";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
@@ -26,6 +28,42 @@ function SwitchDefaultControl({ choice, onChange, disabled, "aria-label": ariaLa
   return <Segmented<SwitchDefault> aria-label={ariaLabel} disabled={disabled} value={switchDefaultOf(choice)} onChange={(value) => onChange(switchChoiceOf(value))} options={SWITCH_DEFAULTS} />;
 }
 
+const reviewerSelect = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60";
+const REVIEWER_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The model and effort a project's reviewer runs on. Left alone the
+ * reviewer copies the author's, as it always did; a review reads a diff, so
+ * a project may put it on a smaller model than the one that wrote the change.
+ */
+function ReviewerChoice({ settings, disabled, save }: { settings: IssuePipelineSettings; disabled: boolean; save: (patch: Partial<IssuePipelineSettings>) => void }) {
+  const claude = useModels("claude");
+  const codex = useModels("codex");
+  const chosen = [...claude, ...codex].find((model) => model.id === settings.reviewerModel);
+  // The efforts the chosen model has; any of them while the author's model decides.
+  const efforts = settings.reviewerModel ? chosen?.efforts ?? REVIEWER_EFFORTS : REVIEWER_EFFORTS;
+  return (
+    <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+      <select aria-label="Reviewer model" className={reviewerSelect} disabled={disabled} value={settings.reviewerModel ?? ""}
+        onChange={(event) => {
+          const next = [...claude, ...codex].find((model) => model.id === event.target.value);
+          // An effort the new model does not have goes back to that model's default.
+          save({ reviewerModel: event.target.value || null, reviewerEffort: settings.reviewerEffort && (!next || next.efforts.includes(settings.reviewerEffort)) ? settings.reviewerEffort : null });
+        }}>
+        <option value="">The author's model</option>
+        {settings.reviewerModel && !chosen && <option value={settings.reviewerModel}>{settings.reviewerModel}</option>}
+        {claude.length > 0 && <optgroup label="Claude Code">{claude.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</optgroup>}
+        {codex.length > 0 && <optgroup label="Codex">{codex.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}</optgroup>}
+      </select>
+      <select aria-label="Reviewer effort" className={reviewerSelect} disabled={disabled} value={settings.reviewerEffort ?? ""} onChange={(event) => save({ reviewerEffort: event.target.value || null })}>
+        <option value="">{settings.reviewerModel ? "Default effort" : "The author's effort"}</option>
+        {settings.reviewerEffort && !efforts.includes(settings.reviewerEffort) && <option value={settings.reviewerEffort}>{EFFORT_LABEL[settings.reviewerEffort] ?? settings.reviewerEffort}</option>}
+        {efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABEL[effort] ?? effort}</option>)}
+      </select>
+    </span>
+  );
+}
+
 /** One pattern or name per line; commas work too, since a check name has none. */
 function lines(text: string, alsoCommas: boolean): string[] {
   return text
@@ -40,6 +78,7 @@ function lines(text: string, alsoCommas: boolean): string[] {
  * the rest of the project menu.
  */
 export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { project: Project; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const reviewerChoice = useExperimentalSettings()?.orchestratorRuns ?? false;
   const stored = pipelineSettings(project);
   // What was last asked for, until the project says the same. Two changes
   // made before the first is saved build on each other rather than on what
@@ -159,6 +198,15 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
               />
             }
           />
+          {/* Part of the orchestrator work: shown with its switch in Settings → Experimental. */}
+          {reviewerChoice && (
+            <SettingRow
+              disabled={off}
+              label="Reviewer runs on"
+              description="The model and effort of the Reviewer tab. Left alone it copies the author's. A model of another agent than the author's is not used: the author's stands."
+              control={<ReviewerChoice settings={settings} disabled={off} save={save} />}
+            />
+          )}
           <SettingRow
             disabled={off}
             label="Merge method"
@@ -233,7 +281,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
           </label>
           <SettingRow
             label="Agents comment and change status without asking"
-            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels, new issues and Linear issues always ask."
+            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels and edits to existing Linear issues always ask. Creating GitHub or Linear issues needs no additional approval."
             control={<Switch aria-label="Agents comment and change status without asking" checked={agentUpdatesOn} onCheckedChange={saveAgentUpdates} />}
           />
         </div>

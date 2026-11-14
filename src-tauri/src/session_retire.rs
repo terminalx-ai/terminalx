@@ -27,6 +27,10 @@ pub struct Work {
     /// A terminal's own title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A Linux terminal's pane, for a supervised launch a handover cannot
+    /// carry. Named back in the handover's `stop`, a lost one is released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,11 +53,11 @@ pub enum WorkKind {
 
 impl Work {
     fn of(kind: WorkKind, tab: &TabRuntime) -> Self {
-        Self { kind, session_id: Some(tab.session_id.clone()), tab_id: Some(tab.tab_id.clone()), harness: Some(tab.harness.clone()), title: None }
+        Self { kind, session_id: Some(tab.session_id.clone()), tab_id: Some(tab.tab_id.clone()), harness: Some(tab.harness.clone()), title: None, pane: None }
     }
 
     fn unnamed(kind: WorkKind) -> Self {
-        Self { kind, session_id: None, tab_id: None, harness: None, title: None }
+        Self { kind, session_id: None, tab_id: None, harness: None, title: None, pane: None }
     }
 }
 
@@ -85,7 +89,7 @@ impl SessionManager {
                 work.push(Work::of(WorkKind::ByHand, &tab));
                 continue;
             }
-            let prompt = !tab.pending.is_empty() || !tab.queued.is_empty() || tab.stop_in_flight || tab.stopping
+            let prompt = !tab.pending.is_empty() || !tab.queued.is_empty() || tab.held_queue.keeps_runtime_busy() || tab.stop_in_flight || tab.stopping
                 || tab.restart_claim.is_some() || tab.stdio_starting
                 || cli.is_some_and(|cli| !cli.ready.settled() || cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || !cli.held.is_empty());
             if prompt {
@@ -119,6 +123,7 @@ impl SessionManager {
                 tab_id: pane.id.strip_prefix("tab:").map(str::to_owned),
                 harness: None,
                 title: shell.and_then(|shell| shell.title),
+                pane: None,
             });
         }
         // Groups that outlived what started them, including closed or replaced panes.

@@ -1,0 +1,91 @@
+import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { SESSION_STATUSES, combinedSessionStatus, sessionStatus, type SessionStatusInput, type StatusDescription } from "@terminalx/portable/sessionStatus";
+import { api } from "./api";
+import type { SessionEntry } from "@/types/session";
+
+export type StatusSession = SessionStatusInput & Pick<SessionEntry, "id" | "rowStatus">;
+
+const visible = new Map<string, number>();
+const listeners = new Set<() => void>();
+let snapshot: Record<string, SessionStatusInput> = {};
+let timer: ReturnType<typeof setTimeout> | undefined;
+let reading = false;
+const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+
+async function refresh() {
+  timer = undefined;
+  if (reading || !visible.size) return;
+  reading = true;
+  try {
+    if (!document.hidden) {
+      const rows = await api.sessionRowStatuses([...visible.keys()]);
+      const next = Object.fromEntries(Object.entries(rows).filter(([id]) => visible.has(id)));
+      if (JSON.stringify(next) !== JSON.stringify(snapshot)) {
+        snapshot = next;
+        for (const listener of listeners) listener();
+      }
+    }
+  } catch {
+    // An older/disconnected runtime supplies only lifecycle status. Do not
+    // keep showing a stale merge-ready or permission verdict after disconnect.
+    if (Object.keys(snapshot).length) {
+      snapshot = {};
+      for (const listener of listeners) listener();
+    }
+  } finally {
+    reading = false;
+    if (visible.size) timer = setTimeout(() => void refresh(), 10_000);
+  }
+}
+
+/** Keep the runtime's status of these rows read while they are drawn. */
+function useVisibleRows(sessions: readonly StatusSession[]) {
+  const key = JSON.stringify(sessions.filter((s) => !s.id.startsWith("cloud:")).map((s) => s.id).sort());
+  useEffect(() => {
+    const ids: string[] = JSON.parse(key);
+    for (const id of ids) visible.set(id, (visible.get(id) ?? 0) + 1);
+    if (ids.length && !timer && !reading) timer = setTimeout(() => void refresh(), 0);
+    return () => {
+      for (const id of ids) {
+        const count = (visible.get(id) ?? 1) - 1;
+        if (count) visible.set(id, count); else visible.delete(id);
+      }
+      if (!visible.size) {
+        snapshot = {};
+        if (timer) { clearTimeout(timer); timer = undefined; }
+      }
+    };
+  }, [key]);
+}
+
+/** Register rendered rows once, across sidebar, overview and dashboard. */
+export function useSessionRowStatus(sessions: readonly StatusSession[]) {
+  useVisibleRows(sessions);
+  // Subscribe to this row's selected value: unrelated row changes do not render it.
+  const selected = useSyncExternalStore(subscribe, () => {
+    const status = combinedSessionStatus(sessions.map((session) => snapshot[session.id] ?? session.rowStatus ?? session));
+    return `${status.id}#${status.pr ?? ""}`;
+  });
+  return useMemo(() => {
+    const [id, pr] = selected.split("#");
+    return { ...SESSION_STATUSES.find((status) => status.id === id)!, pr: pr ? Number(pr) : null };
+  }, [selected]);
+}
+
+/**
+ * Each session's own status, by id: a folded lead counts which of its workers
+ * wait on the person (PRO-281), where `useSessionRowStatus` gives the one
+ * status that wins among them.
+ */
+export function useSessionRowStatuses(sessions: readonly StatusSession[]): Record<string, StatusDescription> {
+  useVisibleRows(sessions);
+  const selected = useSyncExternalStore(subscribe, () => sessions.map((session) => `${session.id}=${sessionStatus(snapshot[session.id] ?? session.rowStatus ?? session).id}`).join(","));
+  return useMemo(() => {
+    const byId: Record<string, StatusDescription> = {};
+    for (const pair of selected ? selected.split(",") : []) {
+      const [id, status] = pair.split("=");
+      byId[id] = SESSION_STATUSES.find((entry) => entry.id === status)!;
+    }
+    return byId;
+  }, [selected]);
+}

@@ -95,6 +95,20 @@ pub struct ImageRef {
     pub name: Option<String>,
 }
 
+/// A file attached to a message besides its images (PRO-290), stored in the
+/// session's attachments folder. `path` is absolute; the agent is handed it in
+/// the prompt it receives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRef {
+    pub path: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolType {
@@ -158,6 +172,14 @@ pub struct Usage {
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Cache reads and writes are separate from uncached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Recorded duration used when committing a turn; not a second wire clock.
+    #[serde(skip)]
+    pub duration_ms: Option<u64>,
     /// Occupancy of the context window after this reading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used: Option<u64>,
@@ -254,9 +276,35 @@ pub struct BackgroundTask {
     pub kind: Option<String>,
 }
 
+/// Codex's reported goal state. Budget accounting is independent of context occupancy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Goal {
+    pub objective: String,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Complete,
+    Blocked,
+    BudgetLimited,
+    UsageLimited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Payload {
+    /// Reader-owned messages that have not been sent to the agent.
+    HeldQueue { queue: crate::session::held::Queue },
+    /// A durable snapshot, including counters: reopening the chat must restore the banner.
+    GoalUpdated { goal: Goal },
+    GoalCleared,
     // ---- lifecycle
     TurnStarted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +372,9 @@ pub enum Payload {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        /// Files attached to the message besides its images (PRO-290).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<FileRef>,
         /// Tree id of the checkout when the prompt was sent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         baseline: Option<String>,
@@ -376,6 +427,10 @@ pub enum Payload {
     /// not sent, and will not be. It can be sent again.
     PromptWithdrawn {
         prompt_seq: u64,
+        /// A native request may have reached Codex, but no acknowledgement
+        /// arrived. Retain the text without claiming definite non-delivery.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unconfirmed: bool,
     },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -39,6 +39,41 @@ describe("the shortcut registry", () => {
     }
   });
 
+  // PRO-362: the drafts drew ⌘⇧R for the Run view, which Automations has. Its own keys are free on every platform,
+  // and are none of the menu keys the system itself puts in the native menus (Edit, Hide, Minimize, Quit).
+  it("gives the Run view keys no other action has, in the Go menu, and leaves Automations its own", () => {
+    const action = SHORTCUT_ACTIONS.find((entry) => entry.id === "app.runView")!;
+    expect(action).toMatchObject({ label: "Run view", group: "App", menu: { section: "go", label: "Run View" } });
+    const system = ["mod+z", "mod+shift+z", "mod+x", "mod+c", "mod+v", "mod+a", "mod+q", "mod+h", "mod+alt+h", "mod+m", "alt+shift+space"];
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["app.runView"]).toEqual(["mod+shift+o"]);
+      expect(keymap["app.automations"]).toEqual(["mod+shift+r"]);
+      const owners = SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes("mod+shift+o")).map((entry) => entry.id);
+      expect(owners).toEqual(["app.runView"]);
+      expect(system).not.toContain("mod+shift+o");
+      expect(bindingProblem("app.runView", "mod+shift+o", mac)).toBeNull();
+      expect(isTerminalReserved("mod+shift+o", mac)).toBe(false);
+    }
+    expect(keycaps("mod+shift+o", true)).toEqual(["⌘", "⇧", "O"]);
+    expect(keycaps("mod+shift+o", false)).toEqual(["Ctrl", "Shift", "O"]);
+  });
+
+  // PRO-363: ⌘R runs the project's action. Off macOS Ctrl+R is the shell's history search, which a terminal keeps,
+  // so the default there adds Alt; neither is another action's, a terminal's or an editing key.
+  it("runs the project's action on ⌘R on macOS and Ctrl+Alt+R elsewhere, keys no other action or terminal has", () => {
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.runAction")).toMatchObject({ label: "Run the project's action", group: "Session" });
+    for (const [mac, chord] of [[true, "mod+r"], [false, "mod+alt+r"]] as const) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["session.runAction"]).toEqual([chord]);
+      expect(SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes(chord)).map((entry) => entry.id)).toEqual(["session.runAction"]);
+      expect(bindingProblem("session.runAction", chord, mac)).toBeNull();
+      expect(isTerminalReserved(chord, mac)).toBe(false);
+    }
+    expect(isTerminalReserved("mod+r", false)).toBe(true);
+    expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");
@@ -102,6 +137,22 @@ describe("the shortcut registry", () => {
 });
 
 describe("the mapping store", () => {
+  it("keeps a saved Send binding when the alternate action introduces the same default", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({ "composer.send": ["mod+enter"] }, mac);
+      expect(keymap["composer.send"]).toEqual(["mod+enter"]);
+      expect(keymap["composer.sendAlternate"]).toEqual([]);
+      expect(conflictOf("mod+enter", "composer.sendAlternate", keymap)?.id).toBe("composer.send");
+    }
+  });
+
+  it("detects alternate Send conflicts and saves a replacement binding", () => {
+    expect(saveShortcut("composer.send", ["mod+enter"])).toMatchObject({ ok: false, conflict: { id: "composer.sendAlternate" } });
+    expect(saveShortcut("composer.sendAlternate", ["mod+shift+enter"])).toEqual({ ok: true });
+    expect(bindingsOf("composer.sendAlternate")).toEqual(["mod+shift+enter"]);
+    expect(saveShortcut("composer.send", ["mod+enter"])).toEqual({ ok: true });
+  });
+
   it("saves a custom chord in the preferences and resolves it at once", () => {
     expect(saveShortcut("app.toggleSidebar", ["mod+shift+b"])).toEqual({ ok: true });
     expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
@@ -269,7 +320,7 @@ describe("matching a key event to an action", () => {
     expect(matchesShortcut(enter, "composer.send")).toBe(true);
     expect(matchesShortcut(key({ key: "Enter", shiftKey: true }), "composer.send")).toBe(false);
     expect(matchesShortcut(key({ key: "Enter", shiftKey: true }), "composer.newLine")).toBe(true);
-    saveShortcut("composer.send", ["mod+enter"]);
+    expect(saveShortcut("composer.send", ["mod+enter"], { replace: true })).toEqual({ ok: true });
     expect(matchesShortcut(enter, "composer.send")).toBe(false);
     expect(matchesShortcut(modEnter, "composer.send")).toBe(true);
   });

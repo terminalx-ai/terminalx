@@ -1,3 +1,4 @@
+import { bootDataPrivacy } from "./lib/dataPrivacy";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/app.css";
@@ -6,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { keepShellUnscrolled } from "./lib/shellScroll";
 import { installAppContextMenu } from "./lib/contextMenu";
 import { bootSettingsFile } from "./lib/settingsFile";
+import { followReduceTransparency } from "./lib/glass";
 
 window.addEventListener("error", (e) => {
   void invoke("frontend_log", { level: "error", message: `${e.message} @ ${e.filename}:${e.lineno}` }).catch(() => {});
@@ -15,10 +17,11 @@ window.addEventListener("unhandledrejection", (e) => {
 });
 
 keepShellUnscrolled();
+followReduceTransparency();
 installAppContextMenu();
 // Finish the migration before controls can save a new choice, so its reply
 // cannot replace a choice made while the old localStorage copy was in flight.
-void bootSettingsFile().then(() => {
+void bootDataPrivacy().then(() => bootSettingsFile()).then(() => {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <App />

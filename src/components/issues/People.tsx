@@ -1,3 +1,4 @@
+import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Search, UserRound } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -26,7 +27,7 @@ export function Avatar({ person, className }: { person: Person; className?: stri
   const initial = Array.from((person.name || person.login || "").trim())[0]?.toLocaleUpperCase();
   const box = cn("size-5 shrink-0 rounded-full", className);
   if (person.avatarUrl && !broken) {
-    return <img src={person.avatarUrl} alt="" aria-hidden draggable={false} referrerPolicy="no-referrer" onError={() => setBroken(true)} className={cn(box, "bg-veil-strong object-cover")} />;
+    return <PrivacyImage src={person.avatarUrl} alt="" aria-hidden draggable={false} referrerPolicy="no-referrer" onError={() => setBroken(true)} className={cn(box, "bg-veil-strong object-cover")} />;
   }
   return (
     <span aria-hidden className={cn(box, "flex items-center justify-center bg-accent/15 text-[9px] font-semibold text-accent")}>

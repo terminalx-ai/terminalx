@@ -85,12 +85,27 @@ pub enum Scope {
     Tab(String, String),
     /// Every session that runs in this checkout or a folder inside it.
     Checkout(PathBuf),
+    /// Every session that works on this checkout's own files: in it or a
+    /// folder of it, but not in another working tree that lies inside it (a
+    /// worker's worktree under the project's own checkout).
+    WorkingTree(PathBuf),
 }
 
 impl Scope {
     pub fn checkout(path: impl AsRef<Path>) -> Self {
         Self::Checkout(canonical(path.as_ref()))
     }
+
+    pub fn working_tree(path: impl AsRef<Path>) -> Self {
+        Self::WorkingTree(canonical(path.as_ref()))
+    }
+}
+
+/// Whether `cwd`, a folder inside `tree`, belongs to another working tree
+/// that lies inside it: some folder from `cwd` up to `tree`, `tree` itself
+/// left out, has a `.git` of its own.
+fn nested_tree(tree: &Path, cwd: &Path) -> bool {
+    cwd.ancestors().take_while(|folder| *folder != tree).any(|folder| folder.join(".git").exists())
 }
 
 /// What a prompt that meets a fence is told, or that it waits.
@@ -108,6 +123,7 @@ pub const WORKSPACE_REMOVED: &str = "This workspace is being removed. Nothing wa
 pub const SESSION_DELETED: &str = "This session is being deleted. Nothing was sent.";
 pub const SESSION_MOVED: &str = "This conversation is moving to another folder. Send it again once it has moved.";
 pub const TAB_CLOSED: &str = "This tab is closing. Nothing was sent.";
+pub const RUN_MERGING: &str = "TerminalX is merging an orchestration run's pieces into this checkout and running its checks. Send it again once the merge has ended.";
 const STOPPING: &str = "This tab's agent is being stopped. Send it again in a moment.";
 
 struct Entry {
@@ -121,7 +137,7 @@ impl Entry {
         matches!(self.kind, Kind::Hold) && match &self.scope {
             Scope::Session(id) => id == session_id,
             Scope::Tab(id, tab) => id == session_id && tab == tab_id,
-            Scope::Checkout(_) => false,
+            Scope::Checkout(_) | Scope::WorkingTree(_) => false,
         }
     }
 
@@ -130,6 +146,7 @@ impl Entry {
             Scope::Session(id) => id == session_id,
             Scope::Tab(id, tab) => id == session_id && tab_id.is_some_and(|tab_id| tab == tab_id),
             Scope::Checkout(path) => cwd().is_some_and(|cwd| cwd.starts_with(path)),
+            Scope::WorkingTree(path) => cwd().is_some_and(|cwd| cwd.starts_with(path) && !nested_tree(path, &cwd)),
         }
     }
 }
@@ -183,6 +200,24 @@ pub fn held(session_id: &str, tab_id: &str) -> bool {
 /// stopped: nothing was sent, and sent again once the stop is done, it goes.
 pub fn stopping(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.to_string() == STOPPING)
+}
+
+/// Whether `cwd` is in the working tree at `tree`: the folder itself or one
+/// inside it, and in no other working tree that lies inside it.
+pub fn in_working_tree(tree: &Path, cwd: &Path) -> bool {
+    let (tree, cwd) = (canonical(tree), canonical(cwd));
+    cwd.starts_with(&tree) && !nested_tree(&tree, &cwd)
+}
+
+/// Whether a fence closes this checkout now: whoever would reserve it for
+/// work of its own (a pipeline's local checks, a conflict resolver) waits.
+pub fn closed(path: &Path) -> bool {
+    let path = canonical(path);
+    FENCES.lock().unwrap_or_else(|error| error.into_inner()).iter().any(|fence| match &fence.scope {
+        Scope::Checkout(fenced) => path.starts_with(fenced),
+        Scope::WorkingTree(fenced) => path.starts_with(fenced) && !nested_tree(fenced, &path),
+        Scope::Session(_) | Scope::Tab(..) => false,
+    })
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -267,7 +302,7 @@ mod tests {
         let mut pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
         pipeline.author = SessionRef { session_id: "author".into(), tab_id: "t1".into() };
         pipeline.resolver = Some(SessionRef { session_id: "author".into(), tab_id: "resolver".into() });
-        pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
+        pipeline.resolution = Some(Resolution { head: "head".into(), remote_head: None, target: None, base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
         super::super::store::insert(&pipeline).unwrap();
         assert!(check("author", "t1").is_err());
         assert!(check("other", "t1").is_err());
@@ -317,6 +352,35 @@ mod tests {
         assert!(check("out", "t1").is_err(), "fences nest");
         drop(outer);
         assert!(check("out", "t1").is_ok());
+    }
+
+    /// A fence over a working tree closes that tree and its folders, and
+    /// leaves a worktree that lies inside it alone: a run's workers go on
+    /// while their lead's checkout is being merged into.
+    #[test]
+    fn a_working_tree_fence_leaves_a_worktree_inside_it_alone() {
+        let _home = crate::store::temp_home();
+        let checkout = tempfile::tempdir().unwrap();
+        let folder = checkout.path().join("src");
+        let worker = checkout.path().join(".raccoon/worktrees/piece");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(worker.join("src")).unwrap();
+        std::fs::write(checkout.path().join(".git"), "").unwrap();
+        std::fs::write(worker.join(".git"), "gitdir: elsewhere").unwrap();
+        index::save(&[
+            session("lead", checkout.path().to_str().unwrap()),
+            session("below", folder.to_str().unwrap()),
+            session("worker", worker.to_str().unwrap()),
+            session("worker-below", worker.join("src").to_str().unwrap()),
+        ]).unwrap();
+        assert!(!closed(checkout.path()));
+        let merging = fence(Kind::Refuse(RUN_MERGING), [Scope::working_tree(checkout.path())]);
+        assert_eq!(check("lead", "t1").unwrap_err().to_string(), RUN_MERGING);
+        assert!(check("below", "t1").is_err());
+        assert!(check("worker", "t1").is_ok() && check("worker-below", "t1").is_ok());
+        assert!(closed(checkout.path()) && closed(&folder) && !closed(&worker));
+        drop(merging);
+        assert!(check("lead", "t1").is_ok() && !closed(checkout.path()));
     }
 
     /// Taking a fence waits for the prompt being admitted at that moment, so

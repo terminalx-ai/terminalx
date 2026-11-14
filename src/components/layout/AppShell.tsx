@@ -1,7 +1,17 @@
+import { bootDataPrivacy } from "@/lib/dataPrivacy";
+import { bootSelfUi } from "@/lib/selfUi";
+import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
-import { PanelLeft, PanelRight } from "@/icons";
+import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
+import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
+import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import type { SettingId } from "@/components/settings/settingsRegistry";
+import { onProjectSettingsRequest } from "@/lib/projectAdded";
+import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
+import { AlertCircle, PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -25,16 +35,18 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
-import { bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
-import { agent, type ImageInput } from "@/lib/api";
-import { loadModels } from "@/lib/models";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { sendFirstMessage } from "@/lib/sessionBackend";
+import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
+import { NotificationsOffCard } from "@/components/ui/NotificationsOffCard";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
@@ -45,6 +57,7 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
+import { WorkspaceRestoreDialog } from "@/components/session/WorkspaceRestoreDialog";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
@@ -63,14 +76,19 @@ import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
+import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
+import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
-import { openLocalProject } from "@/lib/projectStart";
+import { onTemplateSettingsRequest, openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
-import { stepVisibleSession } from "@/lib/sessionNavigation";
+import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
+import { conversationBranch } from "@/lib/checkout";
+import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigation";
+import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
@@ -104,6 +122,8 @@ export function AppShell() {
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
+  // The repository Settings opens on, for a request that names one; every other way in names none.
+  const [settingsProjectPath, setSettingsProjectPath] = useState<string | undefined>(undefined);
   // Every request for Settings, so asking again with it open still lands on the section asked for.
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -111,7 +131,7 @@ export function AppShell() {
   useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
-  useEffect(() => startUpdateChecks(), []);
+  useEffect(() => { void bootDataPrivacy().then(() => startUpdateChecks()); }, []);
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
@@ -120,11 +140,14 @@ export function AppShell() {
     startIdleArchive();
     void bootAutomations();
     void bootIssuePipelines();
+    void bootSelfUi();
     void loadModels();
     startNotifications();
     void bootStatus();
-    void bootAccount();
-    bootCloudCatalog();
+    void bootDataPrivacy().then(() => {
+      void bootAccount();
+      bootCloudCatalog();
+    });
     bootCloudSelection();
     // Live session lists and local mirrors (PRO-25) follow the connections other surfaces open,
     // from launch and whatever is on screen: hidden sidebar or Settings included (#498).
@@ -141,9 +164,9 @@ export function AppShell() {
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
-  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
-    void agent
-      .send(sessionId, tabId, text, images)
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
+    // Files attached on the new-session screen are stored now that the session exists (PRO-290).
+    void sendFirstMessage(sessionId, tabId, text, images, files)
       .then((out) => out.events.forEach(applyEvent))
       .catch((e) => console.error("first send failed", e));
   }, []);
@@ -156,9 +179,34 @@ export function AppShell() {
   // name opens Account too, never a blank page.
   const openSettings = useCallback((tab?: unknown) => {
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
+    setSettingsProjectPath(undefined);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  // A setting's row (PRO-127): a toast's Open setting, and a terminalx://settings/<row-id> link from
+  // another app, which focuses the app on that row (Settings scrolls to it and highlights it). A link
+  // naming no row opens Settings at its default page.
+  useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
+  const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
+  useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
+  // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
+  useEffect(() => onProjectSettingsRequest((projectPath) => {
+    setSettingsTab("repositories.scripts");
+    setSettingsProjectPath(projectPath);
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }), []);
+  // A run's limits, from a session's Run view.
+  useEffect(() => onOrchestratorSettingsRequest(() => {
+    setSettingsTab("orchestrator");
+    setSettingsProjectPath(undefined);
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }), []);
+  // "Add your own templates in Settings › Project templates", from Create a project.
+  useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
+  // The empty model picker's way out: Settings › Agents, where the agent's sign-in is checked.
+  useEffect(() => onAgentSettingsRequest(() => openSettings("agents")), [openSettings]);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
@@ -200,6 +248,11 @@ export function AppShell() {
   useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
   useShortcut("app.openRecent", () => setPaletteOpen(true));
   useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
+  useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
+  useShortcut("session.archive", () => {
+    const id = getSessionStore().selectedSessionId;
+    if (id && !isCloudKey(id)) void archiveSession(id, true).catch(() => {});
+  });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
@@ -207,6 +260,7 @@ export function AppShell() {
   useShortcut("app.togglePanel", togglePanel);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
+  useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
   useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);
@@ -225,17 +279,37 @@ export function AppShell() {
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
+  // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
+  // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
+  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
+  useShortcut("app.runView", () => {
+    if (!selected || !selectedRun) return;
+    setSettingsOpen(false);
+    showRunView(selected.id, true);
+  });
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
-      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <SelfUiAccess />
+      {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
+          and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
+      <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+        {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
+        <NotificationsOffCard />
         <MergedCleanupNotices />
+      </div>
+      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <UnknownSettingLinkToast />
+        <ProjectAddedNotice />
+        <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
+      <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
       <CloudSchedulesDialogHost />
@@ -244,13 +318,17 @@ export function AppShell() {
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
+      <PairPhoneDialogHost />
+      <ConnectedBar />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
             <SettingsPage
               initialTab={settingsTab}
+              initialProjectPath={settingsProjectPath}
               openRequest={settingsRequest}
               onBack={() => setSettingsOpen(false)}
               onOpenSkills={() => {
@@ -290,7 +368,7 @@ export function AppShell() {
               </main>
             ) : selected ? (
               <main className={MAIN}>
-                <ErrorBoundary key={selected.id} label="the session">
+                <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main> ) : behind ? (
@@ -365,20 +443,20 @@ function UnselectedWorkspace({
 
   const preset = store.newSessionPreset;
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
-  const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
+  const newProject = store.projects.find((project) => project.path === wanted) ?? (preset ? null : store.projects[0]) ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
-  const project = view === "new" ? (store.newSessionQuick ? null : newProject) : view === "issues" ? issueProject : null;
+  const project = view === "new" ? (store.newSessionChat ? null : newProject) : view === "issues" ? issueProject : null;
   const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   // A cloud or project-less draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionQuick));
+  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionChat));
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, or over a cloud or project-less draft.
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionQuick));
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionChat));
 
   return (
     <>
@@ -470,4 +548,14 @@ function UnselectedWorkspace({
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );
+}
+
+/** "No setting matches that link": a terminalx://settings link named a row this app has not got (PRO-127). */
+function UnknownSettingLinkToast() {
+  const notice = useUnknownSettingLink();
+  if (!notice) return null;
+  return <div role="status" aria-label={notice.message} className="pointer-events-auto flex min-h-10 items-center gap-2 rounded-lg bg-popover px-3 py-2 text-[12.5px] text-card-foreground shadow-surface hairline animate-fade-in">
+    <AlertCircle className="size-3.5 shrink-0 text-warning" />
+    <span className="min-w-0">{notice.message}</span>
+  </div>;
 }

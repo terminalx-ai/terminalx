@@ -34,6 +34,17 @@ export interface ImageRef {
   name?: string;
 }
 
+/**
+ * A file attached to a message (PRO-290), stored in the session's attachments
+ * folder. `path` is absolute; the agent is handed it in the prompt it receives.
+ */
+export interface FileRef {
+  path: string;
+  name: string;
+  mediaType?: string;
+  size?: number;
+}
+
 export type ToolType =
   | "shell"
   | "file_read"
@@ -60,6 +71,9 @@ export interface ToolResult {
 export interface Usage {
   inputTokens?: number;
   outputTokens?: number;
+  /** Input is uncached; these cache counters are disjoint from it. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   contextUsed?: number;
   contextMax?: number;
   costUsd?: number;
@@ -119,7 +133,27 @@ export type Delta =
 
 export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "unsent" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
+export interface HeldFollowUp { id: string; text: string; images: ImageRef[]; files?: FileRef[] }
+export interface HeldQueue {
+  items: HeldFollowUp[];
+  paused: boolean;
+  sending: string | null;
+  next: string | null;
+  error: string | null;
+}
+
+/** Reported by Codex; tokensUsed is goal usage, not context-window occupancy. */
+export interface Goal {
+  objective: string;
+  status: "active" | "paused" | "complete" | "blocked" | "budgetLimited" | "usageLimited";
+  tokenBudget: number | null;
+  tokensUsed: number;
+}
+
 export type Payload =
+  | { type: "held_queue"; queue: HeldQueue }
+  | { type: "goal_updated"; goal: Goal }
+  | { type: "goal_cleared" }
   | { type: "recovery"; kind: RecoveryKind | null }
   | { type: "turn_checkpoint"; seq: number; base: string; head: string }
   | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number; startedBy?: string; initiatingPrompt?: string }
@@ -141,6 +175,8 @@ export type Payload =
       author?: { userId: string; displayName: string };
       text: string;
       images?: ImageRef[];
+      /** Files attached to the message besides its images (PRO-290). */
+      files?: FileRef[];
       baseline?: string;
       queued: boolean;
       cwd?: string;
@@ -156,7 +192,7 @@ export type Payload =
   /** The agent received the `user_message` at `promptSeq` inside the prompt shown for the one at `intoSeq` (#722). */
   | { type: "prompt_joined"; promptSeq: number; intoSeq: number }
   /** Stopped while the `user_message` at `promptSeq` waited on the agent's input box: never typed (#722). */
-  | { type: "prompt_withdrawn"; promptSeq: number }
+  | { type: "prompt_withdrawn"; promptSeq: number; unconfirmed?: boolean }
   | { type: "assistant_text"; block?: BlockRef; text: string }
   | { type: "reasoning"; block?: BlockRef; text: string }
   | ({ type: "delta" } & Delta)

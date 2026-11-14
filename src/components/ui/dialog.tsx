@@ -16,6 +16,47 @@ export const DialogClose = DialogPrimitive.Close;
 export const DialogTitle = DialogPrimitive.Title;
 export const DialogDescription = DialogPrimitive.Description;
 
+/**
+ * Most dialogs are rendered only while open, so closing one removes it at
+ * once and Radix never gets to play its exit. When a dialog leaves while
+ * still drawn open, a copy of it and its backdrop stays for the length of the
+ * exit animation, inert and hidden from assistive technology, then goes. A
+ * dialog Radix closed itself has already animated out and is left alone.
+ * Not in a document without animations (tests), nor under reduced motion.
+ */
+export function leaveGracefully(node: HTMLElement | null) {
+  if (!node || node.getAttribute("data-state") !== "open") return;
+  if (typeof document.documentElement.getAnimations !== "function") return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  const overlay = node.previousElementSibling instanceof HTMLElement && node.previousElementSibling.hasAttribute("data-dialog-overlay") ? node.previousElementSibling : null;
+  const ghosts = [overlay, node].flatMap((el) => {
+    if (!el) return [];
+    const ghost = el.cloneNode(true) as HTMLElement;
+    ghost.removeAttribute("id");
+    ghost.removeAttribute("role");
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.inert = true;
+    ghost.style.pointerEvents = "none";
+    ghost.dataset.dialogGhost = "";
+    if (el === node) ghost.scrollTop = node.scrollTop;
+    ghost.setAttribute("data-state", "closed");
+    document.body.appendChild(ghost);
+    return [ghost];
+  });
+  const done = () => ghosts.forEach((ghost) => ghost.remove());
+  // Its own exit only: animations inside it (a looping illustration) end too, and bubble.
+  const dialog = ghosts.at(-1);
+  dialog?.addEventListener("animationend", (event) => { if (event.target === dialog) done(); });
+  window.setTimeout(done, 400);
+}
+
+/** A ref for a dialog's content that plays its exit even when the dialog is removed at once (`leaveGracefully`). */
+export function useGracefulLeave<T extends HTMLElement>() {
+  const node = React.useRef<T | null>(null);
+  React.useLayoutEffect(() => () => leaveGracefully(node.current), []);
+  return node;
+}
+
 export const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
@@ -28,14 +69,27 @@ export const DialogContent = React.forwardRef<
      * scrolls on its own while the header and footer stay where they are.
      */
     layout?: "page" | "pinned";
+    /** Classes for the backdrop, for a dialog that holds the whole window and dims it further. */
+    overlayClassName?: string;
   }
->(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", ...props }, ref) => (
+>(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, ...props }, ref) => {
+  const own = React.useRef<HTMLDivElement | null>(null);
+  const setRef = React.useCallback((node: HTMLDivElement | null) => {
+    own.current = node;
+    if (typeof ref === "function") ref(node);
+    else if (ref) ref.current = node;
+  }, [ref]);
+  // Read as the dialog unmounts, while its node still says how it was drawn.
+  React.useLayoutEffect(() => () => leaveGracefully(own.current), []);
+  return (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay data-dialog-overlay className="fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out" />
+    <DialogPrimitive.Overlay data-dialog-overlay className={cn("fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out", overlayClassName)} />
     <DialogPrimitive.Content
-      ref={ref}
+      ref={setRef}
       className={cn(
-        "fixed left-1/2 top-1/2 z-(--z-dialog) w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-popover glass p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
+        // Centred by layout (inset-0, auto margins, as tall as its content), not by translate(-50%): WebKit holds a
+        // translated layer where it was while the entrance plays, so a dialog that grew as it opened jumped at the end.
+        "fixed inset-0 z-(--z-dialog) m-auto h-fit w-[calc(100%-2rem)] rounded-xl bg-popover p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
         // Should the header and footer alone be taller than the window, the dialog still scrolls as a whole.
         "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin",
         layout === "pinned" && "flex flex-col",
@@ -60,7 +114,8 @@ export const DialogContent = React.forwardRef<
       )}
     </DialogPrimitive.Content>
   </DialogPrimitive.Portal>
-));
+  );
+});
 DialogContent.displayName = "DialogContent";
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {

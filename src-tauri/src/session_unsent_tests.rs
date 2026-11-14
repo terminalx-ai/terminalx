@@ -346,3 +346,9 @@ fn a_prompt_that_never_got_going_does_not_hold_up_the_ones_after_it() {
     // And the line goes on.
     drop(writer.ticket().take());
 }
+
+#[path = "session_held_tests.rs"]
+mod held_queue;
+
+#[path = "session_attachments_tests.rs"]
+mod attachments_tests;

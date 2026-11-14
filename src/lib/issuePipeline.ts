@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { issuePipelines as pipelinesApi } from "@/lib/api";
+import { issuePipelines as pipelinesApi, type PrCheck } from "@/lib/api";
+import { checkBucket, requiredCheckCounts } from "@/lib/checks";
 import { actOnCloudPipeline, getCloudPipelines, mergeCloudPipeline, subscribeCloudPipelines } from "@/lib/cloudPipelines";
 import { notePipelineState } from "@/lib/notify";
 import { getPrefs } from "@/lib/prefs";
@@ -179,7 +180,42 @@ export function pipelineForSession(pipelines: IssuePipeline[], sessionId: string
   return found ? { pipeline: found, role: found.author.sessionId === sessionId ? "author" : "reviewer" } : null;
 }
 
-export type PipelineTone = "add" | "warning" | "info" | "merged" | "faint";
+/**
+ * What a pipeline's helper is doing for an author's session, in a short
+ * phrase for the row's second line; null when no helper is at work (the
+ * author's own work, a stop, a merge) and the row says its place again.
+ * Only the author's session carries it: the helper's tab is inside it.
+ */
+export function helperActivity(pipelines: IssuePipeline[], sessionId: string): string | null {
+  const pipeline = pipelines.filter((value) => value.author.sessionId === sessionId && (value.state === "working" || value.state === "waiting")).sort(newest)[0];
+  if (!pipeline) return null;
+  if (pipeline.state === "waiting") return pipelineHeadline(pipeline).label;
+  if (pipeline.answered) return null;
+  if (pipeline.stage === "review") return `Review ${Math.max(pipeline.round, 1)} of ${pipeline.maxRounds} running`;
+  if (pipeline.stage === "resolve") return `Resolving conflicts with ${pipeline.pr?.base || "main"}`;
+  return null;
+}
+
+/**
+ * The sessions a pipeline's reviewer was opened as before reviewers became
+ * tabs of the author's session, each with the author's session it belongs to
+ * (matched by worktree). One list of chats folds them under the author.
+ */
+export function legacyReviewerSessions(pipelines: IssuePipeline[], sessions: readonly { id: string; cwd: string }[]): Map<string, string> {
+  const folded = new Map<string, string>();
+  const canon = (path: string) => path.replace(/\/+$/, "");
+  for (const pipeline of pipelines) {
+    const reviewer = pipeline.reviewer?.sessionId;
+    if (!reviewer || reviewer === pipeline.author.sessionId) continue;
+    const reviewing = sessions.find((session) => session.id === reviewer);
+    const author = sessions.find((session) => session.id === pipeline.author.sessionId);
+    if (reviewing && author && canon(reviewing.cwd) === canon(author.cwd)) folded.set(reviewer, author.id);
+  }
+  return folded;
+}
+
+/** `failed`: a required check failed, as the issue page's check list says it. */
+export type PipelineTone = "add" | "warning" | "info" | "merged" | "faint" | "failed";
 
 /** Where a pipeline stands, in the two or three words a chip can hold. */
 export function pipelineHeadline(pipeline: IssuePipeline): { label: string; tone: PipelineTone } {
@@ -261,11 +297,67 @@ function stepDetail(pipeline: IssuePipeline, stage: PipelineStage, status: StepS
       return pipeline.verdict ? `${pipeline.verdict.findings.length === 0 ? "No findings" : countOf(pipeline.verdict.findings.length, "finding")} at ${short(pipeline.verdict.commit)}` : `Round ${pipeline.round} of ${pipeline.maxRounds}`;
     case "address":
       return status === "skipped" ? "Nothing to address" : null;
-    case "merge":
-      return pipeline.merged ? `${short(pipeline.merged.commit)} into ${pipeline.pr?.base ?? "the base branch"}` : pipeline.state === "readyToMerge" ? "Ready" : null;
+    case "merge": {
+      if (pipeline.merged) return `${short(pipeline.merged.commit)} into ${pipeline.pr?.base ?? "the base branch"}`;
+      if (pipeline.state === "readyToMerge") return "Ready";
+      const checks = pipelineChecksView(pipeline);
+      if (checks?.outcome === "waiting") return "waiting for checks";
+      if (checks?.outcome === "failed") return checks.counts.failed.length === 1 ? "a required check failed" : "required checks failed";
+      if (checks?.outcome === "stalled") return "checks ran out of time";
+      return null;
+    }
     default:
       return null;
   }
+}
+
+export interface PipelineChecksView {
+  /** Waiting on them, stopped on a failed one, or stopped because they never finished. */
+  outcome: "waiting" | "failed" | "stalled";
+  commit: string;
+  /** The checks the merge waits on, in GitHub's order, then the optional ones. */
+  required: PrCheck[];
+  optional: PrCheck[];
+  counts: ReturnType<typeof requiredCheckCounts>;
+  /** The required checks that failed, each the run that failed it. */
+  failing: PrCheck[];
+  /** How long the wait has lasted or lasted, in whole minutes; null when it never began. */
+  waitedMinutes: number | null;
+  limitMinutes: number;
+}
+
+/**
+ * The checks the merge stage is waiting on or stopped on, for the issue page
+ * to list (#881). Null where there is no such list: then the note says what
+ * it can, as it did before checks were carried.
+ */
+export function pipelineChecksView(pipeline: IssuePipeline, now = Date.now()): PipelineChecksView | null {
+  const carried = pipeline.checks;
+  if (!carried || pipeline.stage !== "merge") return null;
+  const kind = pipeline.reason?.kind;
+  const outcome = pipeline.state === "waiting" ? "waiting" : pipeline.state === "needsYou" && kind === "checksFailed" ? "failed" : pipeline.state === "needsYou" && kind === "checksStalled" ? "stalled" : null;
+  if (!outcome) return null;
+  const required = new Set(carried.required);
+  const since = carried.since ? Date.parse(carried.since) : NaN;
+  const until = carried.until ? Date.parse(carried.until) : now;
+  const counts = requiredCheckCounts(carried.checks, carried.required);
+  // A stop on a failure the list cannot name (a workflow or check suite) is said by the note.
+  if (outcome === "failed" && counts.failed.length === 0) return null;
+  return {
+    outcome,
+    commit: carried.commit,
+    required: carried.checks.filter((check) => required.has(check.name)),
+    optional: carried.checks.filter((check) => !required.has(check.name)),
+    counts,
+    failing: counts.failed.map((name) => carried.checks.find((check) => check.name === name && checkBucket(check.state) === "failed")!),
+    waitedMinutes: Number.isNaN(since) || Number.isNaN(until) ? null : Math.max(0, Math.floor((until - since) / 60_000)),
+    limitMinutes: carried.limitMinutes,
+  };
+}
+
+/** "2 of 3 passed": where the required checks stand, beside the headline. */
+export function requiredChecksLine(view: PipelineChecksView): string {
+  return `${view.counts.passed} of ${view.counts.total} passed`;
 }
 
 /**
@@ -319,7 +411,10 @@ export function pipelineActions(pipeline: IssuePipeline): { primary: PipelineAct
         return { primary: { action: "review", label: "Review the new commit" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       }
       // Findings left open at the round limit: one more round is the reader's to grant.
-      if (kind === "roundLimit") return { primary: { action: "advance", label: "Review once more" }, secondary: [stop] };
+      // A review, not an advance: at the merge stage an advance only looks again and stops again.
+      if (kind === "roundLimit") return { primary: { action: "review", label: "Review once more" }, secondary: [stop] };
+      // The final review passed and the branch then moved with commits of its own (#947).
+      if (kind === "movedAfterFinalReview") return { primary: { action: "review", label: "Review the new head once more" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       // The reviewer's own checks failed on the commit it passed: another look is the way on.
       if (kind === "reviewChecksFailed") return { primary: { action: "review", label: "Review again" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       return { primary: { action: "advance", label: ADVANCE[pipeline.stage] }, secondary: [stop] };

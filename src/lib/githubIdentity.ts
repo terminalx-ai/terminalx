@@ -1,27 +1,37 @@
 import { useEffect, useState } from "react";
 import { issues, type GithubIdentity } from "@/lib/api";
+import { getDataPrivacy, PRIVACY_MESSAGE, subscribeDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 
 /**
  * The GitHub account a folder is connected to, as the header names it. The
  * backend asks GitHub itself, which takes a moment, so answers are kept here
  * per folder and every header showing the same folder shares one.
  */
-const known = new Map<string, GithubIdentity>();
+const known = new Map<string, { identity: GithubIdentity; generation: number }>();
+let generation = 0;
 const pending = new Map<string, Promise<GithubIdentity>>();
 const listeners = new Set<() => void>();
+// Retain local metadata, but retire pending answers across policy transitions.
+subscribeDataPrivacy(() => {
+  ++generation;
+  pending.clear();
+});
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 function fetchIdentity(path: string, refresh = false): Promise<GithubIdentity> {
+  if (!getDataPrivacy().ready) return Promise.reject(new Error("Could not verify data privacy mode"));
+  const asked = generation;
   const key = canon(path);
   const inFlight = pending.get(key);
   if (inFlight && !refresh) return inFlight;
   const promise = issues
-    .githubIdentity(key, refresh)
+    .githubIdentity(key, refresh || known.get(key)?.generation !== generation)
     .then((identity) => {
+      if (asked !== generation || pending.get(key) !== promise) throw new Error(PRIVACY_MESSAGE);
       // Only a real answer is kept; anything else (a stub, a refusal) is asked again next time.
       if (identity && typeof identity === "object") {
-        known.set(key, identity);
+        known.set(key, { identity, generation: asked });
         for (const listener of listeners) listener();
       }
       return identity;
@@ -41,12 +51,15 @@ export function refreshGithubIdentity(path: string): Promise<GithubIdentity> {
 /** The account for `path`, once known; `undefined` while it is being looked up, or with no path. */
 export function useGithubIdentity(path: string | null): GithubIdentity | undefined {
   const key = path ? canon(path) : null;
+  const privacy = useDataPrivacy();
   const [, bump] = useState(0);
   useEffect(() => {
     if (!key) return;
     const listener = () => bump((n) => n + 1);
     listeners.add(listener);
-    if (!known.has(key)) {
+    if (privacy.ready && known.get(key)?.generation !== generation) {
+      // Native identity still returns local repository/email metadata while on.
+      // A restored policy must refresh its prior metadata-only answer.
       fetchIdentity(key).catch(() => {
         /* outside a webview, or the folder is gone: the header shows nothing */
       });
@@ -54,8 +67,8 @@ export function useGithubIdentity(path: string | null): GithubIdentity | undefin
     return () => {
       listeners.delete(listener);
     };
-  }, [key]);
-  return key ? known.get(key) : undefined;
+  }, [key, privacy]);
+  return key ? known.get(key)?.identity : undefined;
 }
 
 /** The picture GitHub serves for an account or organisation, at about `size` device pixels. */

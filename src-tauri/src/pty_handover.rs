@@ -100,12 +100,16 @@ impl Hold {
 
 /// How a pane's program is waited for.
 pub(super) enum Waiter {
-    /// Opened by this runtime.
+    /// Opened by this runtime (on Linux, only without a supervisor).
     Spawned(Box<dyn portable_pty::Child + Send + Sync>),
     /// Opened by the runtime this one replaced in the same process, whose
     /// child it still is (#765).
     #[cfg(unix)]
     Adopted,
+    /// Started by its launch's supervisor, which reports how its shell ended
+    /// (#467). The shell is the supervisor's child, never this process's.
+    #[cfg(target_os = "linux")]
+    Supervised(Arc<super::supervisor::Owner>),
 }
 
 impl Waiter {
@@ -124,6 +128,9 @@ impl Waiter {
             Self::Spawned(child) => child.wait().ok().map(|status| status.exit_code() as i32),
             #[cfg(unix)]
             Self::Adopted => pid.and_then(reap),
+            // As portable-pty reports it: the exit code, or 1 for a signal.
+            #[cfg(target_os = "linux")]
+            Self::Supervised(owner) => owner.wait_shell().map(|status| if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 1 }),
         }
     }
 }
@@ -175,6 +182,9 @@ pub(super) struct Parts {
     pub pid: Option<u32>,
     /// The process group the pane's program leads, which stopping it signals.
     pub group: Option<u32>,
+    /// The supervisor that owns a pane opened here, and what is listed of it.
+    #[cfg(target_os = "linux")]
+    pub owned: Option<Arc<OwnedGroup>>,
     pub explicit_command: bool,
     pub environment: crate::store::environment::Stamp,
     pub cwd: String,
@@ -210,6 +220,10 @@ pub(crate) struct FrozenPane {
     pub quiet: Option<Duration>,
     pub title: Option<String>,
     pub renamed: bool,
+    pub docked: Option<bool>,
+    /// Its launch's supervisor, held, and a duplicate of its channel (#467).
+    #[cfg(target_os = "linux")]
+    pub supervised: Option<(super::supervisor::Carried, OwnedFd)>,
 }
 
 #[cfg(unix)]
@@ -222,6 +236,9 @@ pub(crate) struct Frozen {
     /// Process groups this runtime started that no pane leads any more,
     /// which Stop All still ends.
     pub groups: Vec<u32>,
+    /// Supervised launches no live pane holds, by the pane id they had.
+    #[cfg(target_os = "linux")]
+    pub supervised: Vec<(String, super::supervisor::Carried, OwnedFd)>,
 }
 
 #[cfg(unix)]
@@ -232,6 +249,13 @@ impl Terminals {
     /// whole freeze off.
     pub(crate) fn freeze(&self, within: Duration) -> Result<Frozen> {
         *self.frozen.lock().unwrap() = true;
+        // Every supervised launch is held still and carried; one that is
+        // starting, releasing or lost is not, and the handover waits (#467).
+        #[cfg(target_os = "linux")]
+        let carried = match self.park_supervisors(within) {
+            Ok(carried) => carried,
+            Err(error) => { self.thaw(); return Err(error); }
+        };
         let holds: Vec<Arc<Hold>> = self.panes.lock().unwrap().values().map(|pane| pane.hold.clone()).collect();
         for hold in &holds {
             hold.freeze();
@@ -241,6 +265,9 @@ impl Terminals {
             self.thaw();
             bail!("A terminal did not finish taking in its program's output in time.");
         }
+        #[cfg(target_os = "linux")]
+        return self.frozen_state(carried).inspect_err(|_| self.thaw());
+        #[cfg(not(target_os = "linux"))]
         self.frozen_state().inspect_err(|_| self.thaw())
     }
 
@@ -250,15 +277,93 @@ impl Terminals {
         for pane in self.panes.lock().unwrap().values() {
             pane.hold.thaw();
         }
+        #[cfg(target_os = "linux")]
+        for owner in self.supervisors() { owner.unpark(); }
     }
 
+    /// Take each held supervisor's state again, just before the record is
+    /// written: a terminal closed since the freeze goes over as stopping.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_frozen(&self, frozen: &mut Frozen) {
+        let owners = self.supervisors();
+        // Each carried state is one launch's; a launch's id names its owner.
+        let carried = frozen.panes.iter_mut().filter_map(|pane| pane.supervised.as_mut().map(|(carried, _)| carried))
+            .chain(frozen.supervised.iter_mut().map(|(_, carried, _)| carried));
+        for carried in carried {
+            if let Some(owner) = owners.iter().find(|owner| owner.launch_is(carried)) { owner.refresh(carried); }
+        }
+    }
+
+    /// A supervised launch was stopped after its state went into the record:
+    /// the handover must be called off so that Stop is not lost (#765).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stopped_since_refresh(&self) -> bool {
+        self.supervisors().iter().any(|owner| owner.stopped_while_parked())
+    }
+
+    /// Every launch a supervisor still owns, with or without a pane.
+    #[cfg(target_os = "linux")]
+    fn supervisors(&self) -> Vec<Arc<super::supervisor::Owner>> {
+        self.groups.lock().unwrap().iter().filter_map(|(_, group)| group.owner().cloned()).collect()
+    }
+
+    /// Hold each supervised launch still, keyed by its owner. No launch
+    /// starts meanwhile: `frozen` is set, and one already starting refuses.
+    #[cfg(target_os = "linux")]
+    fn park_supervisors(&self, within: Duration) -> Result<Vec<(Arc<super::supervisor::Owner>, super::supervisor::Carried, OwnedFd)>> {
+        if self.bootstrapping.load(Ordering::SeqCst) > 0 { bail!("A terminal was opening."); }
+        let mut carried = Vec::new();
+        let mut not = 0;
+        for owner in self.supervisors() {
+            match owner.park(within) {
+                super::supervisor::Parked::Carried(state, fd) => carried.push((owner, state, fd)),
+                super::supervisor::Parked::Settled => {}
+                super::supervisor::Parked::Not => not += 1,
+            }
+        }
+        if not > 0 { return Err(super::SupervisedTerminals(not).into()); }
+        Ok(carried)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn frozen_state(&self) -> Result<Frozen> {
+        self.frozen_panes()
+    }
+
+    /// The panes, with each supervised launch's carried state beside the
+    /// pane that holds it, and the rest under the ids they had (#467).
+    #[cfg(target_os = "linux")]
+    fn frozen_state(&self, carried: Vec<(Arc<super::supervisor::Owner>, super::supervisor::Carried, OwnedFd)>) -> Result<Frozen> {
+        let mut frozen = self.frozen_panes()?;
+        let mut carried: Vec<_> = carried.into_iter().map(Some).collect();
+        let mut take = |owner: &Arc<super::supervisor::Owner>| carried.iter_mut().find(|entry| entry.as_ref().is_some_and(|(held, _, _)| Arc::ptr_eq(held, owner)))
+            .and_then(Option::take).map(|(_, state, fd)| (state, fd));
+        let owners: HashMap<String, Arc<super::supervisor::Owner>> = self.panes.lock().unwrap().iter()
+            .filter_map(|(id, pane)| pane.group.owner().map(|owner| (id.clone(), owner.clone()))).collect();
+        for pane in &mut frozen.panes {
+            if let Some(owner) = owners.get(&pane.id) { pane.supervised = take(owner); }
+        }
+        for (id, group) in self.groups.lock().unwrap().iter() {
+            if let Some((state, fd)) = group.owner().and_then(&mut take) { frozen.supervised.push((id.clone(), state, fd)); }
+        }
+        Ok(frozen)
+    }
+
+    fn frozen_panes(&self) -> Result<Frozen> {
         use crate::local_runtime::scrollback::History;
+        // A supervised launch goes over as its supervisor, never as a group.
+        #[cfg(target_os = "linux")]
+        let groups: Vec<u32> = { let supervised: std::collections::HashSet<u32> = self.groups.lock().unwrap().iter()
+            .filter(|(_, group)| group.owner().is_some()).filter_map(|(_, group)| group.pid()).collect();
+            self.owned_groups().into_iter().filter(|group| !supervised.contains(group)).collect() };
+        #[cfg(not(target_os = "linux"))]
         let groups = self.owned_groups();
         let mut retained = self.retained.lock().unwrap().clone();
         let panes = self.panes.lock().unwrap();
         let titles = self.titles.lock().unwrap().clone();
         let renamed = self.renamed.lock().unwrap().clone();
+        let docked = self.docked.lock().unwrap().clone();
+        for pane in retained.values_mut() { pane.docked = docked.get(&pane.id).copied(); }
         let mut frozen = Vec::new();
         // A pane opened just as the freeze began, by a path that does not
         // wait for admission, would go on being read after this.
@@ -270,7 +375,7 @@ impl Terminals {
             let title = titles.get(id).cloned();
             if !*pane.alive.lock().unwrap() {
                 // Its program has gone: what it printed is all there is.
-                retained.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(), title, renamed: renamed.contains(id), data: scrollback });
+                retained.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(), title, renamed: renamed.contains(id), docked: docked.get(id).copied(), data: scrollback });
                 continue;
             }
             let fd = pane.master.as_raw_fd().context("a terminal has no descriptor to hand over")?;
@@ -304,35 +409,64 @@ impl Terminals {
                 screen,
                 quiet: pane.last_output.lock().unwrap().map(|at| at.elapsed()),
                 title,
-                renamed: renamed.contains(id),
+                renamed: renamed.contains(id), docked: docked.get(id).copied(),
+                #[cfg(target_os = "linux")]
+                supervised: None,
             });
         }
         let led: std::collections::HashSet<u32> = frozen.iter().filter_map(|pane| pane.group).collect();
-        Ok(Frozen { panes: frozen, retained: retained.into_values().collect(), groups: groups.into_iter().filter(|group| !led.contains(group)).collect() })
+        Ok(Frozen { panes: frozen, retained: retained.into_values().collect(), groups: groups.into_iter().filter(|group| !led.contains(group)).collect(),
+            #[cfg(target_os = "linux")] supervised: Vec::new() })
     }
 
     /// Take over a pane the runtime this one replaced was running: its
     /// program goes on in the same terminal, and its output from where the
     /// handover left it.
     pub(crate) fn adopt(&self, sink: Arc<dyn EventSink>, pane: FrozenPane) -> Result<()> {
-        let FrozenPane { id, master, pid, group, explicit_command, environment, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed } = pane;
+        let FrozenPane { id, master, pid, group, explicit_command, environment, cwd, created, tty, cols, rows, scrollback, printed, screen, quiet, title, renamed, docked, #[cfg(target_os = "linux")] supervised } = pane;
         if self.panes.lock().unwrap().contains_key(&id) {
             bail!("a terminal named {id} is already open");
         }
         let master = AdoptedMaster { fd: master, tty, took_writer: AtomicBool::new(false) };
         let reader = master.try_clone_reader()?;
+        // As a pane opened under a supervisor writes (`supervised_writer`).
+        #[cfg(target_os = "linux")]
+        let writer: Box<dyn Write + Send> = if supervised.is_some() { Box::new(master.file()?) } else { master.take_writer()? };
+        #[cfg(not(target_os = "linux"))]
         let writer = master.take_writer()?;
         let mut parser = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
         parser.process(&screen);
         let mut back = VecDeque::with_capacity(SCROLLBACK_BYTES);
         push_scrollback(&mut back, &scrollback);
+        // Its supervisor's observer resumes where the last runtime held it.
+        #[cfg(target_os = "linux")]
+        let (waiter, owned) = match supervised {
+            Some((state, socket)) => {
+                let (shell, helper) = (state.shell(), state.supervisor());
+                match super::supervisor::Owner::adopt(state, socket) {
+                    Ok(owner) => (Waiter::Supervised(owner.clone()), Some(Arc::new(OwnedGroup::supervised(owner, shell)))),
+                    Err(error) => {
+                        // Its channel let go, the supervisor ends what it
+                        // runs and exits: reaped here, and the reader told.
+                        super::supervisor::reap_abandoned(helper);
+                        self.notice(format!("A terminal could not be kept running through the update and was stopped: \u{201c}{}\u{201d}.", title.as_deref().unwrap_or(&id)));
+                        return Err(anyhow::Error::from(error).context("take over the terminal's supervisor"));
+                    }
+                }
+            }
+            None => (Waiter::Adopted, None),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let waiter = Waiter::Adopted;
         self.start(sink, &id, Parts {
             master: Box::new(master),
             reader,
             writer,
-            waiter: Waiter::Adopted,
+            waiter,
             pid,
             group,
+            #[cfg(target_os = "linux")]
+            owned,
             explicit_command,
             environment,
             cwd,
@@ -342,12 +476,30 @@ impl Terminals {
             screen: parser,
             last_output: quiet.and_then(|quiet| Instant::now().checked_sub(quiet)),
         })?;
+        if let Some(docked) = docked { self.docked.lock().unwrap().insert(id.clone(), docked); }
         if let Some(title) = title {
             self.titles.lock().unwrap().insert(id.clone(), title);
             if renamed {
                 self.renamed.lock().unwrap().insert(id);
             }
         }
+        Ok(())
+    }
+
+    /// Take over a supervised launch no live pane held, under its pane id:
+    /// Stop and Stop All end it as before the handover (#467).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt_supervised(&self, id: &str, state: super::supervisor::Carried, socket: OwnedFd) -> Result<()> {
+        let (shell, helper) = (state.shell(), state.supervisor());
+        let owner = match super::supervisor::Owner::adopt(state, socket) {
+            Ok(owner) => owner,
+            Err(error) => {
+                super::supervisor::reap_abandoned(helper);
+                self.notice(format!("Processes a closed terminal left running could not be kept through the update and were stopped ({id})."));
+                return Err(anyhow::Error::from(error).context("take over a launch's supervisor"));
+            }
+        };
+        self.groups.lock().unwrap().push((id.to_string(), Arc::new(OwnedGroup::supervised(owner, shell))));
         Ok(())
     }
 
@@ -358,6 +510,7 @@ impl Terminals {
             let mut titles = self.titles.lock().unwrap();
             let mut renamed = self.renamed.lock().unwrap();
             for pane in &retained {
+                if let Some(docked) = pane.docked { self.docked.lock().unwrap().insert(pane.id.clone(), docked); }
                 if let Some(title) = &pane.title {
                     titles.insert(pane.id.clone(), title.clone());
                 }
@@ -368,8 +521,9 @@ impl Terminals {
         }
         self.retained.lock().unwrap().extend(retained.into_iter().map(|pane| (pane.id.clone(), pane)));
         let mut owned = self.groups.lock().unwrap();
-        owned.extend(groups.into_iter().map(|group| Arc::new(OwnedGroup(Mutex::new(Some(group))))));
-        owned.retain(|group| group.pid().is_some());
+        // The record names no pane for these: Stop All still ends them.
+        owned.extend(groups.into_iter().map(|group| (String::new(), Arc::new(OwnedGroup::new(Some(group))))));
+        owned.retain(|(_, group)| group.pid().is_some());
     }
 }
 
@@ -541,6 +695,74 @@ mod tests {
         // The old owner never reaps or reports it: in a real handover its
         // threads are gone with its process image.
         std::mem::forget(old);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sleeper(terminals: &Terminals, dir: &tempfile::TempDir, id: &str) -> u32 {
+        terminals.spawn(Arc::new(crate::sink::BroadcastSink::new(64)), id, PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] }).unwrap();
+        terminals.pid(id).unwrap()
+    }
+
+    /// #467 review: a terminal closed while the handover holds its
+    /// supervisor goes into the record as stopping, and the runtime that
+    /// takes over ends it; nothing keeps running unseen.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminal_closed_during_a_handover_is_stopped_by_the_runtime_that_takes_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let pid = sleeper(&old, &dir, "closing");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        old.kill("closing");
+        assert!(old.stopped_since_refresh(), "held, the observer sent nothing for that Stop");
+        old.refresh_frozen(&mut frozen);
+        assert!(!old.stopped_since_refresh(), "the record now carries it");
+        let pane = frozen.panes.remove(0);
+        assert!(pane.supervised.as_ref().unwrap().0.stopping_for_test(), "carried as stopping");
+        let new = Terminals::new();
+        new.adopt(Arc::new(crate::sink::BroadcastSink::new(64)), pane).unwrap();
+        wait_for("the runtime that took over to end it", || !crate::harness::host::is_alive(pid) && new.owned_groups().is_empty());
+    }
+
+    /// #467 review: one closed after its state went into the record calls
+    /// the handover off, and its Stop goes ahead where it was asked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminal_closed_after_the_record_calls_the_handover_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let pid = sleeper(&old, &dir, "late");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        old.refresh_frozen(&mut frozen);
+        assert!(!old.stopped_since_refresh());
+        old.kill("late");
+        assert!(old.stopped_since_refresh(), "the handover must be called off");
+        old.thaw();
+        wait_for("its Stop to go ahead once thawed", || !crate::harness::host::is_alive(pid) && old.owned_groups().is_empty());
+    }
+
+    /// #467 review: a terminal whose supervisor the runtime taking over
+    /// cannot adopt is said by name, and its helper is reaped, not left a
+    /// zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_supervisor_that_cannot_be_adopted_is_said_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Terminals::new();
+        let shell = sleeper(&old, &dir, "unadoptable");
+        old.set_title("unadoptable", "Dev server");
+        let mut frozen = old.freeze(Duration::from_secs(5)).unwrap();
+        let mut pane = frozen.panes.remove(0);
+        let helper = pane.supervised.as_ref().unwrap().0.supervisor();
+        pane.supervised.as_mut().unwrap().0.break_for_test();
+        let new = Terminals::new();
+        assert!(new.adopt(Arc::new(crate::sink::BroadcastSink::new(64)), pane).is_err());
+        assert!(new.notices.lock().unwrap().iter().any(|notice| notice.contains("could not be kept running through the update") && notice.contains("Dev server")),
+            "{:?}", new.notices.lock().unwrap());
+        // In one process the old runtime still holds a copy of the channel,
+        // so the helper is ended here, as the exec would close the copy.
+        unsafe { libc::kill(helper as i32, libc::SIGKILL); libc::kill(shell as i32, libc::SIGKILL); }
+        wait_for("the abandoned helper to be reaped", || !std::path::Path::new(&format!("/proc/{helper}")).exists());
     }
 
     /// #765: a handover called off leaves every pane as it was.

@@ -1,0 +1,63 @@
+diff --git a/bench-answer.txt b/bench-answer.txt
+new file mode 100644
+--- /dev/null
++++ b/bench-answer.txt
+@@ -0,0 +1,12 @@
++scripts/webkit/orchestration.mjs
++skill-guides/terminalx-cli.md
++src-tauri/src/cli.rs
++src-tauri/src/control_issue_tests.rs
++src-tauri/src/orchestration/brief.rs
++src-tauri/src/orchestration/engine_tests.rs
++src-tauri/src/orchestration/plan.rs
++src/components/orchestration/RunView.test.tsx
++src/components/orchestration/RunView.tsx
++src/lib/orchestration.test.ts
++src/lib/orchestration.ts
++src/types/orchestration.ts
+diff --git a/.bench-check/audit-plan-done-check-field.mjs b/.bench-check/audit-plan-done-check-field.mjs
+new file mode 100644
+--- /dev/null
++++ b/.bench-check/audit-plan-done-check-field.mjs
+@@ -0,0 +1,41 @@
++// Outcome check for the orchestration benchmark task audit-plan-done-check-field
++// (docs/ORCHESTRATION-BENCH.md). Reads the agent's answer from bench-answer.txt,
++// one repository-relative path per line, and compares it to the files the
++// real change had to touch. Exit 0 means solved.
++
++import { existsSync, readFileSync } from "node:fs";
++
++const ANSWER = "bench-answer.txt";
++const MIN_RECALL = 0.9;
++const MIN_PRECISION = 0.9;
++const TRUTH = new Set([
++  "scripts/webkit/orchestration.mjs",
++  "skill-guides/terminalx-cli.md",
++  "src-tauri/src/cli.rs",
++  "src-tauri/src/control_issue_tests.rs",
++  "src-tauri/src/orchestration/brief.rs",
++  "src-tauri/src/orchestration/engine_tests.rs",
++  "src-tauri/src/orchestration/plan.rs",
++  "src/components/orchestration/RunView.test.tsx",
++  "src/components/orchestration/RunView.tsx",
++  "src/lib/orchestration.test.ts",
++  "src/lib/orchestration.ts",
++  "src/types/orchestration.ts",
++]);
++
++if (!existsSync(ANSWER)) {
++  console.log(`no ${ANSWER} at the repository root`);
++  process.exit(1);
++}
++// Forgiving about form: bullets, backticks, a leading ./ and a :line suffix are dropped.
++const listed = new Set(
++  readFileSync(ANSWER, "utf8")
++    .split(/\r?\n/)
++    .map((line) => line.trim().replace(/^[-*]\s+/, "").replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/:\d+(:\d+)?$/, "").trim())
++    .filter((line) => line && !line.startsWith("#")),
++);
++const found = [...listed].filter((path) => TRUTH.has(path)).length;
++const recall = found / TRUTH.size;
++const precision = listed.size ? found / listed.size : 0;
++console.log(`listed ${listed.size}, ${found} of ${TRUTH.size} right: recall ${recall.toFixed(2)} (need ${MIN_RECALL}), precision ${precision.toFixed(2)} (need ${MIN_PRECISION})`);
++process.exit(recall >= MIN_RECALL && precision >= MIN_PRECISION ? 0 : 1);

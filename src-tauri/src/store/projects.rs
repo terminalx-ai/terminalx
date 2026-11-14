@@ -50,25 +50,114 @@ pub struct Project {
     /// branch with none goes by its own name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branch_labels: BTreeMap<String, String>,
-    /// Local scripts only; repository files require the layered-config trust flow.
+    /// This computer's scripts; repository files are resolved by `configuration::setup_script` and `configuration::archive_script`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<RepositoryScripts>,
+    /// Run-menu actions saved for this project, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<RepositoryActionEntry>,
+    /// Preview URL templates with $PORT / $PORT_n, expanded against a session's ports, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_urls: Vec<PreviewUrlEntry>,
+    /// Local repository choices; file-based layers are resolved separately.
+    #[serde(default)]
+    pub repository_settings: RepositorySettings,
+    /// Fields a newer build wrote, kept as they are so saving here never drops them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Script fields shared by the Scripts page and workspace lifecycle hooks.
-/// Setup is stored for PRO-240; this build only executes the archive hook.
+/// The Scripts page's values saved on this computer. They are the user layer
+/// of `configuration::setup_script` and `configuration::archive_script`, which the workspace hooks read: repository
+/// files and managed policy can take precedence over them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RepositoryScripts {
     pub setup: String,
     pub archive: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_timeout_minutes: Option<u64>,
 }
 
-/// Nothing is read from the checkout itself: committed commands are not trusted yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RepositoryActionEntry {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub command: String,
+    pub run_after_setup: bool,
+    pub concurrent: bool,
+    pub hidden: bool,
+}
+
+impl Default for RepositoryActionEntry {
+    fn default() -> Self {
+        Self { id: String::new(), name: String::new(), icon: "terminal".into(), command: String::new(), run_after_setup: false, concurrent: false, hidden: false }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PreviewUrlEntry {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
+const MAX_REPOSITORY_ENTRIES: usize = 100;
+
+fn normalized_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn validate_actions(actions: &[RepositoryActionEntry]) -> Result<()> {
+    anyhow::ensure!(actions.len() <= MAX_REPOSITORY_ENTRIES, "At most {MAX_REPOSITORY_ENTRIES} actions.");
+    let (mut names, mut ids) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    for a in actions {
+        anyhow::ensure!(!a.id.trim().is_empty() && ids.insert(a.id.as_str()), "Every action needs a unique id.");
+        // Its run's tab is named by the id, and tab names have a length limit (PRO-363).
+        anyhow::ensure!(a.id.len() <= crate::action_runner::MAX_ACTION_ID, "Action \"{}\" has an id longer than {} characters.", a.name, crate::action_runner::MAX_ACTION_ID);
+        anyhow::ensure!(!a.name.trim().is_empty() && a.name.len() <= 200, "Every action needs a name of at most 200 characters.");
+        anyhow::ensure!(names.insert(normalized_name(&a.name)), "Action names must be unique.");
+        anyhow::ensure!(!a.command.trim().is_empty(), "Action \"{}\" needs a command.", a.name);
+        anyhow::ensure!(a.command.len() <= 65_536, "An action command must be at most 64 KiB.");
+        anyhow::ensure!(a.icon.len() <= 200, "Action icon is too long.");
+    }
+    Ok(())
+}
+
+fn validate_preview_urls(urls: &[PreviewUrlEntry]) -> Result<()> {
+    anyhow::ensure!(urls.len() <= MAX_REPOSITORY_ENTRIES, "At most {MAX_REPOSITORY_ENTRIES} preview URLs.");
+    let (mut names, mut ids) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    for u in urls {
+        anyhow::ensure!(!u.id.trim().is_empty() && ids.insert(u.id.as_str()), "Every preview URL needs a unique id.");
+        anyhow::ensure!(!u.name.trim().is_empty() && u.name.len() <= 200, "Every preview URL needs a name of at most 200 characters.");
+        anyhow::ensure!(names.insert(normalized_name(&u.name)), "Preview URL names must be unique.");
+        anyhow::ensure!(!u.url.trim().is_empty() && u.url.len() <= 2_048, "Every preview URL needs a URL of at most 2048 characters.");
+    }
+    Ok(())
+}
+
+/// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
         .and_then(|project| project.scripts).unwrap_or_default())
+}
+
+/// Repository choices stored with the project, keyed by its canonical path.
+/// Keep this layer separate from effective settings supplied by repository files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RepositorySettings {
+    pub files_to_copy: Vec<String>,
+}
+
+pub fn repository_settings(path: &Path) -> Result<RepositorySettings> {
+    let canonical = canonical_directory(&path.to_string_lossy())?;
+    Ok(load()?.projects.into_iter().find(|p| p.path == canonical)
+        .map(|p| p.repository_settings).unwrap_or_default())
 }
 
 /// The kinds of change a project marks as always needing a person to merge.
@@ -130,6 +219,20 @@ pub struct IssuePipelineSettings {
     pub allow_no_ci: bool,
     pub local_check_command: Option<String>,
     pub local_checks_only: bool,
+    /// The model the reviewer runs on (PRO-278). Absent: the author's own,
+    /// as it always was. A review reads a diff; it need not cost what
+    /// writing the change did. Used when the author's agent offers it.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "blank_is_none")]
+    pub reviewer_model: Option<String>,
+    /// The reviewer's effort. Absent: the author's with the author's model,
+    /// the model's own default with a reviewer model.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "blank_is_none")]
+    pub reviewer_effort: Option<String>,
+}
+
+/// A choice saved as an empty string is no choice.
+fn blank_is_none<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()))
 }
 
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
@@ -161,6 +264,8 @@ impl Default for IssuePipelineSettings {
             allow_no_ci: false,
             local_check_command: None,
             local_checks_only: false,
+            reviewer_model: None,
+            reviewer_effort: None,
         }
     }
 }
@@ -177,6 +282,21 @@ impl IssuePipelineSettings {
     /// What "Resolve conflicts automatically" starts at, as `auto_merge_at_start`.
     pub fn resolve_conflicts_at_start(&self, from_issue: bool) -> bool {
         self.resolve_conflicts.unwrap_or(from_issue)
+    }
+
+    /// The model and effort a reviewer of this project runs on, for an
+    /// author on `harness` running `model` at `effort`. The project's
+    /// reviewer model when that agent offers it (`models` is what its CLI
+    /// lists), else the author's. An effort the chosen model does not offer
+    /// is not sent to it.
+    pub fn reviewer_choice(&self, harness: &str, model: &str, effort: Option<&str>, models: &[crate::models::Model]) -> (String, Option<String>) {
+        let listed = |id: &str| models.iter().find(|candidate| candidate.harness == harness && candidate.id == id);
+        let offers = |id: &str, effort: &str| listed(id).is_some_and(|model| model.efforts.iter().any(|offered| offered == effort));
+        match self.reviewer_model.as_deref().filter(|id| listed(id).is_some()) {
+            // Its own effort when it offers it; otherwise the model's default, never the author's.
+            Some(chosen) => (chosen.to_string(), self.reviewer_effort.clone().filter(|effort| offers(chosen, effort))),
+            None => (model.to_string(), self.reviewer_effort.clone().filter(|effort| offers(model, effort)).or_else(|| effort.map(str::to_owned))),
+        }
     }
 
     /// Before #700 every save wrote both switches, `false` unless turned on,
@@ -220,6 +340,14 @@ pub struct ProjectPatch {
     pub branch_label: Option<BranchLabel>,
     #[serde(default)]
     pub scripts: Option<RepositoryScripts>,
+    #[serde(default)]
+    pub repository_settings: Option<RepositorySettings>,
+    /// Replaces the saved actions; an empty list clears them.
+    #[serde(default)]
+    pub actions: Option<Vec<RepositoryActionEntry>>,
+    /// Replaces the saved preview URLs; an empty list clears them.
+    #[serde(default)]
+    pub preview_urls: Option<Vec<PreviewUrlEntry>>,
 }
 
 /// One branch's sidebar label; none, or a blank one, clears it.
@@ -236,6 +364,17 @@ fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<
 }
 
 pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
+    if let Some(settings) = &patch.repository_settings {
+        crate::worktree_files::validate_patterns(&settings.files_to_copy)?;
+        anyhow::ensure!(!crate::worktree_files::has_include_file(Path::new(path))?,
+            "Patterns come from this repository's .worktreeinclude");
+    }
+    if let Some(actions) = &patch.actions {
+        validate_actions(actions)?;
+    }
+    if let Some(urls) = &patch.preview_urls {
+        validate_preview_urls(urls)?;
+    }
     let mut f = load()?;
     let p = f.projects.iter_mut().find(|p| p.path == path).with_context(|| format!("project {path} is not attached"))?;
     if let Some(n) = patch.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
@@ -261,6 +400,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
         // follows the defaults of whichever build reads it.
         p.issue_pipeline = (v != IssuePipelineSettings::default()).then_some(v);
     }
+    if let Some(v) = patch.repository_settings {
+        p.repository_settings = v;
+    }
     if let Some(v) = patch.agent_issue_updates {
         p.agent_issue_updates = v;
     }
@@ -272,7 +414,14 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(scripts) = patch.scripts {
         anyhow::ensure!(scripts.setup.len() <= 65_536 && scripts.archive.len() <= 65_536, "Scripts must be at most 64 KiB each.");
+        anyhow::ensure!(scripts.archive_timeout_minutes.is_none_or(|minutes| super::configuration::ARCHIVE_TIMEOUT_CHOICES.contains(&minutes)), "Choose an archive timeout Settings offers.");
         p.scripts = (scripts != RepositoryScripts::default()).then_some(scripts);
+    }
+    if let Some(actions) = patch.actions {
+        p.actions = actions;
+    }
+    if let Some(urls) = patch.preview_urls {
+        p.preview_urls = urls;
     }
     let out = p.clone();
     save(&f)?;
@@ -444,7 +593,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -472,7 +621,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -515,6 +664,89 @@ mod tests {
         assert_eq!(list().unwrap().0.len(), 1);
         let legacy: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
         assert_eq!(legacy.kind, ProjectKind::Git);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actions_and_preview_urls_persist_in_order_beside_the_scripts() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let action = |id: &str, name: &str| RepositoryActionEntry { id: id.into(), name: name.into(), command: "pnpm test".into(), concurrent: true, ..Default::default() };
+        let actions = vec![action("b", "Tests"), RepositoryActionEntry { hidden: true, run_after_setup: true, ..action("a", "Dev") }];
+        let urls = vec![PreviewUrlEntry { id: "1".into(), name: "App".into(), url: "http://localhost:$PORT".into() }, PreviewUrlEntry { id: "2".into(), name: "Docs".into(), url: "http://localhost:$PORT_2".into() }];
+        update(&project.path, ProjectPatch { actions: Some(actions.clone()), preview_urls: Some(urls.clone()), ..Default::default() }).unwrap();
+        let saved = list().unwrap().0.remove(0);
+        assert_eq!((&saved.actions, &saved.preview_urls, &saved.scripts), (&actions, &urls, &None));
+        let json = serde_json::to_value(&list().unwrap().0[0]).unwrap();
+        assert_eq!(json["actions"][1]["runAfterSetup"], true);
+        assert_eq!(json["previewUrls"][1]["url"], "http://localhost:$PORT_2");
+        assert!(json.get("scripts").is_none());
+        // The Scripts page's patch replaces only the hooks, and other patches leave the lists alone.
+        let hooks = RepositoryScripts { setup: "echo hi".into(), archive: String::new(), archive_timeout_minutes: None };
+        update(&project.path, ProjectPatch { scripts: Some(hooks.clone()), ..Default::default() }).unwrap();
+        update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
+        let saved = list().unwrap().0.remove(0);
+        assert_eq!((&saved.actions, &saved.preview_urls, &saved.scripts), (&actions, &urls, &Some(hooks.clone())));
+        assert_eq!(scripts(dir.path()).unwrap(), hooks);
+        // Invalid lists are refused and change nothing.
+        for bad in [vec![action("x", " ")], vec![action("x", "Dev"), action("y", "dev ")], vec![action("x", "A"), action("x", "B")], vec![RepositoryActionEntry { id: "x".into(), name: "Dev".into(), ..Default::default() }]] {
+            assert!(update(&project.path, ProjectPatch { actions: Some(bad), ..Default::default() }).is_err());
+        }
+        assert!(update(&project.path, ProjectPatch { preview_urls: Some(vec![PreviewUrlEntry { id: "z".into(), name: "App".into(), url: " ".into() }]), ..Default::default() }).is_err());
+        assert_eq!(list().unwrap().0[0].actions, actions);
+        // Emptying everything stores nothing.
+        update(&project.path, ProjectPatch { actions: Some(vec![]), preview_urls: Some(vec![]), scripts: Some(RepositoryScripts::default()), ..Default::default() }).unwrap();
+        let json = serde_json::to_value(&list().unwrap().0[0]).unwrap();
+        assert!(json.get("scripts").is_none() && json.get("actions").is_none() && json.get("previewUrls").is_none());
+    }
+
+    #[test]
+    fn fields_a_newer_build_wrote_survive_a_save_here() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let path = crate::store::root().unwrap().join("projects.json");
+        let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        file["projects"][0]["futureField"] = serde_json::json!(["kept"]);
+        std::fs::write(&path, file.to_string()).unwrap();
+        update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["projects"][0]["futureField"], serde_json::json!(["kept"]));
+        assert_eq!(saved["projects"][0]["pinned"], true);
+    }
+
+    #[test]
+    fn an_action_id_too_long_to_name_its_tab_is_refused_with_a_reason() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let action = |id: String| RepositoryActionEntry { id, name: "Dev".into(), command: "pnpm dev".into(), ..Default::default() };
+        let error = update(&project.path, ProjectPatch { actions: Some(vec![action("x".repeat(65))]), ..Default::default() }).unwrap_err().to_string();
+        assert_eq!(error, "Action \"Dev\" has an id longer than 64 characters.");
+        update(&project.path, ProjectPatch { actions: Some(vec![action("x".repeat(64))]), ..Default::default() }).unwrap();
+    }
+
+    #[test]
+    fn projects_saved_before_actions_existed_still_read() {
+        let project: Project = serde_json::from_str(r#"{"path":"/r","name":"r","scripts":{"setup":"a","archive":"b"}}"#).unwrap();
+        assert_eq!(project.scripts, Some(RepositoryScripts { setup: "a".into(), archive: "b".into(), archive_timeout_minutes: None }));
+        assert!(project.actions.is_empty() && project.preview_urls.is_empty());
+    }
+
+    #[test]
+    fn known_fields_never_land_in_the_kept_extras() {
+        let raw = r#"{"path":"/r","name":"r","scripts":{"setup":"a","archive":"b","archiveTimeoutMinutes":10},
+            "actions":[{"id":"1","name":"Dev","command":"pnpm dev"}],"previewUrls":[{"id":"p","name":"App","url":"http://localhost:$PORT"}],
+            "repositorySettings":{},"branchLabels":{"main":"Main"},"futureField":1}"#;
+        let project: Project = serde_json::from_str(raw).unwrap();
+        assert_eq!(project.extra.keys().collect::<Vec<_>>(), vec!["futureField"]);
+        assert_eq!(project.scripts.as_ref().and_then(|s| s.archive_timeout_minutes), Some(10));
+        assert_eq!(project.actions.len(), 1);
+        assert_eq!(project.preview_urls.len(), 1);
+        let again = serde_json::to_value(&project).unwrap();
+        assert_eq!(again["scripts"]["archiveTimeoutMinutes"], 10);
+        assert_eq!(again["futureField"], 1);
     }
 
     #[cfg(unix)]

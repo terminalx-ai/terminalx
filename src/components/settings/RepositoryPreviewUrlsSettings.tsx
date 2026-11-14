@@ -17,7 +17,7 @@ export function RepositoryPreviewUrlsSettings({ urls, onChange }: {
   return (
     <section aria-label="Preview URLs" className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Preview URLs</h3>
+        <h4 className="text-sm font-medium">Preview URLs</h4>
         <Button variant="outline" size="sm" disabled={mutation.busy} onClick={() => {
           mutation.clearError();
           setEditing({ isNew: true, entry: { id: crypto.randomUUID(), name: "", url: "http://localhost:$PORT" } });

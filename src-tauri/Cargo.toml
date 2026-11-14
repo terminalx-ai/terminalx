@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.27"
+version = "0.2.32"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -38,6 +38,7 @@ desktop = [
     "dep:block2",
     "dep:objc2-foundation",
     "dep:objc2-speech",
+    "dep:objc2-user-notifications",
     "dep:transcribe-cpp",
     "dep:terminalx-dictation-detector",
 ]
@@ -103,6 +104,7 @@ regex = "1"
 vt100 = "0.18"
 salsa20 = "0.10"
 ignore = "0.4"
+globset = "0.4"
 nucleo-matcher = "0.3"
 tauri-plugin-notification = { version = "2.4.0", optional = true }
 ureq = { version = "2", features = ["json"] }
@@ -127,12 +129,13 @@ libc = "0.2"
 notify-rust = { version = "4", optional = true }
 security-framework = { version = "3.7", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor", "NSPasteboard"], optional = true }
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor", "NSPasteboard", "NSAccessibility", "NSWorkspace"], optional = true }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
 objc2-avf-audio = { version = "0.3", features = ["AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes", "block2"], optional = true }
 block2 = { version = "0.6", optional = true }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"], optional = true }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary", "NSNotification", "NSOperation", "block2"], optional = true }
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"], optional = true }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings"], optional = true }
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
 terminalx-dictation-detector = { path = "src/transcription/native-detector", optional = true }
 

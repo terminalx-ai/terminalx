@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,7 @@ static KNOWN: Mutex<Option<HashMap<PathBuf, (Instant, GithubIdentity)>>> = Mutex
 
 /// The account the project at `cwd` is connected to; a fresh answer when `refresh`.
 pub fn identity(cwd: &Path, refresh: bool) -> GithubIdentity {
+    let _request = crate::github_process::scope();
     if !refresh {
         let known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, answer)) = known.as_ref().and_then(|map| map.get(cwd)) {
@@ -54,6 +55,9 @@ pub fn identity(cwd: &Path, refresh: bool) -> GithubIdentity {
         }
     }
     let answer = look_up(cwd);
+    // A disabled/cancelled lookup returns local metadata, without caching a
+    // missing login for ten minutes after privacy is turned off again.
+    if !crate::github_process::ticket().valid() { return answer; }
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
     known.get_or_insert_with(HashMap::new).insert(cwd.to_path_buf(), (Instant::now(), answer.clone()));
     answer
@@ -82,14 +86,48 @@ fn look_up(cwd: &Path) -> GithubIdentity {
 /// Where a remote is hosted, by the name of its host: `github` (an SSH alias
 /// such as `github-work` included), `gitlab`, or `other`.
 pub fn remote_host_kind(url: &str) -> &'static str {
+    match classify_remote_host(url) {
+        RemoteHost::Github => "github",
+        RemoteHost::Gitlab => "gitlab",
+        RemoteHost::Other | RemoteHost::Unknown => "other",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteHost {
+    Github,
+    Gitlab,
+    /// A recognized non-GitHub forge or a local path.
+    Other,
+    /// An opaque SSH alias or custom domain; gh may know its forge.
+    Unknown,
+}
+
+pub(crate) fn classify_remote_host(url: &str) -> RemoteHost {
     let url = url.trim();
-    let host = ssh_host(url).or_else(|| url.split_once("://").and_then(|(_, rest)| rest.split('/').next()).map(|authority| authority.rsplit('@').next().unwrap_or("").split(':').next().unwrap_or("").to_string())).unwrap_or_default().to_ascii_lowercase();
-    if host.contains("github") {
-        "github"
-    } else if host.contains("gitlab") {
-        "gitlab"
+    let host = if url.contains("://") {
+        let Ok(parsed) = url::Url::parse(url) else { return RemoteHost::Unknown; };
+        if parsed.scheme() == "file" { return RemoteHost::Other; }
+        let Some(host) = parsed.host_str() else { return RemoteHost::Unknown; };
+        host.to_string()
     } else {
-        "other"
+        let Some(host) = ssh_host(url) else { return RemoteHost::Other; };
+        host
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    // Match host labels and conventional single-label SSH aliases, never a
+    // substring in a username, repository path or unrelated hostname.
+    let alias = |name: &str| !host.contains('.') && (host == name || host.strip_prefix(name).is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1));
+    let named = |name: &str| host.split('.').any(|label| label == name) || alias(name);
+    // Non-GitHub labels take precedence, e.g. github.gitlab.example.com.
+    if named("gitlab") {
+        RemoteHost::Gitlab
+    } else if named("bitbucket") || named("gitea") || named("gogs") || host == "codeberg.org" || host.ends_with(".codeberg.org") || host == "sr.ht" || host.ends_with(".sr.ht") {
+        RemoteHost::Other
+    } else if host == "github.com" || host.ends_with(".github.com") || alias("github") || (host.starts_with("github.") && !host.starts_with("github.com.")) {
+        RemoteHost::Github
+    } else {
+        RemoteHost::Unknown
     }
 }
 
@@ -140,30 +178,26 @@ pub fn active_login_in_status(text: &str) -> Option<String> {
 
 fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
     let ssh = crate::binpath::resolve("ssh").unwrap_or_else(|| PathBuf::from("ssh"));
-    let mut child = Command::new(ssh)
-        .current_dir(cwd)
-        .env("PATH", crate::binpath::login_path())
-        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new", &format!("git@{host}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let started = Instant::now();
-    // GitHub closes the connection itself (exit 1), so this is a wait with a
-    // ceiling, not a success check.
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < SSH_PATIENCE => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let out = child.wait_with_output().ok()?;
+    let _request = crate::github_process::scope();
+    let destination = format!("git@{host}");
+    let command = || {
+        let mut command = Command::new(&ssh);
+        command.current_dir(cwd).env("PATH", crate::binpath::login_path())
+            .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]);
+        command
+    };
+    // Destination control options do not constrain a nested ProxyJump client.
+    // Verify the effective route under the same request, before any connection.
+    let mut probe = command();
+    probe.args(["-G", &destination]);
+    let configuration = crate::github_process::output(probe, SSH_PATIENCE, None).ok()?;
+    if !configuration.status.success() { return None; }
+    crate::ssh_containment::direct_configuration(&configuration.stdout).ok()?;
+    let mut command = command();
+    command.args(crate::ssh_containment::OPTIONS).arg(destination);
+    // GitHub closes the greeting with exit 1; it is not a success check.
+    let out = crate::github_process::output(command, SSH_PATIENCE, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stdout));
     Some(text)
@@ -171,14 +205,11 @@ fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
 
 fn gh_active_login() -> Option<String> {
     let gh = crate::binpath::resolve("gh")?;
-    let out = Command::new(gh)
-        .env("PATH", crate::binpath::login_path())
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .args(["auth", "status", "--hostname", "github.com"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new(gh);
+    command.env("PATH", crate::binpath::login_path())
+        .env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1")
+        .args(["auth", "status", "--hostname", "github.com"]);
+    let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     active_login_in_status(&text)
@@ -208,6 +239,35 @@ mod tests {
         assert_eq!(remote_host_kind("ssh://git@gitlab.com:2222/group/name.git"), "gitlab");
         assert_eq!(remote_host_kind("https://user@bitbucket.org/team/name.git"), "other");
         assert_eq!(remote_host_kind("/Users/me/bare.git"), "other");
+    }
+
+    #[test]
+    fn host_classification_matches_labels_and_distinguishes_unknown_hosts() {
+        for (remote, expected) in [
+            ("https://GITHUB.COM./owner/name.git", RemoteHost::Github),
+            ("git@github-work:owner/name.git", RemoteHost::Github),
+            ("https://github.example.com/owner/name.git", RemoteHost::Github),
+            ("https://github.com.evil.test/owner/name.git", RemoteHost::Unknown),
+            ("https://notgithub.com/owner/name.git", RemoteHost::Unknown),
+            ("git@mygithub:owner/name.git", RemoteHost::Unknown),
+            ("https://github.com@code.example.com/owner/name.git", RemoteHost::Unknown),
+            ("https://code.example.com/github.com/name.git", RemoteHost::Unknown),
+            ("https://mirror-of-github.gitlab.example/owner/name.git", RemoteHost::Gitlab),
+            ("https://github.gitlab.example.com/owner/name.git", RemoteHost::Gitlab),
+            ("git@gitlab-work:owner/name.git", RemoteHost::Gitlab),
+            ("https://user@BITBUCKET.ORG:443/owner/name.git", RemoteHost::Other),
+            ("ssh://git@bitbucket.example.com:7999/owner/name.git", RemoteHost::Other),
+            ("https://gitea.example.com/owner/name.git", RemoteHost::Other),
+            ("https://codeberg.org/owner/name.git", RemoteHost::Other),
+            ("git@git.sr.ht:~owner/name", RemoteHost::Other),
+            ("file:///tmp/github.com/name.git", RemoteHost::Other),
+            ("../github.com/name.git", RemoteHost::Other),
+            ("git@work:owner/name.git", RemoteHost::Unknown),
+        ] {
+            assert_eq!(classify_remote_host(remote), expected, "{remote}");
+        }
+        assert_eq!(remote_host_kind("https://github.com.evil.test/owner/name.git"), "other");
+        assert_eq!(remote_host_kind("https://mirror-of-github.gitlab.example/owner/name.git"), "gitlab");
     }
 
     #[test]

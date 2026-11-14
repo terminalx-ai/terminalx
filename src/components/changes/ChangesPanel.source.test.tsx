@@ -1,14 +1,27 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { dropEditors, getEditors } from "@/lib/editors";
+import { dismissError, getErrorToasts } from "@/lib/errorToasts";
 import type { GitSource } from "@/lib/gitSource";
+import type { CommitInfo } from "@/types/session";
 import type { AgentEvent } from "@/types/events";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => { throw new Error(`A source-backed panel called ${command}`); }) }));
+const { invoke, sessions, patchTab } = vi.hoisted(() => ({
+  invoke: vi.fn(async (command: string, _args?: unknown) => {
+    if (command === "send_message") return { events: [], queued: false };
+    if (command === "copy_text") return undefined;
+    throw new Error(`A source-backed panel called ${command}`);
+  }),
+  sessions: { value: [] as unknown[] },
+  patchTab: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/lib/sessions", async (original) => ({ ...(await original<typeof import("@/lib/sessions")>()), useSessionStore: () => ({ sessions: sessions.value }), patchTab }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("./DiffPane", () => ({ DiffPane: ({ path, before, after }: { path: string; before: string; after: string }) => <pre data-testid="diff">{`${path}:${before}->${after}`}</pre> }));
 
 const { ChangesPanel } = await import("./ChangesPanel");
+const { Toasts } = await import("@/components/ui/Toasts");
 
 const events: AgentEvent[] = [
   { id: "prompt", sessionId: "s", tabId: "t", harness: "codex", seq: 1, ts: "", payload: { type: "user_message", text: "Go", queued: false, baseline: "base-tree" } },
@@ -26,8 +39,8 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
     changesBetween: vi.fn(async () => [{ path: "src/turn.ts", status: "modified" as const, additions: 3, deletions: 1 }]),
     fileContentsAt: vi.fn(async () => ({ before: "old", after: "new" })),
     workStatus: unused,
-    logCommits: unused,
-    branches: unused,
+    logCommits: vi.fn(async () => []),
+    branches: vi.fn(async () => [{ name: "main", current: false, remote: false }, { name: "origin/release", current: false, remote: true }]),
     commit: unused,
     push: unused,
     pull: unused,
@@ -40,7 +53,7 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
   } as never;
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); invoke.mockClear(); });
+afterEach(() => { cleanup(); for (const toast of getErrorToasts()) dismissError(toast.id); localStorage.clear(); invoke.mockClear(); patchTab.mockClear(); sessions.value = []; });
 
 it("diffs the turn's range and reads both sides through the given source", async () => {
   const source = fakeSource("cloud:w1|repo");
@@ -166,17 +179,76 @@ it("does not reuse a previous turn when the latest prompt has no snapshot", asyn
   expect(screen.queryByText(/Last turn ·/)).toBeNull();
 });
 
-it("clears an invalid comparison and retries the same target on Apply", async () => {
+it("keeps comparing against the previous branch when the new one can't be used, and says why in a toast (PRO-295)", async () => {
   const source = fakeSource("invalid-target");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
   await screen.findByRole("button", { name: /turn.ts/ });
-  vi.mocked(source.reviewRange).mockRejectedValueOnce("invalid target");
+  await screen.findByText(/Against main/);
+  const gitError = "git rev-parse --verify --end-of-options origin/release/0.9^{commit}: fatal: Needed a single revision";
+  vi.mocked(source.reviewRange).mockRejectedValueOnce(gitError);
+  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "origin/release/0.9" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  const toast = await screen.findByRole("alert");
+  expect(within(toast).getByText("Couldn't switch to origin/release/0.9")).toBeTruthy();
+  expect(toast.textContent).toContain("The branch may have been deleted on its remote, or not fetched here yet. Changes still compare against main.");
+  // git's own line, without the command it ran.
+  expect(within(toast).getByText("fatal: Needed a single revision").className).toContain("font-mono");
+  expect(toast.getAttribute("data-tone")).toBe("error");
+  expect(within(toast).getAllByRole("button").map((button) => button.textContent)).toEqual(["Choose another branch", "Copy error", ""]);
+  // The comparison stayed where it was: same files, same target, and the typed name is still there to fix.
+  expect(screen.getByRole("button", { name: /turn.ts/ })).toBeTruthy();
+  expect(screen.getByText(/Against main/)).toBeTruthy();
+  expect(Object.values({ ...localStorage }).join(" ")).not.toContain("release/0.9");
+
+  invoke.mockClear();
+  await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Copy error" })));
+  expect(invoke).toHaveBeenCalledWith("copy_text", { text: expect.stringContaining("fatal: Needed a single revision") });
+  expect(within(toast).getByRole("button", { name: "Copied" })).toBeTruthy();
+
+  await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Choose another branch" })));
+  const input = screen.getByLabelText("Comparison target") as HTMLInputElement;
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, "origin/release/0.9".length]);
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  // A branch that can be used is switched to.
+  fireEvent.change(input, { target: { value: "release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await screen.findByText(/Against release/);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps a scope picked while Apply checks the branch (PRO-367)", async () => {
+  const source = fakeSource("scope-during-check");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree />);
+  await screen.findByText(/Against main/);
+  let pass!: () => void;
+  const check = new Promise<void>((resolve) => { pass = resolve; });
+  vi.mocked(source.reviewRange).mockImplementationOnce(async (target) => { await check; return { target: target ?? "main", base: "merge-base", head: "snapshot" }; });
+  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(screen.getByRole("button", { name: "Apply" }).getAttribute("aria-busy")).toBe("true");
+  // The person moves on to Uncommitted before the check comes back.
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  await screen.findByRole("button", { name: /dirty.ts/ });
+  await act(async () => { pass(); await check; });
+  // The check passed: the scope they picked stays, and All changes now compares against the new branch.
+  expect((screen.getByLabelText("Changes scope") as HTMLSelectElement).value).toBe("uncommitted");
+  expect(screen.getByRole("button", { name: /dirty.ts/ })).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
+  await screen.findByText(/Against release/);
+});
+
+it("says a local name that names nothing is not here", async () => {
+  const source = fakeSource("missing-local");
+  render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
+  await screen.findByText(/Against main/);
+  vi.mocked(source.reviewRange).mockRejectedValueOnce("fatal: Needed a single revision");
   fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "missing" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText("source: invalid target");
-  expect(screen.queryByRole("button", { name: /turn.ts/ })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText(/Against missing/);
+  const toast = await screen.findByRole("alert");
+  expect(toast.textContent).toContain("There's no branch or commit by that name here. Changes still compare against main.");
 });
 
 it("refreshes while idle without requiring a new agent turn", async () => {
@@ -192,7 +264,7 @@ it("refreshes while idle without requiring a new agent turn", async () => {
   } finally { vi.useRealTimers(); }
 });
 
-// ---- a merge left in progress (#736) ----------------------------------------
+// ---- a merge left in progress (#736, PRO-293) --------------------------------
 
 const HEAD = "1111111111111111111111111111111111111111";
 const BASE = "5555555555555555555555555555555555555555";
@@ -204,52 +276,65 @@ const mergeFiles = [
   { path: "src/late.rs", status: "added" as const, additions: 2, deletions: 0 },
 ];
 
-/** A local checkout part way through merging origin/main: one conflict left, one file edited while merging, two as Git merged them. */
-function merging(key: string, conflicted = ["CHANGELOG.md"]) {
+/** A local checkout part way through merging origin/main: conflicts left, one file edited while merging, two as Git merged them. */
+function merging(key: string, conflicted = ["CHANGELOG.md"], counts: Record<string, number> = { "CHANGELOG.md": 2 }) {
   const source = fakeSource(key);
   source.cloud = false;
   source.canWrite = true;
   source.changesBetween.mockResolvedValue(mergeFiles);
-  const merge = { head: HEAD, mergeHead: BASE, names: ["origin/main", "main"], incoming: 14, conflicted, changedHere: ["notes.txt", ...(conflicted.length ? [] : ["CHANGELOG.md"])], fromBase: ["src/a.rs", "src/b.rs"] };
+  const merge = { head: HEAD, mergeHead: BASE, names: ["origin/main", "main"], incoming: 14, conflicted, changedHere: ["notes.txt", ...(conflicted.length ? [] : ["CHANGELOG.md"])], fromBase: ["src/a.rs", "src/b.rs"],
+    branch: "raccoon/teams-billing", conflictCounts: Object.fromEntries(conflicted.map((path) => [path, counts[path] ?? 1])) };
   return Object.assign(source, {
     unfinishedMerge: vi.fn(async () => merge),
     commitMerge: vi.fn(async () => {}),
     abortMerge: vi.fn(async () => {}),
+    conflictFile: vi.fn(async () => { throw new Error("unused"); }),
+    resolveConflict: vi.fn(async () => { throw new Error("unused"); }),
+    markResolved: vi.fn(async () => {}),
     merge,
   });
 }
 
-it("tells the base's files apart from conflicts and from what was changed while merging", async () => {
-  const source = merging("merge-split");
+it("lists unresolved files with their conflict counts apart from what the merge brought in, and says what aborting keeps", async () => {
+  const source = merging("merge-split", ["CHANGELOG.md", "src/deep/seats.ts"], { "CHANGELOG.md": 2, "src/deep/seats.ts": 1 });
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
-  expect(within(banner).getByText("Merging origin/main into this branch: not committed yet.")).toBeTruthy();
-  expect(within(banner).getByText("5555555 brings in 14 commits. 2 files as Git merged them, 1 file changed here, 1 file with unresolved conflicts.")).toBeTruthy();
-  await screen.findByRole("region", { name: "Unresolved conflicts" });
-  expect(screen.getByText("Unresolved conflicts · 1")).toBeTruthy();
+  expect(within(banner).getByText("Merge in progress")).toBeTruthy();
+  expect(within(banner).getByText("origin/main → raccoon/teams-billing")).toBeTruthy();
+  expect(within(banner).getByText("Resolve the conflicts and stage them to commit the merge, or ask the agent to do it.")).toBeTruthy();
+  const unresolved = within(await screen.findByRole("region", { name: "Unresolved conflicts" }));
+  expect(screen.getByText("Unresolved conflicts · 2")).toBeTruthy();
+  const rows = unresolved.getAllByTitle(/^Unresolved · /).map((row) => row.textContent);
+  expect(rows).toEqual(["UCHANGELOG.md2 conflicts", "Useats.tssrc/deep1 conflict"]);
   // A file the merge was read without (src/late.rs) is never claimed for the base.
   expect(screen.getByText("Changed here · 2")).toBeTruthy();
-  expect(screen.getByText("From origin/main, as Git merged them · 2")).toBeTruthy();
-  expect(within(screen.getByRole("region", { name: "Unresolved conflicts" })).getByRole("button", { name: /CHANGELOG.md/ })).toBeTruthy();
   const here = within(screen.getByRole("region", { name: "Changed here" }));
-  expect(here.getByRole("button", { name: /notes.txt/ }) && here.getByRole("button", { name: /late.rs/ })).toBeTruthy();
-  const base = within(screen.getByRole("region", { name: "From origin/main, as Git merged them" }));
-  expect(base.getByRole("button", { name: /a.rs/ }) && base.getByRole("button", { name: /b.rs/ })).toBeTruthy();
-  // The totals are still the whole of what is uncommitted.
-  expect(screen.getByText("Uncommitted changes · 5 files")).toBeTruthy();
-  // Nothing is committed with a conflict left.
-  expect((within(banner).getByRole("button", { name: "Commit merge" }) as HTMLButtonElement).disabled).toBe(true);
-  expect(within(banner).getByText("Resolve the conflicts and stage them to commit the merge.")).toBeTruthy();
+  expect(here.getByText("notes.txt") && here.getByText("late.rs")).toBeTruthy();
+  expect(screen.getByText("Brought in by the merge · 2")).toBeTruthy();
+  const base = within(screen.getByRole("region", { name: "Brought in by the merge" }));
+  expect(base.getAllByTitle(/·/).map((row) => row.title)).toEqual(["Added · src/a.rs", "Modified · src/b.rs"]);
+  expect(base.getByText("+40") && base.getByText("−4")).toBeTruthy();
+  expect(base.queryByText("CHANGELOG.md")).toBeNull();
+  expect(screen.getByText("Aborting puts the branch back at 1111111 and keeps your uncommitted work.")).toBeTruthy();
+  // Conflicts left: ask the agent or abort; nothing is committed.
+  expect(within(banner).getByRole("button", { name: "Ask the agent to resolve" })).toBeTruthy();
+  expect(within(banner).getByRole("button", { name: "Abort merge…" })).toBeTruthy();
+  expect(within(banner).queryByRole("button", { name: "Commit merge" })).toBeNull();
   expect(source.commitMerge).not.toHaveBeenCalled();
 });
 
-it("commits the merge that was read once nothing is conflicted, and says why if it cannot", async () => {
+it("enables Commit merge once no conflict remains, commits the merge that was read, and says why if it cannot", async () => {
   const source = merging("merge-commit", []);
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  expect(screen.queryByRole("region", { name: "Unresolved conflicts" })).toBeNull();
+  expect(within(banner).queryByRole("button", { name: "Ask the agent to resolve" })).toBeNull();
+  const commit = within(banner).getByRole("button", { name: "Commit merge" }) as HTMLButtonElement;
+  expect(commit.disabled).toBe(false);
+  expect(within(banner).getByRole("button", { name: "Abort merge…" })).toBeTruthy();
   source.commitMerge.mockRejectedValueOnce("HEAD moved since the merge was read");
-  fireEvent.click(within(banner).getByRole("button", { name: "Commit merge" }));
+  fireEvent.click(commit);
   expect(await within(banner).findByRole("alert")).toHaveProperty("textContent", "source: HEAD moved since the merge was read");
   const reads = source.unfinishedMerge.mock.calls.length;
   source.unfinishedMerge.mockResolvedValue(null as never);
@@ -258,6 +343,18 @@ it("commits the merge that was read once nothing is conflicted, and says why if 
   expect(source.commitMerge).toHaveBeenLastCalledWith(source.merge);
   expect(source.unfinishedMerge.mock.calls.length).toBeGreaterThan(reads);
   expect(source.abortMerge).not.toHaveBeenCalled();
+});
+
+it("keeps Commit merge, disabled, for a source that cannot resolve conflicts in the app", async () => {
+  const source = merging("merge-no-resolve");
+  delete (source as Partial<typeof source>).conflictFile;
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  expect(within(banner).getByText("Resolve the conflicts and stage them to commit the merge.")).toBeTruthy();
+  expect(within(banner).queryByRole("button", { name: "Ask the agent to resolve" })).toBeNull();
+  expect((within(banner).getByRole("button", { name: "Commit merge" }) as HTMLButtonElement).disabled).toBe(true);
+  // Its conflicted rows open nothing.
+  expect(within(screen.getByRole("region", { name: "Unresolved conflicts" })).queryByRole("button")).toBeNull();
 });
 
 it("aborts the merge only after a confirmation that says what goes and what stays", async () => {
@@ -285,13 +382,57 @@ it("aborts the merge only after a confirmation that says what goes and what stay
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-it("says what is being merged in every scope, and splits only the uncommitted files", async () => {
+it("says what is being merged in every scope, with the merge's own uncommitted lists beside All changes", async () => {
   const source = merging("merge-all");
+  vi.mocked(source.reviewRange).mockImplementation(async (target: string | null, uncommitted: boolean) => ({ target: uncommitted ? "HEAD" : target ?? "main", base: uncommitted ? "work-head" : "merge-base", head: uncommitted ? "work" : "snapshot" }));
+  source.changesBetween.mockImplementation(async (base: string) => base === "work-head" ? mergeFiles.slice(0, 3) : mergeFiles);
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   expect(within(banner).getByText(/Until it is committed, this counts what the merge brings in as the branch's own work/)).toBeTruthy();
-  expect(screen.getByText("All changes · 5 files")).toBeTruthy();
-  expect(screen.queryByRole("region", { name: "Changed here" })).toBeNull();
+  expect(await screen.findByText("All changes · 5 files")).toBeTruthy();
+  // The merge's lists are what is uncommitted, read against HEAD.
+  expect(await screen.findByText("Brought in by the merge · 1")).toBeTruthy();
+  expect(source.changesBetween).toHaveBeenCalledWith("work-head", "work", false);
+});
+
+it("asks the agent tab to resolve every conflicted file, with each file's count, and to stage without committing", async () => {
+  sessions.value = [{ id: "s1", activeTab: "t1", tabs: [{ id: "t1", front: "chat" }] }];
+  const source = merging("merge-ask", ["CHANGELOG.md", "src/deep/seats.ts"], { "CHANGELOG.md": 2, "src/deep/seats.ts": 1 });
+  render(<ChangesPanel source={source} sessionId="s1" events={[]} version={0} active live={false} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  fireEvent.click(within(banner).getByRole("button", { name: "Ask the agent to resolve" }));
+  expect(await within(banner).findByText("Sent to the agent tab.")).toBeTruthy();
+  const send = invoke.mock.calls.find(([command]) => command === "send_message") as unknown as [string, { sessionId: string; tabId: string; text: string }];
+  expect(send[1]).toMatchObject({ sessionId: "s1", tabId: "t1" });
+  expect(send[1].text).toContain('- "CHANGELOG.md": 2 conflicts');
+  expect(send[1].text).toContain('- "src/deep/seats.ts": 1 conflict');
+  expect(send[1].text).toContain('"origin/main" into "raccoon/teams-billing"');
+  expect(send[1].text).toContain("keeping the intent of both sides");
+  expect(send[1].text).toContain("Stage each file once it is resolved");
+  expect(send[1].text).toContain("Do not commit the merge");
+  expect(patchTab).toHaveBeenCalledWith("s1", "t1", { status: "in_progress" });
+});
+
+it("says why the agent cannot be asked without an agent tab", async () => {
+  const source = merging("merge-no-agent");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  const banner = await screen.findByRole("region", { name: "Merge in progress" });
+  expect((within(banner).getByRole("button", { name: "Ask the agent to resolve" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(banner).getByText("Open an agent tab in this workspace to ask the agent.")).toBeTruthy();
+});
+
+it("opens a conflicted file in a centre conflict tab from its row", async () => {
+  const source = merging("local:/merge-repo", ["src/deep/seats.ts"], { "src/deep/seats.ts": 2 });
+  render(<ChangesPanel source={source} cwd="/merge-repo" sessionId="centre-conflict" events={[]} version={0} active live={false} />);
+  const row = await screen.findByTitle("Unresolved · src/deep/seats.ts");
+  expect(row.getAttribute("aria-current")).toBeNull();
+  fireEvent.click(row);
+  expect(getEditors().editors.find((e) => e.sessionId === "centre-conflict")).toMatchObject({
+    kind: "conflict", rel: "src/deep/seats.ts", name: "seats.ts · 2 conflicts", conflict: { head: HEAD, mergeHead: BASE, conflicts: 2 },
+  });
+  // The row of the file being looked at is marked, as the design draws it.
+  await waitFor(() => expect(screen.getByTitle("Unresolved · src/deep/seats.ts").getAttribute("aria-current")).toBe("page"));
+  dropEditors((e) => e.sessionId === "centre-conflict");
 });
 
 it("shows no merge for a source that cannot tell, and a merge that cannot be read in its words", async () => {
@@ -307,24 +448,38 @@ it("shows no merge for a source that cannot tell, and a merge that cannot be rea
   expect(screen.getByText("All changes · 5 files")).toBeTruthy();
 });
 
+it("opens local Changes rows in centre tabs with the chosen range and rename path", async () => {
+  const source = fakeSource("local:/repo");
+  source.cloud = false;
+  source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 1, deletions: 1 }]);
+  render(<ChangesPanel source={source} cwd="/repo" sessionId="centre" events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
+  expect(getEditors().editors.find((e) => e.sessionId === "centre")).toMatchObject({
+    kind: "diff", rel: "new.ts", name: "new.ts · All changes", diff: { range: { base: "merge-base", head: "snapshot" }, oldPath: "old.ts" },
+  });
+  expect(screen.queryByTestId("diff")).toBeNull();
+  expect(source.fileContentsAt).not.toHaveBeenCalled();
+  dropEditors((e) => e.sessionId === "centre");
+});
 
-it("opens discard from the list and diff header and confirms against the displayed base", async () => {
+// A local row opens its diff in a centre tab (PRO-218), whose header carries the same Discard (EditorSplit.test).
+it("discards from the list against the displayed base and opens the row's diff in a centre tab", async () => {
   const source = fakeSource("local:discard");
   source.cloud = false;
   source.canWrite = true;
   source.discard = vi.fn().mockResolvedValue(undefined);
-  render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
+  render(<ChangesPanel source={source} sessionId="discard" events={events} version={2} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: "Discard changes to src/turn.ts" }));
   expect(source.discard).not.toHaveBeenCalled();
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
-  fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
-  await screen.findByTestId("diff");
-  const discardButtons = screen.getAllByRole("button", { name: "Discard changes to src/turn.ts" });
-  expect(discardButtons).toHaveLength(2);
-  fireEvent.click(discardButtons[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes to src/turn.ts" }));
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("src/turn.ts", "merge-base", undefined));
   expect(document.querySelector("button button")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Modified.*turn.ts/ }));
+  expect(getEditors().editors.find((e) => e.sessionId === "discard")).toMatchObject({ kind: "diff", rel: "src/turn.ts", diff: { scope: "all" } });
+  expect(screen.queryByTestId("diff")).toBeNull();
+  dropEditors((e) => e.sessionId === "discard");
 });
 
 it("refetches file statistics with the whitespace choice in every scope", async () => {
@@ -341,4 +496,139 @@ it("refetches file statistics with the whitespace choice in every scope", async 
   await waitFor(() => expect(source.workingChanges).toHaveBeenLastCalledWith(true));
   view.unmount();
   setPrefs({ diffHideWhitespace: false });
+});
+
+const commitSha = "a".repeat(40), parentSha = "b".repeat(40);
+const selectedCommit: CommitInfo = { sha: commitSha, parent: parentSha, tree: "commit-tree", shortSha: "aaaaaaa", subject: "A selected commit", body: "", author: "Author", email: "author@example.com", date: "2026-01-01T00:00:00Z" };
+
+it("selects and restores a commit's exact range and returns to the saved workspace target", async () => {
+  const source = fakeSource("commit-scope");
+  vi.mocked(source.logCommits).mockImplementation(async (from) => from === parentSha ? [{ ...selectedCommit, sha: parentSha, parent: null, tree: "parent-tree" }] : [selectedCommit]);
+  const props = { source, events, version: 2, active: true, live: false };
+  const view = render(<ChangesPanel {...props} />);
+  await screen.findByText(/Against main/);
+  const target = screen.getByRole("combobox", { name: "Comparison target" });
+  const suggestions = document.getElementById(target.getAttribute("list")!)!;
+  expect([...suggestions.querySelectorAll("option")].map((option) => option.value)).toEqual(["main", "origin/release"]);
+  fireEvent.change(target, { target: { value: "origin/release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await screen.findByText(/Against origin\/release/);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
+  await screen.findByText("Choose a commit to review its changes.");
+  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
+  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
+  await screen.findByText("Commit changes · 1 file");
+  expect(source.changesBetween).toHaveBeenLastCalledWith("parent-tree", "commit-tree", false);
+  fireEvent.click(screen.getByRole("button", { name: /turn.ts/ }));
+  await screen.findByTestId("diff");
+  expect(source.fileContentsAt).toHaveBeenLastCalledWith("src/turn.ts", "parent-tree", "commit-tree");
+  view.unmount();
+  render(<ChangesPanel {...props} />);
+  expect(screen.getByLabelText("Changes scope")).toHaveProperty("value", "commit");
+  await screen.findByText("Commit changes · 1 file");
+  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
+  await screen.findByText(/Against origin\/release/);
+  expect(screen.getByLabelText("Comparison target")).toHaveProperty("value", "origin/release");
+});
+
+it("discards an in-flight commit response when the scope changes", async () => {
+  const source = fakeSource("commit-race");
+  let resolve!: (value: typeof selectedCommit[]) => void;
+  vi.mocked(source.logCommits).mockImplementation((from) => from ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
+  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
+  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
+  await waitFor(() => expect(resolve).toBeDefined());
+  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
+  await screen.findByText(/Against main/);
+  await act(async () => resolve([{ ...selectedCommit, parent: null }]));
+  expect(screen.queryByText("Commit changes · 1 file")).toBeNull();
+  expect(screen.getByText(/Against main/)).toBeTruthy();
+});
+
+it("refreshes viewed identities in Uncommitted after a terminal edit", async () => {
+  const source = fakeSource("uncommitted-viewed");
+  const dirty = { path: "dirty.ts", status: "modified", additions: 1, deletions: 0, blobHash: "old" };
+  source.workingChanges.mockResolvedValue({ head: "work-head", files: [dirty] });
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  fireEvent.click(await screen.findByLabelText("Viewed dirty.ts"));
+  expect(screen.getByText("1 of 1 viewed")).toBeTruthy();
+  source.workingChanges.mockResolvedValue({ head: "work-head", files: [{ ...dirty, blobHash: "new" }] });
+  // Wait for the refresh effect after the initial range resolves.
+  await waitFor(() => expect(source.changesBetween).toHaveBeenCalledWith("work-head", "snapshot", false));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("Changed since viewed");
+  expect(screen.getByLabelText("Viewed dirty.ts")).toHaveProperty("checked", false);
+});
+
+const retainedEvents: AgentEvent[] = [
+  events[0],
+  { ...events[1], id: "checkpoint-1", seq: 2, payload: { type: "turn_checkpoint", seq: 1, base: "first-base", head: "first-head" } },
+  { ...events[1], seq: 3, payload: { ...events[1].payload, head: "first-head" } as AgentEvent["payload"] },
+  { ...events[0], id: "prompt-2", seq: 4, payload: { type: "user_message", text: "Second turn", queued: false, baseline: "second-base" } },
+  { ...events[1], id: "checkpoint-2", seq: 5, payload: { type: "turn_checkpoint", seq: 4, base: "second-base", head: "second-head" } },
+  { ...events[1], id: "done-2", seq: 6, payload: { type: "turn_completed", status: "ok", head: "second-head", authFailed: false } },
+];
+
+it("reviews only an earlier checkpoint's files and lines, persists its selection, and keeps it out of other tabs", async () => {
+  const source = fakeSource("retained-turns");
+  source.cloud = false;
+  source.canWrite = true;
+  source.discard = vi.fn();
+  source.changesBetween.mockImplementation(async (base) => [{ path: base === "first-base" ? "earlier.ts" : "latest.ts", status: "modified", additions: 1, deletions: 1, blobHash: base }]);
+  source.fileContentsAt.mockImplementation(async (_path, base, head) => ({ before: base, after: head }));
+  const props = { source, events: retainedEvents, version: 6, active: true, live: false };
+  const view = render(<ChangesPanel {...props} />);
+  const option = screen.getByRole("option", { name: "Turn · Go" }) as HTMLOptionElement;
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: option.value } });
+  fireEvent.click(await screen.findByRole("button", { name: /earlier.ts/ }));
+  expect((await screen.findByTestId("diff")).textContent).toBe("earlier.ts:first-base->first-head");
+  expect(screen.queryByRole("button", { name: /latest.ts/ })).toBeNull();
+  expect(source.changesBetween).toHaveBeenLastCalledWith("first-base", "first-head", false);
+  expect(screen.queryByRole("button", { name: /Discard/ })).toBeNull();
+  view.unmount();
+  const reopened = render(<ChangesPanel {...props} />);
+  await screen.findByRole("button", { name: /earlier.ts/ });
+  expect(screen.getByLabelText("Changes scope")).toHaveProperty("value", option.value);
+  source.changesBetween.mockClear();
+  reopened.rerender(<ChangesPanel {...props} events={retainedEvents.map((event) => ({ ...event, tabId: "other-tab" }))} version={7} />);
+  await screen.findByRole("alert");
+  expect(screen.queryByRole("button", { name: /earlier.ts/ })).toBeNull();
+  expect(source.changesBetween).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
+  await screen.findByText(/Against main/);
+});
+
+it("reports an expired earlier checkpoint without falling back to workspace lines", async () => {
+  const source = fakeSource("expired-turn");
+  source.changesBetween.mockImplementation(async (base) => {
+    if (base === "first-base") throw new Error("checkpoint tree is unavailable");
+    return [];
+  });
+  render(<ChangesPanel source={source} events={retainedEvents} version={6} active live={false} />);
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: (screen.getByRole("option", { name: "Turn · Go" }) as HTMLOptionElement).value } });
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "source: Error: checkpoint tree is unavailable");
+  expect(source.changesBetween).toHaveBeenLastCalledWith("first-base", "first-head", false);
+});
+
+it("keeps the current discard dialog and Viewed controls together in All changes", async () => {
+  const source = fakeSource("discard-with-viewed");
+  source.cloud = false;
+  source.canWrite = true;
+  source.discard = vi.fn().mockResolvedValue(undefined);
+  source.changesBetween.mockResolvedValue([{ path: "edited.ts", status: "modified", additions: 2, deletions: 1, blobHash: "before-discard" }]);
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByLabelText("Viewed edited.ts"));
+  expect(screen.getByText("1 of 1 viewed")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes to edited.ts" }));
+  expect(source.discard).not.toHaveBeenCalled();
+  const dialog = await screen.findByRole("dialog");
+  source.changesBetween.mockResolvedValue([]);
+  fireEvent.click(within(dialog).getByRole("button", { name: /^Discard$/ }));
+  await waitFor(() => expect(source.discard).toHaveBeenCalledWith("edited.ts", "merge-base", undefined));
+  await screen.findByText("All changes · 0 files");
 });

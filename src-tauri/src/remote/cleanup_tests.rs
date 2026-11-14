@@ -147,9 +147,11 @@ async fn a_terminal_open_in_a_worktree_keeps_it() {
 /// A session in the index, in a worktree of its own or in the main directory.
 fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::index::SessionEntry {
     crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        parent: None,
         section_id: None,
         project_path: f.root.to_string_lossy().into_owned(),
         checkout_branch: None,
+        checkout_pr: None,
         title: Some(title.into()),
         use_worktree: worktree.is_some(),
         base_ref: worktree.map(|_| "main".into()),
@@ -159,6 +161,7 @@ fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::in
         automation: None,
         cwd: None,
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     })
     .unwrap()
 }
@@ -283,7 +286,7 @@ fn merge_session(f: &Fixture, merged: &mut Merged, session: &crate::store::index
     git(&f.root, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
     git(&f.root, &["push", "-q", "origin", "main"]);
     let head = crate::git::head_commit(worktree).unwrap();
-    let pr = crate::github::BranchPr { number, title: "Done".into(), url: format!("https://github.com/o/r/pull/{number}"), state: "MERGED".into(), head, base: "main".into() };
+    let pr = crate::github::BranchPr { number, title: "Done".into(), url: format!("https://github.com/o/r/pull/{number}"), state: "MERGED".into(), head, base: "main".into(), ..Default::default() };
     merged.insert(branch.clone(), pr);
     crate::github::stand_in::set(&f.root, Ok(merged.clone()));
     branch
@@ -366,4 +369,69 @@ async fn the_runtime_removes_a_merged_worktree_with_its_branches_keeps_an_unsafe
     let after = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0009", "graceSeconds": 0 })).await.unwrap();
     assert_eq!(status(&after, &done.cwd)["phase"], "held");
     assert!(Path::new(&done.cwd).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
+    for method in ["workspace.remove", "workspace.sweepMerged"] {
+        let f = fixture();
+        let mut merged = Merged::new();
+        let done = session(&f, "retained cleanup", Some("retained-cleanup"));
+        let other = session(&f, "unrelated", None);
+        merge_session(&f, &mut merged, &done, 467);
+        let mut companion = done.clone();
+        companion.id = "cleanup-companion".into();
+        for tab in &mut companion.tabs { tab.id = format!("companion-{}", tab.id); }
+        crate::store::index::update(|entries| { entries.insert(0, companion.clone()); Ok(()) }).unwrap();
+        let manager = peer(&f.rpc, Authority::Manage, &crate::remote::protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":done.id,"clientRequestId":"cleanup-open"})).await.unwrap();
+        let companion_opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":companion.id,"clientRequestId":"companion-open"})).await.unwrap();
+        let companion_id = companion_opened["ptyId"].as_str().unwrap();
+        let companion_pid = f.rpc.terminals.pid(companion_id).unwrap();
+        // Workspace admission correctly refuses an actively running shell.
+        // Let this sibling exit normally; cleanup must confirm and close its
+        // metadata before encountering the other session's uncertain ownership.
+        f.rpc.terminals.write(companion_id, b"exit\n").unwrap();
+        let companion_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::harness::host::group_or_process_alive(companion_pid) {
+            assert!(std::time::Instant::now() < companion_deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let id = opened["ptyId"].as_str().unwrap();
+        let pid = f.rpc.terminals.pid(id).unwrap();
+        let failure = f.rpc.terminals.inspection_failure_for_test(id);
+        failure.store(true, std::sync::atomic::Ordering::SeqCst);
+        f.rpc.terminals.write(id, b"exit\n").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::harness::host::group_or_process_alive(pid) {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let params = |request: &str| json!({"sessionId":done.id,"expectedSessions":[done.id,companion.id],"graceSeconds":0,"deleteSessions":true,"clientRequestId":request});
+        let response = f.rpc.handle(&manager, &json!({"id":"stop-failure","method":method,"params":params("cleanup-first")})).await;
+        let result = if response["ok"] == true { Ok(response["result"].clone()) }
+            else { Err(response["error"]["message"].as_str().unwrap_or_default().to_string()) };
+        if method == "workspace.remove" { assert!(result.as_ref().is_err_and(|error| error.contains("PTY process exit could not be confirmed")), "{method}: {response}"); }
+        else {
+            let result = result.unwrap();
+            assert_ne!(status(&result, &done.cwd)["phase"], "removed", "{result}");
+            assert!(status(&result, &done.cwd)["record"].is_null(), "failed cleanup recorded removal: {result}");
+            assert!(status(&result, &done.cwd)["detail"].as_str().is_some_and(|detail| detail.contains("PTY process exit could not be confirmed")), "{result}");
+        }
+        assert!(Path::new(&done.cwd).join("README.md").is_file());
+        assert_eq!(crate::store::index::get(&done.id).unwrap().cwd, done.cwd);
+        assert_eq!(crate::store::index::get(&other.id).unwrap(), other);
+        assert!(!f.rpc.ptys.lock().unwrap()[id].closed);
+        assert_eq!(crate::store::index::get(&companion.id).unwrap().cwd, companion.cwd,
+            "partial stop must retain both sessions sharing the workspace");
+        assert!(f.rpc.ptys.lock().unwrap().get(companion_id).is_none_or(|pty| pty.closed),
+            "{method}: the successful earlier stop must close its terminal metadata");
+        failure.store(false, std::sync::atomic::Ordering::SeqCst);
+        let result = call(&f.rpc, &manager, method, params("cleanup-retry")).await.unwrap();
+        if method == "workspace.sweepMerged" { assert_eq!(status(&result, &done.cwd)["phase"], "removed", "{result}"); }
+        assert!(!Path::new(&done.cwd).exists());
+        assert!(crate::store::index::get(&done.id).is_err());
+        assert!(crate::store::index::get(&companion.id).is_err());
+        assert_eq!(crate::store::index::get(&other.id).unwrap(), other);
+    }
 }

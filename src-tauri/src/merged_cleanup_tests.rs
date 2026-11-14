@@ -100,7 +100,7 @@ impl Fixture {
     fn archive_script(&mut self, archive: &str) {
         let project = crate::store::projects::add(self.alpha().to_str().unwrap()).unwrap();
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         if self.archive.is_none() { self.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64)))); }
     }
@@ -109,8 +109,8 @@ impl Fixture {
         self.base.join("alpha")
     }
 
-    fn branch(name: &str) -> String {
-        git::worktree_branch(name)
+    fn branch(&self, name: &str) -> String {
+        git::worktree_branch_for(&self.alpha(), name).unwrap()
     }
 
     /// A worktree TerminalX made, with a commit of its own pushed to its branch.
@@ -124,23 +124,23 @@ impl Fixture {
     /// GitHub's answer for the worktree's branch: a pull request in `state`
     /// whose head is where the branch is now.
     fn pr(&self, name: &str, number: u64, state: &str) {
-        let branch = Self::branch(name);
+        let branch = self.branch(name);
         let head = sh(&self.alpha(), &["rev-parse", &format!("refs/heads/{branch}")]);
-        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into() };
+        let pr = BranchPr { number, title: format!("Pull request for {name}"), url: format!("https://github.com/o/r/pull/{number}"), state: state.into(), head, base: "main".into(), ..Default::default() };
         self.prs.lock().unwrap().as_mut().unwrap().insert(branch, pr);
     }
 
     /// Merge the worktree's branch into `main` on the remote, as GitHub's
     /// "Create a merge commit" does, and say its pull request merged.
     fn merge(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--no-ff", "-m", &format!("Merge {name}"), &self.branch(name)]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     /// "Squash and merge": the branch's whole change as one new commit.
     fn squash(&self, name: &str, number: u64) {
-        sh(&self.alpha(), &["merge", "-q", "--squash", &Self::branch(name)]);
+        sh(&self.alpha(), &["merge", "-q", "--squash", &self.branch(name)]);
         sh(&self.alpha(), &["commit", "-q", "-m", &format!("{name} (#{number})")]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
@@ -150,18 +150,18 @@ impl Fixture {
     /// has moved on, so none of the branch's own commits is in it.
     fn rebase(&self, name: &str, number: u64) {
         commit(&self.alpha(), &format!("moved-on-before-{name}.txt"));
-        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", Self::branch(name))]);
+        sh(&self.alpha(), &["cherry-pick", &format!("main..{}", self.branch(name))]);
         sh(&self.alpha(), &["push", "-q", "origin", "main"]);
         self.pr(name, number, "MERGED");
     }
 
     fn session(&self, cwd: &Path, status: TabStatus) -> SessionEntry {
-        let tab = TabEntry { transport: Default::default(),
+        let tab = TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: "claude".into(),
             title: None,
             model: String::new(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: "default".into(),
             provider_session_id: None,
             status,
@@ -169,7 +169,7 @@ impl Fixture {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         };
@@ -178,6 +178,7 @@ impl Fixture {
             id: uuid::Uuid::now_v7().to_string(),
             kind: crate::store::index::SessionKind::Project,
             link: None,
+            parent: None,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: (cwd != project).then(|| cwd.file_name().unwrap().to_string_lossy().into_owned()),
@@ -195,6 +196,7 @@ impl Fixture {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             tabs: vec![tab],
             unknown: BTreeMap::new(),
@@ -258,11 +260,11 @@ impl Fixture {
     }
 
     fn local_branch(&self, name: &str) -> Option<String> {
-        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", Self::branch(name))]).ok().map(|sha| sha.trim().to_string())
+        git::run(&self.alpha(), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", self.branch(name))]).ok().map(|sha| sha.trim().to_string())
     }
 
     fn remote_branch(&self, name: &str) -> Option<String> {
-        remote_tip(&self.alpha(), &Self::branch(name)).unwrap()
+        remote_tip(&self.alpha(), &self.branch(name)).unwrap()
     }
 }
 
@@ -377,7 +379,7 @@ fn squash_and_rebase_merges_are_recognised_and_their_branches_go_too() {
     f.rebase("rebased-one", 71);
     // Neither branch's own commits are in main.
     for name in ["squashed-one", "rebased-one"] {
-        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", Fixture::branch(name))]), "0");
+        assert_ne!(sh(&f.alpha(), &["rev-list", "--count", &format!("origin/main..{}", f.branch(name))]), "0");
     }
 
     assert!(f.sweep(1).iter().all(|status| status.phase == Phase::Scheduled));
@@ -604,7 +606,7 @@ fn only_a_merged_pull_request_counts_and_only_for_a_worktree_terminalx_made() {
     // GitHub would even say the default branch has a merged pull request.
     let mut answers = f.prs.lock().unwrap().clone().unwrap();
     for (branch, head) in [("by-hand", head), ("main", sh(&alpha, &["rev-parse", "main"]))] {
-        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into() });
+        answers.insert(branch.into(), BranchPr { number: 9, title: "T".into(), url: "u".into(), state: "MERGED".into(), head, base: "main".into(), ..Default::default() });
     }
     *f.prs.lock().unwrap() = Ok(answers);
     f.session(&alpha, TabStatus::Idle);
@@ -806,6 +808,34 @@ fn an_undo_puts_back_the_worktree_its_branches_and_its_sessions_and_keeps_it_fro
 }
 
 #[test]
+fn an_undo_brings_a_sparse_workspace_back_with_the_folders_it_had() {
+    let f = Fixture::new();
+    // Made while the repository chose only its root files; the choice is gone by the undo.
+    std::fs::create_dir_all(f.alpha().join("docs")).unwrap();
+    std::fs::write(f.alpha().join("docs/guide.md"), "guide\n").unwrap();
+    sh(&f.alpha(), &["add", "docs"]);
+    sh(&f.alpha(), &["commit", "-qm", "docs"]);
+    sh(&f.alpha(), &["push", "-q", "origin", "HEAD"]);
+    std::fs::create_dir_all(f.alpha().join(".terminalx")).unwrap();
+    std::fs::write(f.alpha().join(".terminalx/settings.json"), r#"{"sparseCheckout": []}"#).unwrap();
+    let wt = f.worktree("narrow");
+    assert!(!wt.join("docs").exists());
+    std::fs::remove_dir_all(f.alpha().join(".terminalx")).unwrap();
+    f.session(&wt, TabStatus::Idle);
+    f.squash("narrow", 96);
+    f.sweep(1);
+    let swept = f.sweep(12);
+    let status = of(&swept, &wt);
+    let record = status.record.clone().unwrap_or_else(|| panic!("not removed: {status:?}"));
+    assert!(!wt.exists());
+    assert_eq!(record.sparse_checkout, Some(Vec::new()));
+    f.with_host(|host| restore(host, &*f.events, &record.id, f.at(21)).unwrap());
+    assert!(wt.join("narrow.txt").exists());
+    assert!(!wt.join("docs").exists(), "the undo checks out only what the workspace had");
+    assert_eq!(sh(&wt, &["status", "--porcelain"]), "");
+}
+
+#[test]
 fn an_undo_is_refused_when_what_it_would_put_back_is_in_the_way() {
     let f = Fixture::new();
     let wt = f.worktree("in-the-way");
@@ -837,6 +867,28 @@ fn an_undo_is_refused_when_what_it_would_put_back_is_in_the_way() {
     let recorded = f.with_host(|host| records(host).unwrap());
     assert!(recorded.iter().any(|view| view.blocked.as_deref() == Some("Its path is not in the project's worktree folder.")), "{recorded:#?}");
     assert!(!f.base.join("elsewhere").exists());
+}
+
+#[test]
+fn restoring_from_a_retained_session_holds_the_merged_workspace_and_rolls_back_failed_holds() {
+    let f = Fixture::new();
+    let wt = f.worktree("session-restore");
+    let session = f.session(&wt, TabStatus::Idle);
+    f.squash("session-restore", 196);
+    f.sweep(1);
+    let record = of(&f.sweep(12), &wt).record.clone().unwrap();
+    let before = serde_json::to_value(Ledger::load().unwrap()).unwrap();
+    let failed: anyhow::Result<()> = with_workspace_restore(wt.to_str().unwrap(), &record.project_path, &record.commit, || anyhow::bail!("checkout failed"));
+    assert!(failed.is_err());
+    assert_eq!(serde_json::to_value(Ledger::load().unwrap()).unwrap(), before);
+    with_workspace_restore(wt.to_str().unwrap(), &record.project_path, "another-commit", || Ok(())).unwrap();
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_none());
+    let plan = crate::workspace_restore::preview(&session.id).unwrap();
+    assert_eq!(plan.commit, record.commit);
+    crate::workspace_restore::restore(&*f.events, &session.id, &plan, Some(&record.branch), &|_| Ok(())).unwrap();
+    assert_eq!(reason(of(&f.sweep(600), &wt)), (Phase::Held, ""));
+    assert!(wt.exists());
+    assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_some());
 }
 
 #[test]

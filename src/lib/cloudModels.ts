@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { RuntimeAgent, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { ModelInfo } from "@/lib/api";
-import { offeredOn, refreshModels } from "@/lib/models";
+import { offeredOn, refreshModels, useModelsLoaded } from "@/lib/models";
 import { retainCloudConnection, subscribeCloudConnections, type CloudLease, type CloudTarget } from "@/lib/cloudConnections";
 
 interface Reading {
@@ -83,11 +83,13 @@ export function useRuntimeModels(client: WorkspaceRpcClient | null | undefined):
 /** Local models are only a fallback for cloud: never carry their resolved versions across machines. */
 export function usePickerModels(local: ModelInfo[], remote: boolean, client?: WorkspaceRpcClient | null, harness?: string) {
   const runtime = useRuntimeModels(remote ? client : null);
+  const localLoaded = useModelsLoaded();
   const models = !remote ? local : runtime
     ? runtime.models.filter((model) => !harness || model.harness === harness)
     : offeredOn(local, false).map((model) => ({ ...model, resolved: null }));
   const refresh = () => remote ? (client ? readingFor(client).refresh() : Promise.resolve()) : refreshModels();
-  return { models, refresh };
+  // Until the agents have answered, an empty list is a wait, not an answer.
+  return { models, refresh, loaded: remote ? !!runtime : localLoaded };
 }
 
 /** Inspect the running workspace chosen for a new session. Never wake stopped compute. */

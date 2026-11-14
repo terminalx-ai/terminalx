@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, useImperativeHandle, type ReactNode } from "react";
+import { act, useEffect, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
@@ -23,13 +24,17 @@ const mocks = vi.hoisted(() => ({
   scrollToOffset: vi.fn(),
   initialBatchOnly: false,
   uuids: 0,
+  sheetChoice: "Choose File",
+  pasted: new Set<(image: { data: string; width: number; height: number }) => void>(),
 }));
-vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
+vi.mock("../modules/paste-image", () => ({ addPasteImageListener: (listener: any) => { mocks.pasted.add(listener); return () => { mocks.pasted.delete(listener); }; } }));
+vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
+vi.mock("expo-image-picker", () => ({ launchImageLibraryAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
@@ -37,15 +42,21 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
 } }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Plus", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
   return {
-    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, Image: () => null, RefreshControl: () => null,
+    // The + sheet: the test picks a file unless it chose the photo library.
+    ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
+    AppState: { currentState: "active" },
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
+    Keyboard: { addListener: () => ({ remove: () => undefined }) },
+    PanResponder: { create: () => ({ panHandlers: {} }) },
+    ActivityIndicator: () => null,
+    Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{children}</button>,
-    TextInput: ({ value, onChangeText, placeholder }: any) => <input value={value} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
+    TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur }: any) => <input value={value} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
       useImperativeHandle(props.ref, () => ({ scrollToOffset: mocks.scrollToOffset }));
@@ -88,6 +99,7 @@ beforeEach(() => {
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
   mocks.initialBatchOnly = false;
+  mocks.sheetChoice = "Choose File";
   mocks.uuids = 0;
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
@@ -106,6 +118,7 @@ beforeEach(() => {
       reassemblesFragments: async () => false,
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
+      markRead: vi.fn(async () => {}),
       subscribeSession: vi.fn((tab, listener, ready) => { mocks.sessionListeners.set(tab, listener); if (ready) mocks.sessionReady.set(tab, ready); return () => { mocks.sessionListeners.delete(tab); mocks.sessionReady.delete(tab); }; }),
       subscribeTerminal: vi.fn((_session, tab, listener) => { mocks.terminalListeners.set(tab, listener); return () => { mocks.terminalListeners.delete(tab); }; }),
       readTerminal: vi.fn(async (_session, tab) => `${tab} output`),
@@ -259,9 +272,36 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(shown("Run the tests")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
   });
 
+  it("attaches photos from the library as JPEG, named for the photo", async () => {
+    mocks.sheetChoice = "Photo Library";
+    vi.mocked(ImagePicker.launchImageLibraryAsync).mockResolvedValueOnce({ canceled: false, assets: [
+      { uri: "file:///IMG_1.HEIC", fileName: "IMG_1.HEIC", mimeType: "image/heic", base64: "anBn", assetId: "a1", width: 1, height: 1 },
+      { uri: "file:///shared", fileName: null, mimeType: "image/png", base64: "cG5n", assetId: null, width: 1, height: 1 },
+    ] } as any);
+    await render(); await click("Add attachment"); await click("Send");
+    expect(vi.mocked(ImagePicker.launchImageLibraryAsync)).toHaveBeenCalledWith(expect.objectContaining({ mediaTypes: ["images"], allowsMultipleSelection: true, selectionLimit: 8, base64: true }));
+    expect(DocumentPicker.getDocumentAsync).not.toHaveBeenCalled();
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "", [
+      { mediaType: "image/jpeg", data: "anBn", name: "IMG_1.jpg" },
+      { mediaType: "image/jpeg", data: "cG5n", name: "Photo 2.jpg" },
+    ], expect.any(String));
+  });
+
+  it("attaches an image pasted into the message field, and only there", async () => {
+    const paste = (data: string) => act(async () => { for (const listener of mocks.pasted) listener({ data, width: 1, height: 1 }); });
+    await render();
+    // Pasted while the field is not being typed in: not this message's.
+    await paste("bm90");
+    await act(async () => { input().focus(); });
+    await paste("anBn");
+    await act(async () => { input().blur(); });
+    await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "", [{ mediaType: "image/jpeg", data: "anBn", name: "Pasted image.jpg" }], expect.any(String));
+  });
+
   it("sends the text and its attachments in one message", async () => {
     vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
-    await render(); await click("Attach file"); await type("See the brief"); await click("Send");
+    await render(); await click("Add attachment"); await type("See the brief"); await click("Send");
     expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("See the brief");
@@ -269,7 +309,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
   });
 
   it("adds a worktree note once and sends nothing to the agent", async () => {
-    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    await render(); mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await type("Deploying at 5"); await click("Send");
     expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5", expect.any(String));
     expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Note added.");
@@ -335,7 +375,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
 
   it("says a worktree note the Mac never answered may have been added, not that it reached the agent", async () => {
     mocks.app.api.postNote.mockRejectedValueOnce(new Error("RPC timed out: chat.post"));
-    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    await render(); mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await type("Deploying at 5"); await click("Send");
     expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
     expect(container.textContent).not.toContain("agent. Check");
     expect(() => button("Send again")).toThrow();
@@ -418,7 +458,7 @@ describe("sending a draft again after a lost reply (#675)", () => {
     mocks.app.api.sendSession.mockRejectedValueOnce(dropped()).mockRejectedValueOnce(dropped());
     await render(); await type("See the brief");
     await click("Send");
-    await click("Attach file"); await click("Send");
+    await click("Add attachment"); await click("Send");
     await click("Remove brief.pdf"); await click("Send");
     const [plain, attached, removed] = sendIds();
     expect(attached).not.toBe(plain);
@@ -430,7 +470,7 @@ describe("sending a draft again after a lost reply (#675)", () => {
     mocks.app.api.postNote.mockRejectedValueOnce(dropped());
     await render(); await type("Deploying at 5");
     await click("Send");
-    await click("Add worktree note"); await click("Send"); await click("Send");
+    mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await click("Send"); await click("Send");
     const [[, , first], [, , again]] = mocks.app.api.postNote.mock.calls;
     expect(again).toBe(first);
     expect(first).not.toBe(sendIds()[0]);
@@ -477,7 +517,7 @@ describe("mobile transcript mount budget (#385)", () => {
 describe("mobile conversation navigation", () => {
   it("keeps the composer placeholder and draft stable while reconnecting", async () => {
     await render(); await type("Keep my draft");
-    expect(input().placeholder).toBe("Message this session");
+    expect(input().placeholder).toBe("Message Claude Code");
     const placeholder = input().placeholder;
     for (const stage of ["reconnecting", "connected", "cant-connect", "connected"]) {
       mocks.app.connectionStage = stage;
@@ -489,23 +529,44 @@ describe("mobile conversation navigation", () => {
     }
   });
 
-  it("opens each list row with the exact conversation and searches by agent", async () => {
+  it("lists each chat once, as the desktop does, opening the conversation that waits on the reader", async () => {
     await render(true);
-    const rows = [...container.querySelectorAll("button")].filter((item) => item.textContent?.includes("Create a new issue"));
-    expect(rows).toHaveLength(2);
-    for (const [index, tabId] of ["claude", "codex"].entries()) {
-      await act(async () => rows[index].click());
-      expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ sessionId: "worktree", tabId, hostId: mocks.params.hostId }) }));
-    }
-    await type("Codex");
-    expect(container.textContent).toContain("Codex");
-    expect(container.textContent).not.toContain("Claude Code");
+    // Named by its worktree on a Mac that sends no branch, and saying it needs the reader.
+    const rows = () => [...container.querySelectorAll("button")].filter((item) => item.getAttribute("aria-label")?.startsWith("issue-132"));
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].getAttribute("aria-label")).toContain("needs you");
+    await act(async () => rows()[0].click());
+    expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ sessionId: "worktree", tabId: "claude", hostId: mocks.params.hostId }) }));
+    // Then the one working, once nothing waits.
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], tabs: [{ ...mocks.app.sessions[0].tabs[0], status: "idle" }, mocks.app.sessions[0].tabs[1]] }];
+    await render(true);
+    expect(rows()[0].getAttribute("aria-label")).toContain("working");
+    await act(async () => rows()[0].click());
+    expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ tabId: "codex" }) }));
+  });
+
+  it("keeps manual status visible and updated in both the Chats and Projects lists", async () => {
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "in_review" }];
+    await render(true);
+    const row = () => [...container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label")?.startsWith("issue-132"))!;
+    expect(row().textContent).toContain("In review");
+    expect(row().getAttribute("aria-label")).toContain("In review");
+    await click("Group by project");
+    expect(row().textContent).toContain("In review");
+    expect(row().getAttribute("aria-label")).toContain("In review");
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "done" }];
+    await render(true);
+    expect(row().textContent).toContain("Done");
+    expect(row().textContent).not.toContain("In review");
+    await click("Show all chats");
+    expect(row().textContent).toContain("Done");
+    expect(row().getAttribute("aria-label")).toContain("Done");
+    expect(row().textContent).not.toContain("In review");
   });
 
   it("switches agents, keeps drafts and transcripts separate, and sends to the selected tab", async () => {
     await render();
     expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Claude Code");
-    expect(container.textContent).toContain("Create a new issue");
     await type("Claude draft");
     await click("Open Codex"); await render();
     expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Codex");
@@ -964,7 +1025,8 @@ describe("the phone's terminal view, as on the desktop", () => {
     await type("git status");
     await click("Send terminal input");
     expect(sent().slice(0, 4)).toEqual(["l", "\x1b", "\x1b[A", "\x03"]);
-    expect(sent().at(-1)).toBe("\x1b[200~git status\x1b[201~");
+    // Written first, it goes whole, and Enter with it.
+    expect(sent().at(-1)).toBe("\x1b[200~git status\x1b[201~\r");
   });
 
   it("says why the terminal cannot open, and opens it again on request", async () => {
@@ -1006,7 +1068,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     terminalMac();
     mocks.app.api.features = async () => ({});
     await render();
-    const labels = () => [...container.querySelectorAll("button")].map((item) => item.textContent);
+    const labels = () => [...container.querySelectorAll("button")].map((item) => item.getAttribute("aria-label") ?? item.textContent);
     expect(labels()).not.toContain("Terminal");
     mocks.app.api.features = async () => ({ terminal: 1 });
     await act(async () => { for (const listener of mocks.featureListeners) listener(); });
@@ -1035,16 +1097,6 @@ describe("the phone's terminal view, as on the desktop", () => {
     await type("still here");
     await click("Send");
     await vi.waitFor(() => expect(mocks.app.api.sendSession).toHaveBeenCalled());
-  });
-});
-
-describe("new sessions from the sessions list (#730)", () => {
-  it("offers New session once the Mac's runtime starts sessions for a phone", async () => {
-    await render(true);
-    expect(container.querySelector("[aria-label='New session']")).toBeNull();
-    mocks.app.api.features = async () => ({ sessionCreate: 1 });
-    await act(async () => { for (const listener of mocks.featureListeners) listener(); });
-    await vi.waitFor(() => expect(container.querySelector("[aria-label='New session']")).not.toBeNull());
   });
 });
 

@@ -343,6 +343,15 @@ number; absent before 0.2.24).
   (`handover_busy`). That includes one whose hook has yet to wake when the
   bridge is taken: it is still waiting, on a card no held tab waits on any
   more, and the runtime taking over would find no card for it.
+- **Stats.** Activity history (#767) is written by the runtime, which holds
+  its lease on a descriptor that closes with the exec; the runtime taking
+  over claims it again before it adopts anything. What the exec would lose
+  is each tab's last counted state, which the record carries: a turn under
+  way is not counted as a new agent start when it is seen again, and when it
+  ends it counts the time it ran before the handover too. The record also
+  carries the machine's monotonic capture time, so work during serialization,
+  exec and replacement startup counts without depending on the wall clock.
+  Older records without this timestamp retain the elapsed work they supplied.
 - **What it cannot carry** in format 1 is an agent driven over its standard
   input and output (experimental Codex stdio, ACP agents, OpenCode) while its
   process runs. `runtime.handover.plan` names it; the handover refuses
@@ -947,3 +956,284 @@ enough to pass 2 MiB. The guarantees below replace that.
   with its reason. It records failed attempts sparsely: the first, each with a
   new reason, and the 2nd, 4th, 8th and so on. Each recovery is recorded with
   how long the connection was down and how many attempts it took.
+
+## Workspace ports and local URLs (PRO-243)
+
+Before a local shell or agent starts, its checkout receives a block of ten
+ports. `TERMINALX_PORT` is the first port; `TERMINALX_PORTS` is the ten ports
+as a comma-separated list. For example, a shell can run
+`pnpm dev --port "$TERMINALX_PORT"`. Commands must use these variables to
+benefit from the allocation; existing running processes retain their old
+environment. The assignments do not reserve sockets against other applications.
+
+The first ports range from 20000 through 49000 in steps of ten. Assignments
+are shared by sessions in the same canonical checkout, distinct across
+checkouts, and persisted in `sessions/index.json` under `workspacePorts`.
+The index transaction lock protects simultaneous launches. Renaming a
+workspace retains its block; archived sessions retain theirs too. After the
+last session of a workspace is removed, a later allocation may reuse its
+block. No repository file supplies commands or port assignments.
+
+A visible local terminal offers **Open** for up to eight localhost URLs
+with explicit ports found in its bounded output tail. Opening one creates
+and selects a TerminalX browser tab for that pane's session. Discovery is
+read-only, ignores terminal control strings, and never opens a URL without
+a click. It polls only while the pane and window are visible. Older runtimes
+without `runtime.pty.localLinks` simply offer no links.
+
+This is the independent portion of PRO-243. Named actions, the header Run
+menu, Cmd+R and non-concurrent replacement must use PRO-131's
+`repositorySettings` (#804) and PRO-149's script runner (#808) when those
+land. Setup port injection and “run after setup” await PRO-240 (#836).
+The action editors from PRO-155 (#809) are already on main; this change
+does not introduce a competing action schema or script runner.
+
+## Stop confirmation and destructive callers
+
+A PTY pane name can be reused after its view/process handle is detached. Stop
+confirmation therefore retains the exact launch ownership handles, and the
+terminal registry associates every retained launch with its pane ID. A failed
+agent Stop keeps those handles for retry; it does not resolve the reused name
+and stop a replacement. Session deletion also discovers unresolved shell launches
+whose Pane objects have already been removed. Confirmation errors keep the
+session indexed and its workspace/history intact; unrelated sessions are not a
+reason to veto or broaden a scoped stop.
+
+| Caller | Required result before mutation |
+| --- | --- |
+| Agent Stop and retry | Exact captured PTY launches must confirm exit; failure keeps stopping/recovery and launch admission closed. |
+| Agent relocation | Every affected agent Stop must succeed; failure preserves original workspace metadata. Reader-opened shells are not stopped. |
+| Session deletion and tab removal | Scoped agents and shells must confirm exit before history/index removal. |
+| Remote session/workspace removal and merged cleanup | Fallible stop reaches the existing retention/refusal APIs; waiting cleanup retains terminal metadata and subscriptions on failure. |
+| Resource kill | Sampling, kill rules and confirmation still apply; an unconfirmed wait cannot return `killed: true`. |
+| Explicit Stop all | Per-tab failures and retained owned groups prevent acknowledgement; this remains broader than a session-scoped operation. |
+| Nonwaiting terminal teardown | Requests termination without promising confirmed exit; retained launch ownership remains available to later confirmation. |
+
+These results are bounded OS observations of owned work, not a universal
+process-containment certificate.
+
+On macOS they come from main's answer: whether the pane leader's process
+group is still alive, signalled as a group. The session census the backup
+added (stopping every job group of the session, and retiring a launch only
+once the whole session is seen empty) is not applied on macOS. That census
+is strict: any process on the machine that ends between being listed and
+being asked makes it indeterminate. On a busy Mac a stop then ran out its
+wait: `archive_script`'s timeout test failed 13 of 30 runs under 6-way
+parallel load, against main's 0 of 30. Retrying the census helped, but
+still failed 4 of 100 runs at a system load near 10. Darwin census work is
+on its own hold, so macOS keeps main's behaviour until that work lands.
+The census code stays, `cfg`-gated, for Linux panes adopted from a runtime
+from before the supervisor, and for other Unix systems (`settled_session_jobs`).
+
+On Linux the census is no longer the authority; see
+[Linux PTY ownership](#linux-pty-ownership-467).
+
+The compatibility `kill_and_wait`/`kill_all_and_wait` wrappers log failure for
+non-confirming teardown callers. Destructive session/workspace/resource callers
+use the fallible variants. Final headless process teardown still uses the unit
+wrapper; it is not a successful removal acknowledgement. Restart reservations
+publish their exact detached handles before releasing runtime, and completion
+retires only those handles under the still-current claim. No runtime lock is
+held across a process-exit wait; startup refuses unresolved prior ownership and
+leaves its handles for explicit Stop instead.
+
+## Linux PTY ownership (#467)
+
+On Linux every terminal pane, an agent's included, runs under a supervisor
+process of its own, one per launch. The supervisor, not a process census,
+decides when a launch is over. macOS is unchanged: its panes are still
+portable-pty children, owned through the session census described above.
+
+### The supervisor
+
+`Terminals` starts each pane by executing `/proc/self/exe` with a private
+argument and the launch's id: the exact image the runtime is running, even
+when an update has since replaced or removed its file. The helper runs from
+the executable's pre-initialisation array, before any shared library's
+constructor (the desktop links GTK and WebKit) and before `main`; `main.rs`
+and `serve.rs` also dispatch first, should that not have run. Two
+descriptors are inherited at fixed slots: a `SOCK_SEQPACKET` socket pair for
+a bounded, versioned protocol, and the PTY's peer, opened from the master
+with `TIOCGPTPEER`, never by path. There is no listener, path or RPC through
+which anything else can reach a supervisor.
+
+Before doing anything, the helper checks:
+
+- that the channel's peer is its parent, with its uid;
+- that the PTY slot is a terminal;
+- that its parent is this same program image: the same device and inode
+  behind `/proc/self/exe` and `/proc/<parent>/exe`;
+- that it runs with unchanged privileges.
+
+It then closes every other descriptor and runs preflight. Preflight requires
+a single thread, `pidfd_open` and `pidfd_send_signal`, `close_range`,
+`PR_SET_CHILD_SUBREAPER`, an all-child `waitid`, and a `/proc` of its own PID
+namespace. That means Linux 5.9 or later, with no seccomp filter denying
+these calls. A failure is reported to the runtime by stage, and the message
+says what is missing. There is no fallback to the census.
+
+The supervisor becomes the subreaper of everything the launch starts. It
+forks the shell in a new session with the PTY as its controlling terminal,
+the signal mask and dispositions reset, and the control socket not
+inherited. Arguments and environment are carried as bytes. `Started` means
+an exec was observed (a close-on-exec handshake, then the child's proc flags
+under its still-unreaped identity). It does not mean the program got far,
+or will keep running.
+
+The supervisor's main loop is the only caller of `waitpid(-1, __WALL)` in
+that process. The shell's exit status is reported, but a shell exiting does
+not end the launch: jobs it left, including ones that called `setsid` and
+left its session, stay owned. Stop moves a launch through these steps:
+
+1. The runtime sends a numbered Stop claim with a grace.
+2. The supervisor signals each direct child it still holds, through a pidfd
+   taken and checked against its unreaped identity: TERM once to each
+   (a child it comes to hold later, such as an orphan, gets its own), then
+   KILL once the grace is over. The caller's own escalation sets the grace,
+   as on macOS: a closed pane's Stop gives two seconds, and Stop forces its
+   KILL after 400 ms by sending the same claim again with no grace. A Stop
+   the supervisor starts by itself (its channel lost) gives 400 ms.
+3. 1.6 seconds after the KILL it reports "unconfirmed" (two seconds into a
+   default Stop). A new Stop restarts the escalation.
+4. Only `ECHILD` from the all-child wait, for the current claim, makes it
+   report "extinct". The runtime accepts that only while its pidfd witness
+   of the supervisor is still live.
+5. The runtime then lets the supervisor exit, and reaps it.
+
+Where preflight finds the system lacking something (an older kernel, no
+`CONFIG_PROC_CHILDREN`, a seccomp filter denying pidfds or `close_range`),
+nothing is started under a supervisor. That launch, and every later one
+of the runtime, opens as before the supervisor, through portable-pty with
+main's census, and every window is told once: "Terminals on this system
+stop when TerminalX quits (missing: …)".
+
+Some things never count as success: a timeout, a lost or out-of-order
+channel, a supervisor that died after a launch was sent, or an uncertain
+send. These keep the launch owned (`OwnedGroup::pid` stays `Some`), so Stop,
+destructive cleanup and idle exit go on treating it as live work.
+
+A lost channel usually settles by itself. The supervisor sees its end
+close, stops everything as for a Stop, and exits with status 124 only once
+its all-child wait finds nothing left (`linux::EMPTY_AFTER_LOSS`). The
+runtime reaps that exact helper, and that status is the proof. A
+supervisor that is killed or crashes ends with anything else, and leaves
+the launch lost for good: nothing it started can be observed any more, but
+it may still run. So does one whose helper has not exited a minute after
+the loss, being stopped or stuck in the kernel. Only the reader releases
+such a launch, explicitly (see below); its helper is then killed and
+reaped. It is never forgotten silently.
+
+### Integration with the runtime
+
+Only the process creation in `Terminals::spawn_after` changes on Linux:
+
+- portable-pty's spawn is replaced by the supervisor bootstrap;
+- `Waiter::Supervised` waits on the shell status the supervisor reports;
+- `OwnedGroup` defers `pid` and `signal` to the launch's supervisor.
+- A supervised pane's writer does not type the newline and VEOF that
+  portable-pty's writer sends when dropped. On macOS the group signal
+  reaches the program before those bytes do; a supervisor's Stop arrives a
+  moment later, so the program would read them as input.
+
+Every caller (Stop, Stop All, tab and session removal, merged cleanup,
+resource kills, the stop confirmation above) is main's code unchanged. The
+bootstrap runs under whatever guards the caller already holds, as
+portable-pty's spawn did. It normally completes in milliseconds and is
+bounded at 12 seconds. A bootstrap that fails with ownership unsettled
+stays listed under its pane id, for Stop to end.
+
+This is deliberately narrower than the 2026-11-12 draft, which moved
+discovery and bootstrap outside the runtime, admission and authority
+guards. That needed a Linux-only launch, send and admission path (pending
+launch records, cold-send tickets, discovery fencing) beside main's, and it
+is not carried. The cost is that a pathological bootstrap can hold the
+caller's guards for up to the 12-second bound. Main's spawn under those
+guards was never unbounded-safe either: a hung `fork` or `exec` held them
+indefinitely.
+
+### Through a runtime update (#765)
+
+The in-place handover carries supervised launches:
+
+- `freeze` holds each launch's observer still, between whole exchanges.
+  What it has sent and received is all in its state, and anything newer
+  waits in the channel.
+- The record gets that state, plus a duplicate of the control socket that
+  the exec keeps open.
+- The supervisor stays this process's unreaped child across the exec, so
+  its pid still names it. The runtime that takes over reaps around it,
+  re-opens its pidfd, checks that the channel is a SEQPACKET pair this same
+  process made, and resumes the observer.
+
+Shells, agents and their jobs keep running in the same terminals, as on
+macOS. A handover that is called off lets every observer go on.
+
+A terminal closed while the handover holds its supervisor is not lost.
+Each held launch's state is taken again just before the record is written,
+so such a Stop goes over as stopping and the runtime that takes over sends
+it. A Stop that comes after that, up to the exec, calls the handover off,
+and the Stop goes ahead where it was asked. If the runtime taking over
+cannot adopt a carried supervisor, its channel closes, and the supervisor
+ends what the launch runs. The helper is reaped, and every window names
+the terminal: "A terminal could not be kept running through the update and
+was stopped".
+
+A launch that cannot be carried as it stands is listed in
+`runtime.handover.plan` by its terminal's title, as a `Terminal` item with
+its pane id. That covers one still starting, one between proof and release,
+and one lost. The handover then refuses as `handover_unadoptable`, never as
+`handover_busy`. The desktop reads the plan again every five seconds with
+no attempt cap (`replace.rs`, `check`), shows what it is waiting for, and
+finishes the update once nothing is listed. A starting launch clears within
+the bootstrap bound, and a lost channel settles as above. The items carry
+no session or tab, so Update now and Restart now never stop them.
+
+What clears a launch lost for good is the reader. When Update now or
+Restart now passes back a shown item's pane, `runtime.handover` releases
+exactly that launch, if it is lost for good, before deciding what still
+blocks. The log records that what it started may still be running,
+unowned. A launch still starting or cleaning up is not released and goes on
+holding. So the update can wait on a lost launch only while the window
+names it, and the reader can always get through by choosing to update
+anyway.
+
+There is one remaining way for the update to give up. A refusal that comes
+as `handover_busy` (a terminal opening just as the freeze began, a hook or
+pipeline step not settling) counts toward `BUSY_ATTEMPTS` (six) in
+`replace.rs`'s `handover_busy`. After that the window shows the blocker and
+advises Stop all and quit, as it does on macOS. A supervised terminal
+reaches that path only through the transient "A terminal was opening."
+
+### Evidence and its limits
+
+Tests:
+
+- **`src-tauri/serve/tests/local_supervisor.rs`** drives the shipped module
+  from a dispatcher with no libtest harness. It covers live exec and stop,
+  injected bootstrap faults, lost and uncertain launches, clone, nested and
+  orphan adoption, multithreaded leader exit, and a helper refusing a parent
+  that is another program.
+- **The lib's Linux tests** (`pty::supervised_tests`) start real supervised
+  panes. They cover:
+  - an escaped `setsid` job stopped with its launch;
+  - ownership outliving its shell;
+  - a lost channel settled by the supervisor's own exit-124 proof;
+  - a launch whose supervisor was killed holding the freeze, named by pane,
+    never released by itself, and released only explicitly (a running
+    launch never is).
+- **The #765 tests** (`pty::handover::tests`) carry real supervised panes
+  between two `Terminals` in one process.
+- **`serve/tests/local_handover.rs`** execs the real runtime with a terminal
+  and agents running.
+
+These ran in a Linux container: aarch64, kernel 6.8, uid 501, all
+capabilities dropped, no-new-privileges, no network.
+
+What this does not show:
+
+- other kernels, seccomp profiles, proc mounts or user namespaces;
+- a packaged Linux desktop being updated;
+- the unchanged-privileges check against a real setuid launch, which no test
+  can run unprivileged.
+
+Darwin's census omission stays on its separate hold.

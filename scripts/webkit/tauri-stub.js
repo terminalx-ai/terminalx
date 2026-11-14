@@ -7,10 +7,12 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   // the legacy preferences whose migration the layout checks exercise.
   const settingsKey = "__pw_settings_file__";
   const settings = JSON.parse(sessionStorage.getItem(settingsKey) || "null") ?? {
-    file: { path: "/Users/demo/.raccoon/settings.json", exists: false, error: null, preferences: {} },
+    file: { path: "/Users/demo/.raccoon/settings.json", displayPath: "~/.raccoon/settings.json", exists: false, error: null, problem: null, setKeys: [], preferences: {} },
     migrated: false,
   };
   const saveSettings = () => {
+    // PRO-140: the keys the file sets itself, as the native layer names them.
+    settings.file.setKeys = Object.keys(settings.file.preferences).map((key) => `preferences.${key}`);
     sessionStorage.setItem(settingsKey, JSON.stringify(settings));
     window.__PW_STUB__.emit("settings_file_changed", null);
     return structuredClone(settings.file);
@@ -26,6 +28,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
   const catalog = { version: 1, createMemory: {}, orgs: { [ORG]: { workspaces: [ws("w1", "parity-test"), ws("w2", "demo workspace")], repositories: [], quota: { used: 2, limit: 3 }, fetchedAt: now,
     sessions: { w1: { sessions: Array.from({ length: 12 }, (_, i) => session(`s${i}`, i === 11 ? "Last session" : `Session ${i}`)), capabilities: ["session/2"], at: now }, w2: { sessions: [session("s3", "Demo session")], capabilities: null, at: now } } } } };
   const answers = {
+    // Native privacy readiness precedes app startup and account/cloud work.
+    data_privacy_status: { enabled: false, managed: false },
     settings_file_status: () => structuredClone(settings.file),
     update_user_preferences: ({ patch, migrate }) => {
       if (migrate && (settings.migrated || (!settings.file.exists && !Object.keys(patch).length))) return structuredClone(settings.file);
@@ -35,6 +39,14 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
       return saveSettings();
     },
     create_settings_file: () => { settings.file.exists = true; return saveSettings(); },
+    reset_user_setting: ({ key }) => {
+      if (key.startsWith("preferences.")) delete settings.file.preferences[key.slice("preferences.".length)];
+      return saveSettings();
+    },
+    settings_files_list: () => [
+      { layer: "user", path: settings.file.path, displayPath: settings.file.displayPath, exists: settings.file.exists, keys: Object.keys(settings.file.preferences).length, git: null, problem: settings.file.problem },
+      { layer: "defaults", path: null, displayPath: null, exists: true, keys: 0, git: null, problem: null },
+    ],
     // Layout fixtures have no app update. The generic plugin handle below is
     // truthy and would otherwise become a bogus Update after the startup check.
     "plugin:updater|check": null,
@@ -68,6 +80,20 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     status_bar_settings: { visible: false },
     // How the workspaces' tabs are arranged: nothing saved, and what a page saves is kept and announced as the backend does.
     tab_state: { workspaces: {}, closed: [] },
+    sidebar_order: { custom: false, sessions: [], projects: [], revision: 0 },
+    set_sidebar_order: ({ patch }) => {
+      const merge = (saved, requested) => {
+        if (!requested) return saved;
+        const ids = [...new Set(requested)];
+        const slots = [...ids.filter((id) => !saved.includes(id)), ...saved];
+        let at = 0;
+        return slots.map((id) => ids.includes(id) ? ids[at++] : id);
+      };
+      const saved = answers.sidebar_order;
+      answers.sidebar_order = { ...saved, ...patch, sessions: merge(saved.sessions, patch.sessions), projects: merge(saved.projects, patch.projects), revision: saved.revision + 1 };
+      setTimeout(() => window.__PW_STUB__.emit("sidebar_order_changed", answers.sidebar_order), 0);
+      return answers.sidebar_order;
+    },
     set_tab_layout: ({ workspace, layout }) => {
       answers.tab_state = { ...answers.tab_state, workspaces: { ...answers.tab_state.workspaces, [workspace]: layout } };
       setTimeout(() => window.__PW_STUB__.emit("tab_state_changed", answers.tab_state), 0);

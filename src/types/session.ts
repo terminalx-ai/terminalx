@@ -1,3 +1,7 @@
+import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
+import type { RepositoryAction, RepositoryPreviewUrl } from "@/lib/repositoryActions";
+import type { ManualStatus } from "@terminalx/portable/manualStatus";
+export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
@@ -24,6 +28,9 @@ export interface TabEntry {
   providerSessionId?: string | null;
   resetLogId?: string;
   resetBackupId?: string;
+  /** After a reset: the turn it went back to, and how many files "Also reset files" restored. */
+  resetTurn?: number;
+  resetFilesRestored?: number;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -31,6 +38,8 @@ export interface TabEntry {
    */
   transport?: "experimentalCodexStdio";
   status: TabStatus;
+  /** A persisted reminder, independent of the agent status. */
+  markedUnread?: boolean;
   created: string;
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
@@ -39,6 +48,8 @@ export interface TabEntry {
   hasMessages?: boolean;
   contextUsed?: number | null;
   contextMax?: number | null;
+  /** Tokens and estimated cost of every conversation the tab holds or held, by model, as of its last turn end (PRO-273). */
+  usage?: TabUsage | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
   loadingHistory?: boolean;
   /**
@@ -61,6 +72,43 @@ export interface TabEntry {
 }
 
 export type TabFront = "agent" | "by_hand" | "terminal";
+
+/** One model's tokens in a tab or session. `costUsd` is the API list price; `null` when the model has no price, never zero. */
+export interface ModelUsage {
+  model: string;
+  /** Uncached input; cache reads and writes are their own counts. */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+}
+
+export interface TabUsage {
+  models: ModelUsage[];
+  /** When the totals were read from the agent's transcripts. */
+  updated: string;
+}
+
+/** Several models summed: the priced ones' cost, and the models that have none. */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+  unpricedModels: string[];
+}
+
+/** `terminalx sessions usage <session> --json`, which the header's popover reads too. */
+export interface SessionUsageReport {
+  sessionId: string;
+  title: string;
+  tabs: { tabId: string; title?: string | null; agent: string; models: ModelUsage[]; total: UsageTotals; updated: string }[];
+  models: ModelUsage[];
+  total: UsageTotals;
+  estimate: true;
+}
 
 /** A conversation a tab held before the one it holds now. Its events are in the tab's log, under `id`. */
 export interface PastConversation {
@@ -98,6 +146,19 @@ export interface RemovedWorkspace {
   path: string;
   name: string;
   branch?: string | null;
+  commit?: string | null;
+  repository?: string | null;
+}
+
+export interface WorkspaceRestorePreview {
+  projectPath: string;
+  path: string;
+  branch: string | null;
+  commit: string;
+  needsBranch: string | null;
+  suggestedBranch: string;
+  legacy: boolean;
+  sessionIds: string[];
 }
 
 /**
@@ -107,9 +168,28 @@ export interface RemovedWorkspace {
  */
 export type SessionKind = "project" | "quick";
 
+/**
+ * The session that started another (PRO-270): `terminalx sessions create` run
+ * from inside it, or told `--parent`. A record only: the parent may since
+ * have been archived or deleted.
+ */
+export interface SessionParent {
+  sessionId: string;
+  /** The tab the command ran in; absent when `--parent` named the session. */
+  tabId?: string | null;
+}
+
 export interface SessionEntry {
+  /** Live presentation facts supplied by the owning runtime. */
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
+  /** The person’s workflow status; older entries default to Backlog. */
+  manualStatus?: ManualStatus;
   id: string;
   kind?: SessionKind;
+  /** Absent for a session no other session started. */
+  parent?: SessionParent | null;
+  /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
+  orchestrateStart?: boolean;
   /**
    * The session's project. A quick chat has none: this is then its scratch
    * directory under the TerminalX home, which is in no project list. Ask
@@ -121,7 +201,7 @@ export interface SessionEntry {
   branch?: string | null;
   baseRef?: string | null;
   /** `from`: the ref the worktree was made from, which its branch is read against. */
-  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null } | null;
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null; from?: string | null; fileCopy?: WorktreeCopyReport | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   /** The issue the session works on: the one it was started from, or one linked later (`issueWork.link`). */
@@ -150,6 +230,8 @@ export interface SessionEntry {
 export interface RepositoryScripts {
   setup: string;
   archive: string;
+  /** Absent means the default, 5 minutes. One of the Scripts page's choices. */
+  archiveTimeoutMinutes?: number | null;
 }
 
 export interface Project {
@@ -170,6 +252,11 @@ export interface Project {
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
   scripts?: RepositoryScripts | null;
+  /** Run-menu actions, in saved order. Absent is none. Saved with the `actions` patch. */
+  actions?: RepositoryAction[];
+  /** Templates with $PORT / $PORT_n, in saved order. Absent is none. Saved with the `previewUrls` patch. */
+  previewUrls?: RepositoryPreviewUrl[];
+  repositorySettings?: RepositorySettings;
 }
 
 export interface ProjectPatch {
@@ -184,6 +271,11 @@ export interface ProjectPatch {
   agentIssueUpdates?: boolean;
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
+  repositorySettings?: RepositorySettings;
+  /** Replaces the saved actions; [] clears them. Leaves the hooks alone. */
+  actions?: RepositoryAction[];
+  /** Replaces the saved preview URLs; [] clears them. Leaves the hooks alone. */
+  previewUrls?: RepositoryPreviewUrl[];
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */
@@ -280,7 +372,62 @@ export interface UnfinishedMerge {
   changedHere: string[];
   /** Uncommitted paths exactly as Git merged them. */
   fromBase: string[];
+  /** The branch HEAD is on (`raccoon/teams-billing`); null when detached. */
+  branch: string | null;
+  /** For each path in `conflicted`, how many conflict-marker blocks it holds now (0 for a binary or delete conflict). */
+  conflictCounts: Record<string, number>;
 }
+
+/** Where one side of a conflicted file's text came from (PRO-293). */
+export interface ConflictSide {
+  /** The branch: this checkout's branch for yours, what is being merged for theirs (`origin/main`, or `commit 1a2b3c4d5e`). */
+  branch: string;
+  /** The last commit on this side, since the merge base, that changed the file; null when there is none to read. */
+  commit: {
+    id: string;
+    subject: string;
+    author: string;
+    /** Commit time, Unix seconds. */
+    time: number;
+    /** The pull request the commit names (`… (#209)`, `Merge pull request #209 …`); null when it names none. */
+    pr: number | null;
+  } | null;
+}
+
+/** One `<<<<<<<` … `>>>>>>>` block, as it is on disk now. */
+export interface ConflictHunk {
+  /** Its place among the file's conflicts, from 0. */
+  index: number;
+  /** 1-based line of its `<<<<<<<` marker in the file on disk. */
+  line: number;
+  /** The text between `<<<<<<<` and `|||||||`/`=======`, each line with its line ending. */
+  ours: string;
+  /** The text between `=======` and `>>>>>>>`. */
+  theirs: string;
+  /** The common ancestor's text, when the file was written with diff3 or zdiff3 markers. */
+  base: string | null;
+}
+
+/** The file on disk, cut into the text outside conflicts and the conflicts. */
+export type ConflictSegment =
+  | { kind: "text"; text: string }
+  | { kind: "conflict"; hunk: ConflictHunk };
+
+/** A conflicted file of a merge in progress, as read from disk (PRO-293). */
+export interface ConflictFile {
+  path: string;
+  /** SHA-256 of the bytes read. A write is refused when the file no longer has them. */
+  version: string;
+  segments: ConflictSegment[];
+  /** How many conflict hunks `segments` holds. */
+  conflicts: number;
+  ours: ConflictSide;
+  theirs: ConflictSide;
+  /** Why the file cannot be resolved hunk by hunk (binary, deleted on one side); null when it can. */
+  unsupported: string | null;
+}
+
+export type ConflictChoice = "ours" | "theirs" | "both";
 
 export interface WorkspaceDisposition {
   exists: boolean;
@@ -354,6 +501,8 @@ export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";
 export interface ChangedFile {
   path: string;
   oldPath?: string;
+  /** Head blob ID, or deleted:<removed blob ID>. Absent on older runtimes. */
+  blobHash?: string;
   status: ChangeStatus;
   additions: number;
   deletions: number;

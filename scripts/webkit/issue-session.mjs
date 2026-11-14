@@ -269,6 +269,57 @@ try {
       }, pipelineLayout);
       if (shots) await page.screenshot({ path: join(shots, `issue-pipeline-${mode}-${provider}-${width}.png`) });
 
+      // The final review passed, and the branch then moved with a commit of
+      // its own (#947): the reason says so, not "still asks for changes",
+      // and the one way on is another review of the new head. The record
+      // keeps the earlier move that only merged main and carried the verdict.
+      await page.evaluate(() => {
+        const reviewed = "1111111111111111111111111111111111111111";
+        const merged = "2222222222222222222222222222222222222222";
+        const head = "3333333333333333333333333333333333333333";
+        const note = "The branch moved to 3333333333 after the final review (3 of 3) approved 1111111111, and that review does not carry to the new head: 3333333333 is a commit of its own, not a merge of the base branch. Allow one more review of the new head.";
+        window.__PIPELINE__ = {
+          ...window.__PIPELINE__,
+          stage: "merge", state: "needsYou", round: 3, reviewCommit: merged,
+          reason: { kind: "movedAfterFinalReview", reviewed, head, rounds: 3, why: "3333333333 is a commit of its own, not a merge of the base branch" },
+          note,
+          verdict: {
+            commit: merged, carriedFrom: reviewed, decision: "merge", securityPass: "notNeeded", round: 3, at: "2026-10-01T00:20:00Z",
+            checks: "notRun", checksNote: "the reviewer's checks passed on 1111111111, before the merge of main, and have not run since",
+            findings: [],
+          },
+          events: [
+            ...window.__PIPELINE__.events.filter((event) => event.kind !== "needsYou"),
+            { at: "2026-10-01T00:15:00Z", stage: "review", kind: "verdict", message: "Review 3 of 3 of 1111111111: merge, no findings. The reviewer's checks passed.", commit: reviewed },
+            { at: "2026-10-01T00:20:00Z", stage: "merge", kind: "verdictCarried", message: "The branch moved to 2222222222 with a clean merge of main and nothing else, and the pull request's change against main is the same as at 1111111111: review 3 of 3 carries forward to the new head.", commit: merged },
+            { at: "2026-10-01T00:30:00Z", stage: "merge", kind: "needsYou", message: note },
+          ],
+        };
+        window.__PW_STUB__.emit("issue_pipeline", window.__PIPELINE__);
+      });
+      await panel.getByRole("button", { name: "Review the new head once more", exact: true }).waitFor();
+      const movedLayout = await panel.evaluate((node) => {
+        const bounds = node.getBoundingClientRect();
+        const boxes = [...node.querySelectorAll("button, li, label, p")].map((child) => child.getBoundingClientRect());
+        const buttons = [...node.querySelectorAll("button")].map((child) => child.getBoundingClientRect());
+        return {
+          scrolls: node.scrollWidth > node.clientWidth,
+          inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
+          overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
+          text: node.textContent,
+        };
+      });
+      failed += report(`${mode}, ${provider}, ${width}px`, {
+        "a move after the final review fits the detail pane": !movedLayout.scrolls && movedLayout.inside && !movedLayout.overlaps,
+        "it says the final review approved the old head and why it does not carry": movedLayout.text.includes("after the final review (3 of 3) approved 1111111111") && !movedLayout.text.includes("still asks for changes"),
+        "the record shows the verdict carried over the merge of main": movedLayout.text.includes("review 3 of 3 carries forward to the new head"),
+        "the one way on is another review of the new head, and a merge is not offered": (await panel.getByRole("button", { name: "Review the new head once more", exact: true }).count()) === 1 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 0,
+      }, { scrolls: movedLayout.scrolls, inside: movedLayout.inside, overlaps: movedLayout.overlaps });
+      if (shots) {
+        await panel.evaluate((node) => node.scrollIntoView({ block: "start" }));
+        await page.screenshot({ path: join(shots, `issue-pipeline-moved-${mode}-${provider}-${width}.png`) });
+      }
+
       // The project's own settings for all of this, from the project menu. Since
       // the chat-first sidebar (#484) the project is a group named after it, with
       // its fold button first in its row; the row's buttons are not drawn until it is hovered.

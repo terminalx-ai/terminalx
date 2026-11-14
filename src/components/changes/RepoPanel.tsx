@@ -1,7 +1,9 @@
+import { useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
-import { useGitWorkingChanges } from "@/lib/changes";
+import { commitRange } from "@/lib/changesScope";
+import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -12,7 +14,9 @@ import type { ChangedFile, CommitInfo } from "@/types/session";
 import { FileDiff } from "./FileDiff";
 import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
-import { FileList } from "./FileList";
+import { ReviewFileList } from "./ReviewFileList";
+import { AddRemote, GitError } from "./GitRecovery";
+import { setPrefs, usePrefs } from "@/lib/prefs";
 
 export type RepoView = "uncommitted" | "history";
 
@@ -22,7 +26,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff }: {
+  onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
   active: boolean;
@@ -32,23 +37,40 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   author?: string | null;
   /** Inside the Changes tab, whose scope picks the view: no switch of its own. */
   embedded?: boolean;
+  onReviewCommit?: (sha: string) => void;
+  revision?: number;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  const selectedSource = useRef({ source, generation: 0 });
+  if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
+  const generation = selectedSource.current.generation;
   const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
-  const { head, files, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick, hideWhitespace);
+  const { head, index, files, staged, unstaged, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const current = files.find((file) => file.path === selected);
+  const [selectedStaged, setSelectedStaged] = useState(false);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, head, review?.refresh]);
+  const current = (selectedStaged ? staged : unstaged).find((file) => file.path === selected) ?? files.find((file) => file.path === selected);
+  useEffect(() => {
+    if (!selected) return;
+    if (!selectedStaged && !unstaged.some((file) => file.path === selected) && staged.some((file) => file.path === selected)) setSelectedStaged(true);
+    else if (selectedStaged && !staged.some((file) => file.path === selected) && unstaged.some((file) => file.path === selected)) setSelectedStaged(false);
+  }, [selected, selectedStaged, staged, unstaged]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operation, setOperation] = useState<string | undefined>();
+  const [needsRemote, setNeedsRemote] = useState(false);
   /** Null until the history is read: an empty list is then really empty. */
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
   const [openCommit, setOpenCommit] = useState<string | null>(null);
+  const prefs = usePrefs();
+  const [commitAgent, setCommitAgent] = useState<"claude" | "codex">("claude");
 
   useEffect(() => {
     setDiscarding(null);
@@ -57,6 +79,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     setSelected(null);
     setNotice(null);
     setError(null);
+    setNeedsRemote(false);
+    setBusy(null);
   }, [source]);
 
   useEffect(() => {
@@ -66,7 +90,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     return () => {
       cancelled = true;
     };
-  }, [source, active, tick]);
+  }, [source, active, tick, revision]);
 
   useEffect(() => {
     if (!active || sub !== "history") return;
@@ -78,23 +102,48 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   }, [source, active, sub, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
+    setOperation(label);
     setBusy(label);
     setError(null);
     setNotice(null);
     try {
       const said = await fn();
+      if (selectedSource.current.generation !== generation) return false;
       if (said) setNotice(said);
       refresh();
       return true;
     } catch (e) {
+      if (selectedSource.current.generation !== generation) return false;
       setError(source.errorMessage(e));
       refresh();
       return false;
     } finally {
-      setBusy(null);
+      if (selectedSource.current.generation === generation) setBusy(null);
     }
   };
   const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => ok && setMessage(""));
+  const pathArgs = (file: ChangedFile) => [file.path, ...(file.oldPath ? [file.oldPath] : [])];
+  const stageFile = (file: ChangedFile) => void run("stage", async () => { await source.stagePaths?.(pathArgs(file)); });
+  const unstageFile = (file: ChangedFile) => void run("unstage", async () => { await source.unstagePaths?.(pathArgs(file)); });
+  const applyHunk = (index: number) => {
+    if (!current || !source.applyHunk) return;
+    void run(selectedStaged ? "unstage hunk" : "stage hunk", () => source.applyHunk!(current.path, current.oldPath, index, selectedStaged));
+  };
+  const generateMessage = () => void run("generate message", async () => {
+    if (!source.generateCommitMessage) throw new Error("Commit message generation is available for local repositories.");
+    const generated = await source.generateCommitMessage(commitAgent);
+    if (selectedSource.current.generation === generation) setMessage(generated);
+  });
+  const commitLabel = staged.length ? `Commit ${staged.length} staged file${staged.length === 1 ? "" : "s"}` : `Commit all ${files.length} file${files.length === 1 ? "" : "s"}`;
+  const push = () => void run("push", async () => {
+    if (source.hasRemote && !await source.hasRemote()) {
+      if (selectedSource.current.generation === generation) setNeedsRemote(true);
+      return;
+    }
+    if (selectedSource.current.generation !== generation) return;
+    setNeedsRemote(false);
+    return source.push();
+  });
   const writable = source.canWrite;
 
   return (
@@ -117,9 +166,10 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
         </div>
       </div>}
       {!embedded && <DiffOptions />}
-      {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
+      {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
-        <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div>
+        source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div> : <GitError details={source.errorMessage(readError)} />
       )}
       {notice && <div role="status" className="mx-3 mb-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(status?.operation || !!status?.conflicted?.length) && (
@@ -128,7 +178,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           <span>
             {status?.operation ? `A ${status.operation} is in progress. ` : ""}
             {status?.conflicted?.length
-              ? `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
+              ? status.operation === "merge" && source.unfinishedMerge && source.conflictFile && source.canWrite
+                ? `Conflicts in ${status.conflicted.join(", ")}: open each from Merge in progress in Changes to resolve it there, or ask the agent to, before committing.`
+                : `Conflicts in ${status.conflicted.join(", ")}: resolve them in the workspace before committing.`
               : status?.operation === "merge" && source.unfinishedMerge
                 ? "Commit or abort it from Changes, which shows what the merge brought in."
                 : "Finish or abort it in the workspace's terminal."}
@@ -159,18 +211,22 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 placeholder="Commit message (⌘⏎ to commit)"
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
+              {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">
+                <label className="flex items-center gap-1"><input type="checkbox" checked={prefs.writeCommitMessagesWithAgent} onChange={(event) => setPrefs({ writeCommitMessagesWithAgent: event.target.checked })} />Write commit messages with the agent</label>
+                <span className="text-faint">Uses your own quota.</span>
+                {prefs.writeCommitMessagesWithAgent && <><select aria-label="Commit message agent" value={commitAgent} onChange={(event) => setCommitAgent(event.target.value as "claude" | "codex")} className="rounded bg-background px-1 py-0.5"><option value="claude">Claude</option><option value="codex">Codex</option></select><Button size="xs" variant="secondary" disabled={!staged.length || !!busy} onClick={generateMessage}>{busy === "generate message" ? <Loader2 className="animate-spin" /> : null}Generate message</Button></>}
+              </div>}
               <div className="flex items-center gap-1">
                 <Button
                   size="sm"
                   variant="accent"
-                  // Committing stages everything, conflict markers included.
                   disabled={!message.trim() || !files.length || !!busy || !!status?.conflicted?.length}
                   onClick={commit}
                 >
-                  {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit
+                  {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} {commitLabel}
                 </Button>
                 <WithTooltip label="Push">
-                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => void run("push", () => source.push())}>
+                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={push}>
                     {busy === "push" ? <Loader2 className="animate-spin" /> : <ArrowUpFromLine />} Push
                   </Button>
                 </WithTooltip>
@@ -191,18 +247,37 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             </div>
           </div>}
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
-            <FileList
+            {source.stagePaths && source.unstagePaths ? <div className="space-y-2 px-2 pb-2">
+              <section aria-label="Staged">
+                <div className="flex items-center justify-between px-2 py-1 text-xs"><h3 className="font-medium">Staged · {staged.length}</h3><Button size="xs" variant="ghost" disabled={!staged.length || !!busy} onClick={() => void run("unstage all", async () => { await source.unstageAll?.(); })}>Unstage all</Button></div>
+                <ReviewFileList workspace={source.key} base={head ?? undefined} files={staged} selected={selectedStaged ? selected : null} onSelect={(p) => { setSelectedStaged(true); setSelected(p); }} empty="Nothing staged yet."
+                  trailing={(file) => <Button size="xs" variant="ghost" disabled={!!busy} onClick={() => unstageFile(file)}>Unstage</Button>} />
+              </section>
+              <section aria-label="Unstaged">
+                <div className="flex items-center justify-between px-2 py-1 text-xs"><h3 className="font-medium">Unstaged · {unstaged.length}</h3><Button size="xs" variant="ghost" disabled={!unstaged.length || !!busy} onClick={() => void run("stage all", () => source.stagePaths!(unstaged.flatMap(pathArgs)))}>Stage all</Button></div>
+                <ReviewFileList workspace={source.key} base={head ?? undefined} files={unstaged} selected={!selectedStaged ? selected : null} onSelect={(p) => { setSelectedStaged(false); setSelected(p); }} empty="Working tree is clean."
+                  trailing={(file) => <Button size="xs" variant="ghost" disabled={!!busy} onClick={() => stageFile(file)}>Stage</Button>} />
+              </section>
+            </div> : <ReviewFileList
+              workspace={source.key}
+              base={head ?? undefined}
               files={files}
               selected={selected}
-              onSelect={(p) => setSelected((s) => (s === p ? null : p))}
+              onSelect={(p) => {
+                const file = files.find((f) => f.path === p);
+                setSelectedStaged(false);
+                if (onOpenDiff && file && head) onOpenDiff(file, { base: head, head: null });
+                else setSelected((s) => s === p ? null : p);
+              }}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
                 <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
               )}
-            />
+            />}
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={head} head={null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined} />
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined}
+              staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}
         </>
       )}
@@ -215,7 +290,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             <div className="px-2 py-4 text-xs text-muted-foreground">No commits yet.</div>
           ) : null}
           {(commits ?? []).map((c) => (
-            <CommitRow key={c.sha} source={source} commit={c} open={openCommit === c.sha} onToggle={() => setOpenCommit((o) => (o === c.sha ? null : c.sha))} />
+            <CommitRow key={c.sha} source={source} commit={c} onReview={onReviewCommit} open={openCommit === c.sha} onToggle={() => setOpenCommit((o) => (o === c.sha ? null : c.sha))} />
           ))}
         </div>
       )}
@@ -223,22 +298,23 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   );
 }
 
-function CommitRow({ source, commit, open, onToggle }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void }) {
+function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSource; commit: CommitInfo; open: boolean; onToggle: () => void; onReview?: (sha: string) => void }) {
   const { hideWhitespace } = useDiffOptions();
   const [files, setFiles] = useState<ChangedFile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, base, review?.refresh]);
   const current = files.find((file) => file.path === selected);
-  const EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     (async () => {
-      const parentTree = commit.parent ? (await source.logCommits(commit.parent, 1))[0]?.tree ?? EMPTY : EMPTY;
-      const f = await source.changesBetween(parentTree, commit.tree, hideWhitespace);
+      const range = await commitRange(source, commit.sha);
+      const f = await source.changesBetween(range.base, range.head, hideWhitespace);
       if (!cancelled) {
-        setBase(parentTree);
+        setBase(range.base);
         setError(null);
         setFiles(f);
         setSelected((previous) => f.some((file) => file.path === previous) ? previous : f[0]?.path ?? null);
@@ -266,7 +342,8 @@ function CommitRow({ source, commit, open, onToggle }: { source: GitSource; comm
       {open && (
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
-          <FileList files={files} selected={selected} onSelect={setSelected} empty="No files." />
+          {onReview && <Button size="xs" variant="ghost" onClick={() => onReview(commit.sha)}>Review this commit</Button>}
+          <ReviewFileList workspace={source.key} base={base ?? undefined} files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />

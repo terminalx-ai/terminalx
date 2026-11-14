@@ -13,12 +13,13 @@ import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { ComputerPanel } from "@/components/computer/ComputerPanel";
 import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
-import { api } from "@/lib/api";
+import { api, type PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
+import { onPrLinksChanged } from "@/lib/prLinks";
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
@@ -54,6 +55,8 @@ export function RightPanel({
   workingTree = false,
   sessionId,
   mentionTabId,
+  onFixErrors,
+  fixBusy,
   statusKey = "",
   rootName,
   labelMode,
@@ -83,6 +86,8 @@ export function RightPanel({
   workingTree?: boolean;
   sessionId?: string;
   mentionTabId?: string | null;
+  onFixErrors?: (pr: PullRequest) => Promise<unknown>;
+  fixBusy?: boolean;
   statusKey?: string;
   rootName?: string;
   labelMode?: "base" | "branch";
@@ -124,6 +129,8 @@ export function RightPanel({
     [],
   );
   const [focusPr, setFocusPr] = useState(0);
+  // A pull request just linked to this session (PRO-294): scroll to it in the Branch tab.
+  useEffect(() => sessionId ? onPrLinksChanged((changed) => { if (changed === sessionId) setFocusPr((n) => n + 1); }) : undefined, [sessionId]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const fallback: PanelTab = isGit ? "changes" : "files";
@@ -301,6 +308,8 @@ export function RightPanel({
                 branch={branchPicture ? { cwd, active: tab === "branch", version, sessionId, from } : null}
                 pr={{
                   sessionId,
+                  onFixErrors,
+                  fixBusy,
                   cwd,
                   source: gitSource,
                   branch: resolvedBranch,
@@ -321,6 +330,8 @@ export function RightPanel({
             </div>
             <div className={cn("h-full", tab !== "changes" && "hidden")}>
               <ChangesPanel
+                reviewTabId={readOnlyReason ? null : mentionTabId}
+                sessionId={sessionId}
                 key={refreshTick}
                 cwd={cwd}
                 source={gitSource}

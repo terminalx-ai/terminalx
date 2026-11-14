@@ -1,20 +1,38 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use subtle::ConstantTimeEq;
 
 use super::crypto::{token_hash, HostKeypair};
-use super::model::{AccountMirror, DeviceEntry, DeviceFile, DeviceProvenance};
+use super::model::{AccountMirror, DeviceEntry, DeviceFile, DeviceProvenance, PairingTransport};
+use crate::keychain::SecretStore;
 
 const HOST_KEY_ACCOUNT: &str = "host-e2ee-key";
 
-#[derive(Default)]
 pub struct PairingSecrets {
     service: OnceLock<String>,
+    store: Arc<dyn SecretStore>,
+}
+
+impl Default for PairingSecrets {
+    fn default() -> Self {
+        Self { service: OnceLock::new(), store: Arc::new(crate::keychain::Keychain) }
+    }
 }
 
 impl PairingSecrets {
+    /// Secrets kept in `store` instead of the login Keychain, for tests.
+    #[cfg(test)]
+    pub fn with_store(store: Arc<dyn SecretStore>) -> Self {
+        Self { service: OnceLock::new(), store }
+    }
+
+    #[cfg(test)]
+    pub fn service_name(&self) -> Option<&str> {
+        self.service.get().map(String::as_str)
+    }
+
     pub fn configure(&self, app_identifier: &str) -> Result<()> {
         let wanted = format!("{app_identifier}.pairing");
         if let Some(current) = self.service.get() {
@@ -57,18 +75,19 @@ impl PairingSecrets {
             .ok_or_else(|| anyhow!("pairing secret service is not configured"))
     }
 
-    // Through `crate::keychain`, which makes Keychain calls one at a time.
-    // Elsewhere than macOS nothing is stored: reads find nothing, writes fail.
+    // The login Keychain through `crate::keychain`, which makes Keychain calls
+    // one at a time; tests use an in-memory store. Elsewhere than macOS
+    // nothing is stored: reads find nothing, writes fail.
     fn read(&self, account: &str) -> Result<Option<Vec<u8>>> {
-        crate::keychain::get(self.service()?, account).context("read pairing secret from Keychain")
+        self.store.get(self.service()?, account).context("read pairing secret from Keychain")
     }
 
     fn write(&self, account: &str, bytes: &[u8]) -> Result<()> {
-        crate::keychain::set(self.service()?, account, bytes).context("save pairing secret to Keychain")
+        self.store.set(self.service()?, account, bytes).context("save pairing secret to Keychain")
     }
 
     fn delete(&self, account: &str) -> Result<()> {
-        crate::keychain::delete(self.service()?, account).context("delete pairing secret from Keychain")
+        self.store.delete(self.service()?, account).context("delete pairing secret from Keychain")
     }
 }
 
@@ -93,7 +112,9 @@ impl DeviceRegistry {
             .collect())
     }
 
-    pub fn add(&self, entry: DeviceEntry) -> Result<()> {
+    pub fn add(&self, mut entry: DeviceEntry) -> Result<()> {
+        // A live connection is the status's to report, never the file's.
+        entry.connection = None;
         let mut inner = self.inner.lock().unwrap();
         let file = ensure_loaded(&mut inner)?;
         file.devices.retain(|device| device.id != entry.id);
@@ -153,7 +174,52 @@ impl DeviceRegistry {
         }))
     }
 
-    pub fn touch(&self, device_id: &str, public_key: &str) -> Result<()> {
+    /// A connection from the device opened: its key, the fingerprint of that
+    /// key (kept once known), and how it came.
+    pub fn touch(
+        &self,
+        device_id: &str,
+        public_key: &str,
+        fingerprint: &str,
+        transport: PairingTransport,
+    ) -> Result<()> {
+        self.update(device_id, |device| {
+            if !device.public_key.is_empty() && device.public_key != public_key {
+                return Err(anyhow!("paired device public key changed"));
+            }
+            device.public_key = public_key.into();
+            device.fingerprint.get_or_insert_with(|| fingerprint.into());
+            device.last_seen_at = Some(Utc::now().to_rfc3339());
+            device.last_seen_transport = Some(transport);
+            Ok(())
+        })
+    }
+
+    /// The person approved this pairing on the Mac, for the phone key whose
+    /// fingerprint they compared: the device is pinned to that key at once,
+    /// so the code's token alone, with another key, cannot claim it.
+    pub fn approve(&self, device_id: &str, fingerprint: &str, public_key: &str) -> Result<()> {
+        self.update(device_id, |device| {
+            if !device.public_key.is_empty() && device.public_key != public_key {
+                return Err(anyhow!("paired device public key changed"));
+            }
+            device.public_key = public_key.into();
+            device.approved_at = Some(Utc::now().to_rfc3339());
+            device.fingerprint = Some(fingerprint.into());
+            Ok(())
+        })
+    }
+
+    /// What the phone calls itself (`device.describe`), already cleaned.
+    pub fn describe(&self, device_id: &str, label: &str, platform: &str) -> Result<()> {
+        self.update(device_id, |device| {
+            device.label = label.into();
+            device.platform = platform.into();
+            Ok(())
+        })
+    }
+
+    fn update(&self, device_id: &str, change: impl FnOnce(&mut DeviceEntry) -> Result<()>) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let file = ensure_loaded(&mut inner)?;
         let device = file
@@ -161,11 +227,7 @@ impl DeviceRegistry {
             .iter_mut()
             .find(|device| device.id == device_id && device.revoked_at.is_none())
             .ok_or_else(|| anyhow!("paired device was revoked"))?;
-        if !device.public_key.is_empty() && device.public_key != public_key {
-            return Err(anyhow!("paired device public key changed"));
-        }
-        device.public_key = public_key.into();
-        device.last_seen_at = Some(Utc::now().to_rfc3339());
+        change(device)?;
         save(file)
     }
 
@@ -271,6 +333,10 @@ mod tests {
             revoked_at: None,
             installation_id: None,
             created_request_id: None,
+            fingerprint: None,
+            approved_at: None,
+            connection: None,
+            last_seen_transport: None,
         }
     }
 

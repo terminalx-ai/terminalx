@@ -29,6 +29,7 @@
 //! a person merges from the issue page with their own `gh`, pinned the same way.
 
 pub mod admission;
+pub mod carry;
 pub mod categories;
 pub mod cloud_merge;
 #[cfg(feature = "desktop")]
@@ -127,6 +128,7 @@ pub struct MergeRecord {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SwitchActor {
     Person,
+    SelfUi { session_id: Option<String>, tab_id: Option<String> },
     Cli { session_id: Option<String>, tab_id: Option<String> },
     System,
 }
@@ -217,6 +219,11 @@ pub struct Pipeline {
     pub review_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_requested_at: Option<String>,
+    /// While the reviewer reads only what merges of the base changed at
+    /// `review_commit`: the commit whose passing verdict that check would
+    /// carry forward. Such a check is not a review round (#947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_check: Option<String>,
     /// When the reviewer first said its checks for this review were still
     /// running. Its verdict is waited for until [`engine::REVIEW_CHECKS_MINUTES`]
     /// after this, and then asked for once.
@@ -247,6 +254,11 @@ pub struct Pipeline {
     pub reminded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<String>,
+    /// The checks the merge stage is waiting on or stopped on, as it last
+    /// read them (#881). Absent when it is neither, or the checks could not
+    /// be read: `note` then says it in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PipelineChecks>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_requested: Option<MergeRequest>,
     /// A commit GitHub refused to merge: it is not asked again of its own accord.
@@ -264,6 +276,30 @@ pub struct Pipeline {
     pub modified: String,
 }
 
+/// The checks on a pull request's head while its merge waits on them, or
+/// after one failed or they ran out of time: what the issue page lists under
+/// the Merge stage. Read in the same pass as the merge decision, with no
+/// request of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineChecks {
+    /// The commit they ran on.
+    pub commit: String,
+    /// Every check GitHub reported on it, as it reported them. A required
+    /// check not reported yet is listed as `expected`.
+    pub checks: Vec<crate::github::PrCheck>,
+    /// The names the merge waits on (see [`gate::gating_names`]). The rest
+    /// are optional: they never hold a merge.
+    pub required: Vec<String>,
+    /// When the wait on them began, and when it ended: absent while it goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// How long it waits before stopping for a person ([`engine::CHECKS_WAIT_MINUTES`]).
+    pub limit_minutes: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCheck {
@@ -278,12 +314,24 @@ pub struct LaunchOptions {
     pub resolve_conflicts: bool,
 }
 
+/// One verified push destination. Store a digest rather than a URL that may
+/// contain credentials; a changed destination invalidates the resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolutionTarget {
+    pub remote: String,
+    pub repository: Option<String>,
+    pub url_hash: String,
+}
+
 /// The exact inputs of a resolution. A remote writer moving the head invalidates it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resolution {
     pub head: String,
     pub remote_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ResolutionTarget>,
     pub base: String,
     pub base_commit: String,
     pub return_stage: Stage,

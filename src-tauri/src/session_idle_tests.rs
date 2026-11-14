@@ -333,7 +333,7 @@ fn a_quiet_session_is_archived_only_once_its_tab_has_nothing_going_and_a_message
         let rt = rt();
         let mut rt = rt.lock().unwrap();
         rt.turn_open = false;
-        rt.queued.push(QueuedMessage { id: "held".into(), text: "and then".into(), images: Vec::new() });
+        rt.queued.push(PendingMessage { message: QueuedMessage { id: "held".into(), text: "and then".into(), images: Vec::new() }, privacy: None, seq: 0 });
     }
     assert!(sweep(&nobody).is_empty(), "a message waits to be sent");
     rt().lock().unwrap().queued.clear();
@@ -372,4 +372,35 @@ fn a_message_from_a_phone_brings_an_archived_session_back() {
     let entry = index::get(FROM_PHONE).unwrap();
     assert!(!entry.archived && !entry.archive.auto_archived, "a phone's message brings it back");
     assert!(entry.archive.unarchived_at.is_some());
+}
+
+#[test]
+fn manual_unread_survives_a_new_runtime_and_reading_does_not_start_the_agent() {
+    let rig = Rig::new(json!({}));
+    rig.manager.set_tab_unread(SESSION, TAB, true).unwrap();
+    assert!(index::get(SESSION).unwrap().tab(TAB).unwrap().marked_unread);
+    assert!(!rig.running());
+    // A fresh runtime begins idle; the reminder is still the index's, not its status.
+    let later = SessionManager::new(
+        Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(crate::sink::NoObserver),
+        Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    later.mark_read(SESSION, TAB).unwrap();
+    assert!(!index::get(SESSION).unwrap().tab(TAB).unwrap().marked_unread);
+    assert!(!later.is_running(SESSION, TAB));
+}
+
+#[test]
+fn reading_a_completed_tab_does_not_change_its_dashboard_order() {
+    let rig = Rig::new(json!({}));
+    let rt = rig.rt();
+    rig.manager.set_status(&mut rt.lock().unwrap(), TabStatus::Completed);
+    let before = index::get(SESSION).unwrap();
+    rig.manager.mark_read(SESSION, TAB).unwrap();
+    let after = index::get(SESSION).unwrap();
+    assert_eq!(after.modified, before.modified);
+    assert_eq!(after.tab(TAB).unwrap().modified, before.tab(TAB).unwrap().modified);
+    assert_eq!(after.tab(TAB).unwrap().status, TabStatus::Idle);
+    assert_eq!(rt.lock().unwrap().status, TabStatus::Idle);
 }

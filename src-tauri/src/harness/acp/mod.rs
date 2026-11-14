@@ -44,9 +44,27 @@ enum Pending {
     /// The model asked for, so the reply says which one it is about;
     /// `opening` when it is the tab's own model being put on a new session
     /// rather than a change somebody just asked for.
-    SetModel { model: String, opening: bool },
-    Other,
+    SetModel { model: String, opening: bool, request_id: Option<String> },
 }
+
+/// Kept with the prompt across initialization, session load/new and any
+/// queued write. Admission is rechecked by the owner at the physical pipe.
+#[derive(Clone)]
+pub struct Delivery {
+    pub seq: u64,
+    pub privacy: Option<crate::data_privacy::Ticket>,
+    pub mobile: Option<crate::local_runtime::mobile::WritePermit>,
+    pub shared: Option<crate::local_sharing::WritePermit>,
+}
+
+pub struct PromptWrite {
+    pub id: u64,
+    pub line: String,
+    pub delivery: Delivery,
+    pub started: Payload,
+}
+
+struct Stashed { text: String, images: Vec<(String, String)>, delivery: Option<Delivery> }
 
 #[derive(Default)]
 pub struct Acp {
@@ -54,7 +72,12 @@ pub struct Acp {
     pending: HashMap<u64, Pending>,
     pub session_id: Option<String>,
     pub ready: bool,
-    stashed: Option<(String, Vec<(String, String)>)>,
+    stashed: Option<Stashed>,
+    opening: bool,
+    undelivered: HashMap<u64, u64>,
+    pub opening_model_request: Option<String>,
+    pub writing: Option<u64>,
+    pub deferred_writes: Vec<(Action, Option<crate::data_privacy::Ticket>)>,
     cwd: String,
     pub model: Option<String>,
     /// The model the agent last said the session is on, when it says.
@@ -105,8 +128,15 @@ impl Acp {
     }
 
     /// The handshake, with the first prompt stashed until a session exists.
+    #[cfg(test)]
     pub fn start(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
-        self.stashed = Some((text, images));
+        self.start_with_delivery(text, images, None)
+    }
+
+    pub fn start_with_delivery(&mut self, text: String, images: Vec<(String, String)>, delivery: Option<Delivery>) -> Vec<Action> {
+        self.stashed = Some(Stashed { text, images, delivery });
+        if self.opening { return Vec::new(); }
+        self.opening = true;
         let params = json!({
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}, "terminal": false},
@@ -134,23 +164,63 @@ impl Acp {
         Action::Write(self.request("session/prompt", json!({"sessionId": sid, "prompt": prompt}), Pending::Prompt))
     }
 
-    fn begin_turn(&mut self, text: &str, images: &[(String, String)]) -> Vec<Action> {
-        vec![
-            Action::Emit(Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }),
-            Action::Emit(Payload::ModelRequestStarted),
-            self.prompt_line(text, images),
-        ]
+    fn begin_turn(&mut self, text: &str, images: &[(String, String)], delivery: Option<Delivery>) -> Vec<Action> {
+        let started = Payload::TurnStarted { model: self.model.clone(), provider_session_id: self.session_id.clone(), prompt_seq: delivery.as_ref().map(|d| d.seq), started_by: None, initiating_prompt: None };
+        let line = self.prompt_line(text, images);
+        if let Some(delivery) = delivery {
+            self.undelivered.insert(self.next_id, delivery.seq);
+            let Action::Write(line) = line else { unreachable!() };
+            vec![Action::AcpPrompt(Box::new(PromptWrite { id: self.next_id, line, delivery, started }))]
+        } else {
+            vec![Action::Emit(started), Action::Emit(Payload::ModelRequestStarted), line]
+        }
     }
 
     pub fn prompt(&mut self, text: String, images: Vec<(String, String)>) -> Vec<Action> {
+        self.prompt_with_delivery(text, images, None)
+    }
+
+    pub fn prompt_with_delivery(&mut self, text: String, images: Vec<(String, String)>, delivery: Option<Delivery>) -> Vec<Action> {
         if !self.ready {
-            self.stashed = Some((text, images));
+            self.stashed = Some(Stashed { text, images, delivery });
             return Vec::new();
         }
-        self.begin_turn(&text, &images)
+        self.begin_turn(&text, &images, delivery)
+    }
+
+    pub fn delivery_current(&self, id: u64, seq: u64) -> bool {
+        self.undelivered.get(&id) == Some(&seq) && self.pending.get(&id) == Some(&Pending::Prompt)
+    }
+    pub fn waiting_for_session(&self) -> bool { self.stashed.is_some() }
+    pub fn delivered(&mut self, id: u64) { self.undelivered.remove(&id); }
+    pub fn discard_write(&mut self, action: &Action) {
+        let line = match action { Action::Write(line) | Action::AcpMode { line: Some(line), .. } => line, _ => return };
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if value.get("method").is_some() {
+                if let Some(id) = value["id"].as_u64() { self.pending.remove(&id); }
+            }
+        }
+    }
+    pub fn withdraw_delivery(&mut self, id: u64) {
+        self.undelivered.remove(&id);
+        self.pending.remove(&id);
+        self.turn_started_at = None;
+    }
+
+    /// Stop, initialization failure and interrupt all retire unsent input.
+    /// A later response can continue the handshake, but never revive it.
+    pub fn withdraw_input(&mut self) -> Vec<Action> {
+        let mut seqs: Vec<_> = self.stashed.take().and_then(|s| s.delivery).map(|d| d.seq).into_iter().collect();
+        for (id, seq) in self.undelivered.drain() { self.pending.remove(&id); seqs.push(seq); }
+        seqs.into_iter().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).collect()
     }
 
     pub fn interrupt(&mut self) -> Vec<Action> {
+        if self.stashed.is_some() || !self.undelivered.is_empty() {
+            let mut out = self.withdraw_input();
+            out.push(Action::Emit(Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None }));
+            return out;
+        }
         match &self.session_id {
             Some(sid) => vec![Action::Write(json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}).to_string())],
             None => Vec::new(),
@@ -176,21 +246,25 @@ impl Acp {
         self.mode = mode.into();
         let (Some(sid), Some(id)) = (self.session_id.clone(), self.mode_id_for(mode)) else { return Vec::new() };
         if self.current_mode.as_deref() == Some(&id) {
-            return Vec::new();
+            return vec![Action::AcpMode { mode: mode.into(), line: None }];
         }
-        vec![Action::Write(self.request("session/set_mode", json!({"sessionId": sid, "modeId": id}), Pending::SetMode))]
+        let line = self.request("session/set_mode", json!({"sessionId": sid, "modeId": id}), Pending::SetMode);
+        vec![Action::AcpMode { mode: mode.into(), line: Some(line) }]
     }
 
     /// Ask the agent for another model. Its reply is the answer the tab
     /// waits on (`harness::settings`): the model becomes current when it
     /// agrees, and the request is dropped with its reason when it does not.
-    pub fn set_model(&mut self, model: &str) -> Vec<Action> {
+    #[cfg(test)]
+    pub fn set_model(&mut self, model: &str) -> Vec<Action> { self.set_requested_model(model, None) }
+
+    pub fn set_requested_model(&mut self, model: &str, request_id: Option<String>) -> Vec<Action> {
         let Some(sid) = self.session_id.clone() else {
             // No session yet: it is asked for when one opens.
             self.model = Some(model.into());
             return Vec::new();
         };
-        vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": model}), Pending::SetModel { model: model.into(), opening: false }))]
+        vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": model}), Pending::SetModel { model: model.into(), opening: false, request_id }))]
     }
 
     /// A session has opened on `agent_model`, the agent's own choice. The
@@ -201,7 +275,7 @@ impl Acp {
         self.agent_model = agent_model.map(String::from);
         match (self.model.clone(), self.session_id.clone()) {
             (Some(wanted), Some(sid)) if agent_model.is_some_and(|current| current != wanted) => {
-                vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": wanted}), Pending::SetModel { model: wanted, opening: true }))]
+                vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": wanted}), Pending::SetModel { model: wanted, opening: true, request_id: self.opening_model_request.clone() }))]
             }
             _ => self.model_is(agent_model).into_iter().collect(),
         }
@@ -265,7 +339,12 @@ impl Acp {
 
     fn fail_turn(&mut self, message: String) -> Vec<Action> {
         let auth_failed = message.to_lowercase().contains("auth") || message.to_lowercase().contains("login");
-        let mut out = self.flush();
+        let mut out = self.withdraw_input();
+        out.extend(self.flush());
+        if !self.ready {
+            self.opening = false;
+            self.pending.retain(|_, pending| !matches!(pending, Pending::Initialize | Pending::Authenticate | Pending::SessionNew | Pending::SessionLoad));
+        }
         self.turn_started_at = None;
         out.push(Action::Emit(Payload::TurnCompleted {
             status: TurnStatus::Error,
@@ -281,7 +360,7 @@ impl Acp {
 
     fn on_response(&mut self, v: &Value) -> Vec<Action> {
         let id = v["id"].as_u64().unwrap_or(0);
-        let kind = self.pending.remove(&id).unwrap_or(Pending::Other);
+        let Some(kind) = self.pending.remove(&id) else { return Vec::new() };
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
             let message = err
                 .pointer("/data/message")
@@ -303,14 +382,19 @@ impl Acp {
                 // A change somebody asked for is turned down in the agent's
                 // words. The tab's own model failing on a new session leaves
                 // the session on the agent's choice, and the tab says so.
-                Pending::SetModel { model, opening: false } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, value: Some(model), message } })],
-                Pending::SetModel { model, opening: true } => {
+                Pending::SetModel { model, request_id: Some(request_id), .. } => {
+                    let mut out = vec![Action::AcpModelRefused { request_id, model, message }];
+                    let current = self.agent_model.clone();
+                    out.extend(self.model_is(current.as_deref()));
+                    out
+                }
+                Pending::SetModel { model, opening: false, request_id: None } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, value: Some(model), message } })],
+                Pending::SetModel { model, opening: true, request_id: None } => {
                     let mut out = vec![Action::Emit(Payload::Status { text: format!("Could not use {model}: {message}") })];
                     let agent_model = self.agent_model.clone();
                     out.extend(self.model_is(agent_model.as_deref()));
                     out
                 }
-                Pending::Other => vec![Action::Emit(Payload::Error { message, fatal: false, detail: None })],
             };
         }
         let result = &v["result"];
@@ -343,10 +427,11 @@ impl Acp {
                 // An agent that lists its models says which one the session opened on.
                 out.extend(self.settle_model(result["models"]["currentModelId"].as_str()));
                 self.ready = true;
+                self.opening = false;
                 let mode = self.mode.clone();
                 out.extend(self.set_mode(&mode));
-                if let Some((text, images)) = self.stashed.take() {
-                    out.extend(self.begin_turn(&text, &images));
+                if let Some(Stashed { text, images, delivery }) = self.stashed.take() {
+                    out.extend(self.begin_turn(&text, &images, delivery));
                 }
                 out
             }
@@ -368,7 +453,6 @@ impl Acp {
                 Vec::new()
             }
             Pending::SetModel { model, .. } => self.model_is(Some(&model)).into_iter().collect(),
-            Pending::Other => Vec::new(),
         }
     }
 
@@ -542,7 +626,10 @@ mod tests {
     use super::*;
 
     fn writes(actions: &[Action]) -> Vec<Value> {
-        actions.iter().filter_map(|a| if let Action::Write(l) = a { serde_json::from_str(l).ok() } else { None }).collect()
+        actions.iter().filter_map(|a| match a {
+            Action::Write(line) | Action::AcpMode { line: Some(line), .. } => serde_json::from_str(line).ok(),
+            _ => None,
+        }).collect()
     }
     fn emits(actions: &[Action]) -> Vec<&Payload> {
         actions.iter().filter_map(|a| if let Action::Emit(p) = a { Some(p) } else { None }).collect()

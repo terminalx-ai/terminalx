@@ -10,7 +10,7 @@ vi.mock("@/lib/account", () => ({ signIn: vi.fn(), signOut: vi.fn(), openPasteLi
 import { bootPairing } from "@/lib/pairing";
 import { AccountSidebarEntry } from "./AccountSidebarEntry";
 
-const connected: PairingStatus = { relay: { phase: "connected", message: "Connected", attempt: 0 }, host: null, devices: [], activePairing: null, lastError: null };
+const connected: PairingStatus = { relay: { phase: "connected", message: "Connected", attempt: 0 }, host: null, devices: [], activePairing: null, pendingApproval: null, keepAwake: true, lastError: null };
 const reason = "The Relay connection timed out. Retrying automatically. You can use LAN meanwhile.";
 const offline: PairingStatus = { ...connected, relay: { phase: "offline", message: reason, attempt: 12 } };
 const publish = (payload: PairingStatus) => act(() => mocks.listener!({ payload }));

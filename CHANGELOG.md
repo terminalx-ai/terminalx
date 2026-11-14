@@ -2,6 +2,284 @@
 
 ## Unreleased
 
+## 0.2.32
+
+- Attach any file to a message (up to 10), and open attached files from the
+  chat in their own tab with preview, source and copy. (PRO-290, #946)
+- Stage and unstage changes by file and hunk in the Repository view, and
+  generate commit messages from the staged diff. (PRO-266, #927)
+- Resolve merge conflicts in the app, one conflict at a time or with the
+  agent. (PRO-293, #922)
+- Link an open pull request to a session, even one on another branch, so its
+  checks and review show in the Branch tab. (PRO-294, #919)
+- Show GitHub review threads inline in the diff, list them in the Checks
+  panel, and send one or all of them to the agent. (PRO-234, #943)
+- Run a project's saved actions from the workspace header, ⌘R or ⌘K, start
+  "Run after setup" actions once per workspace, and open preview URLs in a
+  TerminalX browser tab. (PRO-363, PRO-155, #943, #931)
+- Open file (⌘P) lists recent and changed files first and offers to search
+  inside files or include ignored files when nothing matches; All files can
+  be filtered. (PRO-298, PRO-296, #940, #931)
+- Add view options to the file tab: wrap lines, show whitespace, copy the
+  whole file and download it. (PRO-297, #942)
+- Search settings from Settings and ⌘K, and copy a link to any setting.
+  (PRO-127, #920)
+- Per-project settings: the Projects group with General, Environment,
+  Actions, Preview URLs and Scripts pages; a project can check out only
+  chosen folders in new workspaces; setup and archive scripts resolve through
+  layered configuration, and an archive script runs before a workspace is
+  removed. (PRO-131, PRO-144, PRO-307, PRO-149, #943, #931, #928, #929)
+- Confirm a phone pairing by comparing a fingerprint on the Mac and the
+  phone, and show how each paired device is connected. (PRO-314, #923)
+- Resetting a chat to a turn can also restore the worktree to that turn.
+  (PRO-261, #931)
+- Drag sessions into, between and out of sidebar sections, and reorder
+  sections. (PRO-174, #931)
+- Clearer errors: a copyable error toast, a notice when notifications are
+  off, an empty model list with Retry, failed tab opens and closes, pull
+  request panel errors, a rename on a detached HEAD and a failed
+  comparison-branch switch. (PRO-326, PRO-327, PRO-292, PRO-291, PRO-207,
+  PRO-295, #915, #931, #941)
+- Whole-word search in files and replace, and short deterministic names for
+  sessions started from a long prompt. (PRO-299, PRO-333, #915)
+- Make text readable over panels: opaque overlays in glass mode, respect
+  macOS Reduce transparency, and raise faint text contrast. (PRO-336, #910)
+- Completed automation runs can archive their session. (#912)
+- When agents may control cloud workspaces, they can stop one without the
+  approval dialog. (#951)
+- Sessions an orchestration run starts (workers, verifiers) no longer play
+  the attention chime; personal sessions and the run's lead still do. (#950)
+- Attention sounds release the audio output after the last note instead of
+  keeping it open after the first chime. (#952)
+- Applying a comparison change keeps a scope picked during its branch check,
+  and worktrees detached at the same commit get a sidebar row each, so
+  Create a branch here and Rename act on the chosen worktree. (PRO-367, #949)
+- An issue pipeline no longer stops with "reviewer still asks for changes"
+  when main is merged in after the final approving review. (#954)
+- Orchestration runs (Experimental): orchestrate an issue from its page,
+  set budgets to No limit, act on blocked pieces, read workers' reports,
+  set tries and effort ceilings, open the run view with ⌘⇧O, name retries by
+  their piece and stop workers when a run ends. (PRO-269, PRO-337, PRO-335,
+  PRO-361, PRO-362, PRO-364, #911, #913, #909, #921, #936, #937)
+- Linux terminal supervisor follow-ups: stop escalation as callers ask, and
+  review fixes; macOS keeps its existing stop behaviour. (#467, #935, #939,
+  #945)
+- The settings watcher reports a change only once the file holds still.
+  (#918)
+- On Linux, give every terminal and terminal agent a supervisor of its own
+  that owns all its processes, including jobs that leave the shell's session
+  or outlive the shell. Stop is confirmed only once none is left. Supervised
+  terminals go on through a runtime update; one that cannot be carried yet
+  holds the update until it can, and is named meanwhile. A Linux system
+  without what the supervisor needs opens terminals as before, and says so
+  once. (#467)
+- Keep a failed or unconfirmed terminal stop owned through retries, session
+  and workspace removal, and resource kills, instead of reporting success
+  or targeting a terminal that reused its name. (#467)
+- Settings files are checked against a JSON schema generated from the app's
+  own validator: the user file and local repository file name it in `$schema`
+  when the app writes them (an existing one is kept; the committed shared file
+  is left without one so older builds do not warn), and `$TERMINALX_HOME/schemas/settings.schema.json` stays current, so
+  editors complete keys and flag typos. An error in a settings file names its
+  key and line; Settings can show where each value comes from, reset a key to
+  its inherited value, and list every settings file a project reads, with its
+  Git state and first problem. (PRO-140)
+
+## 0.2.31
+
+- Keep the session's own title in the sidebar while reviewer and helper tabs
+  are active. (#904)
+- Show token usage and cost per session, and align session status labels
+  across desktop and mobile. (#896, #898)
+- Show detailed session and pull request status on every sidebar row, and the
+  next Git action in the session header. (#821, #825)
+- Configure agent API keys from Settings and enforce managed data privacy
+  controls across app-owned network and agent activity. (#894, #817)
+- Create projects from Quick Start, confirm where a project was added, and
+  offer logs and recovery actions when the local runtime fails to start.
+  (#892, #888, #889)
+- Improve workspace setup scripts, local branch merges, workspace mirroring,
+  named run actions, and review comments. (#836, #827, #855, #853, #835)
+- Run auto-approved read-only commands outside the user's startup shell.
+  (#899)
+- Inspect individual CI checks from an issue pipeline and preserve the held
+  follow-up queue when leaving the composer. (#890, #886)
+- Experimental orchestration runs: a lead plans pieces you can approve,
+  workers get a model and effort per piece with escalation on failure, run
+  in a limited pool, are verified in a fresh session, and are merged into the
+  lead's branch in dependency order; the sidebar shows a lead with its
+  workers. (#895, #901, #900, #903, #905, #908, #902, #897)
+
+- Experimental: `terminalx runs merge` brings an orchestration run's accepted
+  pieces into the lead's branch. TerminalX does the git work itself, with no
+  model: one piece at a time, each after the pieces it depends on, one merge
+  commit a piece. A conflict is found with `git merge-tree` before the branch
+  is touched and stops the merge at that piece; the run's integration check
+  (`integrationCheck` in the plan, else the project's own check) runs after
+  each merge, and a merge that fails it is undone alone and names the piece.
+  Each piece's command done-checks run once more on the merged result before
+  the run is `done`. Nothing is pushed and no other branch is touched. A piece
+  that could not be merged goes back to its worker with the conflict as its
+  brief (`runs send-back`), is resolved by the lead, or is left out (`--skip`);
+  the Run view shows the merge a row a branch, with the same three choices.
+  `terminalx runs cleanup --yes` removes the workers' worktrees and refuses one
+  with uncommitted or unmerged work.
+  Merging holds no worker slot and uses none of the run's budget; having a
+  model resolve a conflict does count, and a run past its budget does not
+  start one: it waits for you instead and says which limit.
+- Experimental: a session can lead an orchestration run. The lead writes a plan
+  of pieces (`terminalx runs create --from plan.json`), each with a brief, the
+  files it owns, what it depends on and the check that proves it done, and
+  `terminalx runs start` starts a worker session for every piece whose
+  dependencies are done: its own worktree and branch cut from the lead's, the
+  piece's model and effort, and a brief built from the piece. A plan is refused,
+  naming the piece, when two pieces own the same file, a dependency loops, a piece
+  has no done-check or there are more pieces than the limit (8 by default). A
+  done-check is a command run in the worker's worktree or a point for a reviewer
+  to confirm; a piece needs a command unless it says why review alone can check it. By
+  default a run waits until you approve its plan in the session's new Run view,
+  where you can also edit or discard it; no command approves one. Workers start
+  in bypass unless the repository or the plan says otherwise, and never push,
+  merge or deploy: deny rules are handed to the agent at launch, TerminalX checks
+  every tool call, and the worker's git sends a push nowhere. Turn it on under
+  Settings → Experimental → Orchestration runs; the limits are in Settings →
+  Orchestrator and per repository. (PRO-274)
+
+- Experimental: an orchestration run picks each piece's model and effort from
+  the piece's kind. Every piece of a plan names a kind (`search`, `logs`,
+  `scoped-code`, `code`, `refactor`, `research`, `review`, `verify`), and a
+  routing table gives each kind a model tier and an effort, with one column for
+  Claude Code workers and one for Codex workers: small (Haiku, Luna) for
+  searching and reading logs, mid (Sonnet, Terra) for bounded changes and
+  checks, large (Opus, Sol) for everyday engineering, top (Fable, Astra) for
+  refactors and research. The table names tiers, not versions, so a new release
+  takes its place; a tier with no installed model falls back to the lead's
+  model, and the piece says so. A plan may still name a model or an effort for
+  a piece. Edit the table under Settings → Orchestrator, and per repository in
+  its own settings.
+
+  A piece that reports `failed` or `partial`, or whose done-check fails
+  (`terminalx runs check-failed`), is tried again without being asked: first
+  with the failure text and one more level of effort (never past high), then one
+  model tier up at one effort level lower. Each try is a fresh worker that is
+  told what the one before fell short on, and after three tries the piece is
+  blocked and goes back to the lead with what was tried. The Run view shows
+  every try with its model, effort, cost and outcome. (PRO-275)
+
+- Experimental: with Orchestration runs on, a lead's workers sit under it in the
+  sidebar, whatever worktree they run in, each named by its piece with its
+  model's tier and its piece's state mark. Fold a lead and its row keeps what
+  matters: pieces done out of total, how many workers are running, a Needs
+  approval or Needs you mark with how many wait on you, and a worker's unread
+  mark. Hover it for the pieces that are not done. Clicking a lead opens its
+  run. The Run view's costs follow each worker's usage as it changes, still
+  counting every try a piece took, and set the run's spend against its dollar
+  budget; a Needs you list there names a blocked piece, a worker waiting
+  on an answer or spend past the budget, each opening the worker it is about.
+  Sessions that no other session started look as before. (PRO-281)
+
+- Experimental: an orchestration run no longer starts more workers than the
+  Mac can carry. At most 4 workers of one run, and 8 across every run, are in a
+  turn at once; the rest queue and start by themselves as workers finish.
+  Sessions you start by hand are never counted or queued. A run also keeps a
+  budget, by how its workers sign in: dollars on an API key, and on a
+  subscription 25 points of a usage window for the run and a level of 85% that
+  no window it draws on may pass. Reaching one starts nothing new, lets running
+  workers finish their turn, and shows why in the Run view, naming the window
+  and when it resets; you can raise the budget, resume, or have it go on after
+  the reset. The approval view warns when a run would not fit in what is left of
+  a window and changes the limits for one run. A worker with no tool call or file
+  change for 10 minutes while its agent is idle is marked stalled and reported to
+  the lead; a long build is not a stall. The limits are in Settings →
+  Orchestrator, and a repository can set its own budget. (PRO-280)
+
+- Each release also uploads its notarized DMG as `TerminalX-latest-aarch64.dmg`
+  and lists it in `SHA256SUMS`, so
+  [one link](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
+  always downloads the newest build.
+  The release pipeline (`scripts/release/`, described in docs/RELEASING.md) is
+  now in the repository. It publishes nothing unless notarization, stapling and
+  the secret scan pass. (PRO-148)
+
+- Branch prefixes and local launch environment can now inherit shared repository
+  configuration, local overrides and managed locks. Settings → General → Layered
+  configuration shows sources and offers explicit repository saves. Shared values
+  require native consent tied to the repository and file contents; changed files
+  need approval again. CLI and paired phones can inspect redacted sources. Setup
+  and archive scripts and files to copy are not read from the shared file yet.
+
+- Sidebar rows show change counts, command/server activity and the current
+  window's unsent prompt previews. Mark rows read or unread from their menu
+  (R), archive on hover, and cycle waiting sessions with ⌘⌥L. Unread reminders
+  persist per tab and clear when opened on desktop or phone. Renaming a
+  conversation also pins its active tab's title, including a previously
+  untitled tab, so automatic branch/title changes keep the explicit name.
+  (PRO-179, #851)
+
+## 0.2.30
+
+- Open local diffs and pull requests in full-width centre tabs, alongside
+  files and terminals. (#826)
+- Show Codex goals and token budgets in the chat while keeping chat search
+  available. (#856)
+- Configure repository startup behavior and files to copy into new
+  workspaces from Settings. (#804)
+- Wait on several agent sessions at once and read structured worker reports
+  with the TerminalX CLI. (#878, #879)
+- Preserve each tab's activity state across background runtime handovers.
+  (#873)
+- Keep private paths and configured model filenames out of recovery
+  diagnostics, summaries, and exports. (#875, #884)
+
+- Connect GitHub from the PR tab or Settings → Integrations in an embedded
+  sign-in terminal. Pushing a repository without a remote now offers a URL
+  field, or creation of a GitHub repository when signed in. Git failures show
+  a readable explanation with command output behind **Show details**. Connection
+  checks and login target the repository's host after resolving SSH aliases and
+  excluding unrelated remotes. Connection failures offer retry,
+  failed login output stays available, and repository creation works from linked
+  worktrees. PR conversations, check logs, reruns and Fix errors remain available after
+  connecting; failed reruns keep their output behind **Show details**. Remote setup
+  preserves file filters and folder view in the updated Changes panel. (PRO-166)
+
+- Keep native resend regression fixtures within their existing deadlines by
+  removing shell helper launches from the simulated protocol. (PRO-166 validation)
+
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
+  (PRO-173 follow-up)
+- A session started with `terminalx sessions create` from inside another
+  session records it as its `parent` (`--parent`, `--no-parent`).
+  `sessions list --children-of` lists the sessions a session started, and
+  `sessions stop --children-of` stops their running agents. (PRO-270)
+- `terminalx wait --children-of <session>` waits on every session that session
+  started, with `--any` or `--all`, and returns at once when it started none.
+  (PRO-328)
+
+## 0.2.29
+
+- Review changes from a turn checkpoint or a single commit, browse files in a
+  folder tree, mark files as viewed, and choose a comparison branch. (#854)
+- Read pull request conversations, manage reviewers, inspect check logs,
+  rerun failed checks, and send check failures to an agent for help. (#829, #831)
+- Set a manual session status and use status groups to organize local and
+  cloud chats. (#811)
+- Improve Native Codex follow-up delivery and recovery after a background
+  runtime update. (#865, #867)
+- Diagnose stalled macOS child-process startup from Settings, with recorded
+  startup evidence and guided validation. (#830)
+- Create GitHub and Linear issues with pipeline policy options. (#864)
+- Refine chat overlays, image viewing, dialogs, sidebar styling, and the
+  post-merge workspace flow. (#868, #876)
+- Let explicitly authorized agents inspect and operate TerminalX's own UI
+  through a session-scoped grant. Human-only confirmations remain protected.
+  (#872)
+
+## 0.2.28
+
 - User settings reload when `settings.json` changes. General shows its location
   and offers to create it. Existing webview preferences migrate into that file;
   downgrading to a build without this support uses its preference defaults,
@@ -9,6 +287,24 @@
   `settings.json`. Unknown keys and `$schema` survive saves, and an invalid
   field no longer resets valid credentials, permission choices, or other
   settings when the app starts. (Part of PRO-140)
+
+- Keep a checkpoint for each chat turn and reset a conversation to an earlier
+  turn, with an Undo option. Reset changes the conversation only; files stay
+  as they are. (#843, #858)
+- Find text across the chat with Command-F, including messages outside the
+  visible portion of long conversations. (#857)
+- Manage repository scripts from Settings, including setup and archive scripts
+  and their run history. (#808)
+- Native Codex can move from chat to its terminal interface while preserving
+  the conversation. The transition handles process startup and readiness, and
+  reports interrupted transitions without silently replaying prompts. (#819)
+- Attention notices wait while the foreground conversation has an approval
+  needing a response, keeping approval controls and live terminals usable.
+  (#862)
+- Settings and sharing get a design update, with settings search, a simpler
+  account menu and a pasted sign-in-link fallback. Sharing explains permission
+  choices before a link is created. (#852)
+
 ## 0.2.27
 
 ### Sessions and sidebar

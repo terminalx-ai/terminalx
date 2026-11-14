@@ -129,7 +129,7 @@ pub fn valid_helper_path(value: &str) -> bool {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).user_agent("terminalx-route-check").build()
+    crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).user_agent("terminalx-route-check").build()
 }
 
 /// Read an endpoint's model list with the credential.

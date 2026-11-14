@@ -1,3 +1,4 @@
+import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
 import type { RuntimeIssuePipeline, RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -135,6 +136,7 @@ export function useCloudCatalog(): CloudCatalogState {
 
 /** Organizations with cloud workspaces enabled, as the desktop session reports them (PRO-69). */
 export function cloudOrganizations(status: AccountStatus): OrganizationSummary[] {
+  if (privacyEnabled()) return [];
   if (status.state !== "signed-in") return [];
   return (status.organizations ?? []).filter((org) => org.cloud?.enabled === true);
 }
@@ -145,6 +147,7 @@ export function cloudOrganizations(status: AccountStatus): OrganizationSummary[]
  * otherwise the default organization only, as before.
  */
 export function liveCloudOrgIds(status: AccountStatus): string[] {
+  if (privacyEnabled()) return [];
   const enabled = cloudOrganizations(status).map((org) => org.id);
   if (isMultiOrg(status)) return enabled;
   const orgId = defaultOrgId(status);
@@ -557,6 +560,7 @@ export function catalogErrorText(error: string): string {
  * on a server with the capability, else the default one alone.
  */
 export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccount().status), now: () => number = Date.now): Promise<void> {
+  if (privacyEnabled()) return Promise.resolve();
   if (!orgId || !liveCloudOrgIds(getAccount().status).includes(orgId)) return Promise.resolve();
   const running = flights.get(orgId);
   if (running) return running;
@@ -697,6 +701,7 @@ export function mergeFeedDelta(current: readonly CloudWorkspaceListItem[], entry
  * showed, with the error; a failed request keeps everything.
  */
 export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
+  if (privacyEnabled()) return Promise.resolve();
   if (!usesCatalogFeed()) return Promise.resolve();
   if (feedFlight) return feedFlight;
   const owner = state.owner;
@@ -1132,6 +1137,7 @@ function resetFeed() {
 let booted = false;
 let unsubscribe: (() => void) | null = null;
 let unsubscribeAccess: (() => void) | null = null;
+let unsubscribePrivacy: (() => void) | null = null;
 
 /** Follow the account: load the saved catalog for a signed-in user, list the default organization, and poll. */
 function syncAccount() {
@@ -1203,6 +1209,13 @@ export function bootCloudCatalog() {
   if (booted) return;
   booted = true;
   unsubscribe = subscribeAccount(syncAccount);
+  unsubscribePrivacy = subscribeDataPrivacy(() => {
+    clearTimers();
+    clearFeedTimer();
+    for (const timer of accessTimers.values()) clearTimeout(timer);
+    accessTimers.clear();
+    if (!privacyEnabled()) syncAccount();
+  });
   unsubscribeAccess = onAccessChanged(onAccessChange);
   if (typeof window !== "undefined") {
     window.addEventListener("focus", onWindowChange);
@@ -1214,6 +1227,8 @@ export function bootCloudCatalog() {
 
 /** For tests. */
 export function resetCloudCatalog() {
+  unsubscribePrivacy?.();
+  unsubscribePrivacy = null;
   unsubscribe?.();
   unsubscribe = null;
   unsubscribeAccess?.();

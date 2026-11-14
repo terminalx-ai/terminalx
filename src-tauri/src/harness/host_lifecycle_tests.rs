@@ -93,7 +93,7 @@ fn leader_exit_cannot_publish_terminal_receipt_before_reader_join() {
     }).unwrap().begin();
     ready.recv_timeout(Duration::from_secs(2)).unwrap();
     let stderr = start_reader("drain-err".into(), || ReaderEnd::Eof).unwrap().begin();
-    let live = Arc::new(LiveChild { pid: 41, epoch: 7, stdin: Mutex::new(None), terminal: Arc::new(Mutex::new(None)) });
+    let live = Arc::new(LiveChild { pid: 41, epoch: 7, stdin: Mutex::new(None), frame: Mutex::new(()), terminal: Arc::new(Mutex::new(None)) });
     let terminal = live.terminal.clone();
     let (at_join, reached_join) = mpsc::channel();
     let (resume, proceed) = mpsc::channel();
@@ -148,7 +148,7 @@ fn assert_panic_receipt(stdout: JoinHandle<ReaderEnd>, exit_payload: Option<Arc<
     ready.recv_timeout(Duration::from_secs(2)).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let sink = ExitSink { calls: calls.clone(), panic_drop: exit_payload };
-    let live = Arc::new(LiveChild { pid: 42, epoch: 8, stdin: Mutex::new(None), terminal: Arc::new(Mutex::new(None)) });
+    let live = Arc::new(LiveChild { pid: 42, epoch: 8, stdin: Mutex::new(None), frame: Mutex::new(()), terminal: Arc::new(Mutex::new(None)) });
     let terminal = live.terminal.clone();
     let (at_join, reached_join) = mpsc::channel();
     let (resume, proceed) = mpsc::channel();

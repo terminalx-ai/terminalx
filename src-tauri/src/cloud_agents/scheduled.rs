@@ -733,18 +733,21 @@ impl Agent for ManagerAgent {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                parent: None,
                 section_id: None,
                 project_path: self.root.clone(),
                 title: Some(title.to_string()),
                 use_worktree: false,
                 on_main: true,
                 checkout_branch: None,
+                checkout_pr: None,
                 base_ref: None,
                 worktree_name: None,
                 issue: None,
                 automation: None,
                 cwd: None,
                 tab: Some(new_tab(run)),
+                orchestrate: false,
             },
         )
         .map_err(|error| StartError::NotStarted(anyhow!("{error}")))?;

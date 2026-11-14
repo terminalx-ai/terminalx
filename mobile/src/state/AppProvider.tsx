@@ -11,12 +11,13 @@ import { handleNotificationEvent, restoreLocalNotifications } from "../notificat
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
 import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
-import { pairFromOffer, recoverPendingPairing } from "../pairing/pair";
+import { pairFromOffer, recoverPendingPairing, type PairingProgress } from "../pairing/pair";
 import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/parse";
 import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 import { phoneNetwork } from "../transport/network";
+import { currentDeviceDescription } from "./device-name";
 
 interface AppContextValue {
   ready: boolean;
@@ -41,6 +42,8 @@ interface AppContextValue {
   refreshMachines(): Promise<void>;
   pairAvailable(host: AccountHost): Promise<void>;
   pairCode(code: string): Promise<void>;
+  /** While a QR pairing runs: the fingerprint to compare with the Mac's, and whether the Mac is waiting for the person to approve (PRO-314). */
+  pairingProgress: PairingProgress | null;
   retryPairing(): Promise<void>;
   /** Select a computer without restarting a usable connection; false if selection failed or was superseded. */
   connectHost(host: StoredHost): Promise<boolean>;
@@ -51,7 +54,7 @@ interface AppContextValue {
   renameHost(hostId: string, name: string): Promise<void>;
   /** Drop the connection to a computer and make it again (connecting to it if it was not the active one). */
   reconnectHost(hostId: string): Promise<void>;
-  refreshSessions(): Promise<void>;
+  refreshSessions(silent?: boolean): Promise<void>;
   clearError(): void;
 }
 
@@ -59,7 +62,8 @@ const AppContext = createContext<AppContextValue | null>(null);
 const LOG_KEY = "terminalx:connection-log:v1";
 
 export function AppProvider({ children }: PropsWithChildren) {
-  const connection = useMemo(() => new HostConnection(), []);
+  const device = useMemo(() => currentDeviceDescription(), []);
+  const connection = useMemo(() => new HostConnection(device), [device]);
   const api = useMemo(() => new HostApi(connection), [connection]);
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<CloudSession | null>(null);
@@ -78,6 +82,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConnectionLogEntry[]>([]);
+  const [pairingProgress, setPairingProgress] = useState<PairingProgress | null>(null);
 
   const loadHosts = useCallback(async () => {
     const storedHosts = await readHosts();
@@ -155,12 +160,12 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const summariesRunning = useRef(false);
   const summariesDirty = useRef(false);
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (silent = false) => {
     if (!activeHostRef.current) return;
     summariesDirty.current = true;
     if (summariesRunning.current) return;
     summariesRunning.current = true;
-    setLoadingSessions(true);
+    if (!silent) setLoadingSessions(true);
     try {
       while (summariesDirty.current && activeHostRef.current) {
         summariesDirty.current = false;
@@ -176,7 +181,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
     } finally {
       summariesRunning.current = false;
-      setLoadingSessions(false);
+      if (!silent) setLoadingSessions(false);
     }
   }, [api]);
 
@@ -186,7 +191,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     setError(null);
     if (activeHostRef.current?.id === host.id) {
       if (connectionStageRef.current === "connected") void refreshSessions();
-      else if (!["connecting", "reconnecting"].includes(connectionStageRef.current)) connection.restart("the computer was chosen again");
+      else if (!["connecting", "reconnecting"].includes(connectionStageRef.current)) connection.restart("the computer was chosen again", true);
       return true;
     }
     try {
@@ -228,7 +233,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (startup.signal.aborted) return;
       setSession(effectiveSession);
       setHosts(storedHosts);
-      void recoverPendingPairing()
+      void recoverPendingPairing({ device })
         .then(() => { if (!startup.signal.aborted) return loadHosts(); })
         .catch((cause: unknown) => { if (!startup.signal.aborted) setError(readableError(cause)); });
       if (rawLogs) {
@@ -241,10 +246,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
       if (startup.signal.aborted) return;
       // Saved pairings already hold the pinned key and credential. Resume the
-      // most recently connected Mac without another selection or pairing code.
+      // most recently connected Mac without another selection or pairing code,
+      // unless that Mac disconnected this phone: then the person reconnects (PRO-314).
       const recentHost = storedHosts.reduce<StoredHost | null>((recent, host) =>
         !recent || host.lastConnectedAt > recent.lastConnectedAt ? host : recent, null);
-      if (recentHost) await connectHost(recentHost, startup.signal);
+      if (recentHost && !recentHost.disconnectedOnMacAt) await connectHost(recentHost, startup.signal);
       if (startup.signal.aborted) return;
       setReady(true);
     }).catch((cause: unknown) => {
@@ -256,7 +262,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
     });
     return () => { startup.abort(); selectionGeneration.current++; linking.remove(); };
-  }, [api, connectHost, loadHosts]);
+  }, [api, connectHost, device, loadHosts]);
 
   useEffect(() => {
     const stage = connection.onStage((next, attempt) => {
@@ -362,30 +368,32 @@ export function AppProvider({ children }: PropsWithChildren) {
       const offer = parsePairingCodeOrThrow(code);
       // The link may say what the computer is called; an older desktop's does not, and the fallback label stays until it does.
       const hostName = cleanHostName(extractPairingNameFromUrl(code));
-      const paired = await pairFromOffer({ offer, label: FALLBACK_HOST_LABEL, provenance: { kind: "explicit" } });
+      const paired = await pairFromOffer({ offer, label: FALLBACK_HOST_LABEL, provenance: { kind: "explicit" }, onProgress: setPairingProgress, device });
       if (hostName) await pairingStep("persistence", () => setHostNames(paired.id, { hostName }));
       await pairingStep("persistence", loadHosts);
     } catch (cause) {
       setError(readableError(cause));
       throw cause;
     } finally {
+      setPairingProgress(null);
       setLoadingMachines(false);
     }
-  }, [loadHosts]);
+  }, [device, loadHosts]);
 
   const retryPairing = useCallback(async () => {
     setLoadingMachines(true);
     setError(null);
     try {
-      await recoverPendingPairing();
+      await recoverPendingPairing({ onProgress: setPairingProgress, device });
       await pairingStep("persistence", loadHosts);
     } catch (cause) {
       setError(readableError(cause));
       throw cause;
     } finally {
+      setPairingProgress(null);
       setLoadingMachines(false);
     }
-  }, [loadHosts]);
+  }, [device, loadHosts]);
 
   const disconnectHost = useCallback(() => {
     selectionGeneration.current++;
@@ -414,14 +422,14 @@ export function AppProvider({ children }: PropsWithChildren) {
   const reconnectHost = useCallback(async (hostId: string) => {
     setError(null);
     if (activeHostRef.current?.id === hostId) {
-      connection.restart("reconnect was chosen");
+      connection.restart("reconnect was chosen", true);
       return;
     }
     const host = (await readHosts()).find((item) => item.id === hostId);
     if (host) await connectHost(host);
   }, [connectHost, connection]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

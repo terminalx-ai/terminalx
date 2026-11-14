@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import {
   EditorView,
   GutterMarker,
@@ -8,6 +8,7 @@ import {
   gutter,
   highlightActiveLine,
   highlightActiveLineGutter,
+  highlightWhitespace,
   keymap,
   lineNumbers,
 } from "@codemirror/view";
@@ -15,18 +16,22 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, openSearchPanel, searchKeymap } from "@codemirror/search";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle } from "@/icons";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { api, fs } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
+import { getPrefs, usePrefs } from "@/lib/prefs";
 import { registerLiveEditor } from "@/lib/editorViews";
 import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
-import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type EditorEntry } from "@/lib/editors";
+import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer, useFileSource, type FileState } from "@/lib/workspaceFiles";
 import { useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { EditorToolbar } from "./EditorToolbar";
+import { AttachmentToolbar } from "./AttachmentToolbar";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
 
 // ---- git gutter: which lines differ from HEAD
@@ -97,6 +102,13 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
   return out;
 }
 
+/** The source view's View options (PRO-297), swapped in place as they change. */
+const wrapExtension = (on: boolean): Extension => (on ? EditorView.lineWrapping : []);
+const whitespaceExtension = (on: boolean): Extension => (on ? highlightWhitespace() : []);
+
+/** The file name a download suggests: the file's own. */
+const downloadName = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1) || "file";
+
 /**
  * A file open for editing. ⌘S saves; the tab shows a dot while the buffer
  * differs from disk. A local file's mtime is compared with the one last read
@@ -108,7 +120,7 @@ function gitMarks(head: string, now: string): Map<number, Mark> {
  * overwritten without an explicit choice, and an unsaved cloud buffer
  * survives reconnects and the workspace page closing.
  */
-export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: boolean }) {
+export function EditorPane({ entry, visible, embedded = false }: { entry: FileEditorEntry; visible: boolean; embedded?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const savedDoc = useRef<string>("");
@@ -125,9 +137,17 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const [find, setFind] = useState<FindPanelHandle | null>(null);
   // The buffer as text, for the markdown preview; refreshed a beat after edits.
   const [docText, setDocText] = useState("");
+  // Copy and Download say how they went, a moment, under the toolbar.
+  const [notice, setNotice] = useState<string | null>(null);
+  const wrapSlot = useRef(new Compartment()).current;
+  const whitespaceSlot = useRef(new Compartment()).current;
+  const { editorWrap, editorShowWhitespace } = usePrefs();
+  const paneRef = useRef<HTMLDivElement>(null);
   const source = useFileSource(entry.source, entry.root);
   const cloud = source?.kind === "cloud";
-  const readOnly = !!source?.readOnly;
+  // A sent message's file (PRO-290) is the copy that was sent: never edited.
+  const attachment = entry.attachment;
+  const readOnly = !!source?.readOnly || !!attachment;
   const abs = `${entry.root}/${entry.rel}`;
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
@@ -157,7 +177,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   const write = useCallback(
     async (base: string | null | undefined) => {
       const view = viewRef.current;
-      if (!view || !source || source.readOnly) return;
+      if (!view || !source || source.readOnly || attachment) return;
       const text = view.state.doc.toString();
       try {
         markSaved(text, await source.writeText(entry.rel, text, base));
@@ -166,13 +186,14 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         else setError(describeError(e));
       }
     },
-    [source, entry.rel, markSaved, describeError],
+    [source, entry.rel, markSaved, describeError, attachment],
   );
 
   const save = useCallback(() => write(fileState.current.etag), [write]);
 
   // Save and Find are the reader's shortcuts, not CodeMirror's fixed keys. They act on the editor that has the focus.
   const saveKeys = useShortcutKeys("files.save");
+  const copyKeys = useShortcutKeys("files.copyContents");
   const focused = () => {
     const view = viewRef.current;
     return view && view.dom.contains(document.activeElement) ? view : null;
@@ -184,6 +205,61 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   }, []);
   useShortcut("files.save", saveFocused, { enabled: visible });
   useShortcut("files.find", findFocused, { enabled: visible });
+
+  const flash = useCallback((text: string) => {
+    setNotice(text);
+    window.setTimeout(() => setNotice((now) => (now === text ? null : now)), 2500);
+  }, []);
+
+  /**
+   * The whole file as the reader has it: the buffer, unsaved edits and all,
+   * unless the editor shows only the start of a large file. Then the file
+   * itself, read again in full.
+   */
+  const wholeText = useCallback(async () => {
+    const view = viewRef.current;
+    if (truncated && source?.kind === "local") return fs.readWholeText(abs);
+    return view ? view.state.doc.toString() : docText;
+  }, [truncated, source, abs, docText]);
+
+  const copyContents = useCallback(async () => {
+    try {
+      await copyText(await wholeText());
+      setError(null);
+      flash("Copied the file's contents");
+    } catch (e) {
+      setError(`Could not copy the file: ${describeError(e)}`);
+    }
+  }, [wholeText, flash, describeError]);
+
+  /**
+   * Save a copy where the reader picks. A local file with nothing unsaved
+   * is copied byte for byte (whatever its size or encoding); an unsaved
+   * buffer, or a cloud workspace's file, is written as the text it holds.
+   */
+  const download = useCallback(async () => {
+    const view = viewRef.current;
+    if (!source || !view) return;
+    const to = await saveDialog({ title: `Download ${downloadName(entry.rel)}`, defaultPath: downloadName(entry.rel) }).catch(() => null);
+    if (!to) return;
+    try {
+      const unsaved = view.state.doc.toString() !== savedDoc.current;
+      await fs.exportFile(to, source.kind === "local" && (!unsaved || truncated) ? { from: abs } : { content: view.state.doc.toString() });
+      setError(null);
+      flash(`Saved a copy to ${to}`);
+    } catch (e) {
+      setError(`Could not download the file: ${describeError(e)}`);
+    }
+  }, [source, entry.rel, abs, truncated, flash, describeError]);
+
+  // ⌥⌘C acts on the file tab that has the focus, in Preview as in Source.
+  const copyFocused = useCallback(() => (status === "ready" && paneRef.current?.contains(document.activeElement) ? (void copyContents(), true) : false), [status, copyContents]);
+  useShortcut("files.copyContents", copyFocused, { enabled: visible });
+
+  // Wrap and whitespace change the open view at once.
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: [wrapSlot.reconfigure(wrapExtension(editorWrap)), whitespaceSlot.reconfigure(whitespaceExtension(editorShowWhitespace))] });
+  }, [editorWrap, editorShowWhitespace, wrapSlot, whitespaceSlot, status]);
 
   /**
    * Resolve a conflict in favour of the buffer: overwrite what is there now,
@@ -231,10 +307,11 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     }
     let cancelled = false;
     let markTimer: number | undefined;
+    let textTimer: number | undefined;
     let unregister: (() => void) | undefined;
     (async () => {
       try {
-        const stash = source.kind === "cloud" ? takeStashedBuffer(entry.id) : undefined;
+        const stash = source.kind === "cloud" || embedded ? takeStashedBuffer(entry.id) : undefined;
         let doc: string;
         if (stash) {
           doc = stash.text;
@@ -256,7 +333,6 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         const restoredDirty = doc !== savedDoc.current;
         setDirty(restoredDirty);
         setEditorDirty(entry.id, restoredDirty);
-        let textTimer: number | undefined;
         const extensions: Extension[] = [
           raccoonTheme,
           raccoonHighlight,
@@ -272,8 +348,10 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           highlightSelectionMatches(),
           findPanel(setFind),
           languageFor(entry.rel),
-          EditorState.readOnly.of(source.readOnly),
-          EditorView.editable.of(!source.readOnly),
+          wrapSlot.of(wrapExtension(getPrefs().editorWrap)),
+          whitespaceSlot.of(whitespaceExtension(getPrefs().editorShowWhitespace)),
+          EditorState.readOnly.of(source.readOnly || !!attachment),
+          EditorView.editable.of(!source.readOnly && !attachment),
           keymap.of([
             ...closeBracketsKeymap,
             ...defaultKeymap,
@@ -302,7 +380,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           const now = await source.stat(entry.rel).catch(() => fileState.current);
           if (!cancelled && changedSince(fileState.current, now)) setChangedOnDisk(true);
         }
-        if (source.kind !== "local") return;
+        if (source.kind !== "local" || attachment) return;
         try {
           const tree = await api.headTree(entry.root);
           if (cancelled || !tree) return;
@@ -323,18 +401,19 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
     return () => {
       cancelled = true;
       window.clearTimeout(markTimer);
+      window.clearTimeout(textTimer);
       unregister?.();
       const view = viewRef.current;
-      // A cloud buffer with unsaved text outlives its view while its editor
-      // is still open (the workspace page closed, or the source went away).
-      if (view && source.kind === "cloud" && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
+      // A review can switch to another session through the workspace strip.
+      // Like cloud buffers, its unsaved text must outlive that unmounted view.
+      if (view && (source.kind === "cloud" || embedded) && view.state.doc.toString() !== savedDoc.current && getEditors().editors.some((e) => e.id === entry.id)) {
         stashBuffer(entry.id, { text: view.state.doc.toString(), saved: savedDoc.current, state: fileState.current });
       }
       view?.destroy();
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded, attachment, wrapSlot, whitespaceSlot]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {
@@ -386,16 +465,33 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
       return stop;
     }
     if (!visible) return;
+    void checkForChange();
     const t = window.setInterval(() => void checkForChange(), 2000);
     return () => window.clearInterval(t);
   }, [visible, status, source, entry.rel, checkForChange]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <EditorToolbar
+    <div ref={paneRef} className="flex h-full min-h-0 flex-col">
+      {attachment ? (
+        <AttachmentToolbar
+          path={attachment.path}
+          name={entry.name}
+          sentAt={attachment.sentAt}
+          markdown={markdown && !embedded}
+          viewMode={entry.viewMode}
+          onViewModeChange={(mode) => setViewMode(entry.id, mode)}
+          copyContents={() => {
+            // Not text: like a media file, its path is what can be copied.
+            if (status === "binary") return attachment.path;
+            if (status !== "ready") throw new Error("it has not been read yet");
+            if (truncated) throw new Error("only its first 4 MB could be read. Use Download for the whole file");
+            return viewRef.current?.state.doc.toString() ?? docText;
+          }}
+        />
+      ) : <EditorToolbar
         path={abs}
         relativePath={entry.rel}
-        markdown={markdown}
+        markdown={markdown && !embedded}
         viewMode={entry.viewMode}
         onViewModeChange={(mode) => setViewMode(entry.id, mode)}
         cloud={cloud}
@@ -405,7 +501,11 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         saveDisabled={!dirty || readOnly || !source}
         saveKeys={saveKeys}
         onSave={() => void save()}
-      />
+        copyKeys={copyKeys}
+        contentsDisabled={status !== "ready"}
+        onCopy={() => void copyContents()}
+        onDownload={() => void download()}
+      />}
       {conflict && (
         <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 bg-destructive/10 px-3 py-1.5 text-xs text-foreground" data-testid="editor-conflict">
           <AlertTriangle className="size-3.5 text-destructive" />
@@ -436,9 +536,10 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         </div>
       )}
       {error && <div className="shrink-0 px-3 py-1.5 text-xs text-destructive">{error}</div>}
+      {notice && !error && <div role="status" className="shrink-0 truncate px-3 py-1.5 text-xs text-muted-foreground" data-testid="editor-notice">{notice}</div>}
       {status === "binary" && (
         <div className="p-4 text-sm text-muted-foreground">
-          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
+          Cannot preview {entry.name}. {cloud ? "It is binary or not UTF-8 text." : attachment ? "It is not text. Use Download to save a copy, or Reveal in Finder from the More menu." : "This binary format is unsupported. Use Reveal in Finder to open it externally."}
         </div>
       )}
       {status === "loading" && <div className="p-4 text-sm text-muted-foreground">Loading…</div>}
@@ -446,7 +547,8 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
         <div className="p-4 text-sm text-muted-foreground">Open the cloud workspace to read {entry.name}. Unsaved changes are kept until then.</div>
       )}
       {preview && status === "ready" && (
-        <div className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 select-text">
+        // Focusable, so ⌥⌘C copies the file while reading its preview.
+        <div tabIndex={-1} className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 outline-none select-text">
           <Markdown
             text={docText}
             className="prose-chat"

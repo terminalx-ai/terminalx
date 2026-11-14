@@ -1,3 +1,5 @@
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { PrivacyEmptyState } from "./DataPrivacySettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useState } from "react";
 import { Loader2 } from "@/icons";
@@ -13,10 +15,18 @@ import { usePairing } from "@/lib/pairing";
 import { openOrganizationSettings } from "@/lib/settingsLinks";
 
 export function AccountTab() {
+  const privacy = useDataPrivacy();
   const account = useAccount();
   const pairing = usePairing();
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
   const { status } = account;
+
+  if (privacy.enabled) return (
+    <div>
+      {account.status.identity && <p className="text-sm">Signed in as {account.status.identity.email}</p>}
+      <PrivacyEmptyState />
+    </div>
+  );
 
   if (!account.ready) {
     return (
@@ -129,4 +139,3 @@ export function AccountTab() {
     </div></RegisteredSetting>
   );
 }
-

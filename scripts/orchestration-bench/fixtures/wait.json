@@ -1,0 +1,10 @@
+{
+  "id": "01a1cf0d-0007-7501-b84f-45cc5b4d082c",
+  "ok": true,
+  "result": {
+    "reason": "stop",
+    "sessionId": "01a1ceff-adef-7630-ac43-1122d2f5f099",
+    "status": "completed",
+    "tabId": "01a1cf06-9bdf-71b3-9458-0f827490483a"
+  }
+}

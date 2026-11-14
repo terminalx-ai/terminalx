@@ -14,6 +14,7 @@ use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
 use super::engine::{self, act, answered, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
+use super::carry::{BaseMerges, Carry};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::engine::set_resolve_conflicts;
@@ -105,8 +106,10 @@ struct World {
     checks: Vec<PrCheck>,
     sent: Vec<(String, String)>,
     pushes: Vec<String>,
+    resolution_push_targets: Vec<Option<super::ResolutionTarget>>,
     created: Vec<(String, String)>,
     associations: Vec<(String, String)>,
+    association_error: bool,
     edited: Vec<String>,
     comments: Vec<String>,
     merges: Vec<(String, String)>,
@@ -115,6 +118,8 @@ struct World {
     conflict: bool,
     local_runs: Vec<(String, String)>,
     local_error: bool,
+    startup_blocker: Option<String>,
+    validation_pending: bool,
     during_local: Option<Hook>,
     resolution_error: Option<String>,
     /// Merges TerminalX aborted: `(head, merge_head)`.
@@ -123,6 +128,7 @@ struct World {
     abort_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
+    during_changed: Option<Hook>,
     issue_body: Option<String>,
     push_error: Option<String>,
     send_error: Option<String>,
@@ -150,12 +156,20 @@ struct World {
     /// What each conversation's agent left running, by [`key`]: it goes
     /// with the agent when that is stopped.
     background: BTreeMap<String, String>,
+    /// What git makes of the commits after the reviewed one; new work unless a test says.
+    carry: Option<Carry>,
+    /// The `(reviewed, head)` pairs the pipeline asked git about.
+    carry_asked: Vec<(String, String)>,
+    /// What asking git about them fails with.
+    carry_error: Option<String>,
+    /// The diff against a particular base, where it is not `diff`.
+    diff_against: BTreeMap<String, Diff>,
 }
 
 struct FakeHost(Mutex<World>);
 
 fn check(name: &str, state: &str) -> PrCheck {
-    PrCheck { name: name.into(), state: state.into(), url: None }
+    PrCheck { name: name.into(), state: state.into(), url: None, actions: None, ..Default::default() }
 }
 
 fn github_issue() -> IssueRef {
@@ -188,8 +202,10 @@ impl FakeHost {
             checks: vec![check("build", "success")],
             sent: Vec::new(),
             pushes: Vec::new(),
+            resolution_push_targets: Vec::new(),
             created: Vec::new(),
             associations: Vec::new(),
+            association_error: false,
             edited: Vec::new(),
             comments: Vec::new(),
             merges: Vec::new(),
@@ -198,12 +214,15 @@ impl FakeHost {
             conflict: false,
             local_runs: Vec::new(),
             local_error: false,
+            startup_blocker: None,
+            validation_pending: false,
             during_local: None,
             resolution_error: None,
             aborts: Vec::new(),
             abort_error: None,
             reviewer_tabs: false,
             announced: 0,
+            during_changed: None,
             issue_body: Some("Sessions stop at code.".into()),
             push_error: None,
             send_error: None,
@@ -221,6 +240,10 @@ impl FakeHost {
             busy: BTreeSet::new(),
             stopped_agents: Vec::new(),
             background: BTreeMap::new(),
+            carry: None,
+            carry_asked: Vec::new(),
+            carry_error: None,
+            diff_against: BTreeMap::new(),
         }))
     }
 
@@ -353,7 +376,11 @@ impl Host for FakeHost {
         Ok(SessionRef { session_id: id, tab_id: "t1".into() })
     }
 
-    fn run_local_check(&self, _cwd: &Path, command: &str) -> Result<()> {
+    fn startup_blocker(&self, _pipeline: &Pipeline, _new_validation: bool) -> Result<Option<String>> { Ok(self.world().startup_blocker.clone()) }
+
+    fn validation_pending(&self, _pipeline: &Pipeline) -> Result<bool> { Ok(self.world().validation_pending) }
+
+    fn run_local_check(&self, _pipeline: &Pipeline, _cwd: &Path, command: &str) -> Result<()> {
         let hook = {
             let mut world = self.world();
             let head = world.workspace.head.clone();
@@ -365,9 +392,13 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool) -> Result<Option<super::Resolution>> {
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
         let world = self.world();
-        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+        Ok((world.conflict || required).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), target: Some(super::ResolutionTarget { remote: "fixture".into(), repository: pr.and_then(|pr| pr.head_repository.clone()), url_hash: "fixture".into() }), base: base.into(), base_commit: BASE.into(), return_stage: Stage::Work, waiting_since: None }))
+    }
+    fn push_resolution(&self, cwd: &Path, resolution: &super::Resolution, _branch: &str, _head: &str) -> Result<()> {
+        self.world().resolution_push_targets.push(resolution.target.clone());
+        self.push(cwd)
     }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let mut resolver = session("resolver", None);
@@ -381,6 +412,13 @@ impl Host for FakeHost {
         if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
         if head == resolution.head { bail!("No merge commit was made"); }
         Ok(())
+    }
+
+    fn base_merges(&self, _cwd: &Path, reviewed: &str, head: &str, _pr: &PrSnapshot) -> Result<Carry> {
+        let mut world = self.world();
+        world.carry_asked.push((reviewed.into(), head.into()));
+        if let Some(error) = &world.carry_error { bail!("{error}"); }
+        Ok(world.carry.clone().unwrap_or_else(|| Carry::NewWork(format!("{} is a commit of its own", &head[..10]))))
     }
 
     fn abort_merge(&self, _cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
@@ -406,12 +444,13 @@ impl Host for FakeHost {
         format!("origin/{base_branch}")
     }
 
-    fn diff(&self, _cwd: &Path, _base: &str, _head: &str) -> Result<Diff> {
+    fn diff(&self, _cwd: &Path, base: &str, _head: &str) -> Result<Diff> {
         let hook = self.world().during_diff.take();
         if let Some(hook) = hook {
             hook();
         }
-        Ok(self.world().diff.clone())
+        let world = self.world();
+        Ok(world.diff_against.get(base).cloned().unwrap_or_else(|| world.diff.clone()))
     }
 
     fn push(&self, _cwd: &Path) -> Result<()> {
@@ -451,6 +490,7 @@ impl Host for FakeHost {
             base: "main".into(),
             head: "raccoon/433-open-a-pull-request".into(),
             head_sha: head,
+            head_repository: Some("acme/widgets".into()),
             mergeable: "MERGEABLE".into(),
             merge_state: "CLEAN".into(),
             review_decision: None,
@@ -463,7 +503,9 @@ impl Host for FakeHost {
     }
 
     fn associate_pull_request(&self, session_id: &str, _cwd: &Path, pr: &PrSnapshot) -> Result<()> {
-        self.world().associations.push((session_id.into(), pr.url.clone()));
+        let mut world = self.world();
+        if world.association_error { bail!("Could not associate the pull request."); }
+        world.associations.push((session_id.into(), pr.url.clone()));
         Ok(())
     }
 
@@ -531,7 +573,8 @@ impl Host for FakeHost {
     }
 
     fn changed(&self, _pipeline: &Pipeline) {
-        self.world().announced += 1;
+        let hook = { let mut world = self.world(); world.announced += 1; world.during_changed.take() };
+        if let Some(hook) = hook { hook(); }
     }
 }
 
@@ -840,6 +883,143 @@ fn checks_still_running_are_waited_for_and_left_to_a_person_if_they_never_finish
     // The project names it as a check that never holds a merge.
     run.host.world().settings.ignored_checks = vec!["windows-latest".into()];
     assert_eq!(run.poll().state, State::Merged);
+}
+
+/// A pipeline waiting on checks, as the issue page's check list reads it
+/// (`issuePipeline.test.ts` reads the same file).
+#[test]
+fn a_wait_on_checks_is_stored_in_the_shape_the_issue_page_reads() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("../fixtures/issue_pipeline_checks.json")).unwrap();
+    let pipeline: Pipeline = serde_json::from_value(fixture.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&pipeline).unwrap(), fixture);
+    let checks = pipeline.checks.as_ref().unwrap();
+    assert_eq!((pipeline.state, checks.limit_minutes, checks.since.as_deref()), (State::Waiting, engine::CHECKS_WAIT_MINUTES, pipeline.waiting_since.as_deref()));
+    // What the engine produces has the same keys, for the list and for each kind of check in it.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![
+        PrCheck { actions: Some(crate::github::checks::ActionsCheck { run_id: 90, job_id: Some(5) }), summary: Some("macOS".into()), ..timed("check", "in_progress", "2026-11-11T10:00:00Z") },
+        PrCheck { completed_at: Some("2026-11-11T10:04:00Z".into()), actions: Some(crate::github::checks::ActionsCheck { run_id: 90, job_id: Some(6) }), ..timed("headless-serve", "success", "2026-11-11T10:00:00Z") },
+    ];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().required_checks = Some(vec!["check".into(), "desktop-platforms".into(), "headless-serve".into()]);
+    let produced = serde_json::to_value(run.reviewer(&reviewed(C1, "merge", "[]"))).unwrap();
+    let keys = |value: &serde_json::Value| value.as_object().map(|object| object.keys().cloned().collect::<std::collections::BTreeSet<_>>()).unwrap_or_default();
+    assert_eq!(keys(&produced["checks"]), keys(&fixture["checks"]));
+    let by_name = |value: &serde_json::Value, name: &str| value["checks"]["checks"].as_array().unwrap().iter().find(|check| check["name"] == name).cloned().unwrap();
+    for name in ["check", "headless-serve", "desktop-platforms"] {
+        assert_eq!(keys(&by_name(&produced, name)), keys(&by_name(&fixture, name)), "{name}");
+    }
+}
+
+fn timed(name: &str, state: &str, started: &str) -> PrCheck {
+    PrCheck { name: name.into(), state: state.into(), url: Some(format!("https://github.com/o/r/actions/runs/7/job/{}", name.len())), started_at: Some(started.into()), ..Default::default() }
+}
+
+#[test]
+fn a_wait_on_checks_carries_each_check_the_names_it_waits_on_and_its_clock() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![
+        timed("check", "in_progress", "2026-11-11T10:00:00Z"),
+        timed("headless-serve", "success", "2026-11-11T10:00:00Z"),
+        timed("lint", "success", "2026-11-11T10:00:00Z"),
+    ];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().required_checks = Some(vec!["check".into(), "desktop-platforms".into(), "headless-serve".into()]);
+    let waiting = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(waiting.state, State::Waiting);
+    let checks = waiting.checks.clone().expect("the wait carries its checks");
+    assert_eq!(checks.commit, C1);
+    assert_eq!(checks.required, ["check", "desktop-platforms", "headless-serve"]);
+    assert_eq!(checks.limit_minutes, engine::CHECKS_WAIT_MINUTES);
+    assert_eq!((checks.since.as_deref(), checks.until.as_deref()), (waiting.waiting_since.as_deref(), None));
+    // Every reported check as GitHub gave it, and a required one it has not reported yet as expected.
+    let found = |name: &str| checks.checks.iter().find(|check| check.name == name).cloned().unwrap();
+    assert_eq!(found("check"), timed("check", "in_progress", "2026-11-11T10:00:00Z"));
+    assert_eq!(found("lint").state, "success", "an optional check is listed too");
+    assert_eq!((found("desktop-platforms").state.as_str(), found("desktop-platforms").url), ("expected", None));
+    // The words stay, for the sidebar and the phone.
+    assert_eq!(waiting.note.as_deref(), Some("Waiting for checks on 1111111111: check and desktop-platforms."));
+
+    // A later read with nothing changed writes nothing new: the clock is the wait's start, not the read's.
+    run.host.world().now += TimeDelta::minutes(5);
+    assert_eq!(run.poll().checks, Some(checks.clone()));
+
+    // When the stall stop fires, the list stays with the wait it ended.
+    // (Each poll is six minutes past the last: 11 so far, 60 at the next.)
+    run.host.world().now += TimeDelta::minutes(43);
+    let stalled = run.poll();
+    assert!(matches!(stalled.reason, Some(StopReason::ChecksStalled { .. })));
+    let after = stalled.checks.expect("the stop keeps the checks it stopped on");
+    assert_eq!(after.since, checks.since);
+    let until = after.until.clone().expect("the wait has ended");
+    let minutes = (DateTime::parse_from_rfc3339(&until).unwrap() - DateTime::parse_from_rfc3339(after.since.as_deref().unwrap()).unwrap()).num_minutes();
+    assert_eq!(minutes, i64::from(engine::CHECKS_WAIT_MINUTES), "the clock the page shows ends where the stop fired");
+    run.host.world().now += TimeDelta::minutes(5);
+    assert_eq!(run.poll().checks.and_then(|checks| checks.until), Some(until), "looked at again, the stop keeps when the wait ended");
+}
+
+#[test]
+fn a_failed_required_check_is_listed_with_the_wait_it_ended_and_a_rerun_starts_a_new_one() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![timed("check", "in_progress", "2026-11-11T10:00:00Z"), timed("lint", "success", "2026-11-11T10:00:00Z")];
+    let run = Run::start_in(host, true);
+    let started = run.to_gate().waiting_since.clone().unwrap();
+    run.host.world().now += TimeDelta::minutes(41);
+    run.host.world().pr.as_mut().unwrap().checks[0] = PrCheck { completed_at: Some("2026-11-11T10:41:00Z".into()), ..timed("check", "failure", "2026-11-11T10:00:00Z") };
+    let failed = run.poll();
+    assert_eq!(failed.reason, Some(StopReason::ChecksFailed { names: vec!["check".into()] }));
+    assert_eq!(failed.waiting_since, None);
+    let checks = failed.checks.expect("a failed check is listed");
+    assert_eq!(checks.since.as_deref(), Some(started.as_str()));
+    assert!(checks.until.is_some());
+    let failing = checks.checks.iter().find(|check| check.name == "check").unwrap();
+    assert_eq!((failing.state.as_str(), failing.url.is_some()), ("failure", true));
+
+    // Run again: a new wait, with its own clock.
+    run.host.world().now += TimeDelta::minutes(2);
+    run.host.world().pr.as_mut().unwrap().checks[0] = timed("check", "queued", "2026-11-11T10:43:00Z");
+    let again = run.poll();
+    assert_eq!(again.state, State::Waiting);
+    let checks = again.checks.unwrap();
+    assert_eq!((checks.since.as_deref(), checks.until), (again.waiting_since.as_deref(), None));
+    assert_ne!(checks.since.as_deref(), Some(started.as_str()));
+}
+
+#[test]
+fn a_failed_workflow_behind_passing_checks_is_said_by_the_note_not_listed() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "success")];
+    let run = Run::start_in(host, true);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().validation = Some(vec![check("CI (check_suites #9)", "failure")]);
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(stopped.reason, Some(StopReason::ChecksFailed { names: vec!["CI (check_suites #9)".into()] }));
+    assert_eq!(stopped.checks, None, "no check in the list failed, so there is no list to name it in");
+    assert!(stopped.note.as_deref().is_some_and(|note| note.contains("CI (check_suites #9)")), "{:?}", stopped.note);
+}
+
+#[test]
+fn checks_are_carried_only_while_the_merge_waits_on_them_or_stops_on_them() {
+    // Unreadable: no list, and the note says what it can.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    run.to_review();
+    run.host.world().pr.as_mut().unwrap().checks_unread = true;
+    let unread = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(unread.checks, None);
+    assert!(unread.note.is_some());
+    drop(run);
+    // Passed and merged, or waiting on something else: nothing listed.
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    assert!(run.to_gate().checks.is_some());
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success")];
+    let ready = run.poll();
+    assert_eq!((ready.state, ready.checks), (State::ReadyToMerge, None));
 }
 
 #[test]
@@ -1185,7 +1365,7 @@ fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
         let checks = world.checks.clone();
         world.pr = Some(PrSnapshot {
             number: 12, url: "https://github.com/acme/widgets/pull/12".into(), title: "wip".into(), body: "Pads minutes.".into(), state: "OPEN".into(), is_draft: false,
-            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
+            base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), head_repository: Some("acme/widgets".into()), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
             review_decision: None, checks, required_checks: None, checks_unread: false, validation: Some(vec![check("CI", "success")]),
         });
     }
@@ -2454,6 +2634,39 @@ fn failed_local_command_does_not_merge_even_with_successful_hosted_checks() {
 }
 
 #[test]
+fn host_startup_blockers_escalate_author_work_without_a_pr_or_changed_tab_metadata() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().startup_blocker = Some("Incident a is unresolved; recorder pending".into());
+    run.poll();
+    let blocked = run.pipeline();
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.pr.is_none());
+    assert!(blocked.note.as_ref().is_some_and(|note| note.contains("Incident a")));
+    let events = blocked.events.len();
+    run.poll();
+    assert_eq!(run.pipeline().events.len(), events, "unchanged incident does not repeat alerts");
+    run.host.world().startup_blocker = Some("Incident a needs attention; recorder still pending".into());
+    run.poll();
+    assert!(run.pipeline().note.as_ref().is_some_and(|note| note.contains("needs attention")));
+    assert!(run.host.world().local_runs.is_empty());
+    assert!(run.host.world().sent.is_empty());
+}
+
+#[test]
+fn host_incident_admits_no_new_local_check_even_with_successful_ci() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.to_review();
+    run.host.world().startup_blocker = Some("Incident a: demonstrate health before validation".into());
+    let blocked = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.local_check.is_none());
+    assert!(blocked.failed_local_checks.is_empty(), "host-blocked is not an application test failure");
+    assert!(run.host.world().local_runs.is_empty());
+    assert!(run.merges().is_empty());
+}
+
+#[test]
 fn local_checks_wait_for_an_active_author_then_resume_on_the_next_poll() {
     let run = Run::start(&github_issue(), false);
     run.host.world().settings.local_check_command = Some("project-check".into());
@@ -3598,4 +3811,430 @@ fn carrying_on_from_an_aborted_resolution_resolves_a_conflict_only_github_finds(
     assert_eq!(carried.resolution.as_ref().map(|resolution| resolution.head.as_str()), Some(C1));
     assert_eq!(run.host.prompts_to("resolver").len(), 2);
     assert_eq!(run.host.world().pushes, [C1]);
+}
+
+// #871: start/attach uses the original conversation and exact existing PR.
+fn existing_pr_host() -> FakeHost {
+    let host = FakeHost::new(&github_issue());
+    host.push(Path::new("/repo")).unwrap();
+    host.create_pull_request(Path::new("/repo"), "Already reviewed", "Keep this body").unwrap();
+    host.world().pushes.clear();
+    host.world().created.clear();
+    host.world().reviewer_tabs = true;
+    host
+}
+fn cli_actor() -> super::SwitchActor {
+    super::SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t1".into()) }
+}
+#[test]
+fn existing_session_start_is_idempotent_and_sends_the_brief_once() {
+    let _home = crate::store::temp_home();
+    let host = FakeHost::new(&github_issue());
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), false, cli_actor()).unwrap();
+    assert_eq!(p.author, SessionRef { session_id: "author".into(), tab_id: "t1".into() });
+    assert_eq!(host.world().sessions.len(), 1);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(p.events.last().unwrap().actor, Some(cli_actor()));
+    let repeated = engine::start_existing(&host, "author", "t1", Some(true), Some(true), false, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    assert!(!repeated.auto_merge && !repeated.resolve_conflicts);
+    assert_eq!(host.prompts_to("author").len(), 1);
+    assert_eq!(store::list().unwrap().len(), 1);
+}
+#[test]
+fn adoption_waits_for_idle_and_reviews_the_same_pr_without_push_or_history_changes() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let actor = super::SwitchActor::SelfUi { session_id: Some("author".into()), tab_id: Some("t1".into()) };
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(false), true, actor.clone()).unwrap();
+    assert_eq!(p.pr.as_ref().unwrap().number, 7);
+    assert_eq!(p.stage, Stage::Merge);
+    assert_eq!(p.events.last().unwrap().actor, Some(actor));
+    poll(&host);
+    assert_eq!(host.world().reviewers, 0);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(&host);
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.review_commit.as_deref(), Some(C1));
+    let reviewer = reviewing.reviewer.as_ref().unwrap();
+    assert_eq!(reviewer.session_id, "author");
+    assert_ne!(reviewer.tab_id, "t1");
+    let repeated = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(repeated.id, p.id);
+    let world = host.world();
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+}
+#[test]
+fn adoption_refuses_unmatched_or_dirty_work_without_creating_a_pipeline() {
+    let _home = crate::store::temp_home();
+    for condition in ["dirty", "head", "branch", "missing", "merging", "stdio"] {
+        let host = existing_pr_host();
+        {
+            let mut world = host.world();
+            match condition {
+                "dirty" => world.workspace.dirty.push("uncommitted.ts".into()),
+                "head" => world.workspace.head = C2.into(),
+                "branch" => world.pr.as_mut().unwrap().head = "another-branch".into(),
+                "missing" => world.pr = None,
+                "merging" => world.workspace.merging.push(BASE.into()),
+                "stdio" => world.sessions.get_mut("author").unwrap().tabs[0].transport = crate::store::index::AgentTransport::ExperimentalCodexStdio,
+                _ => unreachable!(),
+            }
+        }
+        assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err(), "{condition}");
+        assert!(store::list().unwrap().is_empty());
+        assert!(host.world().sent.is_empty());
+    }
+}
+#[test]
+fn adoption_preserves_person_only_merge_and_existing_author_ownership() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().settings.require_person = true;
+    // An existing issue pipeline at Work can adopt, too.
+    let original = start(&host, "author", "t1", Some(true), None).unwrap();
+    let p = engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).unwrap();
+    assert_eq!(p.id, original.id);
+    poll(&host);
+    let p = store::get(&p.id).unwrap();
+    let reviewer = p.reviewer.as_ref().unwrap();
+    assert!(engine::start_existing(&host, &reviewer.session_id, &reviewer.tab_id, None, None, true, cli_actor()).is_err());
+    turn_completed(&host, &reviewer.session_id, &reviewer.tab_id, Some(&reviewed(C1, "merge", "[]")));
+    assert!(host.world().merges.is_empty());
+    let p = store::get(&p.id).unwrap();
+    assert!(matches!(p.reason, Some(StopReason::PersonRequired)));
+    assert_eq!(p.author.tab_id, "t1");
+}
+
+#[test]
+fn adoption_is_initialized_before_completion_events_and_polling_can_see_it() {
+    let _home = crate::store::temp_home();
+    let host = std::sync::Arc::new(existing_pr_host());
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let callback_host = host.clone();
+    host.world().during_changed = Some(Box::new(move || {
+        let p = store::for_session("author").unwrap().unwrap();
+        assert_eq!((p.stage, p.state), (Stage::Merge, State::Waiting));
+        assert_eq!(p.pr.as_ref().unwrap().number, 7);
+        assert_eq!(p.events.iter().find(|event| event.kind == "adopted").unwrap().actor, Some(cli_actor()));
+        // These are the real entry points that could previously push and edit
+        // the PR between publishing Work and acquiring the adoption step lock.
+        turn_completed(callback_host.as_ref(), "author", "t1", Some(&done("Ready for review")));
+        poll(callback_host.as_ref());
+    }));
+    let p = engine::start_existing(host.as_ref(), "author", "t1", Some(false), Some(false), true, cli_actor()).unwrap();
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Merge);
+    host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Idle;
+    poll(host.as_ref());
+    let reviewing = store::get(&p.id).unwrap();
+    assert_eq!(reviewing.stage, Stage::Review);
+    assert_eq!(reviewing.pr.as_ref().unwrap().number, 7);
+    assert_eq!(reviewing.author, p.author);
+    let world = host.world();
+    assert!(world.pushes.is_empty() && world.created.is_empty() && world.edited.is_empty());
+    assert_eq!(world.pr.as_ref().unwrap().body, "Keep this body");
+    assert_eq!(world.sessions.len(), 1);
+    assert_eq!(world.reviewers, 1);
+}
+
+#[test]
+fn adoption_association_failure_does_not_publish_a_work_pipeline() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    host.world().association_error = true;
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::list().unwrap().is_empty());
+    assert_eq!(host.world().announced, 0);
+    turn_completed(&host, "author", "t1", Some(&done("Ready for review")));
+    assert!(host.world().pushes.is_empty());
+}
+
+#[test]
+fn adoption_does_not_overwrite_a_stopped_pipeline() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    let p = start(&host, "author", "t1", Some(false), None).unwrap();
+    engine::act_from_agent(&host, &p.id, Action::Stop).unwrap();
+    assert!(engine::start_existing(&host, "author", "t1", None, None, true, cli_actor()).is_err());
+    assert!(store::get(&p.id).unwrap().stopped);
+}
+
+#[test]
+fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
+    let _home = crate::store::temp_home();
+    let host = existing_pr_host();
+    {
+        let mut world = host.world();
+        world.conflict = true;
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_repository = Some("me/widgets".into());
+        pr.merge_state = "DIRTY".into();
+    }
+    let p = engine::start_existing(&host, "author", "t1", Some(false), Some(true), true, cli_actor()).unwrap();
+    poll(&host);
+    let resolving = store::get(&p.id).unwrap();
+    assert_eq!(resolving.stage, Stage::Resolve);
+    let target = resolving.resolution.as_ref().unwrap().target.clone();
+    assert_eq!(target.as_ref().unwrap().repository.as_deref(), Some("me/widgets"));
+    host.commit(C2);
+    host.world().conflict = false;
+    host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    turn_completed(&host, "resolver", "t1", Some(&done("Resolved conflicts")));
+    assert_eq!(host.world().resolution_push_targets, [target]);
+    assert_eq!(host.world().pushes, [C2]);
+    assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
+}
+
+// ---- #947: a passing verdict carries over merges of the base --------------------
+
+/// Only clean merges of main since the review: the change is what it was.
+fn clean_merges() -> Carry {
+    Carry::BaseMerges(BaseMerges { base_commit: BASE.into(), merges: vec![C2.into()], resolution: String::new(), change_set_moved: false })
+}
+
+/// A merge of main that resolved a conflict in `package.json`.
+fn resolved_merge() -> Carry {
+    Carry::BaseMerges(BaseMerges {
+        base_commit: BASE.into(),
+        merges: vec![C2.into()],
+        resolution: format!("Merge {C2}:\ndiff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -2,5 +2,1 @@\n-<<<<<<< {C1}\n-  \"version\": \"1.1.0\"\n-=======\n-  \"version\": \"1.0.1\"\n->>>>>>> {BASE}\n+  \"version\": \"1.1.1\"\n"),
+        change_set_moved: true,
+    })
+}
+
+/// Review 1 of 1 passed C1 while the checks ran; then main moved and the
+/// branch merged it, as `carry` says, to C2. With the checks on C2 green,
+/// the next look is the one that decides.
+fn moved_after_final_review(diff: Option<Diff>, security: &str, carry: Option<Carry>) -> Run {
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.max_rounds = 1;
+    host.world().checks = vec![check("build", "pending")];
+    if let Some(diff) = diff {
+        host.world().diff = diff;
+    }
+    let run = Run::start_in(host, true);
+    run.to_review();
+    let waiting = run.reviewer(&reviewed_with(C1, "merge", "[]", security));
+    assert_eq!((waiting.stage, waiting.state, waiting.round, waiting.max_rounds), (Stage::Merge, State::Waiting, 1, 1), "{:?}", waiting.note);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_sha = C2.into();
+        pr.checks = vec![check("build", "success")];
+        world.carry = carry;
+    }
+    run
+}
+
+#[test]
+fn a_clean_merge_of_main_after_the_final_review_carries_the_verdict_and_merges() {
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert_eq!(run.host.world().carry_asked, [(C1.to_string(), C2.to_string())]);
+    // No review round spent, and the reviewer was not asked anything more.
+    assert_eq!(merged.round, 1);
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    let verdict = merged.verdict.clone().unwrap();
+    assert_eq!((verdict.commit.as_str(), verdict.carried_from.as_deref(), verdict.round), (C2, Some(C1), 1));
+    // The reviewer's checks ran on C1, not on the merge.
+    assert_eq!(verdict.checks, Some(super::verdict::ReviewChecks::NotRun));
+    assert!(verdict.checks_note.as_deref().unwrap().contains("passed on 1111111111, before the merge of main"));
+    let carried = merged.events.iter().find(|event| event.kind == "verdictCarried").expect("the carry is in the record");
+    assert_eq!(carried.commit.as_deref(), Some(C2));
+    assert_eq!(carried.message, "The branch moved to 2222222222 with a clean merge of main and nothing else, and the pull request's change against main is the same as at 1111111111: review 1 of 1 carries forward to the new head.");
+    assert!(!merged.events.iter().any(|event| event.kind == "needsYou"), "{:?}", merged.events);
+    let comments = run.host.world().comments.clone();
+    assert!(comments.last().unwrap().starts_with("### TerminalX review of `1111111111` carries forward to `2222222222`"), "{comments:?}");
+}
+
+#[test]
+fn a_merge_of_main_that_resolved_a_conflict_gets_a_light_check_that_is_not_a_round() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    let checking = run.poll();
+    assert_eq!((checking.stage, checking.state), (Stage::Review, State::Working), "{:?} {:?}", checking.note, checking.reason);
+    assert_eq!((checking.round, checking.max_rounds), (1, 1), "the check is not a round, and the limit did not refuse it");
+    assert_eq!((checking.review_commit.as_deref(), checking.merge_check.as_deref()), (Some(C2), Some(C1)));
+    assert_eq!(checking.note.as_deref(), Some("The branch only merged main since review 1 of 1 passed 1111111111: the reviewer conversation is checking what the merge changed at 2222222222. This is not a review round."));
+    assert_eq!(checking.events.last().unwrap().kind, "mergeCheckRequested");
+    let prompts = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(prompts.len(), 2);
+    let check = &prompts[1];
+    assert!(check.contains("This is not another review round"), "{check}");
+    assert!(check.contains("Commit to check: 2222222222222222222222222222222222222222"));
+    assert!(check.contains("`git show --remerge-diff 2222222222`"));
+    assert!(check.contains("+  \"version\": \"1.1.1\""), "the resolution is quoted: {check}");
+    assert!(check.contains("Compare `git diff 5555555555...1111111111` with `git diff 5555555555...2222222222"), "{check}");
+    assert!(!check.contains("Judge the whole change"), "it is not a full review");
+
+    // The check passes: the verdict stands for the merge, and it merges.
+    let merged = run.reviewer(&reviewed(C2, "merge", LOW));
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert_eq!(merged.round, 1);
+    assert!(merged.merge_check.is_none());
+    let verdict = merged.verdict.unwrap();
+    assert_eq!((verdict.commit.as_str(), verdict.carried_from.as_deref(), verdict.findings.len()), (C2, Some(C1), 1));
+    let line = merged.events.iter().rev().find(|event| event.kind == "verdict").unwrap();
+    assert_eq!(line.message, "Check of the merge in 2222222222 (review 1 of 1 passed 1111111111): merge, 1 finding, none of medium severity or higher. The reviewer's checks passed.");
+    assert!(run.host.world().comments.last().unwrap().starts_with("### TerminalX check of the merge in `2222222222` — no blocking findings"));
+}
+
+#[test]
+fn a_light_check_that_finds_a_bad_resolution_stops_on_what_it_found() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    run.poll();
+    let stopped = run.reviewer(&reviewed(C2, "changes", HIGH));
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert_eq!(stopped.reason, Some(StopReason::RoundLimit { rounds: 1, count: 1, worst: Some(Severity::High) }));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_light_check_with_rounds_left_sends_its_findings_to_the_author() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    { let mut p = run.pipeline(); p.max_rounds = 3; store::commit(&mut p).unwrap(); }
+    assert_eq!(run.poll().round, 1);
+    let addressing = run.reviewer(&reviewed(C2, "changes", HIGH));
+    assert_eq!((addressing.stage, addressing.round), (Stage::Address, 1));
+    assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
+}
+
+#[test]
+fn a_real_commit_after_the_final_review_still_needs_a_review_and_says_so() {
+    let run = moved_after_final_review(None, "not_needed", None);
+    let stopped = run.poll();
+    assert_eq!((stopped.stage, stopped.state), (Stage::Merge, State::NeedsYou));
+    let reason = stopped.reason.clone().unwrap();
+    assert_eq!(reason, StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1, why: "2222222222 is a commit of its own".into() });
+    assert_eq!(stopped.note.as_deref(), Some("The branch moved to 2222222222 after the final review (1 of 1) approved 1111111111, and that review does not carry to the new head: 2222222222 is a commit of its own. Allow one more review of the new head."));
+    assert!(!reason.describe().contains("still asks for changes"));
+    assert!(run.merges().is_empty());
+
+    // The one action on the issue page: review the new head once more.
+    let reviewing = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((reviewing.stage, reviewing.round, reviewing.max_rounds, reviewing.review_commit.as_deref()), (Stage::Review, 2, 2, Some(C2)));
+    assert!(reviewing.merge_check.is_none());
+    let reviewer = reviewing.reviewer.unwrap();
+    assert!(run.host.prompts_to(&reviewer.session_id).last().unwrap().contains("Judge the whole change"), "a full review");
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+}
+
+#[test]
+fn with_rounds_left_a_real_commit_gets_a_full_round_and_a_clean_merge_spends_none() {
+    for (carry, round) in [(None, 2), (Some(clean_merges()), 1)] {
+        let run = moved_after_final_review(None, "not_needed", carry.clone());
+        { let mut p = run.pipeline(); p.max_rounds = 3; store::commit(&mut p).unwrap(); }
+        let next = run.poll();
+        assert_eq!(next.round, round, "{carry:?}");
+        assert_eq!(next.state == State::Merged, carry.is_some(), "{carry:?} {:?}", next.note);
+    }
+}
+
+#[test]
+fn a_carried_verdict_keeps_the_security_pass_rule() {
+    let billing = || Some(Diff { paths: vec!["saas/src/billing/plans.ts".into()], patch: String::new() });
+    // A flagged pass, even with nothing blocking, is not carried: the new head is reviewed.
+    let flagged = r#"[{"severity": "low", "title": "Token lifetime is long", "security": true}]"#;
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.max_rounds = 1;
+    host.world().checks = vec![check("build", "pending")];
+    host.world().diff = billing().unwrap();
+    let run = Run::start_in(host, true);
+    run.to_review();
+    assert_eq!(run.reviewer(&reviewed_with(C1, "merge", flagged, "flagged")).state, State::Waiting);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        world.pr.as_mut().unwrap().head_sha = C2.into();
+        world.pr.as_mut().unwrap().checks = vec![check("build", "success")];
+        world.carry = Some(clean_merges());
+    }
+    let stopped = run.poll();
+    assert_eq!(stopped.reason, Some(StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1, why: "the change touches billing and that review's security pass was not clean".into() }));
+    assert!(stopped.note.unwrap().contains("security pass was not clean"), "only merges of main came in, so the reason is the pass, not new work");
+    assert!(run.merges().is_empty());
+    // One temporary home at a time: a second waits for the first to go.
+    drop(run);
+
+    // A clean pass carries over clean merges.
+    let run = moved_after_final_review(billing(), "clean", Some(clean_merges()));
+    assert_eq!(run.poll().state, State::Merged);
+    assert_eq!(run.pipeline().verdict.unwrap().security_pass, super::verdict::SecurityPass::Clean);
+    drop(run);
+
+    // A light check of a resolution asks for the pass, and one that reports none does not count.
+    let run = moved_after_final_review(billing(), "clean", Some(resolved_merge()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    run.poll();
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("so a security pass is required as well"));
+    let asked = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((asked.stage, asked.reminded), (Stage::Review, true));
+    assert!(run.merges().is_empty());
+    assert_eq!(run.reviewer(&reviewed_with(C2, "merge", "[]", "clean")).state, State::Merged);
+}
+
+#[test]
+fn a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_light_check() {
+    let run = moved_after_final_review(None, "not_needed", None);
+    // Undo the move: this time GitHub reports the conflict and the resolver merges main.
+    run.host.commit(C1);
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_sha = C1.into();
+        pr.merge_state = "DIRTY".into();
+        world.conflict = true;
+    }
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    assert_eq!(run.poll().stage, Stage::Resolve);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        world.conflict = false;
+        world.pr.as_mut().unwrap().merge_state = "CLEAN".into();
+        // The checks the pushed merge gets.
+        world.checks = vec![check("build", "success")];
+        world.carry = Some(resolved_merge());
+    }
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged main, kept both version bumps.")));
+    let checking = run.pipeline();
+    assert_eq!((checking.stage, checking.state, checking.round, checking.merge_check.as_deref()), (Stage::Review, State::Working, 1, Some(C1)), "{:?} {:?}", checking.note, checking.reason);
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+}
+
+#[test]
+fn a_stale_base_ref_does_not_count_the_bases_own_changes_against_a_carry() {
+    // The checkout's origin/main lags behind the main that was merged: a
+    // three-dot diff against it holds main's own billing change. Against the
+    // base the merges were compared with, the change touches nothing.
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    run.host.world().diff_against.insert("origin/main".into(), Diff { paths: vec!["saas/src/billing/plans.ts".into(), "src/lib/format.ts".into()], patch: String::new() });
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert!(merged.security_areas.is_empty());
+    assert_eq!(merged.verdict.unwrap().carried_from.as_deref(), Some(C1));
+}
+
+#[test]
+fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    run.host.world().carry_error = Some("Fetching the pull request base failed: timed out".into());
+    let stopped = run.poll();
+    let note = stopped.note.clone().unwrap();
+    assert!(matches!(&stopped.reason, Some(StopReason::MovedAfterFinalReview { why, .. }) if why.contains("could not be told")), "{:?}", stopped.reason);
+    assert!(note.contains("whether the new commits only merge main could not be told (Fetching the pull request base failed: timed out)"), "{note}");
+    assert!(!note.contains("not only merges"), "{note}");
+    assert!(stopped.events.iter().any(|event| event.kind == "note" && event.message.contains("timed out")));
 }

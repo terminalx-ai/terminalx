@@ -392,7 +392,7 @@ for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, VIEWPORT);
   await sidebar(page);
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   for (const label of ["claude tab", "gemini tab"]) {
     const name = `local session (${label})`;
     await tab(page, label).click();
@@ -525,7 +525,7 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
   // The side panel is the one `aside` inside the main slot, next to the header.
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
-  await page.waitForTimeout(300);
+  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   const measured = await headerLayout(page);
   failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/cloud-header-${viewport.width}${terminalSwitch ? "-terminal-switch" : ""}.png` });
@@ -563,11 +563,18 @@ const permissionMenuItem = (page) =>
     const label = item?.querySelector('[data-testid="permission-mode-label"]');
     if (!item || !label) return null;
     const icon = item.querySelector('[data-testid="permission-mode-icon"]');
+    const rect = item.getBoundingClientRect();
+    const shield = icon?.getBoundingClientRect();
+    const iconInside = !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
     const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
-    return { name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1, tint };
+    return {
+      tint, name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1,
+      iconInside,
+      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
+    };
   });
 
-function permissionChecks(measured, mode) {
+function permissionChecks(measured) {
   if (!measured) return { "the More options button is there": false };
   return {
     "the More options button is inside the composer toolbar": measured.inToolbar,
@@ -576,6 +583,7 @@ function permissionChecks(measured, mode) {
   };
 }
 
+const MODE_TONE = { bypassPermissions: "danger", manual: "guarded", plan: "plan" };
 const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
 const MODE_TINT = { bypassPermissions: "danger", manual: "plain", plan: "plan" };
 for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
@@ -585,9 +593,35 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
-  await page.waitForTimeout(300);
+  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   let measured = await permissionButton(page);
-  await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').click();
+  const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
+  // Pin the scheduling case where opening the panel leaves Refresh's tooltip
+  // open under the pointer. Start from a fresh pointer entry, not a second
+  // hover over a trigger whose tooltip was already dismissed.
+  await page.mouse.move(0, 0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Refresh", exact: true }).hover();
+  await page.getByRole("tooltip", { name: "Refresh", exact: true }).waitFor();
+  // A synthetic jump from any open tooltip can leave Radix in pointer transit.
+  // Dismiss and observe its closure before entering the next trigger.
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Toggle panel" }).hover();
+  await page.getByRole("tooltip", { name: /^Hide panel/ }).waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("tooltip").waitFor({ state: "hidden" });
+  await options.hover();
+  // Wait for this trigger's tooltip, independently of the text we assert below.
+  const tooltip = page.locator('xpath=//*[@role="tooltip"][@id=//main//*[@data-testid="composer-options"]/@aria-describedby]');
+  await tooltip.waitFor();
+  const tooltipText = await tooltip.textContent();
+  const tooltipState = await tooltip.evaluate((node) => {
+    const trigger = document.querySelector('main [data-testid="composer-options"]');
+    return { id: node.id, describedBy: trigger?.getAttribute("aria-describedby"), hovered: trigger?.matches(":hover"), focused: document.activeElement === trigger };
+  });
+  await options.click();
   await page.locator('[role="menu"] [data-testid="permission-mode"]').waitFor();
   const item = await permissionMenuItem(page);
   await page.keyboard.press("Escape");
@@ -595,12 +629,14 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     `permission mode (960x700, side panel open, ${permissionMode})`,
     {
       "the side panel is open": !!measured?.panel,
-      ...permissionChecks(measured, permissionMode),
+      ...permissionChecks(measured),
+      "the permission shield is visible inside the menu with the mode's tone": !!item && item.iconInside && item.tone === MODE_TONE[permissionMode],
+      "the options tooltip names the mode in force": tooltipText === `More options · ${MODE_LABEL[permissionMode]}`,
       "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
       "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
-      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.tint === MODE_TINT[permissionMode],
+      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.iconInside && item.tint === MODE_TINT[permissionMode],
     },
-    { button: measured, item },
+    { button: measured, item, tooltip: { expected: `More options · ${MODE_LABEL[permissionMode]}`, actual: tooltipText, ...tooltipState } },
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 
@@ -610,7 +646,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     await page.setViewportSize({ width, height: 700 });
     await page.waitForTimeout(40);
     measured = await permissionButton(page);
-    const checks = permissionChecks(measured, permissionMode);
+    const checks = permissionChecks(measured);
     if (Object.values(checks).some((ok) => !ok)) failures.push(measured ?? { viewport: width, missing: true });
   }
   await page.setViewportSize({ width: 1680, height: 800 });
@@ -620,7 +656,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,
     {
       "at every width the button stays in the toolbar, pressable, with its icon": failures.length === 0,
-      "with room (1680 px) the same holds": Object.values(permissionChecks(measured, permissionMode)).every(Boolean),
+      "with room (1680 px) the same holds": Object.values(permissionChecks(measured)).every(Boolean),
     },
     { failures, wide: measured },
   );

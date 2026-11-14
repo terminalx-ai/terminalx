@@ -201,6 +201,7 @@ pub struct WorkspaceDisposition {
 }
 
 pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
+    let _request = crate::github_process::scope();
     if !path.exists() {
         return WorkspaceDisposition::default();
     }
@@ -315,6 +316,9 @@ pub fn delete(project: &Path, path: &Path, options: DeleteOptions<'_>) -> Result
         if let Err(direct_error) = git::remove_managed_worktree_dir(project, &p) {
             anyhow::bail!("Could not remove the worktree at {}: {direct_error:#} ({git_error:#}). {}", p.display(), git::leftover_state(&p));
         }
+    }
+    if let Err(error) = crate::store::root().and_then(|root| crate::store::review_comments::remove_workspace(&root, &p)) {
+        eprintln!("Could not remove review comments for {}: {error:#}", p.display());
     }
     let _ = git::run(project, &["worktree", "prune"]);
     if let Some(b) = branch {

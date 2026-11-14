@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -39,6 +39,9 @@ struct State {
     notes: Vec<Note>,
     #[serde(default)]
     sent_notes: std::collections::BTreeMap<u64, Vec<Note>>,
+    /// The files the last chat reset replaced, for its one level of Undo.
+    #[serde(default)]
+    reset: Option<ResetBackup>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,6 +81,10 @@ pub struct Checkpoint {
     pub backup_ref: Option<String>,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
+    /// Cut off by a chat reset: no longer part of the conversation, so its
+    /// files are not this chat's own when a later reset plans what to restore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    abandoned: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -348,6 +355,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
                 restored: false,
                 backup_ref: None,
                 unavailable_reason: None,
+                abandoned: false,
             });
         } else if let Payload::TurnCompleted { head, .. } = payload {
             if let Some(turn) = state.turns.last_mut().filter(|t| t.end.is_none()) {
@@ -661,6 +669,271 @@ pub fn restore_undo(session: &str, tab: &str, seq: u64, confirmed: Option<&str>)
     })
 }
 
+/// The files a chat reset replaced, kept for that reset's one level of Undo.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetBackup {
+    /// The reset's backup id (the tab's `resetBackupId`).
+    generation: String,
+    cwd: String,
+    paths: Vec<String>,
+    /// The files and staging before the reset, pinned as `before-reset`.
+    tree: String,
+    index: String,
+    /// What the reset wrote, so Undo can tell later edits apart.
+    restored_tree: String,
+    restored_index: String,
+}
+
+/// What restoring files for a chat reset (or its Undo) will change. Read-only.
+pub struct ResetPlan {
+    pub cwd: String,
+    pub paths: Vec<String>,
+    /// Paths that something other than this chat's later turns changed:
+    /// other tabs or sessions in the checkout, or edits by hand.
+    pub overlap: Vec<String>,
+    token: String,
+    tree: String,
+    index: String,
+    undo: bool,
+}
+
+/// A completed file restore, so a failed conversation commit can put the files back.
+pub struct ResetApplied {
+    cwd: String,
+    pub paths: Vec<String>,
+    tree: String,
+    index: String,
+    before: String,
+    before_index: String,
+    previous: Option<ResetBackup>,
+}
+
+fn reset_group(tab: &str) -> String {
+    format!("{tab}-reset")
+}
+
+/// The Git working tree a session's checkpoints are taken in.
+pub fn workspace_root(cwd: &str) -> Result<String> {
+    root(cwd)
+}
+
+/// A peer turn that ran or ended after `turn` ended: its edits are not in `turn`'s end tree.
+fn after_end(peer: &Checkpoint, turn: &Checkpoint) -> bool {
+    match (peer.end.as_ref().and(peer.ended_at), turn.ended_at) {
+        (Some(peer_end), Some(end)) => peer_end >= end,
+        _ => true,
+    }
+}
+
+/// Plan putting the checkout back to the END of the turn a chat reset cuts at
+/// (the last checkpoint that starts at or before `end_seq`).
+pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
+    locked(session, || {
+        let entry_cwd = index::get(session)?.cwd;
+        if !git::is_repo(Path::new(&entry_cwd)) {
+            bail!("Files can't be reset: this chat's folder is not a Git repository. Nothing was reset.");
+        }
+        let state = load(session, tab)?;
+        let missing = "This turn has no saved file checkpoint. Reset the chat without files.";
+        let at = state.turns.iter().rposition(|t| t.seq <= end_seq && !t.abandoned).ok_or_else(|| anyhow::anyhow!(missing))?;
+        let turn = &state.turns[at];
+        let Some(end) = turn.end.clone() else { bail!(missing) };
+        if let Some(reason) = &turn.unavailable_reason {
+            bail!("{reason} Reset the chat without files.");
+        }
+        if root(&entry_cwd)? != turn.cwd {
+            bail!("This checkpoint belongs to a workspace that is no longer attached.");
+        }
+        idle(&turn.cwd, false)?;
+        let cwd = Path::new(&turn.cwd);
+        if !trees::exists(cwd, session, &format!("{tab}-{}", turn.seq), "end")? {
+            bail!("This checkpoint has expired under the workspace retention limit. Reset the chat without files.");
+        }
+        let end_index = turn.end_index.clone().ok_or_else(|| {
+            anyhow::anyhow!("This turn ended with unresolved Git conflicts, so its files can't be reset automatically. Reset the chat without files.")
+        })?;
+        let snapshot = git::snapshot_tree(cwd)?;
+        let now_index = index_tree(cwd)?;
+        let mut paths: BTreeSet<String> = trees::paths(cwd, &end, &snapshot)?.into_iter().collect();
+        paths.extend(trees::paths(cwd, &end_index, &now_index)?);
+        let paths: Vec<String> = paths.into_iter().collect();
+        let now = trees::current(cwd, &paths)?;
+        // This chat's later turns account for their own files, as each last
+        // left them. Everything else (other conversations in the checkout,
+        // turns an earlier reset cut off, edits by hand, including edits to a
+        // file after the last turn that touched it) needs confirmation.
+        let mut own = BTreeSet::new();
+        let mut last_end: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+        let mut others = BTreeSet::new();
+        let mut unknown = false;
+        for later in state.turns[at + 1..].iter().filter(|t| !t.abandoned) {
+            for path in file_paths(later) {
+                last_end.insert(path.clone(), (later.end.clone(), later.end_index.clone()));
+                own.insert(path);
+            }
+            others.extend(later.concurrent_paths.iter().cloned());
+            unknown |= later.concurrent_unknown || uncertain(session, tab, later)?;
+        }
+        let mut by_end: BTreeMap<(Option<String>, Option<String>), Vec<&String>> = BTreeMap::new();
+        for path in paths.iter().filter(|p| own.contains(*p)) {
+            by_end.entry(last_end[path].clone()).or_default().push(path);
+        }
+        let mut drifted = BTreeSet::new();
+        for ((end, end_index), group) in by_end {
+            let changed = match (end, end_index) {
+                (Some(end), Some(end_index)) => trees::paths(cwd, &end, &now)
+                    .and_then(|mut changed| { changed.extend(trees::paths(cwd, &end_index, &now_index)?); Ok(changed) })
+                    .ok()
+                    .map(|changed| changed.into_iter().collect::<BTreeSet<_>>()),
+                // An unfinished or conflicted end (or an expired one): nothing to compare with.
+                _ => None,
+            };
+            drifted.extend(group.into_iter().filter(|p| changed.as_ref().is_none_or(|c| c.contains(*p))).cloned());
+        }
+        for (owner, peer_tab, peer_state) in workspace_states(&turn.cwd)? {
+            if owner == session && peer_tab == tab {
+                continue;
+            }
+            for peer in peer_state.turns.iter().filter(|peer| peer.cwd == turn.cwd && after_end(peer, turn)) {
+                others.extend(file_paths(peer));
+                unknown |= uncertain(&owner, &peer_tab, peer)?;
+            }
+        }
+        let overlap = paths.iter().filter(|p| unknown || others.contains(*p) || !own.contains(*p) || drifted.contains(*p)).cloned().collect();
+        Ok(ResetPlan {
+            cwd: turn.cwd.clone(),
+            token: format!("reset:{end}:{end_index}:{now}:{now_index}"),
+            paths,
+            overlap,
+            tree: end,
+            index: end_index,
+            undo: false,
+        })
+    })
+}
+
+/// Whether the reset `generation` restored files, so its Undo puts them back.
+pub fn reset_has_files(session: &str, tab: &str, generation: &str) -> bool {
+    load(session, tab).is_ok_and(|state| state.reset.is_some_and(|backup| backup.generation == generation))
+}
+
+/// Plan restoring the files the reset `generation` replaced. None when that
+/// reset left the files alone.
+pub fn plan_reset_undo(session: &str, tab: &str, generation: &str) -> Result<Option<ResetPlan>> {
+    locked(session, || {
+        let Some(backup) = load(session, tab)?.reset.filter(|backup| backup.generation == generation) else {
+            return Ok(None);
+        };
+        if root(&index::get(session)?.cwd)? != backup.cwd {
+            bail!("The files saved before the reset belong to a workspace that is no longer attached.");
+        }
+        idle(&backup.cwd, false)?;
+        let cwd = Path::new(&backup.cwd);
+        let group = reset_group(tab);
+        if !trees::exists(cwd, session, &group, "before-reset")? || !trees::exists(cwd, session, &group, "before-reset-index")? {
+            bail!("The files saved before the reset have expired under the workspace retention limit. Nothing was undone.");
+        }
+        let now = trees::current(cwd, &backup.paths)?;
+        let now_index = index_tree(cwd)?;
+        let mut changed: BTreeSet<String> = trees::paths(cwd, &backup.restored_tree, &now)?.into_iter().collect();
+        changed.extend(trees::paths(cwd, &backup.restored_index, &now_index)?);
+        let overlap = backup.paths.iter().filter(|p| changed.contains(*p)).cloned().collect();
+        Ok(Some(ResetPlan {
+            token: format!("undo-reset:{}:{}:{now}:{now_index}", backup.tree, backup.index),
+            cwd: backup.cwd,
+            paths: backup.paths,
+            overlap,
+            tree: backup.tree,
+            index: backup.index,
+            undo: true,
+        }))
+    })
+}
+
+impl ResetPlan {
+    /// Names exactly this plan, and the checkout as it was when it was made.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+/// A reset that overlaps other changes is refused with the list and the
+/// plan's token; only a request that hands back that token, with nothing
+/// changed since, confirms it. Nothing is remembered between requests, so a
+/// cancelled dialog or another window's plain request never counts as consent.
+pub fn confirm_overlap(plan: &ResetPlan, confirmed: Option<&str>) -> bool {
+    plan.overlap.is_empty() || confirmed == Some(plan.token.as_str())
+}
+
+/// After a reset or its Undo: the turns whose prompt is not in the
+/// conversation that remains are abandoned, and the ones that are are live.
+pub fn sync_live_turns(session: &str, tab: &str, live: &std::collections::HashSet<u64>) -> Result<()> {
+    locked(session, || {
+        let mut state = load(session, tab)?;
+        let mut changed = false;
+        for turn in &mut state.turns {
+            let abandoned = !live.contains(&turn.seq);
+            changed |= turn.abandoned != abandoned;
+            turn.abandoned = abandoned;
+        }
+        if changed { save(session, tab, &state) } else { Ok(()) }
+    })
+}
+
+/// Write the planned files and staging, keeping what they replace for Undo.
+/// Refuses if anything in the checkout changed since the plan was made.
+pub fn apply_reset(session: &str, tab: &str, plan: &ResetPlan, generation: &str) -> Result<ResetApplied> {
+    locked(session, || {
+        let cwd = Path::new(&plan.cwd);
+        let now = trees::current(cwd, &plan.paths)?;
+        let now_index = index_tree(cwd)?;
+        if !plan.token.ends_with(&format!(":{now}:{now_index}")) {
+            bail!("Files changed during reset. Nothing was reset; try again.");
+        }
+        let mut state = load(session, tab)?;
+        let previous = state.reset.clone();
+        let edges = if plan.undo { ["before-undo", "before-undo-index"] } else { ["before-reset", "before-reset-index"] };
+        // Retain the current contents first, so an I/O error never makes them unreachable.
+        trees::pin_many(cwd, session, &reset_group(tab), &[(edges[0], &now), (edges[1], &now_index)])?;
+        trees::restore_with_backup(cwd, &plan.tree, &plan.index, &plan.paths, &now, &now_index)?;
+        state.reset = (!plan.undo).then(|| ResetBackup {
+            generation: generation.into(),
+            cwd: plan.cwd.clone(),
+            paths: plan.paths.clone(),
+            tree: now.clone(),
+            index: now_index.clone(),
+            restored_tree: plan.tree.clone(),
+            restored_index: plan.index.clone(),
+        });
+        let applied = ResetApplied {
+            cwd: plan.cwd.clone(),
+            paths: plan.paths.clone(),
+            tree: plan.tree.clone(),
+            index: plan.index.clone(),
+            before: now,
+            before_index: now_index,
+            previous,
+        };
+        if let Err(error) = save(session, tab, &state) {
+            trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.tree, &applied.index)?;
+            return Err(error);
+        }
+        Ok(applied)
+    })
+}
+
+/// Put back the files `apply_reset` replaced, when the chat itself could not be reset.
+pub fn revert_reset(session: &str, tab: &str, applied: &ResetApplied) -> Result<()> {
+    locked(session, || {
+        let cwd = Path::new(&applied.cwd);
+        trees::restore_with_backup(cwd, &applied.before, &applied.before_index, &applied.paths, &applied.tree, &applied.index)?;
+        let mut state = load(session, tab)?;
+        state.reset = applied.previous.clone();
+        save(session, tab, &state)
+    })
+}
+
 /// Keep retry context outside the user's visible message.
 pub fn acknowledge_sent(session: &str, tab: &str, seq: u64, notes: &[Note]) -> Result<()> {
     if notes.is_empty() {
@@ -762,11 +1035,15 @@ pub fn prune(session: &index::SessionEntry) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "checkpoints_tests.rs"]
+mod reset_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::TurnStatus;
 
-    fn fixture() -> (tempfile::TempDir, index::SessionEntry) {
+    pub(super) fn fixture() -> (tempfile::TempDir, index::SessionEntry) {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         git::run(p, &["init", "-q", "-b", "main"]).unwrap();
@@ -789,11 +1066,12 @@ mod tests {
         .unwrap();
         (dir, session)
     }
-    fn prompt(queued: bool) -> Payload {
+    pub(super) fn prompt(queued: bool) -> Payload {
         Payload::UserMessage {
             author: None,
             text: "Change it".into(),
             images: vec![],
+            files: Vec::new(),
             baseline: None,
             queued,
             cwd: None,
@@ -808,7 +1086,7 @@ mod tests {
             initiating_prompt: None,
         }
     }
-    fn done() -> Payload {
+    pub(super) fn done() -> Payload {
         Payload::TurnCompleted {
             status: TurnStatus::Ok,
             final_text: None,
@@ -958,7 +1236,7 @@ mod tests {
         prune(&session).unwrap();
         assert!(git::run(repo.path(), &["for-each-ref", "refs/raccoon-checkpoints"]).unwrap().is_empty());
     }
-    fn second_tab(session: &index::SessionEntry, other_session: bool) -> index::SessionEntry {
+    pub(super) fn second_tab(session: &index::SessionEntry, other_session: bool) -> index::SessionEntry {
         let tab = crate::session_ops::NewTab {
             transport: Default::default(),
             harness: "claude".into(),

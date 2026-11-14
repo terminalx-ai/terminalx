@@ -16,6 +16,29 @@ pub struct Readiness {
     pub state: State,
     pub checked_at: String,
     pub version: Option<String>,
+    pub login_method: Option<String>,
+    pub plan: Option<String>,
+    /// The signed-in account's address, display only (PRO-306).
+    pub account: Option<String>,
+    /// Claude Code's organization name, display only (PRO-306).
+    pub organization: Option<String>,
+    /// What the agent's own login says, when a key saved in Settings is
+    /// what its new tabs use instead (PRO-306): whether switching back to
+    /// the subscription would work. `None` otherwise: the fields above are
+    /// its own login then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_login: Option<OwnLogin>,
+}
+
+/// An agent's own login, beside a saved API key that takes its place.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnLogin {
+    pub state: State,
+    pub login_method: Option<String>,
+    pub plan: Option<String>,
+    pub account: Option<String>,
+    pub organization: Option<String>,
 }
 
 /// A local login is evidence of configuration, not proof of entitlement or
@@ -38,6 +61,46 @@ fn claude_state(value: &Value) -> State {
     }
 }
 
+/// Only allowlisted display metadata reaches the webview, never the account
+/// document (which may gain credential fields in a future CLI release).
+fn account_details(agent: &str, value: &Value) -> (Option<String>, Option<String>) {
+    let (method, plan) = if agent == "claude" && claude_state(value) == State::Ready {
+        (value["authMethod"].as_str(), value["subscriptionType"].as_str())
+    } else if agent == "codex" && codex_state(value) == State::Ready {
+        (value["account"]["type"].as_str(), value["account"]["planType"].as_str())
+    } else { return (None, None); };
+    let method = match method {
+        Some("claude.ai" | "oauth") => Some("Claude account"),
+        Some("chatgpt" | "chatgptAuthTokens") => Some("ChatGPT account"),
+        Some("api_key" | "apiKey" | "console") => Some("API key"),
+        _ => None,
+    }.map(str::to_owned);
+    let plan = plan.filter(|plan| matches!(*plan, "free" | "pro" | "max" | "team" | "enterprise" | "plus" | "business" | "edu" | "go" | "api"))
+        .map(str::to_owned);
+    (method, plan)
+}
+
+/// An address fit to name an account on the page: one token with an `@`.
+fn display_address(raw: &str) -> Option<String> {
+    let address = raw.trim();
+    (address.len() <= 120 && address.contains('@') && !address.chars().any(|c| c.is_control() || c.is_whitespace())).then(|| address.to_string())
+}
+
+/// Whose login it is, for "Signed in" and the Login row: the account's
+/// address and Claude Code's organization name, each checked to be a plain
+/// display string, of a login that is in use. Nothing else of the document.
+fn account_identity(agent: &str, value: &Value) -> (Option<String>, Option<String>) {
+    let (address, organization) = if agent == "claude" && claude_state(value) == State::Ready {
+        (value["email"].as_str(), value["orgName"].as_str())
+    } else if agent == "codex" && codex_state(value) == State::Ready {
+        (value["account"]["email"].as_str(), None)
+    } else { return (None, None); };
+    let organization = organization.map(str::trim)
+        .filter(|name| !name.is_empty() && name.chars().count() <= 120 && !name.chars().any(char::is_control))
+        .map(str::to_owned);
+    (address.and_then(display_address), organization)
+}
+
 /// `home::prepare` links the user's auth file when one exists, and otherwise
 /// preserves a login completed in the managed terminal. Inspect that same
 /// effective account without creating a home or reading credential contents.
@@ -51,7 +114,7 @@ fn codex_home_for_check(user: Option<PathBuf>, managed: Option<PathBuf>) -> Opti
 pub fn check(id: &str) -> Readiness {
     match super::offered().into_iter().find(|h| h.id == id) {
         Some(agent) => check_binary(id, agent.path),
-        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None },
+        None => Readiness { state: State::Unknown, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None },
     }
 }
 
@@ -67,7 +130,7 @@ pub fn check(id: &str) -> Readiness {
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None };
+    let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None };
     if let Some(path) = path {
         let mut version = std::process::Command::new(&path);
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
@@ -81,18 +144,34 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
                 super::codex::appserver::ask_with_timeout(
                     super::codex::appserver::Where { codex_home: home.as_deref(), cwd: None },
                     "account/read", json!({ "refreshToken": false }), Duration::from_secs(5),
-                ).map(|value| codex_state(&value)).unwrap_or(State::Unknown)
+                ).map(|value| { (result.login_method, result.plan) = account_details("codex", &value); (result.account, result.organization) = account_identity("codex", &value); codex_state(&value) }).unwrap_or(State::Unknown)
             }
             "claude" => {
                 let mut command = std::process::Command::new(path);
                 command.args(["auth", "status", "--json"]).env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
                 crate::git::capture_within(command, Duration::from_secs(5)).ok()
                     .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-                    .map(|value| claude_state(&value)).unwrap_or(State::Unknown)
+                    .map(|value| { (result.login_method, result.plan) = account_details("claude", &value); (result.account, result.organization) = account_identity("claude", &value); claude_state(&value) }).unwrap_or(State::Unknown)
             }
             _ => State::Unknown,
         };
     } else { result.state = State::Missing; }
+    // An API key saved in Settings → Agents that new tabs use (PRO-306) signs
+    // an installed agent in: what New Session, the agent menu and the start
+    // screen read must say so, or a person with a key and no subscription
+    // could never start one. Its own login is not what tabs will use.
+    if result.state != State::Missing && crate::agent_keys::uses_saved_key(id) {
+        // Kept apart, so Settings can still say whether the subscription
+        // would work before anyone switches back to it.
+        result.own_login = Some(OwnLogin {
+            state: result.state,
+            login_method: result.login_method.replace("API key".into()),
+            plan: result.plan.take(),
+            account: result.account.take(),
+            organization: result.organization.take(),
+        });
+        result.state = State::Ready;
+    }
     result.checked_at = chrono::Utc::now().to_rfc3339();
     result
 }
@@ -100,6 +179,62 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_details_only_keep_display_fields_of_a_known_login() {
+        assert_eq!(account_details("claude", &json!({"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","accessToken":"secret"})), (Some("Claude account".into()), Some("max".into())));
+        assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","planType":"plus","accessToken":"secret"}})), (Some("ChatGPT account".into()), Some("plus".into())));
+        assert_eq!(account_details("claude", &json!({"loggedIn":false,"authMethod":"claude.ai","subscriptionType":"max"})), (None, None));
+        assert_eq!(account_details("codex", &json!({"requiresOpenaiAuth":false,"account":{"type":"chatgpt","planType":"plus"}})), (None, None));
+    }
+
+    /// PRO-306: a person with a company key and no subscription. Every view
+    /// that refuses a signed-out agent (New Session, the agent menu, the
+    /// start screen) reads this check, not Settings.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_key_in_use_makes_an_installed_agent_ready_everywhere() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::write(&claude, "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.3.41 (Claude Code)' ;;\n  auth) echo '{\"loggedIn\":false}' ;;\nesac\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(claude.to_string_lossy().into_owned());
+        assert_eq!(check_binary("claude", path.clone()).state, State::SignedOut);
+
+        let secrets = crate::keychain::testing::MemorySecrets::default();
+        crate::agent_keys::save_for_test("claude", "sk-ant-api03-ReadinessKey0123456789abcdefghijklmnop-test", &secrets);
+        let ready = check_binary("claude", path.clone());
+        assert_eq!((ready.state, ready.login_method.as_deref(), ready.version.as_deref()), (State::Ready, Some("API key"), Some("2.3.41")));
+        // Its own login is still told, apart: there is none to switch back to.
+        assert_eq!(ready.own_login, Some(OwnLogin { state: State::SignedOut, login_method: None, plan: None, account: None, organization: None }));
+        // Signed in to the subscription as well: whose, for when it is chosen again.
+        std::fs::write(&claude, "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.3.41 (Claude Code)' ;;\n  auth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"subscriptionType\":\"max\",\"email\":\"ada@example.com\",\"orgName\":\"Acme\"}' ;;\nesac\n").unwrap();
+        let both = check_binary("claude", path.clone());
+        assert_eq!((both.state, both.login_method.as_deref(), both.plan.as_deref(), both.account.as_deref()), (State::Ready, Some("API key"), None, None));
+        assert_eq!(both.own_login, Some(OwnLogin { state: State::Ready, login_method: Some("Claude account".into()), plan: Some("max".into()), account: Some("ada@example.com".into()), organization: Some("Acme".into()) }));
+        // Not installed stays not installed: a key does not run a CLI.
+        assert_eq!(check_binary("claude", None).state, State::Missing);
+        // Another agent's key signs nothing in.
+        assert!(!crate::agent_keys::uses_saved_key("codex"));
+
+        // Back on the subscription (the key kept, or removed): its own login again.
+        crate::agent_keys::set_mode("claude", crate::agent_keys::Mode::Subscription).unwrap();
+        let own = check_binary("claude", path);
+        assert_eq!((own.state, own.account.as_deref(), own.own_login), (State::Ready, Some("ada@example.com"), None));
+    }
+
+    #[test]
+    fn the_account_and_organization_are_kept_only_as_display_strings_of_a_login_in_use() {
+        let claude = json!({"loggedIn":true,"authMethod":"claude.ai","email":"ada@example.com","orgName":"Acme","orgId":"secret-org-id","accessToken":"secret"});
+        assert_eq!(account_identity("claude", &claude), (Some("ada@example.com".into()), Some("Acme".into())));
+        assert_eq!(account_identity("claude", &json!({"loggedIn":false,"email":"ada@example.com","orgName":"Acme"})), (None, None));
+        assert_eq!(account_identity("claude", &json!({"loggedIn":true,"email":"not an address","orgName":"Two\nlines"})), (None, None));
+        let codex = json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","email":"ada@example.com","planType":"pro"}});
+        assert_eq!(account_identity("codex", &codex), (Some("ada@example.com".into()), None));
+        assert_eq!(account_identity("codex", &json!({"requiresOpenaiAuth":true,"account":null})), (None, None));
+    }
 
     #[test]
     fn a_login_completed_in_the_managed_terminal_is_not_reported_signed_out() {

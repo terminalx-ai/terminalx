@@ -31,10 +31,11 @@ try {
       await page.waitForFunction((count) => document.querySelectorAll('nav[aria-label="Settings sections"] button[title]').length === count, projectCount);
       const groups = await nav.getByRole("group").evaluateAll((elements) => elements.map((element) => document.getElementById(element.getAttribute("aria-labelledby"))?.textContent));
       const checks = {
-        "five named groups in order": JSON.stringify(groups) === JSON.stringify(["Personal", "Agents & environment", "Repositories", "Admin", "More"]),
-        "all repositories appear": await nav.getByRole("group", { name: "Repositories", exact: true }).getByRole("button").count() === projectCount,
+        "five named groups in order": JSON.stringify(groups) === JSON.stringify(["Personal", "Agents & environment", "Projects", "Admin", "More"]),
+        // Settings › Project templates (PRO-286) leads the Projects group (PRO-131), then one row per project.
+        "all repositories appear": JSON.stringify(await nav.getByRole("group", { name: "Projects", exact: true }).getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.hasAttribute("title") ? "repository" : button.textContent))) === JSON.stringify(["Project templates", ...Array(projectCount).fill("repository")]),
       };
-      const repositories = nav.getByRole("group", { name: "Repositories", exact: true });
+      const repositories = nav.getByRole("group", { name: "Projects", exact: true });
       const first = repositories.getByRole("button", { name: "A repository with a very long name that should be truncated", exact: true });
       await first.click();
       const cleanup = settings.getByRole("radiogroup", { name: "Delete merged workspaces of A repository with a very long name that should be truncated" });

@@ -72,6 +72,8 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
       workspace: automation.workspace,
       sessionId: automation.sessionId ?? null,
       reuseSession: automation.reuseSession,
+      archiveOnComplete: automation.archiveOnComplete,
+      keepLatestRunVisible: automation.keepLatestRunVisible,
       baseRef: automation.baseRef ?? null,
       schedule: automation.schedule,
       precheck: automation.precheck ?? null,
@@ -95,6 +97,9 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
     workspace: "newWorktree",
     sessionId: null,
     reuseSession: false,
+    // New automations tidy up after themselves; saved ones keep what they have.
+    archiveOnComplete: true,
+    keepLatestRunVisible: false,
     baseRef: null,
     schedule: {
       kind: "preset",
@@ -461,6 +466,29 @@ export function AutomationEditor({
                 {sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>)}
               </select>
             </label>
+          )}
+
+          {input.reuseSession ? (
+            <div className="col-span-2 rounded-lg bg-well px-3 py-2.5 text-xs text-faint">Every run goes on in the one session, so there is nothing to archive.</div>
+          ) : (
+            <>
+              <label className="col-span-2 flex items-center justify-between rounded-lg bg-well px-3 py-2.5 text-xs">
+                <span>
+                  <span className="block font-medium">Archive each run when it completes</span>
+                  <span className="text-faint">A run that fails, is stopped or waits for you stays in the sidebar. Every run stays in this history, archived or not.</span>
+                </span>
+                <Switch aria-label="Archive each run when it completes" checked={input.archiveOnComplete} onCheckedChange={(archiveOnComplete) => patch({ archiveOnComplete })} />
+              </label>
+              {input.archiveOnComplete && (
+                <label className="col-span-2 flex items-center justify-between rounded-lg bg-well px-3 py-2.5 text-xs">
+                  <span>
+                    <span className="block font-medium">Keep the latest run visible</span>
+                    <span className="text-faint">The newest completed run stays in the sidebar until the next one completes.</span>
+                  </span>
+                  <Switch aria-label="Keep the latest run visible" checked={input.keepLatestRunVisible} onCheckedChange={(keepLatestRunVisible) => patch({ keepLatestRunVisible })} />
+                </label>
+              )}
+            </>
           )}
 
           <label className="col-span-2 flex items-center justify-between rounded-lg bg-well px-3 py-2.5 text-xs">

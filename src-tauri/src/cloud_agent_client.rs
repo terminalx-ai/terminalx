@@ -536,7 +536,7 @@ impl CloudAgentClient {
     }
 
     pub fn with(accounts: Arc<dyn AccountSource>, keys: Arc<dyn KeyStore>, base: Url, root: PathBuf) -> Self {
-        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build();
+        let agent = crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).build();
         Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None), refused: Mutex::new(HashMap::new()) }
     }
 

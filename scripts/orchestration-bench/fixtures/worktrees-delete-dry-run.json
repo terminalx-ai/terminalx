@@ -1,0 +1,62 @@
+{
+  "id": "01a1cf12-825a-7113-9922-53b7b9cc37fd",
+  "ok": true,
+  "result": {
+    "dryRun": true,
+    "landed": {
+      "base": "origin/main",
+      "branch": "raccoon/runner-runner-one-task-in-one-arrangemen",
+      "checked": true,
+      "clean": false,
+      "digest": "checked=true head=c06d3dd97a8570eee281b78ad8b3c0177c9608ab branch=raccoon/runner-runner-one-task-in-one-arrangemen uncommitted=1:b7451b68d9ed16cc merging=- stashes=0 merged=Some(Ancestor) unmerged=0 fresh=true unverified=-",
+      "fresh": true,
+      "head": "c06d3dd97a8570eee281b78ad8b3c0177c9608ab",
+      "losses": [
+        "1 uncommitted file would be lost."
+      ],
+      "merged": "ancestor",
+      "merging": null,
+      "notVerified": null,
+      "pushed": true,
+      "safe": false,
+      "stashes": 0,
+      "uncommitted": 1,
+      "unmergedCommits": 0
+    },
+    "needsForce": true,
+    "project": "~/code/ai/raccoon",
+    "sessions": [
+      {
+        "belongsTo": "thisProject",
+        "id": "01a1cf07-9559-7ff1-8be9-155ac5903e60",
+        "project": "~/code/ai/raccoon",
+        "runningTabs": [
+          {
+            "harness": "claude",
+            "id": "01a1cf07-9559-7ff1-8be9-156c55253c98",
+            "title": "You are a worker in a run led"
+          }
+        ],
+        "title": "Runner: one task in one arrangement, recorded with cost"
+      }
+    ],
+    "worktree": {
+      "additions": 0,
+      "ahead": 0,
+      "behind": 0,
+      "branch": "raccoon/runner-runner-one-task-in-one-arrangemen",
+      "branchAdditions": 0,
+      "branchDeletions": 0,
+      "deletions": 0,
+      "head": "c06d3dd97a8570eee281b78ad8b3c0177c9608ab",
+      "isMain": false,
+      "managed": true,
+      "name": "runner-runner-one-task-in-one-arrangemen",
+      "path": "~/code/ai/raccoon/.raccoon/worktrees/runner-runner-one-task-in-one-arrangemen",
+      "placeholder": false,
+      "state": "uncommitted",
+      "uncommitted": 1,
+      "unpushed": 0
+    }
+  }
+}

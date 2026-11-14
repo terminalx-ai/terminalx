@@ -99,7 +99,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -131,7 +131,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -209,7 +209,7 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
         (cli.ready.clone(), cli.awaiting_delivery.unwrap())
     };
     // No share survives: this is the delayed writer after the kill switch.
-    let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
+    let permit = crate::local_sharing::WritePermit { privacy:Default::default(), share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
         mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)), stops: 0,
     });
@@ -921,6 +921,29 @@ fn a_prompt_sent_from_the_composer_is_one_message_not_two() {
     }
 }
 
+/// An image and files sent with nothing typed (PRO-290): the agent is handed
+/// only the block of paths, and the CLI records its image label in front of
+/// it. That record is the composer message's echo, not a second message.
+#[test]
+fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let files = vec![FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None }];
+        let agent = crate::attachments::with_block("", &files);
+        let prompt = PromptText { files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
+        let image = vec![ImageRef { url: "attachments/s/0.png".into(), media_type: Some("image/png".into()), name: None }];
+        let cwd = rig._dir.path().to_string_lossy().into_owned();
+        assert!(!rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, image, &cwd, None).1);
+        rig.stamp();
+        rig.cli_takes(&rig.cli().with_image(&agent));
+        rig.cli_replies("seen");
+        assert_eq!(rig.told(), ["user: ", "reply: seen", "end"], "{kind:?}: one message, not the raw paths again");
+        let events = rig.events();
+        let prompts: Vec<_> = events.iter().filter_map(|e| match &e.payload { Payload::UserMessage { images, files, .. } => Some((images.len(), files.clone())), _ => None }).collect();
+        assert_eq!(prompts, [(1, files)], "{kind:?}: the composer's copy, with its image and files, is the one kept");
+    }
+}
+
 #[test]
 fn a_composer_prompt_and_then_a_terminal_prompt_are_two_messages_in_order() {
     for kind in BOTH {
@@ -1408,7 +1431,7 @@ fn codex_batch_acknowledgement_requires_the_exact_written_fifo() {
             ..ComposerEcho::new((*text).into(), 0)
         }).collect()
     };
-    let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+    let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None };
     let mut repeated = queue(&["same", "same", "later"]);
     let accepted = consume_codex_queue_echo(&mut repeated, &message("same\nsame"));
     assert_eq!(accepted.iter().map(|echo| echo.seq).collect::<Vec<_>>(), [1, 2]);
@@ -2125,7 +2148,7 @@ fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
 #[test]
 fn restart_dispatch_is_bound_to_the_original_launch() {
     for (replace, fenced) in [(false, true), (true, false), (true, true)] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", None);
         let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
         let (paused_tx, paused_rx) = std::sync::mpsc::channel();
@@ -2177,7 +2200,7 @@ fn restart_dispatch_is_bound_to_the_original_launch() {
 #[test]
 fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
     for replacement in ["none", "engine", "stop", "pane", "claim"] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", None);
         let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
         let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
@@ -2236,7 +2259,13 @@ fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
 #[test]
 fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
     for (state, fenced) in [("idle", true), ("turn", false), ("turn", true), ("cancelled", true), ("stop", true)] {
-        let rig = Rig::of(CliKind::Codex, "");
+        let rig = Rig::on(CliKind::Codex, "", Some("low"));
+        // Restart admission reads the pending edit and its provenance from
+        // the saved tab. A runtime flag alone is no longer pending work.
+        index::update_tab(SESSION, TAB, |tab| {
+            tab.requested_effort = Some("high".into());
+            Ok(())
+        }).unwrap();
         let spec = pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
         rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec).unwrap();
         if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine { p.restart_when_idle = true; }
@@ -2349,7 +2378,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
         }
         if replaced { assert_eq!(rig.events(), before); }
         if !replaced {
-            let prompt = PromptText { mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
             let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
             assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
             assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));
@@ -2413,7 +2442,7 @@ impl Rig {
                 Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
                 Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
                 Payload::PromptJoined { prompt_seq, into_seq } => Some(format!("joined: {} -> {}", text(*prompt_seq), text(*into_seq))),
-                Payload::PromptWithdrawn { prompt_seq } => Some(format!("withdrawn: {}", text(*prompt_seq))),
+                Payload::PromptWithdrawn { prompt_seq, .. } => Some(format!("withdrawn: {}", text(*prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
                 _ => None,
             })
@@ -2851,3 +2880,7 @@ fn a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed() {
         drop(rig);
     }
 }
+
+#[cfg(unix)]
+#[path = "session_privacy_tests.rs"]
+mod privacy;

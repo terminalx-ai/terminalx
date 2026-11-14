@@ -171,13 +171,30 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
             Ok(())
         });
     }
-    let mut child = command.spawn().context("start local runtime")?;
+    // Where this start's own lines begin, so a failure reports its error
+    // and not an earlier runtime's.
+    let since = log.and_then(|log| std::fs::metadata(log).ok()).map_or(0, |metadata| metadata.len());
+    let started = Instant::now();
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(StartFailed::new(None, Duration::ZERO, Some(format!("start local runtime: {error}")), log.map(Path::to_path_buf)).into()),
+    };
+    attachment(child, &home, deadline, started, log.map(|log| (log, since)))
+}
+
+/// Wait for runtime `child`, started at `started`, to take connections in
+/// `home`. One that exits first is a [`StartFailed`]: how it ended, and the
+/// error it logged from offset `since` of its log (PRO-287).
+fn attachment(mut child: std::process::Child, home: &Path, deadline: Instant, started: Instant, log: Option<(&Path, u64)>) -> Result<Arc<Client>> {
     loop {
-        if let Ok(client) = Client::connect(&home) {
+        if let Ok(client) = Client::connect(home) {
             std::thread::spawn(move || { let _ = child.wait(); });
             return Ok(client);
         }
-        if let Some(status) = child.try_wait()? { bail!("local runtime exited before attachment: {status}"); }
+        if let Some(status) = child.try_wait()? {
+            let error = log.and_then(|(log, since)| logged_error(log, since));
+            return Err(StartFailed::new(Some(status), started.elapsed(), error, log.map(|(log, _)| log.to_path_buf())).into());
+        }
         if Instant::now() >= deadline {
             // Do not kill on timeout: the runtime may already own accepted
             // work. With no attachments or work it exits by its idle policy.
@@ -186,6 +203,103 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The runtime's executable, as a failure names it.
+pub const PROCESS: &str = "terminalx-serve";
+
+/// A runtime this desktop started that exited, or never ran, before it took
+/// a connection (PRO-287): what a window shows in place of reconnecting,
+/// since trying again starts the same runtime that just failed. Carried as
+/// fields, never parsed back out of a message.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartFailed {
+    /// The executable that was started.
+    pub process: String,
+    /// Its exit code, when it exited.
+    pub code: Option<i32>,
+    /// The signal that ended it, when one did. With no code either, it never ran.
+    pub signal: Option<i32>,
+    /// How long it ran, in milliseconds.
+    pub ran_ms: u64,
+    /// The last error it logged while starting, or why it could not be started.
+    pub error: Option<String>,
+    /// Where its log is, when it has one.
+    pub log: Option<PathBuf>,
+    /// When it failed, in milliseconds since the Unix epoch.
+    pub at: i64,
+    /// This app's version.
+    pub app: String,
+    /// The OS it ran on, as "macOS 26.1 (25B78)", when it could be read.
+    pub os: Option<String>,
+}
+
+impl StartFailed {
+    fn new(status: Option<std::process::ExitStatus>, ran: Duration, error: Option<String>, log: Option<PathBuf>) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        Self {
+            process: PROCESS.into(),
+            code: status.and_then(|status| status.code()),
+            signal: status.and_then(|status| status.signal()),
+            ran_ms: ran.as_millis().try_into().unwrap_or(u64::MAX),
+            error, log,
+            at: chrono::Utc::now().timestamp_millis(),
+            app: env!("CARGO_PKG_VERSION").into(),
+            os: crate::startup::os_label(),
+        }
+    }
+
+    /// How it ended: "exited with code 78 after 0.4 s".
+    pub fn ended(&self) -> String {
+        let ran = super::log_file::span(Duration::from_millis(self.ran_ms));
+        match (self.code, self.signal) {
+            (Some(code), _) => format!("{} exited with code {code} after {ran}", self.process),
+            (None, Some(signal)) => format!("{} was ended by signal {signal} after {ran}", self.process),
+            (None, None) => format!("{} could not be started", self.process),
+        }
+    }
+}
+
+impl std::fmt::Display for StartFailed {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "local runtime failed before attachment: {}", self.ended())?;
+        if let Some(error) = &self.error { write!(out, ": {error}")?; }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StartFailed {}
+
+/// How much of a failed start's log is read for its error.
+const LOGGED_TAIL: u64 = 64 * 1024;
+
+/// The error runtime start logged in `log` from offset `since`: its last
+/// error record, or failing that its last line of output (a panic's message,
+/// an argument it refused). A log that was started afresh in the meantime is
+/// read from its beginning.
+fn logged_error(log: &Path, since: u64) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = File::open(log).ok()?;
+    let length = file.metadata().ok()?.len();
+    let from = if since > length { 0 } else { since.max(length.saturating_sub(LOGGED_TAIL)) };
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    error_line(&String::from_utf8_lossy(&bytes))
+}
+
+/// The line of `text`, a runtime's log, that says why it stopped (see
+/// [`logged_error`]), without its record's time, level and module.
+fn error_line(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    // "[2026-11-11T09:13:45Z ERROR raccoon_lib::serve] terminalx-serve: …"
+    let record = |line: &str| line.strip_prefix('[').and_then(|rest| rest.split_once("] ")).map(|(head, message)| (head.to_owned(), message.to_owned()));
+    if let Some(message) = lines.iter().rev().filter_map(|line| record(line)).find(|(head, _)| head.split_whitespace().nth(1) == Some("ERROR")).map(|(_, message)| message) {
+        return Some(message);
+    }
+    // Not a record: what it printed itself. A panic ends with a note on how to see more.
+    lines.iter().rev().find(|line| record(line).is_none() && !line.starts_with("note: ")).map(|line| (*line).to_owned())
 }
 
 /// Stop the runtime that holds `home` without asking it, for one that has
@@ -448,6 +562,61 @@ mod tests {
         assert!(install(&source, &home).is_err());
     }
 
+    /// PRO-287: a runtime that exits while starting is reported with its
+    /// exit code, how long it ran, and the error it logged in this start,
+    /// not an earlier one's.
+    #[test]
+    fn a_runtime_that_exits_while_starting_reports_its_exit_code_and_error() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let log = fixture.path().join("runtime.log");
+        std::fs::write(&log, "[2026-11-10T08:00:00Z ERROR raccoon_lib::serve] terminalx-serve: an earlier start's failure\n").unwrap();
+        let since = std::fs::metadata(&log).unwrap().len();
+        let script = format!(
+            "printf '%s\\n' '[2026-11-11T09:41:12Z INFO  raccoon_lib::serve] starting' \
+             '[2026-11-11T09:41:12Z ERROR raccoon_lib::serve] terminalx-serve: open the state directory: Permission denied (os error 13)' \
+             '[2026-11-11T09:41:12Z INFO  raccoon_lib::serve] shutting down' >> '{}'; exit 78", log.display());
+        let started = Instant::now();
+        let child = Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap();
+        let error = attachment(child, &home, Instant::now() + Duration::from_secs(10), started, Some((&log, since))).err().expect("it exited");
+        let failed = error.downcast_ref::<StartFailed>().expect("a structured start failure");
+        assert_eq!((failed.code, failed.signal), (Some(78), None));
+        assert_eq!(failed.error.as_deref(), Some("terminalx-serve: open the state directory: Permission denied (os error 13)"));
+        assert_eq!(failed.log.as_deref(), Some(log.as_path()));
+        assert_eq!(failed.process, "terminalx-serve");
+        assert_eq!(failed.app, env!("CARGO_PKG_VERSION"));
+        assert!(failed.ran_ms < 10_000);
+        assert!(failed.ended().starts_with("terminalx-serve exited with code 78 after "), "{}", failed.ended());
+        assert!(error.to_string().contains("Permission denied"), "the log line says it too: {error}");
+        if cfg!(target_os = "macos") { assert!(failed.os.as_deref().is_some_and(|os| os.starts_with("macOS ")), "{:?}", failed.os); }
+    }
+
+    #[test]
+    fn a_runtime_ended_by_a_signal_while_starting_says_which() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let child = Command::new("/bin/sh").args(["-c", "kill -9 $$"]).spawn().unwrap();
+        let error = attachment(child, &home, Instant::now() + Duration::from_secs(10), Instant::now(), None).err().expect("it was killed");
+        let failed = error.downcast_ref::<StartFailed>().unwrap();
+        assert_eq!((failed.code, failed.signal, failed.error.as_deref(), failed.log.as_deref()), (None, Some(9), None, None));
+        assert!(failed.ended().starts_with("terminalx-serve was ended by signal 9 after "));
+    }
+
+    /// The error a failed start logged: its last error record, without the
+    /// record's time, level and module; else what it printed itself.
+    #[test]
+    fn a_failed_start_is_told_by_its_last_error_or_what_it_printed() {
+        let records = "[2026-11-11T09:41:12Z ERROR raccoon_lib::a] first\n[2026-11-11T09:41:12Z ERROR raccoon_lib::serve] terminalx-serve: second\n[2026-11-11T09:41:13Z INFO  raccoon_lib::serve] after\n";
+        assert_eq!(error_line(records).as_deref(), Some("terminalx-serve: second"));
+        let panic = "thread 'main' panicked at src/serve.rs:12:5:\nthe socket path is too long\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n";
+        assert_eq!(error_line(panic).as_deref(), Some("the socket path is too long"));
+        assert_eq!(error_line("terminalx-serve: unknown argument --bogus\n").as_deref(), Some("terminalx-serve: unknown argument --bogus"));
+        assert_eq!(error_line("[2026-11-11T09:41:12Z INFO  raccoon_lib::serve] only records, none an error\n"), None);
+        assert_eq!(error_line(""), None);
+    }
+
     #[test]
     fn installer_refuses_symlinks_and_shared_directories() {
         let fixture = tempfile::tempdir().unwrap();
@@ -482,10 +651,49 @@ mod tests {
         // SAFETY: setsid is async-signal-safe.
         unsafe { terminal.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
         let mut terminal = terminal.spawn().unwrap();
-        std::fs::write(home.join("terminal.pid"), terminal.id().to_string()).unwrap();
+        // The parent treats existence as readiness. Publish complete bytes:
+        // write() alone exposes an empty file between creation and writing.
+        let pending = home.join("terminal.pid.pending");
+        std::fs::write(&pending, terminal.id().to_string()).unwrap();
+        std::fs::rename(pending, home.join("terminal.pid")).unwrap();
         std::thread::sleep(Duration::from_secs(600));
         let _ = terminal.kill();
         let _ = terminal.wait();
+    }
+
+    /// Spawn `command`, retrying while Linux refuses it with ETXTBSY ("Text
+    /// file busy"), as Go's os/exec does. The fixtures exec a copy of this test
+    /// binary they just wrote; another test that forks while that copy's write
+    /// descriptor is open hands the child a duplicate (close-on-exec closes it
+    /// only at the child's exec), and until then the kernel refuses to exec the
+    /// file. The window is short, so a short backoff outlasts it. No lock can
+    /// close it: every other test in this binary forks too.
+    fn spawn_when_not_busy(command: &mut Command) -> std::process::Child {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut delay = Duration::from_millis(5);
+        loop {
+            match command.spawn() {
+                Ok(child) => return child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline => {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_millis(200));
+                }
+                Err(error) => panic!("start the fixture owner: {error}"),
+            }
+        }
+    }
+
+    /// This test binary, installed as the launcher installs a runtime, so it is
+    /// one of `home`'s: written under a temporary name and closed before it is
+    /// renamed into place, so nothing ever runs a copy still being written.
+    fn installed_copy(home: &Path) -> PathBuf {
+        let directory = home.join("runtime/fixture");
+        std::fs::create_dir_all(&directory).unwrap();
+        let installed = directory.join("terminalx-serve");
+        let partial = directory.join("terminalx-serve.partial");
+        std::fs::copy(std::env::current_exe().unwrap(), &partial).unwrap();
+        std::fs::rename(&partial, &installed).unwrap();
+        installed
     }
 
     /// Start `executable` as the wedged owner of a fresh home, and wait until
@@ -499,7 +707,7 @@ mod tests {
             .env(OWNER_HOME, &home).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         // SAFETY: as the launcher does: the owner leads a session of its own.
         unsafe { owner.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
-        let mut owner = owner.spawn().unwrap();
+        let mut owner = spawn_when_not_busy(&mut owner);
         let deadline = Instant::now() + Duration::from_secs(30);
         let terminal = loop {
             if let Ok(pid) = std::fs::read_to_string(home.join("terminal.pid")) { break pid.parse().unwrap(); }
@@ -520,14 +728,7 @@ mod tests {
     #[test]
     fn an_unresponsive_owner_is_stopped_with_the_terminals_it_started() {
         let fixture = tempfile::tempdir().unwrap();
-        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |home| {
-            // Installed as the launcher installs a runtime, so it is one of this home's.
-            let installed = home.join("runtime/fixture");
-            std::fs::create_dir_all(&installed).unwrap();
-            let installed = installed.join("terminalx-serve");
-            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
-            installed
-        });
+        let (home, mut owner, terminal) = installed_owner(fixture.path());
         assert_eq!(listener(&home.join("run/hooks.sock")), Some(owner.id() as libc::pid_t));
         assert!(kill_owner(&home).unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -539,13 +740,7 @@ mod tests {
     }
 
     fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
-        wedged_owner(fixture, |home| {
-            let installed = home.join("runtime/fixture");
-            std::fs::create_dir_all(&installed).unwrap();
-            let installed = installed.join("terminalx-serve");
-            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
-            installed
-        })
+        wedged_owner(fixture, installed_copy)
     }
 
     fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {

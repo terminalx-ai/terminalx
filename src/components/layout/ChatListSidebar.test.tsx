@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Project, SessionEntry } from "@/types/session";
@@ -30,7 +30,8 @@ let sessions: SessionEntry[];
 let summaries: Record<string, { lastPrompt?: string; lastReply?: string; waitingOn?: string }>;
 
 beforeEach(async () => {
-  prefs.setPrefs({ sidebarLayout: "list", sidebarSections: {} });
+  store.setShowArchived(false);
+  prefs.setPrefs({ sidebarLayout: "list", sidebarSections: {}, sidebarSort: "updated", sidebarProject: null, sidebarFilters: {} });
   summaries = {};
   mocks.invoke.mockReset().mockImplementation(async (command: string, args?: { sessionIds?: string[] }) => {
     if (command === "list_projects") return { projects, lastSelected: null };
@@ -63,18 +64,18 @@ async function boot(list: SessionEntry[]) {
 }
 
 const rows = () => within(screen.getByTestId("conversation-list")).getAllByRole("listitem");
-const titleOf = (row: HTMLElement) => within(row).getByRole("button", { name: /^(Talk|Session)/ }).getAttribute("aria-label");
+const titleOf = (row: HTMLElement) => row.querySelector("[data-row-sessions] > button")?.getAttribute("aria-label");
 
 describe("the chat list", () => {
   it("lists every conversation in one list, pinned first then newest, whatever project it is in", async () => {
     await boot([
       session("chat", chatsPath, at(3)),
-      session("work", "/repos/web", at(2), { worktreeName: "fix-login", branch: "raccoon/fix-login" }),
+      session("work", "/repos/web", at(2), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }),
       session("old", "/repos/web", at(1), { pinned: true }),
       session("gone", chatsPath, at(4), { archived: true }),
     ]);
     mount();
-    expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "Talk work"]);
+    expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "fix login"]);
     // No project level: the project view is one click away.
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "View" }));
@@ -88,7 +89,7 @@ describe("the chat list", () => {
       alone: { waitingOn: "Which file?" },
     };
     await boot([
-      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", branch: "raccoon/fix-login" }, "waiting"),
+      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }, "waiting"),
       session("said", chatsPath, at(3), {}, "completed"),
       session("alone", chatsPath, at(2), {}, "waiting"),
       session("quiet", "/repos/web", at(1), { branch: "main" }),
@@ -98,14 +99,16 @@ describe("the chat list", () => {
     await act(async () => {});
     const [asks, said, alone, quiet] = rows();
     expect(within(asks!).getByTestId("chat-preview").textContent).toBe("web · raccoon/fix-login");
+    // A mark, not a label: its name is the label.
     expect(within(asks!).getByRole("img", { name: "Needs you" })).toBeTruthy();
     // What it waits on is still there, on hover.
-    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("Talk asks\nweb · raccoon/fix-login\nAllow rm -rf dist?");
+    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("fix login\nweb · raccoon/fix-login\nAllow rm -rf dist?");
     expect(within(said!).getByTestId("chat-preview").textContent).toBe("Done: the tests pass and the build is green.");
     expect(within(said!).getByRole("img", { name: "Unread" })).toBeTruthy();
     expect(within(alone!).getByTestId("chat-preview").textContent).toBe("Which file?");
     expect(within(quiet!).getByTestId("chat-preview").textContent).toBe("web · main");
-    expect(within(quiet!).queryByRole("img")).toBeNull();
+    // Only its status mark: nothing unread, nothing waiting.
+    expect(within(quiet!).getAllByRole("img").map((img) => img.getAttribute("aria-label"))).toEqual(["No changes"]);
   });
 
   it("opens a chat on click, and switches back to the project view from the View menu", async () => {
@@ -129,6 +132,11 @@ describe("chatPreview", () => {
     expect(chatPreview(chat, { sessionId: "x", tabId: "t", lastPrompt: "hi", lastReply: null, waitingOn: null, updatedAt: "" }, null)).toEqual({ text: "hi", tone: "said" });
     expect(chatPreview(chat, undefined, { name: "web", branch: null })).toEqual({ text: "web", tone: "place" });
     expect(chatPreview(chat, undefined, null)).toEqual({ text: "New chat", tone: "place" });
+  });
+
+  it("says what a helper tab is doing while one works, then goes back to the place (PRO-331)", () => {
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, "Review 2 of 3 running")).toEqual({ text: "Review 2 of 3 running", tone: "helper" });
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, null)).toEqual({ text: "web · main", tone: "place" });
   });
 });
 
@@ -183,7 +191,7 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
   const kept = screen.getByRole("button", { name: "Talk kept" });
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
-  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
   expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
   expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
 });
@@ -206,7 +214,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });
@@ -259,5 +267,99 @@ describe("the archive in the chat list (#718)", () => {
     await act(async () => { fireEvent.click(within(bar).getByRole("button", { name: /^Archive/ })); });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived").map(([, args]) => args)).toEqual([{ sessionIds: ["a", "b"], archived: true }]);
     expect(screen.queryByRole("button", { name: "Talk a" })).toBeNull();
+  });
+});
+
+
+describe("status grouping and view controls (PRO-164)", () => {
+  it("groups each session independently, updates counts and remembers collapsed headers", async () => {
+    await boot([session("one", "/repos/web", at(1), { manualStatus: "in_review" }), session("two", "/repos/web", at(2), { manualStatus: "in_review" }), session("three", chatsPath, at(3))]);
+    mount();
+    expect(screen.getByRole("button", { name: "Talk one", description: "Status: In review" })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Group by status" }));
+    const header = screen.getByRole("button", { name: "In review 2" });
+    expect(screen.getByRole("button", { name: "Backlog 1" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull();
+    fireEvent.click(header);
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Talk one" })).toBeNull();
+    expect(prefs.getPrefs().sidebarSections["status:local:in_review"]).toBe("collapsed");
+    await act(async () => { store.upsertSession({ ...sessions[0], manualStatus: "done" }); });
+    expect(screen.getByRole("button", { name: "In review 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Done 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Talk one" })).toBeTruthy();
+  });
+
+  it("combines a project with Needs you and creation order, and keeps the archive project-filtered", async () => {
+    await boot([
+      session("old", "/repos/web", at(1), { lastMessageAt: at(10) }, "waiting"),
+      session("new", chatsPath, at(2), { link: { path: "/repos/web/" } }, "waiting"),
+      session("other", "/repos/other", at(3), {}, "waiting"),
+      session("read", "/repos/web", at(4)),
+      session("archive", "/repos/web", at(5), { archived: true }),
+      session("hidden-archive", "/repos/other", at(6), { archived: true }),
+    ]);
+    act(() => {
+      store.selectSession(null);
+      prefs.setPrefs({ sidebarLayout: "status", sidebarProject: "/repos/web", sidebarSort: "created", sidebarFilters: { local: "needs" } });
+    });
+    mount();
+    expect(screen.queryByRole("button", { name: "Talk other" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Talk read" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Backlog 2" })).toBeTruthy();
+    // DOM order follows creation while the older session has newer messages.
+    const buttons = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(buttons.findIndex((text) => text?.includes("Talk new"))).toBeLessThan(buttons.findIndex((text) => text?.includes("Talk old")));
+    act(() => { prefs.setPrefs({ sidebarFilters: {} }); store.setShowArchived(true); });
+    expect(screen.getByRole("button", { name: "Talk archive" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Talk hidden-archive" })).toBeNull();
+  });
+
+  it("keeps the selected session visible when its project does not match", async () => {
+    await boot([session("web", "/repos/web", at(1)), session("other", "/repos/other", at(2)), session("hidden", "/repos/other", at(3))]);
+    act(() => { store.selectSession("other"); prefs.setPrefs({ sidebarProject: "/repos/web", sidebarFilters: { local: "needs" } }); });
+    mount();
+    expect(screen.getByRole("button", { name: "Talk other" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Talk hidden" })).toBeNull();
+    act(() => prefs.setPrefs({ sidebarFilters: {} }));
+    expect(screen.getByRole("button", { name: "Talk web" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Talk other" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Talk hidden" })).toBeNull();
+  });
+
+  it("searches project choices with the keyboard without hover stealing focus", async () => {
+    await boot([session("web", "/repos/web", at(1)), session("other", "/repos/other", at(2))]);
+    act(() => store.selectSession(null));
+    mount();
+    fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
+    const trigger = await screen.findByRole("menuitem", { name: "Filter by project" });
+    fireEvent.keyDown(trigger, { key: "ArrowRight" });
+    const search = await screen.findByRole("textbox", { name: "Search projects" });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    const all = screen.getByRole("menuitemradio", { name: "All projects" });
+    // With no query, mouse users still get the usual highlighted result.
+    fireEvent.pointerMove(all, { pointerType: "mouse" });
+    expect(document.activeElement).toBe(all);
+    fireEvent.keyDown(all, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.change(search, { target: { value: "web" } });
+    expect(screen.queryByRole("menuitemradio", { name: "other" })).toBeNull();
+    // Moving from the formerly hovered row fires leave before the next move.
+    // Radix otherwise focuses the menu content and interrupts the typed query.
+    fireEvent.pointerLeave(all, { pointerType: "mouse" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.pointerMove(screen.getByRole("menuitemradio", { name: "web" }), { pointerType: "mouse" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(all);
+    fireEvent.keyDown(all, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(all, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "web" })));
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(prefs.getPrefs().sidebarProject).toBe("/repos/web");
+    expect(screen.queryByRole("button", { name: "Talk other" })).toBeNull();
   });
 });

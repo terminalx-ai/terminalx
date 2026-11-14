@@ -237,6 +237,12 @@ impl Peer {
     }
 }
 
+/// Authority belongs to the keystroke, not the later writer thread.
+struct PtyInput {
+    data: Vec<u8>,
+    privacy: crate::data_privacy::Ticket,
+}
+
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
 /// terminal output into a session transcript.
 struct PtyState {
@@ -266,13 +272,15 @@ struct PtyState {
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
+    /// A fallible cleanup must retain ownership metadata even after PTY exit.
+    stop_pending: bool,
     /// Last applied `pty.write` seq per ([`Peer::input_scope`], writer): a
     /// resend is dropped and a gap is refused, so input is applied once and
     /// in order.
     applied_seq: HashMap<(String, String), (u64, Instant)>,
     /// Accepted input, written by the terminal's own writer thread so a
     /// program that stops reading never stalls the connection.
-    input: std::sync::mpsc::Sender<Vec<u8>>,
+    input: std::sync::mpsc::Sender<PtyInput>,
     input_pending: Arc<AtomicUsize>,
     subscribers: HashMap<String, Arc<Peer>>,
     /// Set for an agent tab's own terminal (`agent-pty/1`): the pane the
@@ -829,18 +837,32 @@ impl WorkspaceRpc {
 
     /// Answer one request. Returns the response frame; notifications for
     /// this peer go through its outbound queue.
-    pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) -> Value {
+    pub fn handle<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = Value> + Send + 'a {
+        self.handle_admitted(peer, request, crate::github_process::ticket())
+    }
+
+    /// Capture at ingress, before the relay queues its first async task. The
+    /// request retains this ticket through idempotency waits and blocking work.
+    pub fn handle_owned(self: &Arc<Self>, peer: Arc<Peer>, request: Value) -> impl std::future::Future<Output = Value> + Send + 'static {
+        let rpc = self.clone();
+        let ticket = crate::github_process::ticket();
+        async move { rpc.handle_admitted(&peer, &request, ticket).await }
+    }
+
+    async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value, ticket: crate::data_privacy::Ticket) -> Value {
         let id = request.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("").to_string();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
-        match self.dispatch(peer, &method, params).await {
+        match self.dispatch(peer, &method, params, ticket).await {
             Ok(result) => protocol::success(&id, result),
             Err(error) => protocol::failure(&id, &error),
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn dispatch(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
@@ -894,7 +916,7 @@ impl WorkspaceRpc {
             self.authorize_participant(peer, spec)?;
         }
         if !spec.idempotent {
-            return self.execute(peer, method, params).await;
+            return self.execute(peer, method, params, ticket).await;
         }
         let request_id = params
             .get("clientRequestId")
@@ -910,7 +932,7 @@ impl WorkspaceRpc {
             match previous {
                 Some(previous) => previous,
                 None => {
-                    let result = self.execute(peer, method, params).await;
+                    let result = self.execute(peer, method, params, ticket).await;
                     self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
                     result
                 }
@@ -981,25 +1003,37 @@ impl WorkspaceRpc {
     /// Answer `ports.open` in order with the connection's notifications, and
     /// only then let the stream's data flow: an application that speaks
     /// first can never be heard before the client knows the stream's id.
-    pub async fn answer_port_open(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) {
-        let response = self.handle(peer, request).await;
-        let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
-        peer.deliver(response);
-        if let Some(stream_id) = stream_id {
-            self.ports.start(peer, &stream_id);
+    pub fn answer_port_open<'a>(self: &'a Arc<Self>, peer: &'a Arc<Peer>, request: &'a Value) -> impl std::future::Future<Output = ()> + Send + 'a {
+        let response = self.handle(peer, request);
+        async move {
+            let response = response.await;
+            let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
+            peer.deliver(response);
+            if let Some(stream_id) = stream_id { self.ports.start(peer, &stream_id); }
         }
     }
 
-    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
+            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
         }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
         // File, Git and process work blocks; keep it off the socket's task.
-        tokio::task::spawn_blocking(move || rpc.execute_blocking(&peer, &method, params))
+        tokio::task::spawn_blocking(move || {
+            // Remote mutations, including deferred SessionManager deliveries,
+            // need more than a thread-local GitHub ticket. Acquire before any
+            // state change; retain the lease until all synchronous work ends.
+            let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
+            #[cfg(test)]
+            {
+                let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
+            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+        })
             .await
             .map_err(RpcError::internal)?
     }
@@ -1338,7 +1372,7 @@ impl WorkspaceRpc {
             if self.removed_agent_tabs.lock().unwrap().iter().any(|removed| removed == tab_id) {
                 return Err(RpcError::not_found("the terminal closed with its tab"));
             }
-            let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+            let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
             let input_pending = Arc::new(AtomicUsize::new(0));
             let terminals = self.terminals.clone();
             let pending = input_pending.clone();
@@ -1349,8 +1383,8 @@ impl WorkspaceRpc {
                     // Ends when the entry (the sender) is dropped with its tab.
                     for data in queue {
                         // Between two CLIs there is nothing to type into.
-                        let _ = terminals.write(&pane, &data);
-                        pending.fetch_sub(data.len(), Ordering::SeqCst);
+                        let _ = terminals.write_remote(&pane, &data.data, &data.privacy);
+                        pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                     }
                 })
                 .map_err(RpcError::internal)?;
@@ -1373,6 +1407,7 @@ impl WorkspaceRpc {
                     exit: None,
                     exited_at: None,
                     closed: false,
+                    stop_pending: false,
                     applied_seq: HashMap::new(),
                     input,
                     input_pending,
@@ -1550,7 +1585,7 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
-        let (input, queue) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
@@ -1578,6 +1613,7 @@ impl WorkspaceRpc {
                     exit: None,
                     exited_at: None,
                     closed: false,
+                    stop_pending: false,
                     applied_seq: HashMap::new(),
                     input,
                     input_pending: input_pending.clone(),
@@ -1599,8 +1635,8 @@ impl WorkspaceRpc {
             // Ends when the terminal's entry (the sender) is dropped, or the
             // program is gone; its exit is reported through `pty.exit`.
             for data in queue {
-                let written = terminals.write(&writer_id, &data);
-                input_pending.fetch_sub(data.len(), Ordering::SeqCst);
+                let written = terminals.write_remote(&writer_id, &data.data, &data.privacy);
+                input_pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                 // A program that stopped reading loses this input, not every
                 // later keystroke: it may read again.
                 if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
@@ -1754,7 +1790,7 @@ impl WorkspaceRpc {
             return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
         }
         pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
-        if pty.input.send(data.as_bytes().to_vec()).is_err() {
+        if pty.input.send(PtyInput { data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
             pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }
@@ -1901,7 +1937,9 @@ impl WorkspaceRpc {
         let Some((session_id, tab_id)) = start else { return Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref())) };
         // Outside the lock: the CLI's first output is recorded under it.
         drop(ptys);
-        self.start_in_terminal(session_id, tab_id)?;
+        if !self.start_in_terminal(session_id, tab_id, None)? {
+            return Err(RpcError::new("conflict", "Wait for Codex to finish this turn, or interrupt it, before opening its terminal."));
+        }
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // The CLI starts at its default size; the controller's applies from here.
@@ -1926,17 +1964,26 @@ impl WorkspaceRpc {
             Some(refusal) => return Err(refusal),
             None => {}
         }
-        self.start_in_terminal(&tab.session_id, &tab.tab_id)?;
-        Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        let transition_id = serde_json::from_value(params["transitionId"].clone()).map_err(|_| RpcError::new("invalid_params", "transitionId must be a UUID"))?;
+        let ready = self.start_in_terminal(&tab.session_id, &tab.tab_id, transition_id)?;
+        if params["deferUntilIdle"] == true {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id, "waitingForTurn": !ready }))
+        } else if ready {
+            Ok(json!({ "sessionId": tab.session_id, "tabId": tab.tab_id }))
+        } else {
+            // Existing session/3 clients treat any success as a completed
+            // switch and cannot poll. Keep their original busy refusal.
+            Err(RpcError::new("conflict", "Codex is still working. Wait or interrupt before opening Terminal view."))
+        }
     }
 
     /// Start a tab's CLI in its terminal, moving native Codex there first.
-    fn start_in_terminal(&self, session_id: &str, tab_id: &str) -> Result<(), RpcError> {
+    fn start_in_terminal(&self, session_id: &str, tab_id: &str, transition_id: Option<uuid::Uuid>) -> Result<bool, RpcError> {
         let manager = self.manager()?;
-        manager.codex_stdio_to_terminal(session_id, tab_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        if !manager.codex_stdio_to_terminal_reported(session_id, tab_id, transition_id).map_err(|error| RpcError::new("conflict", format!("{error:#}")))? { return Ok(false); }
         manager.ensure_started(session_id, tab_id).map_err(|error| RpcError::new("unavailable", format!("the agent did not start: {error:#}")))?;
         self.tabs_changed.notify_one();
-        Ok(())
+        Ok(true)
     }
 
     fn pty_kill(&self, params: Value) -> Result<Value, RpcError> {
@@ -2122,13 +2169,13 @@ impl WorkspaceRpc {
                     json!({ "subscriptionId": subscription_id, "ptyId": exit.id, "code": exit.code, "offset": pty.end }),
                 );
             }
-            if pty.closed {
+            if pty.closed && !pty.stop_pending {
                 ended.extend(Self::remove_pty(&mut ptys, &exit.id));
             }
             // Exited terminals keep their output for a late reader, up to a
             // bound: the oldest are dropped first.
             let mut exited: Vec<(Instant, String)> =
-                ptys.iter().filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+                ptys.iter().filter(|(_, pty)| !pty.stop_pending).filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
             let mut evicted = Vec::new();
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
@@ -2324,7 +2371,10 @@ impl WorkspaceRpc {
     /// Every session of this workspace, whoever asks.
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
-        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect())
+        let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect();
+        // Sessions on one branch are in one project, so this workspace's sessions are every peer that matters.
+        if let Ok(manager) = self.manager() { let stored = sessions.clone(); manager.annotate_row_statuses_among(&mut sessions, &stored); }
+        Ok(sessions)
     }
 
     /// Sharing is workspace-wide (PRO-30): a person it is shared with sees
@@ -2442,6 +2492,7 @@ impl WorkspaceRpc {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
+                parent: None,
                 section_id: None,
                 project_path: root,
                 title: p.title,
@@ -2449,11 +2500,13 @@ impl WorkspaceRpc {
                 on_main: !p.use_worktree,
                 base_ref: None,
                 checkout_branch: None,
+                checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
                 issue: p.issue.clone(),
                 automation: None,
                 cwd: None,
                 tab: Some(first_tab),
+                orchestrate: false,
             },
         )
         .map_err(RpcError::internal)?;
@@ -2721,7 +2774,7 @@ impl WorkspaceRpc {
             patch.title = Some(title);
         }
         if patch.is_empty() {
-            return Err(RpcError::invalid("name a title, pinned or archived"));
+            return Err(RpcError::invalid("name a title, pinned, archived or manualStatus"));
         }
         let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(RpcError::internal)?;
         self.sink.emit("session_updated", &updated);
@@ -2802,11 +2855,11 @@ impl WorkspaceRpc {
                     fetch: crate::landed::Fetch::Fresh,
                     guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
                 };
-                let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
+                let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
                 removed.sessions
             }
-            None => vec![crate::session_ops::delete_session_blocking(&*self.sink, &session.id, &stop).map_err(RpcError::internal)?],
+            None => vec![crate::session_ops::delete_session_blocking_fallible(&*self.sink, &session.id, &stop).map_err(RpcError::internal)?],
         };
         // Said when the worktree was asked for and stayed because other
         // sessions still run in it.
@@ -2816,18 +2869,15 @@ impl WorkspaceRpc {
     }
 
     /// End what a session that is about to be deleted runs, and wait.
-    fn stop_before_removal(&self, doomed: &SessionEntry) {
-        for tab in &doomed.tabs {
-            let Some(manager) = &self.sessions else { break };
-            if manager.is_running(&doomed.id, &tab.id) {
-                if let Err(error) = manager.stop(&doomed.id, &tab.id) {
-                    log::warn!("stop {}/{} before delete: {error:#}", doomed.id, tab.id);
-                }
-            }
+    fn stop_before_removal(&self, doomed: &SessionEntry) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if let Some(manager) = &self.sessions {
+            if let Err(error) = manager.stop_session_confirmed(doomed) { failures.push(format!("{error:#}")); }
         }
-        // Its shells go before the worktree does, and are waited for, so
-        // nothing holds the directory.
-        self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5)));
+        if let Err(error) = self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5))) {
+            failures.push(error);
+        }
+        if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
     }
 
     /// Drop what the runtime still holds for sessions that were deleted, and
@@ -2896,7 +2946,7 @@ impl WorkspaceRpc {
             guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
-        let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
+        let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
         let deleted = self.forget_deleted_sessions(&removed.sessions);
         Ok(json!({ "deleted": deleted, "keptBranch": removed.removal.kept_branch, "rescuedBranch": removed.removal.rescued_branch }))
     }
@@ -2930,8 +2980,8 @@ impl WorkspaceRpc {
                 };
                 let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
                 let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd, branches);
-                let run = crate::merged_cleanup::Sweep { host, sink: &*self.sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
-                crate::merged_cleanup::sweep(&run, &scope)
+                let run = crate::merged_cleanup::FallibleSweep { host, sink: &*self.sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
+                crate::merged_cleanup::sweep_fallible(&run, &scope)
             })?
             .map_err(RpcError::internal)?;
         // What the runtime still holds for sessions deleted with their
@@ -2971,12 +3021,19 @@ impl WorkspaceRpc {
 
     /// Close the terminals opened for sessions that are gone.
     fn close_session_ptys(&self, sessions: &HashSet<String>) {
-        self.close_session_ptys_waiting(sessions, None);
+        let _ = self.close_session_ptys_waiting(sessions, None);
     }
 
     /// Close the sessions' terminals; with `wait`, also wait that long for
     /// their processes to exit.
-    fn close_session_ptys_waiting(&self, sessions: &HashSet<String>, wait: Option<std::time::Duration>) {
+    fn close_session_ptys_waiting(&self, sessions: &HashSet<String>, wait: Option<std::time::Duration>) -> Result<(), String> {
+        if let Some(timeout) = wait {
+            let ids = self.ptys.lock().unwrap().iter()
+                .filter(|(_, pty)| pty.session_id.as_ref().is_some_and(|id| sessions.contains(id)))
+                .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            return self.close_selected_ptys_waiting(&ids, timeout);
+        }
+        // Nonwaiting teardown retains its existing close/forget semantics.
         let (killed, ended) = {
             let mut ptys = self.ptys.lock().unwrap();
             let doomed: Vec<(String, bool)> = ptys
@@ -2995,15 +3052,45 @@ impl WorkspaceRpc {
             }
             (doomed.into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ended)
         };
-        match wait {
-            Some(timeout) => self.terminals.kill_all_and_wait(&killed, timeout),
-            None => {
-                for id in killed {
-                    self.terminals.kill(&id);
+        for id in killed { self.terminals.kill(&id); }
+        self.forget_subscriptions(ended);
+        Ok(())
+    }
+
+    /// Retain the remote entry, output and subscriptions until the captured
+    /// launches have actually stopped. A retry still knows which panes belong
+    /// to the session even though their local Pane objects were detached.
+    fn close_selected_ptys_waiting(&self, ids: &[String], timeout: std::time::Duration) -> Result<(), String> {
+        let identities: Vec<_> = {
+            let mut ptys = self.ptys.lock().unwrap();
+            ids.iter().filter_map(|id| ptys.get_mut(id).map(|pty| {
+                pty.stop_pending = true;
+                (id.clone(), pty.input_pending.clone(), pty.pid)
+            })).collect()
+        };
+        self.terminals.kill_all_and_wait_confirmed(ids, timeout).map_err(|error| format!("{error:#}"))?;
+        self.finish_selected_ptys_stop(identities)
+    }
+
+    fn finish_selected_ptys_stop(&self, identities: Vec<(String, Arc<AtomicUsize>, Option<u32>)>) -> Result<(), String> {
+        let ended = {
+            let mut ptys = self.ptys.lock().unwrap();
+            if identities.iter().any(|(id, identity, pid)| self.terminals.is_live(id) || !self.terminals.pending_stops(id).is_empty()
+                || ptys.get(id).is_some_and(|pty| !Arc::ptr_eq(&pty.input_pending, identity) || pty.pid != *pid)) {
+                return Err("A terminal changed while stopping; its session was retained. Retry the operation.".into());
+            }
+            let mut ended = Vec::new();
+            for (id, _, _) in identities {
+                if let Some(pty) = ptys.get_mut(&id) {
+                    pty.stop_pending = false;
+                    pty.closed = true;
+                    if pty.exit.is_some() { ended.extend(Self::remove_pty(&mut ptys, &id)); }
                 }
             }
-        }
+            ended
+        };
         self.forget_subscriptions(ended);
+        Ok(())
     }
 
     fn session_close(&self, params: Value) -> Result<Value, RpcError> {
@@ -3018,12 +3105,24 @@ impl WorkspaceRpc {
         // Without agents (tests) nothing is running to stop.
         if let Some(manager) = &self.sessions {
             for tab_id in &closing {
-                if manager.is_running(&session.id, tab_id) {
+                // As main: an idle tab has nothing to stop, and stopping it
+                // would post "Session closed" into its log and read an
+                // unread reply. A running one, or one whose earlier stop is
+                // still unconfirmed (#467), is stopped and must confirm.
+                if manager.is_running(&session.id, tab_id) || manager.stop_unconfirmed(&session.id, tab_id) {
                     manager.stop(&session.id, tab_id).map_err(RpcError::internal)?;
                 }
             }
         }
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
+            let pane_ids: Vec<_> = session.tabs.iter().filter(|tab| closing.contains(&tab.id)).map(crate::store::index::TabEntry::pane_id).collect();
+            self.terminals.kill_all_and_wait_confirmed(&pane_ids, std::time::Duration::from_secs(5)).map_err(RpcError::internal)?;
+            if closing.len() == session.tabs.len() {
+                self.close_session_ptys_waiting(&HashSet::from([session.id.clone()]), Some(std::time::Duration::from_secs(5))).map_err(RpcError::internal)?;
+            } else {
+                let agent_ids: Vec<_> = closing.iter().map(|id| format!("{AGENT_PTY_PREFIX}{id}")).collect();
+                self.close_selected_ptys_waiting(&agent_ids, std::time::Duration::from_secs(5)).map_err(RpcError::internal)?;
+            }
             index::update(|sessions| {
                 if let Some(entry) = sessions.iter_mut().find(|entry| entry.id == session.id) {
                     entry.tabs.retain(|tab| !closing.contains(&tab.id));
@@ -3288,7 +3387,7 @@ impl WorkspaceRpc {
             return Err(RpcError::invalid("the query is too long"));
         }
         let limit = params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_FILE_HITS, |limit| limit as usize).clamp(1, MAX_FILE_HITS);
-        let files = crate::files::search(Path::new(&session.cwd), query, limit).map_err(RpcError::internal)?;
+        let files = crate::files::search(Path::new(&session.cwd), query, limit, false).map_err(RpcError::internal)?;
         Ok(json!({ "files": files }))
     }
 
@@ -3476,3 +3575,6 @@ mod pipeline_tests;
 #[cfg(test)]
 #[path = "pipeline_reviewer_tests.rs"]
 mod pipeline_reviewer_tests;
+
+#[cfg(test)]
+pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

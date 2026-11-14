@@ -65,7 +65,7 @@ pub(crate) fn notify_sessions_deleted(sink: &dyn EventSink, removed: &[SessionEn
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTab {
     pub harness: String,
@@ -79,7 +79,7 @@ pub struct NewTab {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSession {
     #[serde(default)]
@@ -96,6 +96,9 @@ pub struct NewSession {
     /// An existing branch to check out in the new worktree, instead of a new branch.
     #[serde(default)]
     pub checkout_branch: Option<String>,
+    /// A PR head, fetched by gh (including forks) into an isolated worktree.
+    #[serde(default)]
+    pub checkout_pr: Option<u64>,
     /// Explicit acknowledgement that a requested worktree should be skipped.
     #[serde(default)]
     pub on_main: bool,
@@ -109,10 +112,31 @@ pub struct NewSession {
     /// The first agent conversation. Omitted when a checkout is opened directly.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
+    /// Started with Orchestrate (PRO-337): a run this session leads waits for
+    /// a person's Approve even where the project asks for none.
+    #[serde(default)]
+    pub orchestrate: bool,
+}
+
+/// A session started by an orchestration run's worker, or for a run's piece, has the
+/// worker's limits from its first moment (`orchestration::guard`): what a worker may not
+/// do itself it may not do through a session it starts.
+fn inherit_run_limits(entry: &mut SessionEntry) {
+    if crate::orchestration::guard::limited(entry) {
+        entry.mark_run_worker();
+    }
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
+    if let Some(number) = req.checkout_pr {
+        if number == 0 || !req.use_worktree || req.on_main || req.cwd.is_some() || req.checkout_branch.is_some() || req.base_ref.is_some() || req.tab.is_none() {
+            return Err("Starting from a pull request requires a new worktree and an agent.".into());
+        }
+    }
     let requested_worktree = req.worktree_name.as_deref().is_some_and(|name| !name.trim().is_empty());
     if !req.use_worktree && requested_worktree && !req.on_main {
         return Err("A requested worktree can only be skipped when onMain is explicitly true.".into());
@@ -188,12 +212,13 @@ fn requested_worktree_name(project: &Path, requested: &str, excluding: Option<&s
 
 pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     TabEntry {
+        marked_unread: false,
         id: uuid::Uuid::now_v7().to_string(),
         harness: t.harness.clone(),
         transport: t.transport,
         title: None,
         model: t.model.clone(),
-        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None,
+        effort: t.effort.clone(), requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
         permission_mode: index::permission_mode_or_default(t.permission_mode.as_deref()),
         provider_session_id: None,
         status: TabStatus::Idle,
@@ -203,6 +228,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         context_max: None,
         fork_from: None,
         continuation: None,
+        usage: None,
         parked: false,
         follow: Default::default(),
         unknown: BTreeMap::new(),
@@ -232,11 +258,20 @@ pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSessio
 }
 
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    let _request = crate::github_process::scope();
+    if crate::git::is_repo(Path::new(&req.project_path)) {
+        crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
+            .map_err(|e| WorkspaceError::InvalidArguments(e.to_string()))?;
+    }
     let _naming = WORKSPACE_NAMING.lock();
     validate_session_target(&req)?;
     let project = projects::canonical_directory(&req.project_path).map_err(err)?;
     projects::refuse_mirror(&project).map_err(err)?;
     let project_path = Path::new(&project);
+    if req.checkout_pr.is_some() && !git::is_repo(project_path) {
+        return Err(WorkspaceError::InvalidArguments("Pull requests require a Git project.".into()));
+    }
+    let starting_pr = req.checkout_pr.map(|number| crate::github::pr_details(project_path, number).map_err(err)).transpose()?;
     let id = uuid::Uuid::now_v7().to_string();
     let now = index::now();
     let requested_title = req.title.clone().filter(|t| !t.trim().is_empty())
@@ -270,11 +305,17 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         archived: false,
         archive: Default::default(),
         pinned: false,
+        manual_status: Default::default(),
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
         link: None,
+        parent: req.parent.clone(),
         tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
+    inherit_run_limits(&mut entry);
+    if req.orchestrate {
+        entry.mark_orchestrate_start();
+    }
 
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
@@ -290,9 +331,13 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
             Some(name) => name,
             None => available_worktree_name(project_path, generated_name, None)?,
         };
-        let wt = match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
-            Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
-            None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+        let wt = if let Some(number) = req.checkout_pr {
+            git::checkout_pr_worktree(project_path, &name, number).map_err(err)?
+        } else {
+            match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+                Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
+                None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+            }
         };
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
@@ -310,6 +355,17 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     });
 
     index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
+    if let Some(pr) = starting_pr {
+        // Association failure must not report an already-created session as failed.
+        if let Err(error) = crate::pr_associations::record_local(&entry.id, Path::new(&entry.cwd), &pr.url, entry.branch.as_deref().unwrap_or_default()) {
+            log::warn!("Could not associate the starting pull request: {error:#}");
+        }
+    }
+    // The checkout and index entry already exist. Setup bookkeeping must not
+    // turn a successful creation into an error that invites a duplicate retry.
+    if let Err(error) = crate::workspace_setup::prepare(&entry) {
+        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+    }
     Ok(entry)
 }
 
@@ -330,6 +386,9 @@ pub struct NewQuickChat {
     /// a terminal.
     #[serde(default)]
     pub tab: Option<NewTab>,
+    /// The session that starts this one (PRO-270), recorded on the entry.
+    #[serde(default)]
+    pub parent: Option<index::ParentRef>,
 }
 
 pub(crate) const QUICK_CHAT_TITLE: &str = "Quick chat";
@@ -362,6 +421,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             id: id.clone(),
             kind: SessionKind::Quick,
             link: None,
+            parent: req.parent.clone(),
             project_path: scratch.clone(),
             // The scratch directory is on no branch even when the TerminalX
             // home happens to sit inside a repository (dotfiles kept in git).
@@ -381,10 +441,13 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
             tabs: first_tab.into_iter().collect(),
             unknown: BTreeMap::new(),
         };
+        let mut entry = entry;
+        inherit_run_limits(&mut entry);
         index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
         Ok(entry)
     })();
@@ -716,6 +779,7 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 /// verdict too ("cannot be checked"), so the dialog can ask about it rather
 /// than wave it through.
 pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {
+    let _request = crate::github_process::scope();
     let mut disposition = crate::workspaces::disposition(project, path);
     if fetch && !disposition.is_main {
         disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));
@@ -823,9 +887,11 @@ pub(crate) struct WorkspaceRemoved {
     /// Processes found still working in it once its sessions were stopped:
     /// leftover builds were stopped, anything else listed (`stray_processes`).
     pub strays: Vec<crate::stray_processes::Stray>,
+    /// The folders it checked out when it was a sparse workspace.
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
-/// How an error from [`remove_workspace`] starts when the workspace was left
+/// How an error from [`remove_workspace_fallible`] starts when the workspace was left
 /// alone because it needs the second confirmation. Callers that can ask for
 /// it look for this.
 pub(crate) const NEEDS_CONFIRMATION: &str = "This workspace needs a second confirmation before it is removed";
@@ -868,12 +934,14 @@ fn needs_confirmation(landed: &crate::landed::Landed, confirmation: &Confirmatio
 ///
 /// A folder that is not on disk (removed by hand, or on a volume that is not
 /// mounted) cannot be checked, so it needs the second confirmation too.
+#[cfg(test)]
 pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry)) -> Result<WorkspaceRemoved> {
     remove_workspace_fallible(sink, request, &|entry| { stop(entry); Ok(()) })
 }
 
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
+    let _github_request = crate::github_process::scope();
     let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
     let target = std::fs::canonicalize(request.path).unwrap_or_else(|_| PathBuf::from(request.path));
     if target == project {
@@ -929,6 +997,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
         log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
     }
+    let removed_workspace = on_disk.then(|| crate::workspace_restore::removal_record(&project, &target));
     let removal = if on_disk {
         let verified_head = if after.safe { after.head.as_deref() } else { None };
         let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
@@ -947,17 +1016,18 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             affected
         }
         SessionsFate::Keep => {
-            let moved = mark_workspace_sessions_removed(&project, &affected)?;
+            let moved = mark_workspace_sessions_removed(&project, &affected, removed_workspace.as_ref())?;
             notify_workspace_settled(sink, request.project_path, &moved);
             moved
         }
     };
-    Ok(WorkspaceRemoved { sessions, removal, strays })
+    let sparse_checkout = removed_workspace.and_then(|removed| removed.sparse_checkout);
+    Ok(WorkspaceRemoved { sessions, removal, strays, sparse_checkout })
 }
 
 /// Record that the workspace these sessions ran in is gone: they keep their
 /// conversations and work from the project root from now on.
-pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
+pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry], removed: Option<&index::RemovedWorkspace>) -> Result<Vec<SessionEntry>> {
     for session in affected { crate::checkpoints::prune(session).map_err(err)?; }
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
     let branch = git::current_branch(project);
@@ -966,6 +1036,7 @@ pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[Sessio
         for session in sessions {
             if affected_ids.contains(&session.id) {
                 index::mark_workspace_removed(session, branch.clone());
+                if let Some(removed) = removed { session.removed_workspace = Some(removed.clone()); }
                 session.modified = index::now();
                 moved.push(session.clone());
             }
@@ -1021,7 +1092,7 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
     Ok(())
 }
 
-/// Title, pin and archive changes to one session. `None` leaves a field as it is.
+/// Metadata changes to one session. `None` leaves a field as it is.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPatch {
@@ -1031,42 +1102,74 @@ pub struct SessionPatch {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub archived: Option<bool>,
+    #[serde(default)]
+    pub manual_status: Option<index::ManualStatus>,
 }
 
 impl SessionPatch {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.pinned.is_none() && self.archived.is_none()
+        self.title.is_none() && self.pinned.is_none() && self.archived.is_none() && self.manual_status.is_none()
     }
 }
 
-/// Name a conversation after what it is about, as its agent titled it
-/// (Claude Code writes a title into its transcript), while the conversation
-/// still goes by the name it was given automatically: "New session", or the
-/// first line of its opening prompt. A title the reader chose is never
-/// replaced, nor one taken from the agent before. `None` when nothing changes.
+/// Name a conversation after what it is about, while it still goes by the
+/// name it was given automatically: "New session", the first line of its
+/// opening prompt, or a name generated from that prompt. Called after each
+/// turn; the result is the same every time until the agent writes a title.
+///
+/// Which name wins (PRO-333): a name led by a ticket/PR reference found in a
+/// long opening prompt (`PRO-123 …`, `#456 …`), else the agent's own title
+/// (Claude Code writes one into its transcript), else the long prompt's first
+/// imperative clause, trimmed ([`crate::session_names`]). A prompt of one
+/// sentence with no agent title keeps its first line. A title the reader
+/// chose is never replaced, nor one taken from the agent before. A session of
+/// one tab shows that tab's title, so the tab takes the name too unless the
+/// reader named it. `None` when nothing changes.
 pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>> {
     let Some(session) = index::load().map_err(err)?.into_iter().find(|s| s.id == session_id) else { return Ok(None) };
-    let Some(path) = session.tabs.iter()
-        .filter(|tab| tab.harness == "claude")
-        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
-        .find(|path| path.is_file())
-    else { return Ok(None) };
-    let Some(title) = crate::harness::claude::transcript::ai_title(&path) else { return Ok(None) };
-    let first = crate::harness::claude::transcript::first_prompt(&path).unwrap_or_default();
-    if title == session.title || !automatic_title(&session.title, &first) {
+    if session.tabs.len() == 1 && session.tabs[0].follow.title_pinned {
         return Ok(None);
     }
-    update_session_meta(session_id, &SessionPatch { title: Some(title), ..Default::default() }).map(Some)
+    let transcript = session.tabs.iter()
+        .filter(|tab| tab.harness == "claude")
+        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
+        .find(|path| path.is_file());
+    // The app's own log holds the prompt as it was typed, for every agent.
+    let first = store::conversation_titles::first_request(&session)
+        .or_else(|| transcript.as_deref().and_then(crate::harness::claude::transcript::first_prompt))
+        .unwrap_or_default();
+    if !automatic_title(&session.title, &first) {
+        return Ok(None);
+    }
+    let agent_title = transcript.as_deref().and_then(crate::harness::claude::transcript::ai_title);
+    let Some(title) = crate::session_names::chosen_name(&first, agent_title) else { return Ok(None) };
+    let named = |s: &SessionEntry| s.title == title && (s.tabs.len() != 1 || s.tabs[0].follow.title_pinned || s.tabs[0].title.as_deref() == Some(title.as_str()));
+    if named(&session) {
+        return Ok(None);
+    }
+    index::update_session(session_id, |s| {
+        // The reader may have renamed it since it was read.
+        if !automatic_title(&s.title, &first) || named(s) || (s.tabs.len() == 1 && s.tabs[0].follow.title_pinned) {
+            return Ok(None);
+        }
+        s.title = title.clone();
+        if let [tab] = s.tabs.as_mut_slice() {
+            tab.title = Some(title.clone());
+        }
+        Ok(Some(s.clone()))
+    })
+    .map_err(err)
 }
 
-/// Whether `title` is one the app made up: the untitled default, or the
-/// opening prompt's first line (cut short).
+/// Whether `title` is one the app made up: the untitled default, the opening
+/// prompt's first line (cut short), or the name generated from that prompt.
 fn automatic_title(title: &str, first_prompt: &str) -> bool {
     let title = title.trim();
     title.is_empty()
         || title == "New session"
         || title == QUICK_CHAT_TITLE
         || first_prompt.trim().lines().next().is_some_and(|line| line.trim().starts_with(title))
+        || crate::session_names::generated_name(first_prompt).is_some_and(|name| name == title)
 }
 
 /// Apply a [`SessionPatch`] and return the updated entry.
@@ -1077,6 +1180,9 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
         }
         if let Some(pinned) = patch.pinned {
             s.pinned = pinned;
+        }
+        if let Some(status) = patch.manual_status {
+            s.manual_status = Some(status);
         }
         // A person's archive, as every other way in or out marks it (#718).
         if let Some(archived) = patch.archived {
@@ -1145,7 +1251,7 @@ pub(crate) fn rename_tab_entry(session_id: &str, tab_id: &str, title: Option<Str
 /// Delete one session: its index entry, logs, attachments and the agents'
 /// own data for it. Nothing else goes: not its workspace, and never another
 /// session, whatever they share. A workspace is removed only through
-/// [`remove_workspace`]. `stop` ends what the session's tabs are running.
+/// [`remove_workspace_fallible`]. `stop` ends what the session's tabs are running.
 pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     delete_session_blocking_fallible(sink, session_id, &|entry| { stop(entry); Ok(()) })
 }
@@ -1178,6 +1284,17 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn pull_request_sessions_require_an_isolated_target() {
+        let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
+        assert!(super::validate_session_target(&serde_json::from_value(valid.clone()).unwrap()).is_ok());
+        for (key, value) in [("checkoutPr", serde_json::json!(0)), ("useWorktree", serde_json::json!(false)), ("onMain", serde_json::json!(true)), ("cwd", serde_json::json!("/repo")), ("checkoutBranch", serde_json::json!("main")), ("baseRef", serde_json::json!("main")), ("tab", serde_json::Value::Null)] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(super::validate_session_target(&serde_json::from_value(invalid).unwrap()).is_err(), "accepted conflicting {key}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1198,7 +1315,7 @@ mod tests {
         let mut settings = store::settings::load();
         settings.experimental.native_codex = true;
         store::settings::save(&settings).unwrap();
-        let mut issue = NewSession { section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        let mut issue = NewSession { parent: None, section_id: None, project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, checkout_pr: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)), orchestrate: false };
         prefer_native_codex_session(&mut issue);
         assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
         issue.tab = Some(tab("codex", None));
@@ -1244,6 +1361,7 @@ mod tests {
 
     fn worktree_session(project: &Path) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: None,
@@ -1252,10 +1370,12 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: None,
             tab: Some(NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            orchestrate: false,
         })
         .unwrap()
     }
@@ -1379,6 +1499,88 @@ mod tests {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
         assert!(!super::automatic_title("Pricing notes", "We can work on PRD here"));
+        let long = "Implement PRO-123: short names. Read the code first.";
+        let generated = crate::session_names::generated_name(long).unwrap();
+        assert!(super::automatic_title(&generated, long));
+    }
+
+    fn one_tab_session(title: &str, harness: &str) {
+        let session: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "n", "projectPath": "/p", "cwd": "/p", "title": title, "created": "x", "modified": "x", "activeTab": "only",
+            "tabs": [{"id": "only", "harness": harness, "created": "x"}]
+        }))
+        .unwrap();
+        index::update(|sessions| {
+            sessions.push(session);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    const LONG_PROMPT: &str = "You are the owner's chief of staff for the company.\nPlease triage the support inbox every morning, then report.";
+
+    #[test]
+    fn a_session_from_a_long_prompt_gets_a_short_name_for_any_agent() {
+        let _home = crate::store::temp_home();
+        one_tab_session("You are the owner's chief of staff for the company.", "codex");
+        said("n", "only", LONG_PROMPT);
+        store::conversation_titles::name_tab("n", "only").unwrap();
+        let named = adopt_agent_title("n").unwrap().expect("renamed");
+        assert_eq!(named.title, "Triage the support inbox every morning");
+        // The row of a one-tab session shows the tab's title: it says the same.
+        assert_eq!(named.tabs[0].title.as_deref(), Some("Triage the support inbox every morning"));
+        // Computed once: later turns change nothing.
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        // A sidebar rename is the reader's and is never replaced.
+        rename_tab_entry("n", "only", Some("Inbox".into())).unwrap();
+        update_session_meta("n", &SessionPatch { title: Some("Inbox".into()), ..Default::default() }).unwrap();
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Inbox");
+    }
+
+    #[test]
+    fn a_name_the_person_set_is_kept() {
+        let _home = crate::store::temp_home();
+        one_tab_session("Support triage", "codex");
+        said("n", "only", LONG_PROMPT);
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Support triage");
+    }
+
+    #[test]
+    fn a_prompt_of_one_sentence_keeps_its_first_line() {
+        let _home = crate::store::temp_home();
+        one_tab_session("Fix the login bug", "codex");
+        said("n", "only", "Fix the login bug");
+        assert!(adopt_agent_title("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().title, "Fix the login bug");
+    }
+
+    #[test]
+    fn a_ticket_reference_leads_the_name() {
+        let _home = crate::store::temp_home();
+        one_tab_session("", "codex");
+        said("n", "only", "Work on Linear issue ENG-42: Fix login timeout\n\nUsers get logged out.\n\nWhen done, summarise what changed.");
+        assert_eq!(adopt_agent_title("n").unwrap().unwrap().title, "ENG-42 Fix login timeout");
+    }
+
+    #[test]
+    fn setup_persistence_failure_does_not_fail_an_existing_worktree_creation() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        projects::update(&project.path, projects::ProjectPatch {
+            scripts: Some(projects::RepositoryScripts { setup: "exit 0".into(), archive: String::new(), archive_timeout_minutes: None }), ..Default::default()
+        }).unwrap();
+        // Setup cannot write its status after the index has landed. (Making the
+        // sessions folder a file would also stop the index, which lives in it.)
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(true));
+        let created = create_session_entry(named_request(dir.path(), Some("setup save failure")));
+        crate::workspace_setup::SAVE_FAILS.with(|fails| fails.set(false));
+        let entry = created.unwrap();
+        assert!(Path::new(&entry.cwd).is_dir());
+        assert_eq!(index::get(&entry.id).unwrap(), entry);
+        assert!(!store::sessions_dir().unwrap().join(&entry.id).join("workspace-setup.json").exists());
     }
 
     #[test]
@@ -1571,6 +1773,7 @@ mod tests {
     /// Another session running in an existing checkout.
     fn session_in(project: &Path, cwd: &str, title: &str) -> SessionEntry {
         create_session_entry(NewSession {
+            parent: None,
             section_id: None,
             project_path: project.to_string_lossy().into_owned(),
             title: Some(title.into()),
@@ -1579,10 +1782,12 @@ mod tests {
             worktree_name: None,
             on_main: false,
             checkout_branch: None,
+            checkout_pr: None,
             issue: None,
             automation: None,
             cwd: Some(cwd.into()),
             tab: None,
+            orchestrate: false,
         })
         .unwrap()
     }
@@ -1606,7 +1811,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
-        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into() };
+        let script = crate::store::projects::RepositoryScripts { setup: "future setup".into(), archive: "printf 'session:%s\\n' \"$TERMINALX_SESSION_ID\"; printf 'attribution:%s\\n' \"${RACCOON_SESSION_ID:-none}\"; exit 19".into(), archive_timeout_minutes: None };
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(script.clone()), ..Default::default() }).unwrap();
         assert_eq!(crate::store::projects::scripts(dir.path()).unwrap(), script);
         let session = worktree_session(dir.path());
@@ -1633,12 +1838,35 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_committed_setup_script_does_not_hold_up_the_saved_archive_script() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "exit 3".into(), archive_timeout_minutes: None }), ..Default::default()
+        }).unwrap();
+        let session = worktree_session(dir.path());
+        // Committed after the worktree exists, as a pull would bring it.
+        std::fs::create_dir_all(dir.path().join(".terminalx")).unwrap();
+        std::fs::write(dir.path().join(".terminalx/settings.json"), r#"{"setupScript":"touch untrusted"}"#).unwrap();
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(sink());
+        let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
+        removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
+        // The saved archive script ran and failed: the person gets the Remove anyway question, not a trust error.
+        let failure = crate::archive_script::Failure::from_error(&remove_workspace(&*sink, &removal, &|_| {}).unwrap_err()).unwrap();
+        assert_eq!(failure.code, Some(3));
+        assert!(Path::new(&session.cwd).exists());
+        terminals.kill_all();
+    }
+
+    #[test]
     fn successful_archive_finishes_before_removal_and_script_changes_invalidate_consent() {
         let _home = crate::store::temp_home();
         let dir = repo();
         let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
         let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         save("exit 8");
         let session = worktree_session(dir.path());
@@ -1665,7 +1893,7 @@ mod tests {
             let dir = repo();
             let project = crate::store::projects::add(dir.path().to_str().unwrap()).unwrap();
             let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+                scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
             }).unwrap();
             save("exit 8");
             let session = worktree_session(dir.path());
@@ -1705,6 +1933,7 @@ mod tests {
 
     fn quick_chat(cwd: Option<&Path>) -> SessionEntry {
         create_quick_chat_entry(NewQuickChat {
+            parent: None,
             section_id: None,
             title: None,
             cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
@@ -1723,7 +1952,7 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
         let sink = sink();
         let mut events = sink.subscribe();
-        let first = create_quick_chat_blocking(&sink, NewQuickChat { section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { parent: None, section_id: None, title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { transport: Default::default(), harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
         assert_eq!(&*events.try_recv().unwrap().event, "session_created");
 
         assert_eq!(first.kind, SessionKind::Quick);
@@ -1775,7 +2004,7 @@ mod tests {
     fn a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory() {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
-        let error = create_quick_chat_entry(NewQuickChat { section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
+        let error = create_quick_chat_entry(NewQuickChat { parent: None, section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
         assert!(error.contains("resolve"), "{error}");
         assert!(index::load().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IssuePipeline } from "@/types/issuePipeline";
 // A pipeline exactly as the Rust side writes it; a Rust test holds it to that.
 import stored from "../../src-tauri/src/fixtures/issue_pipeline.json?raw";
+import storedChecks from "../../src-tauri/src/fixtures/issue_pipeline_checks.json?raw";
 
 const { list, start, setAutoMerge, act, notePipelineState, listeners } = vi.hoisted(() => ({
   list: vi.fn(),
@@ -154,7 +155,13 @@ describe("where a pipeline stands", () => {
     expect(forward(pipeline({ state: "needsYou" }))).toEqual({ action: "advance", label: "Open pull request" });
     expect(forward(pipeline({ stage: "pullRequest", state: "needsYou" }))).toEqual({ action: "advance", label: "Try again" });
     expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "noVerdict" } }))).toEqual({ action: "advance", label: "Review again" });
-    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "advance", label: "Review once more" });
+    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // At the merge stage too: an advance there only looks again and stops on the limit again.
+    expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // The final review passed and the branch moved with commits of their own (#947): one more review.
+    const moved = pipelineActions(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "movedAfterFinalReview", reviewed: C1, head: "2222222", rounds: 3 } }));
+    expect(moved.primary).toEqual({ action: "review", label: "Review the new head once more" });
+    expect(moved.secondary.map((button) => button.action)).toEqual(["refresh", "stop"]);
     expect(forward(pipeline({ stage: "address", state: "needsYou" }))).toEqual({ action: "advance", label: "Review the changes" });
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "checksFailed" } }))).toEqual({ action: "advance", label: "Check again" });
     // A head nobody reviewed is fixed by a review, not by looking again.
@@ -259,7 +266,7 @@ describe("a pipeline as the app stores it", () => {
       ["address", "done", null],
       ["merge", "pending", null],
     ]);
-    expect(pipelineActions(fixture).primary).toEqual({ action: "advance", label: "Review once more" });
+    expect(pipelineActions(fixture).primary).toEqual({ action: "review", label: "Review once more" });
     expect(pipelineForIssue([fixture], "/repo", "https://github.com/acme/widgets/issues/433")).toBe(fixture);
     expect(pipelineForSession([fixture], "reviewer-1")?.role).toBe("reviewer");
     expect(fixture.verdict?.findings.map((finding) => [finding.severity, finding.security, finding.file ?? null, finding.line ?? null])).toEqual([
@@ -285,6 +292,7 @@ describe("a pipeline as the app stores it", () => {
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
       "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing", "answered",
+      "mergeCheck",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);
@@ -383,5 +391,103 @@ describe("after a gap in the live connection", () => {
     expect(p3.note).toBe("started meanwhile");
     expect(notePipelineState).toHaveBeenCalledOnce();
     expect(notePipelineState).toHaveBeenCalledWith(expect.objectContaining({ id: "p1", state: "readyToMerge" }));
+  });
+});
+
+describe("the checks a merge waits on, as the app stores them (#881)", () => {
+  const fixture = JSON.parse(storedChecks) as IssuePipeline;
+  const at = (iso: string) => Date.parse(iso);
+
+  it("lists the required checks apart from the optional ones, counted as the gate counts them", async () => {
+    const { pipelineChecksView, pipelineHeadline, pipelineSteps, requiredChecksLine } = await load();
+    const view = pipelineChecksView(fixture, at("2026-11-11T10:23:40.000Z"))!;
+    expect(view.outcome).toBe("waiting");
+    expect(view.required.map((check) => [check.name, check.state])).toEqual([["check", "in_progress"], ["headless-serve", "success"], ["desktop-platforms", "expected"]]);
+    expect(view.optional.map((check) => check.name)).toEqual(["lint"]);
+    expect(requiredChecksLine(view)).toBe("1 of 3 passed");
+    expect([view.waitedMinutes, view.limitMinutes]).toEqual([23, 60]);
+    expect(pipelineHeadline(fixture)).toEqual({ label: "Waiting for checks", tone: "info" });
+    expect(pipelineSteps(fixture).at(-1)).toMatchObject({ stage: "merge", status: "current", detail: "waiting for checks" });
+    // The clock reads what the stall stop reads: whole minutes since the wait began.
+    expect(pipelineChecksView(fixture, at("2026-11-11T10:59:59.000Z"))!.waitedMinutes).toBe(59);
+    expect(pipelineChecksView(fixture, at("2026-11-11T11:00:00.000Z"))!.waitedMinutes).toBe(60);
+  });
+
+  it("names a failed required check by the run that failed it, and keeps the wait it ended", async () => {
+    const { pipelineChecksView, pipelineSteps } = await load();
+    const failed: IssuePipeline = {
+      ...fixture, state: "needsYou", reason: { kind: "checksFailed", names: ["check"] }, waitingSince: null,
+      checks: { ...fixture.checks!, until: "2026-11-11T10:41:00.000Z", checks: [...fixture.checks!.checks, { name: "check", state: "failure", url: "https://github.com/acme/widgets/actions/runs/92/job/9" }] },
+    };
+    const view = pipelineChecksView(failed, at("2026-11-11T12:00:00.000Z"))!;
+    expect(view.outcome).toBe("failed");
+    expect(view.counts.failed).toEqual(["check"]);
+    expect(view.failing.map((check) => check.url)).toEqual(["https://github.com/acme/widgets/actions/runs/92/job/9"]);
+    expect(view.waitedMinutes).toBe(41);
+    expect(pipelineSteps(failed).at(-1)).toMatchObject({ status: "attention", detail: "a required check failed" });
+  });
+
+  it("has no list where the merge is not waiting on checks or the checks were not read", async () => {
+    const { pipelineChecksView } = await load();
+    expect(pipelineChecksView({ ...fixture, checks: null })).toBeNull();
+    expect(pipelineChecksView({ ...fixture, state: "readyToMerge", reason: { kind: "autoMergeOff" } })).toBeNull();
+    expect(pipelineChecksView({ ...fixture, state: "needsYou", reason: { kind: "conflicts" } })).toBeNull();
+    // A failed workflow or check suite behind checks that all passed: the note names it, not the list.
+    const passed = fixture.checks!.checks.map((check) => ({ ...check, state: "success" }));
+    expect(pipelineChecksView({ ...fixture, state: "needsYou", reason: { kind: "checksFailed", names: ["CI (check_suites #9)"] }, checks: { ...fixture.checks!, checks: passed } })).toBeNull();
+  });
+});
+
+describe("what a check's state and time are said as", () => {
+  it("says queued, running, passed, failed, cancelled and skipped", async () => {
+    const { checkStateLabel } = await import("./checks");
+    expect(["queued", "expected", "waiting", "in_progress", "pending", "success", "failure", "timed_out", "cancelled", "skipped", "neutral"].map(checkStateLabel))
+      .toEqual(["Queued", "Queued", "Queued", "Running", "Running", "Passed", "Failed", "Failed", "Cancelled", "Skipped", "Skipped"]);
+  });
+
+  it("times a running check from its start and a finished one by how long it ran", async () => {
+    const { checkMinutes, minutesLabel } = await import("./checks");
+    const now = Date.parse("2026-11-11T10:23:30Z");
+    expect(checkMinutes({ name: "a", state: "in_progress", startedAt: "2026-11-11T10:00:00Z" }, now)).toBe(23);
+    expect(checkMinutes({ name: "a", state: "success", startedAt: "2026-11-11T10:00:00Z", completedAt: "2026-11-11T10:04:59Z" }, now)).toBe(4);
+    expect(checkMinutes({ name: "a", state: "queued" }, now)).toBeNull();
+    expect([minutesLabel(0), minutesLabel(41)]).toEqual(["<1 min", "41 min"]);
+  });
+
+  it("counts a check run more than once by its worst run, and a required one not reported as waiting", async () => {
+    const { requiredCheckCounts } = await import("./checks");
+    const counts = requiredCheckCounts([
+      { name: "build", state: "success" }, { name: "build", state: "failure" },
+      { name: "test", state: "success" }, { name: "docs", state: "skipped" }, { name: "lint", state: "failure" },
+    ], ["build", "test", "docs", "e2e"]);
+    expect(counts).toEqual({ total: 4, passed: 2, failed: ["build"], waiting: 1 });
+  });
+});
+
+describe("what a helper is doing (PRO-331)", () => {
+  it("says which review round runs, what the resolver does, and what the pipeline waits for", async () => {
+    const { helperActivity } = await import("./issuePipeline");
+    expect(helperActivity([pipeline({ state: "working", stage: "review", round: 2, maxRounds: 3 })], "author")).toBe("Review 2 of 3 running");
+    expect(helperActivity([pipeline({ state: "working", stage: "resolve", pr: { number: 1, url: "u", base: "main" } })], "author")).toBe("Resolving conflicts with main");
+    expect(helperActivity([pipeline({ state: "waiting", stage: "merge", note: "Waiting for checks to pass." })], "author")).toBe("Waiting for checks");
+  });
+
+  it("says nothing while the author works, or once the pipeline stopped or ended, or for another session", async () => {
+    const { helperActivity } = await import("./issuePipeline");
+    expect(helperActivity([pipeline({ state: "working", stage: "address" })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "needsYou", stage: "review" })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "working", stage: "review", answered: { kind: "x" } })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "working", stage: "review" })], "someone-else")).toBeNull();
+  });
+});
+
+describe("legacy reviewer sessions (PRO-331)", () => {
+  it("folds a separate reviewer session of the author's worktree, and no other", async () => {
+    const { legacyReviewerSessions } = await import("./issuePipeline");
+    const sessions = [{ id: "author", cwd: "/wt/a" }, { id: "rev", cwd: "/wt/a/" }, { id: "elsewhere", cwd: "/wt/b" }];
+    expect([...legacyReviewerSessions([pipeline({ reviewer: { sessionId: "rev", tabId: "t" } })], sessions)]).toEqual([["rev", "author"]]);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "elsewhere", tabId: "t" } })], sessions).size).toBe(0);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "author", tabId: "t2" } })], sessions).size).toBe(0);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "gone", tabId: "t" } })], sessions).size).toBe(0);
   });
 });

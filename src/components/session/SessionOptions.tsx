@@ -46,7 +46,7 @@ export function SessionOptions({
           align="start"
           sideOffset={6}
           collisionPadding={8}
-          className="z-(--z-menu) flex w-[24rem] max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-xl bg-popover glass p-2 text-popover-foreground shadow-surface hairline animate-fade-in"
+          className="z-(--z-menu) flex w-[24rem] max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-xl bg-popover p-2 text-popover-foreground shadow-surface hairline animate-fade-in"
         >
           {onUseWorktreeChange && (
             <label className="flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 text-xs">

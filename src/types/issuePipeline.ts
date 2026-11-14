@@ -1,3 +1,4 @@
+import type { PrCheck } from "@/lib/api";
 import type { IssueRef } from "@/types/session";
 
 /** Work, review, conflict resolution, and merge stages for a Git branch session. */
@@ -29,6 +30,8 @@ export interface PipelineVerdict {
   checksNote?: string | null;
   round: number;
   at: string;
+  /** The commit this verdict was given for, when it was carried forward over merges of the base branch to `commit` (#947). */
+  carriedFrom?: string | null;
 }
 
 export interface PipelineSessionRef {
@@ -45,7 +48,7 @@ export interface PipelineEvent {
   commit?: string | null;
   url?: string | null;
   sessionId?: string | null;
-  actor?: { kind: "person" | "system" } | { kind: "cli"; sessionId?: string | null; tabId?: string | null };
+  actor?: { kind: "person" | "system" } | { kind: "selfUi"; sessionId?: string | null; tabId?: string | null } | { kind: "cli"; sessionId?: string | null; tabId?: string | null };
 }
 
 /** Why a pipeline is at Ready to merge or Needs you; `note` says it in words. */
@@ -83,6 +86,8 @@ export interface IssuePipeline {
   round: number;
   maxRounds: number;
   reviewCommit?: string | null;
+  /** While the reviewer checks only what merges of the base changed at `reviewCommit`: the commit whose passing verdict that check carries forward. Not a review round (#947). */
+  mergeCheck?: string | null;
   /** When the reviewer said its own checks were still running; its verdict is waited for a while from then. */
   reviewPendingSince?: string | null;
   verdict?: PipelineVerdict | null;
@@ -91,12 +96,31 @@ export interface IssuePipeline {
   localCheck?: { head: string; command: string } | null;
   checkingLocally?: boolean;
   securityAreas: string[];
+  /** When its current wait on GitHub began. */
+  waitingSince?: string | null;
+  /** The checks the merge waits on or stopped on, as last read; absent when it is neither or they could not be read (#881). */
+  checks?: PipelineChecks | null;
   merged?: { commit: string; at: string; by: "pipeline" | "person" | "elsewhere" } | null;
   /** Conversations told the pipeline ended while in a turn; each one's agent is stopped when that turn ends. */
   releasing?: PipelineSessionRef[];
   events: PipelineEvent[];
   created: string;
   modified: string;
+}
+
+/** The checks on a pull request's head while its merge waits on them, or after one failed or they ran out of time. */
+export interface PipelineChecks {
+  /** The commit they ran on. */
+  commit: string;
+  /** Every check GitHub reported on it; a required one not reported yet is `expected`. */
+  checks: PrCheck[];
+  /** The names the merge waits on. The rest are optional and never hold it. */
+  required: string[];
+  /** When the wait on them began, and when it ended: absent while it goes on. */
+  since?: string | null;
+  until?: string | null;
+  /** How long it waits before stopping for a person. */
+  limitMinutes: number;
 }
 
 /**
@@ -156,4 +180,8 @@ export interface IssuePipelineSettings {
   allowNoCi?: boolean;
   localCheckCommand?: string | null;
   localChecksOnly?: boolean;
+  /** The model the reviewer runs on; absent, the author's own. Used when the author's agent offers it. */
+  reviewerModel?: string | null;
+  /** The reviewer's effort; absent, the author's with the author's model, the model's default with a reviewer model. */
+  reviewerEffort?: string | null;
 }

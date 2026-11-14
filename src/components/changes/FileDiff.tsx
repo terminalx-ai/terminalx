@@ -17,12 +17,17 @@ export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
 }
 
 /** Owns the revision read so switching files/scopes never leaves stale content or copy actions. */
-type FileDiffProps = { source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number; onDiscard?: () => void };
+type FileDiffProps = {
+  source: GitSource; path: string; oldPath?: string; base: string; head: string | null; revision?: number; onDiscard?: () => void;
+  staging?: { staged: boolean; disabled?: boolean; onHunk: (index: number) => void };
+  /** A centre editor also needs this snapshot for Entire file and disk-change warnings. */
+  text?: { before: string; after: string };
+};
 export function FileDiff(props: FileDiffProps) {
-  return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision])} {...props} />;
+  return <FileDiffContent key={JSON.stringify([props.source.key, props.path, props.oldPath, props.base, props.head, props.revision, props.staging?.staged])} {...props} />;
 }
 
-function FileDiffContent({ source, path, oldPath, base, head, onDiscard }: FileDiffProps) {
+function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard, staging }: FileDiffProps) {
   const fileKey = diffFileKey(source.key, path);
   const options = useDiffOptions(fileKey);
   const kind = diffMediaKind(path);
@@ -31,6 +36,13 @@ function FileDiffContent({ source, path, oldPath, base, head, onDiscard }: FileD
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [hunks, setHunks] = useState(0);
+  useEffect(() => {
+    if (!staging || !source.hunkCount) { setHunks(0); return; }
+    let cancelled = false;
+    source.hunkCount(path, oldPath, staging.staged).then((count) => !cancelled && setHunks(count)).catch(() => !cancelled && setHunks(0));
+    return () => { cancelled = true; };
+  }, [source, path, oldPath, staging?.staged, head]);
   useEffect(() => {
     let cancelled = false;
     setPair(null);
@@ -41,8 +53,8 @@ function FileDiffContent({ source, path, oldPath, base, head, onDiscard }: FileD
         const [before, after] = await Promise.all([source.mediaContentAt(oldPath ?? path, base), source.mediaContentAt(path, head)]);
         return { kind: "media", before, after };
       }
-      const next = await source.fileContentsAt(path, base, head);
-      const before = oldPath ? (await source.fileContentsAt(oldPath, base, head)).before : next.before;
+      const next = text ?? await source.fileContentsAt(path, base, head);
+      const before = !text && oldPath ? (await source.fileContentsAt(oldPath, base, head)).before : next.before;
       if (before === "<file too large to show>" || next.after === "<file too large to show>") {
         throw new Error("This file exceeds the text preview limit. Open it in the workspace to read or copy its full contents.");
       }
@@ -50,13 +62,14 @@ function FileDiffContent({ source, path, oldPath, base, head, onDiscard }: FileD
     };
     void read().then((next) => { if (!cancelled) setPair(next); }).catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [source, path, oldPath, base, head, kind, retry]);
+  }, [source, path, oldPath, base, head, kind, retry, text]);
 
   const textView = pair?.kind === "text" && (kind !== "svg" || raw);
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-xs">
       <span className="min-w-0 flex-1 truncate" title={path}>{path}</span>
       {onDiscard && <DiscardButton path={path} onClick={onDiscard} />}
+      {staging && source.applyHunk && Array.from({ length: hunks }, (_, index) => <Button key={index} size="xs" variant="ghost" disabled={staging.disabled} onClick={() => staging.onHunk(index)}>{staging.staged ? "Unstage" : "Stage"} hunk {index + 1}</Button>)}
       {kind === "svg" && <Button size="xs" variant="secondary" onClick={() => setRaw(!raw)}>{raw ? "Rendered SVG" : "Raw SVG"}</Button>}
       {textView && <label className="flex items-center gap-1">Wrap lines
         <select aria-label="Wrap lines for this file" className="rounded bg-well p-1" value={options.override === undefined ? "default" : String(options.override)} onChange={(e) => setFileWrap(fileKey, e.target.value === "default" ? undefined : e.target.value === "true")}>
@@ -71,7 +84,8 @@ function FileDiffContent({ source, path, oldPath, base, head, onDiscard }: FileD
     {copyStatus && <p role="status" className="px-3 py-1 text-xs">{copyStatus}</p>}
     {error ? <div role="alert" className="p-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
       : !pair ? <div role="status" className="p-3 text-xs">Loading file diff…</div>
-      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane path={path} before={pair.before} after={pair.after} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
+      : pair.kind === "text" && (pair.before.includes("\0") || pair.after.includes("\0")) ? <p className="p-3 text-xs text-muted-foreground">Binary file changed.</p>
+      : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane workspace={source.key} path={path} before={pair.before} after={pair.after} base={base} originalPath={oldPath} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
       : <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-hairline">
         {(["before", "after"] as const).map((side) => <section key={side} aria-label={side === "before" ? "Before" : "After"} className="flex min-h-0 min-w-0 flex-col">
           <h4 className="shrink-0 border-b border-hairline px-2 py-1 text-xs text-muted-foreground">{side === "before" ? "Before" : "After"}</h4>

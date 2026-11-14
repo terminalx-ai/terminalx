@@ -16,6 +16,9 @@ use super::transaction;
 #[path = "local_sections.rs"]
 pub mod local_sections;
 
+#[path = "workspace_ports.rs"]
+pub mod workspace_ports;
+
 const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The launch mode of any session or tab whose creator did not name one —
@@ -207,11 +210,16 @@ pub struct TabEntry {
     /// (`harness::settings`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_permission_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::harness::settings::RequestPrivacy::is_empty")]
+    pub request_privacy: crate::harness::settings::RequestPrivacy,
     /// The harness's own conversation id (Claude session id, Codex thread id).
     #[serde(default)]
     pub provider_session_id: Option<String>,
     #[serde(default)]
     pub status: TabStatus,
+    /// A reminder set by the reader, independent of the agent's live status.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub marked_unread: bool,
     pub created: String,
     #[serde(default)]
     pub modified: String,
@@ -237,6 +245,11 @@ pub struct TabEntry {
     /// a runtime that starts again knows it too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parked: bool,
+    /// Tokens and estimated cost of every conversation the tab holds or has
+    /// held, by model, as its agents' transcripts said at the last turn end
+    /// (PRO-273, `session_usage`). Absent until one is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::session_usage::TabUsage>,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -363,12 +376,22 @@ pub struct AutomationRef {
 /// Provenance for a session whose checkout has been deleted. Operationally
 /// the session moves to the project checkout, but the sidebar must not imply
 /// that its existing transcript was created there.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovedWorkspace {
     pub path: String,
     pub name: String,
     pub branch: Option<String>,
+    /// HEAD immediately before deletion; absent on records from older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The repository that owned the checkout, including for guest/quick sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The folders it checked out when it was a sparse workspace, so a restore
+    /// narrows the new checkout the same way. Absent for a full checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_checkout: Option<Vec<String>>,
 }
 
 /// The repo a chat's agent is working in: its root, and the branch checked out there.
@@ -428,6 +451,47 @@ impl<'de> Deserialize<'de> for SessionKind {
     }
 }
 
+/// A person's workflow status, independent of what any agent tab is doing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualStatus {
+    #[default]
+    Backlog,
+    InProgress,
+    InReview,
+    Done,
+    Canceled,
+}
+
+/// Stored metadata may come from a newer build. An unknown status must not
+/// prevent loading or updating any session. Mutations still use the strict enum.
+fn stored_manual_status<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ManualStatus>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// The session that started another (PRO-270): `sessions create` run from
+/// inside a session, or told `--parent`. It is a record of who started whom
+/// and nothing more: it gives the parent no hold over the session, and
+/// deleting or archiving the parent leaves both the session and this as
+/// they are, so it may name a session that is gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentRef {
+    pub session_id: String,
+    /// The tab that ran the command, when it is known: `--parent` names a
+    /// session only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+}
+
+/// A parent this build cannot read (a newer build's shape) is read as none
+/// rather than failing the whole index, as an unknown manual status is.
+fn stored_parent<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<ParentRef>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
@@ -477,6 +541,8 @@ pub struct SessionEntry {
     pub archive: ArchiveMark,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, deserialize_with = "stored_manual_status", skip_serializing_if = "Option::is_none")]
+    pub manual_status: Option<ManualStatus>,
     #[serde(default)]
     pub tabs: Vec<TabEntry>,
     #[serde(default)]
@@ -485,11 +551,51 @@ pub struct SessionEntry {
     /// last worked in, and on which branch, so the chat shows under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<ChatLink>,
+    /// The session that started this one, if one did. Left out of the file
+    /// when empty, so an entry nothing started is written exactly as before.
+    #[serde(default, deserialize_with = "stored_parent", skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRef>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
+/// The key a run's worker is marked with on its entry. Kept among the
+/// unknown keys rather than as a field: a build that knows nothing of runs
+/// then writes it back untouched, and the limits it stands for stay.
+const RUN_WORKER: &str = "runWorker";
+
+/// The key a session started with Orchestrate (PRO-337) is marked with: any run it
+/// leads waits for a person's Approve, whatever `orchestrator.requireApproval`
+/// says. Kept among the unknown keys for the same reason as [`RUN_WORKER`].
+const ORCHESTRATE_START: &str = "orchestrateStart";
+
 impl SessionEntry {
+    /// Whether this session was started as an orchestration run's worker
+    /// (`orchestration::guard`): it never pushes, merges or deploys.
+    pub fn run_worker(&self) -> bool {
+        self.unknown.get(RUN_WORKER).is_some_and(|marked| marked == true)
+    }
+
+    /// Mark the session as a run's worker. Never unmarked: the limits outlive the run.
+    pub fn mark_run_worker(&mut self) {
+        self.unknown.insert(RUN_WORKER.into(), serde_json::Value::Bool(true));
+    }
+
+    /// Whether this session was started with Orchestrate: a run it leads always asks first.
+    pub fn orchestrate_start(&self) -> bool {
+        self.unknown.get(ORCHESTRATE_START).is_some_and(|marked| marked == true)
+    }
+
+    /// Mark the session as started with Orchestrate. Never unmarked: the person asked to approve its runs.
+    pub fn mark_orchestrate_start(&mut self) {
+        self.unknown.insert(ORCHESTRATE_START.into(), serde_json::Value::Bool(true));
+    }
+
+    /// Whether `session_id` is recorded as having started this session.
+    pub fn started_by(&self, session_id: &str) -> bool {
+        self.parent.as_ref().is_some_and(|parent| parent.session_id == session_id)
+    }
+
     pub fn is_quick(&self) -> bool {
         self.kind == SessionKind::Quick
     }
@@ -594,6 +700,10 @@ pub struct TabState {
 struct IndexFile {
     #[serde(default)]
     sessions: Vec<SessionEntry>,
+    /// First port of each checkout's ten-port block. Kept with the sessions,
+    /// under the same cross-process transaction lock.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_ports: BTreeMap<String, u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     local_sections: Vec<local_sections::LocalSection>,
     #[serde(default)]
@@ -604,6 +714,8 @@ struct IndexFile {
     workspace_tabs: BTreeMap<String, TabLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closed_tabs: Vec<ClosedTab>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_order: Option<SidebarOrder>,
     #[serde(flatten, default)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -625,6 +737,9 @@ pub fn revision() -> u64 {
 }
 
 fn save_file(file: &mut IndexFile) -> Result<()> {
+    if let Some(order) = &mut file.sidebar_order {
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+    }
     local_sections::prune(file);
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
@@ -641,7 +756,9 @@ fn with_file_lock<R>(f: impl FnOnce() -> Result<R>) -> Result<R> {
 fn update_file<R>(f: impl FnOnce(&mut IndexFile) -> Result<R>) -> Result<R> {
     with_file_lock(|| {
         let mut file = load_file()?;
+        let previous = workspace_ports::locations(&file.sessions);
         let r = f(&mut file)?;
+        workspace_ports::relocate(&mut file, &previous);
         save_file(&mut file)?;
         Ok(r)
     })
@@ -678,6 +795,143 @@ pub fn update<R>(f: impl FnOnce(&mut Vec<SessionEntry>) -> Result<R>) -> Result<
 pub fn tab_state() -> Result<TabState> {
     let file = load_file()?;
     Ok(TabState { workspaces: file.workspace_tabs, closed: file.closed_tabs })
+}
+
+/// Sidebar arrangement is independent of activity and of whether custom order
+/// is currently displayed. Revision guards windows against delayed replies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SidebarOrder {
+    pub custom: bool,
+    pub sessions: Vec<String>,
+    pub projects: Vec<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SidebarOrderPatch {
+    pub custom: Option<bool>,
+    pub sessions: Option<Vec<String>>,
+    pub projects: Option<Vec<String>>,
+}
+
+/// Only the named rows move. Filtered, folded, archived and other groups' rows
+/// retain their slots; simultaneous edits to different groups cannot erase one another.
+fn merge_sidebar_order(saved: &mut Vec<String>, requested: Vec<String>) {
+    let mut unique = std::collections::HashSet::new();
+    saved.retain(|id| unique.insert(id.clone()));
+    let mut seen = std::collections::HashSet::new();
+    let requested: Vec<_> = requested.into_iter().filter(|id| seen.insert(id.clone())).collect();
+    let missing: Vec<_> = requested.iter().filter(|id| !unique.contains(*id)).cloned().collect();
+    saved.splice(0..0, missing);
+    let mut next = requested.iter();
+    for id in saved.iter_mut() {
+        if seen.contains(id) {
+            *id = next.next().expect("one slot per requested row").clone();
+        }
+    }
+}
+
+fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]) {
+    let mut seen = std::collections::HashSet::new();
+    let existing: std::collections::HashSet<_> = sessions.iter().map(|s| &s.id).collect();
+    saved.retain(|id| existing.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = sessions.iter().filter(|s| !seen.contains(&s.id)).collect();
+    new.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
+    saved.splice(0..0, new.into_iter().map(|s| s.id.clone()));
+}
+
+/// Project groups include attached projects and repositories still represented by
+/// conversations, including archives and linked chats. Forget only vanished groups.
+fn sidebar_projects(sessions: &[SessionEntry], attached: &[super::projects::Project]) -> Result<Vec<String>> {
+    let chats = super::root()?.join("Chats");
+    let chats = chats.canonicalize().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
+    let mut groups: BTreeMap<String, (bool, String, bool)> = attached.iter()
+        .filter(|p| p.path.trim_end_matches('/') != chats)
+        .map(|p| (p.path.trim_end_matches('/').to_string(), (p.pinned, p.last_opened.clone().unwrap_or_default(), false)))
+        .collect();
+    for session in sessions.iter().filter(|s| !s.is_quick()) {
+        let path = if session.project_path.trim_end_matches('/') == chats {
+            let Some(link) = &session.link else { continue };
+            &link.path
+        } else { &session.project_path };
+        let group = groups.entry(path.trim_end_matches('/').to_string()).or_default();
+        if !session.archived {
+            let time = sidebar_message_time(session);
+            if !group.2 || time > group.1 { group.1 = time; }
+            group.2 = true;
+        }
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by(|(a, av), (b, bv)| bv.0.cmp(&av.0).then(bv.1.cmp(&av.1)).then(a.cmp(b)));
+    Ok(groups.into_iter().map(|(path, _)| path).collect())
+}
+
+fn sidebar_message_time(session: &SessionEntry) -> String {
+    super::message_activity::last_message_at(session)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| session.created.clone())
+}
+
+fn reconcile_sidebar_projects(saved: &mut Vec<String>, current: &[String]) {
+    let current: std::collections::HashSet<_> = current.iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    saved.retain(|id| current.contains(id) && seen.insert(id.clone()));
+    let mut new: Vec<_> = current.into_iter().filter(|id| !seen.contains(*id)).cloned().collect();
+    new.sort();
+    saved.splice(0..0, new);
+}
+
+pub fn sidebar_order() -> Result<SidebarOrder> {
+    let file = load_file()?;
+    let Some(mut order) = file.sidebar_order else { return Ok(SidebarOrder::default()) };
+    match super::projects::list() {
+        Ok((attached, _)) => {
+            let projects = sidebar_projects(&file.sessions, &attached)?;
+            reconcile_sidebar_projects(&mut order.projects, &projects);
+        }
+        // An unavailable project catalog must not hide or prune the saved order.
+        Err(error) => log::warn!("read sidebar projects; keeping saved order: {error:#}"),
+    }
+    Ok(order)
+}
+
+pub fn set_sidebar_order(patch: SidebarOrderPatch) -> Result<SidebarOrder> {
+    update_file(|file| {
+        // Read after acquiring the index lock so a waiting drop sees newly attached projects.
+        let attached = super::projects::list()?.0;
+        // Seed only once, in this transaction, so enabling custom order keeps the
+        // pin/message ordering already on screen and cannot overwrite another window.
+        if file.sidebar_order.is_none() {
+            let mut sessions = file.sessions.clone();
+            super::message_activity::project(&mut sessions)?;
+            // Section members are absent from the main project list, so their
+            // activity must not reshuffle that list when custom order is enabled.
+            let sectioned: std::collections::HashSet<_> = file.local_sections.iter().flat_map(|section| &section.sessions).collect();
+            let main_sessions: Vec<_> = sessions.iter().filter(|session| !sectioned.contains(&session.id)).cloned().collect();
+            let projects = sidebar_projects(&main_sessions, &attached)?;
+            sessions.sort_by_cached_key(|s| (std::cmp::Reverse(s.pinned), std::cmp::Reverse(sidebar_message_time(s)), s.id.clone()));
+            file.sidebar_order = Some(SidebarOrder { sessions: sessions.into_iter().map(|s| s.id).collect(), projects, ..Default::default() });
+        }
+        let projects = sidebar_projects(&file.sessions, &attached)?;
+        let project_ids: std::collections::HashSet<_> = projects.iter().collect();
+        let session_ids: std::collections::HashSet<_> = file.sessions.iter().map(|s| &s.id).collect();
+        let order = file.sidebar_order.as_mut().expect("initialized above");
+        reconcile_sidebar_sessions(&mut order.sessions, &file.sessions);
+        reconcile_sidebar_projects(&mut order.projects, &projects);
+        if let Some(custom) = patch.custom { order.custom = custom; }
+        if let Some(mut sessions) = patch.sessions {
+            sessions.retain(|id| session_ids.contains(id));
+            merge_sidebar_order(&mut order.sessions, sessions);
+        }
+        if let Some(mut projects) = patch.projects {
+            projects.retain(|id| project_ids.contains(id));
+            merge_sidebar_order(&mut order.projects, projects);
+        }
+        order.revision = order.revision.saturating_add(1);
+        Ok(order.clone())
+    })
 }
 
 /// Save how a workspace's tabs are arranged; an empty layout forgets it.
@@ -837,6 +1091,17 @@ pub fn set_parked(session_id: &str, tab_id: &str, parked: bool) -> Result<()> {
     })
 }
 
+/// Read state is not conversation activity: preserve its dashboard position.
+pub fn set_tab_unread(session_id: &str, tab_id: &str, unread: bool) -> Result<()> {
+    update(|sessions| {
+        let session = sessions.iter_mut().find(|s| s.id == session_id).ok_or_else(|| anyhow!("session {session_id} not found"))?;
+        let tab = session.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        tab.marked_unread = unread;
+        if !unread && tab.status == TabStatus::Completed { tab.status = TabStatus::Idle; }
+        Ok(())
+    })
+}
+
 pub fn update_tab<R>(session_id: &str, tab_id: &str, f: impl FnOnce(&mut TabEntry) -> Result<R>) -> Result<R> {
     update_session(session_id, |s| {
         let t = s.tab_mut(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -876,6 +1141,7 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
             path: session.cwd.clone(),
             name,
             branch: session.branch.clone(),
+            ..Default::default()
         });
     }
     session.cwd = session.project_path.clone();
@@ -915,11 +1181,64 @@ mod tests {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             tabs: vec![],
             active_tab: None,
             link: None,
+            parent: None,
             unknown: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn manual_status_defaults_and_survives_index_updates() {
+        let _home = crate::store::temp_home();
+        let mut legacy = serde_json::to_value(entry("one")).unwrap();
+        legacy.as_object_mut().unwrap().remove("manualStatus");
+        let legacy: SessionEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.manual_status, None);
+        save(&[legacy, entry("two")]).unwrap();
+        for (status, wire) in [(ManualStatus::Backlog, "backlog"), (ManualStatus::InProgress, "in_progress"), (ManualStatus::InReview, "in_review"), (ManualStatus::Done, "done"), (ManualStatus::Canceled, "canceled")] {
+            let patch = crate::session_ops::SessionPatch { manual_status: Some(status), ..Default::default() };
+            assert!(!patch.is_empty());
+            crate::session_ops::update_session_meta("one", &patch).unwrap();
+            // An unrelated metadata edit must retain the manual status.
+            crate::session_ops::update_session_meta("one", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+            let saved = load().unwrap();
+            assert_eq!(saved[0].manual_status, Some(status));
+            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["manualStatus"], wire);
+            assert!(!saved[0].archived);
+            assert_eq!(saved[1].manual_status, None);
+        }
+        assert!(serde_json::from_value::<crate::session_ops::SessionPatch>(serde_json::json!({"manualStatus":"broken"})).is_err());
+    }
+
+    #[test]
+    fn an_unknown_manual_status_does_not_cost_the_index_or_block_writes() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("future", serde_json::json!("triage")), ("null", serde_json::Value::Null), ("malformed", serde_json::json!(42)), ("known", serde_json::json!("in_review"))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["manualStatus"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({
+            "sessions": rows,
+            "localSections": [{"id":"release", "name":"Release", "sessions":["future", "known"]}],
+            "localSectionsRevision": 17
+        })).unwrap()).unwrap();
+        let loaded = load().expect("a newer build's status must not hide every session");
+        assert_eq!(loaded.len(), 4);
+        assert!(loaded[..3].iter().all(|session| session.manual_status.is_none()));
+        assert_eq!(loaded[3].manual_status, Some(ManualStatus::InReview));
+        let sections = local_sections::load().unwrap();
+        crate::session_ops::update_session_meta("future", &crate::session_ops::SessionPatch { title: Some("renamed".into()), ..Default::default() }).unwrap();
+        assert_eq!(get("future").unwrap().title, "renamed");
+        save(&load().unwrap()).unwrap();
+        assert_eq!(load().unwrap().len(), 4);
+        assert_eq!(get("known").unwrap().manual_status, Some(ManualStatus::InReview));
+        assert_eq!(get("future").unwrap().manual_status, None);
+        assert_eq!(local_sections::load().unwrap(), sections, "status edits preserve section membership and revision");
     }
 
     fn tab(id: &str) -> TabEntry {
@@ -932,6 +1251,161 @@ mod tests {
 
     fn tab_ids(session_id: &str) -> Vec<String> {
         get(session_id).unwrap().tabs.into_iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn sidebar_order_survives_updates_and_new_sessions_lead_even_while_off() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("c")];
+        for session in &mut sessions { session.created = "2026-01-01".into(); session.project_path = if session.id == "b" { "/b" } else { "/a" }.into(); }
+        save(&sessions).unwrap();
+        assert_eq!(sidebar_order().unwrap(), SidebarOrder::default());
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["c".into(), "a".into(), "b".into(), "c".into(), "gone".into()]),
+            projects: Some(vec!["/b".into(), "/a".into()]),
+        }).unwrap();
+        assert_eq!(saved.sessions, ["c", "a", "b"]);
+        assert_eq!(sidebar_order().unwrap(), saved);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        update_session("b", |session| { session.modified = "later".into(); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, saved.sessions);
+        update(|sessions| { let mut new = entry("new"); new.project_path = "/a".into(); sessions.push(new); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "c", "a", "b"]);
+        // A filtered drop preserves the unseen rows and another group's order.
+        set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["b".into(), "c".into()]), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, ["new", "b", "a", "c"]);
+        assert_eq!(restored.projects, ["/b", "/a"]);
+        assert!(restored.revision > saved.revision);
+        assert_eq!(get("a").unwrap().modified, sessions[0].modified);
+        update(|sessions| { sessions.retain(|s| s.id != "a"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "c"]);
+    }
+
+    #[test]
+    fn sidebar_seeds_project_order_from_sessions_outside_personal_sections() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("b"), entry("sectioned")];
+        for (session, (path, created)) in sessions.iter_mut().zip([
+            ("/a", "2026-01-01T00:00:00Z"), ("/b", "2026-02-01T00:00:00Z"), ("/a", "2026-03-01T00:00:00Z"),
+        ]) {
+            session.project_path = path.into();
+            session.created = created.into();
+        }
+        save(&sessions).unwrap();
+        local_sections::edit(local_sections::SectionEdit::Create {
+            name: "Release".into(), emoji: None, session_ids: vec!["sectioned".into()],
+        }).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/b", "/a"]);
+        assert_eq!(order.sessions, ["sectioned", "b", "a"]);
+    }
+
+    #[test]
+    fn sidebar_order_and_section_memberships_survive_each_others_writes() {
+        use local_sections::SectionEdit;
+        let _home = crate::store::temp_home();
+        save(&[entry("a"), entry("b")]).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["b".into(), "a".into()]), ..Default::default()
+        }).unwrap();
+        let sections = local_sections::edit(SectionEdit::Create {
+            name: "Release".into(), emoji: None, session_ids: vec!["a".into(), "b".into()],
+        }).unwrap();
+        let id = &sections.sections[0].id;
+        assert_eq!(sidebar_order().unwrap(), order);
+        local_sections::insert_session(&entry("new"), Some(id)).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["new", "b", "a"]);
+        set_sidebar_order(SidebarOrderPatch { sessions: Some(vec!["a".into(), "new".into(), "b".into()]), ..Default::default() }).unwrap();
+        assert_eq!(local_sections::load().unwrap().sections[0].sessions, ["a", "b", "new"]);
+        update(|sessions| { sessions.retain(|session| session.id != "b"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().sessions, ["a", "new"]);
+        assert_eq!(local_sections::load().unwrap().sections[0].sessions, ["a", "new"]);
+    }
+
+    #[test]
+    fn sidebar_order_remains_readable_when_the_project_catalog_is_unavailable() {
+        let _home = crate::store::temp_home();
+        let projects_path = crate::store::root().unwrap().join("projects.json");
+        let projects = serde_json::json!({ "projects": [{ "path": "/attached", "name": "Attached" }] });
+        crate::store::write_json(&projects_path, &projects).unwrap();
+        save(&[entry("a"), entry("b")]).unwrap();
+        let saved = set_sidebar_order(SidebarOrderPatch {
+            custom: Some(true), sessions: Some(vec!["b".into(), "a".into()]),
+            projects: Some(vec!["/attached".into(), "/p".into()]),
+        }).unwrap();
+        let index_before = std::fs::read(file_path().unwrap()).unwrap();
+        std::fs::write(&projects_path, b"{invalid").unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        std::fs::remove_file(&projects_path).unwrap();
+        std::fs::create_dir(&projects_path).unwrap();
+        assert_eq!(sidebar_order().unwrap(), saved);
+        assert_eq!(std::fs::read(file_path().unwrap()).unwrap(), index_before);
+        std::fs::remove_dir(&projects_path).unwrap();
+        crate::store::write_json(&projects_path, &serde_json::json!({ "projects": [] })).unwrap();
+        let restored = sidebar_order().unwrap();
+        assert_eq!(restored.projects, ["/p"]);
+        assert_eq!(restored.sessions, saved.sessions);
+        assert!(restored.custom);
+    }
+
+    #[test]
+    fn sidebar_project_reorder_keeps_other_groups_and_index_fields() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("a"), entry("hidden"), entry("b")];
+        for session in &mut sessions { session.project_path = format!("/{}", session.id); }
+        save(&sessions).unwrap();
+        set_tab_layout("/a", layout(&["agent:tab"])).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/a".into(), "/hidden".into(), "/b".into()]), ..Default::default() }).unwrap();
+        set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/b".into(), "/a".into(), "/a".into()]), ..Default::default() }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/b", "/hidden", "/a"]);
+        assert_eq!(tab_state().unwrap().workspaces["/a"].order, ["agent:tab"]);
+        assert_eq!(load().unwrap().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidebar_recognizes_the_canonical_chats_directory() {
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let real = crate::store::ensure_dir(root.join("chat-target")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("Chats")).unwrap();
+        let mut chat = entry("chat");
+        chat.project_path = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        chat.link = Some(ChatLink { path: "/linked".into(), branch: None });
+        save(&[chat]).unwrap();
+        let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(order.projects, ["/linked"]);
+        assert_eq!(sidebar_order().unwrap().projects, ["/linked"]);
+    }
+
+    #[test]
+    fn sidebar_starts_in_display_order_and_reconciles_projects_before_filtered_drops() {
+        let _home = crate::store::temp_home();
+        let mut sessions = vec![entry("pinned"), entry("newest"), entry("active")];
+        for session in &mut sessions {
+            session.project_path = if session.id == "newest" { "/b" } else { "/z" }.into();
+            session.created = "2026-01-01T00:00:00Z".into();
+        }
+        sessions[0].pinned = true;
+        sessions[1].created = "2026-02-01T00:00:00Z".into();
+        sessions[2].unknown.insert("lastMessageAt".into(), "2026-03-01T00:00:00Z".into());
+        crate::store::write_json(&crate::store::root().unwrap().join("projects.json"), &serde_json::json!({
+            "projects": [{ "path": "/b", "name": "B", "pinned": true }, { "path": "/z", "name": "Z" }]
+        })).unwrap();
+        save(&sessions).unwrap();
+        let first = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(first.sessions, ["pinned", "active", "newest"]);
+        assert_eq!(first.projects, ["/b", "/z"]);
+        update(|sessions| { let mut new = entry("fresh"); new.project_path = "/new".into(); sessions.push(new); Ok(()) }).unwrap();
+        let reordered = set_sidebar_order(SidebarOrderPatch { projects: Some(vec!["/z".into(), "/b".into(), "/gone".into()]), ..Default::default() }).unwrap();
+        assert_eq!(reordered.projects, ["/new", "/z", "/b"]);
+        update(|sessions| { sessions.retain(|s| s.id != "fresh"); Ok(()) }).unwrap();
+        assert_eq!(sidebar_order().unwrap().projects, ["/z", "/b"]);
+        set_sidebar_order(SidebarOrderPatch { custom: Some(false), ..Default::default() }).unwrap();
+        let restored = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(restored.sessions, first.sessions);
+        assert_eq!(restored.projects, ["/z", "/b"]);
     }
 
     #[test]
@@ -1301,6 +1775,77 @@ mod tests {
         assert_eq!(load().unwrap()[0].kind, SessionKind::Quick);
     }
 
+    /// PRO-270: the field is additive in both directions.
+    #[test]
+    fn a_parent_is_stored_only_where_there_is_one_and_older_and_newer_indexes_both_load() {
+        let _home = crate::store::temp_home();
+        // An index written before the field existed loads with it empty.
+        let before = r#"{"sessions":[{"id":"old","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"}]}"#;
+        std::fs::write(file_path().unwrap(), before).unwrap();
+        assert_eq!(load().unwrap()[0].parent, None);
+
+        // A session nothing started is written exactly as before; one that was started says by whom.
+        let mut worker = entry("worker");
+        worker.parent = Some(ParentRef { session_id: "lead".into(), tab_id: Some("lead-tab".into()) });
+        let mut named = entry("named");
+        named.parent = Some(ParentRef { session_id: "lead".into(), tab_id: None });
+        save(&[entry("lead"), worker.clone(), named.clone()]).unwrap();
+        let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(written["sessions"][0].get("parent").is_none());
+        assert_eq!(written["sessions"][1]["parent"], serde_json::json!({"sessionId": "lead", "tabId": "lead-tab"}));
+        assert_eq!(written["sessions"][2]["parent"], serde_json::json!({"sessionId": "lead"}));
+        let loaded = load().unwrap();
+        assert_eq!((&loaded[1].parent, &loaded[2].parent), (&worker.parent, &named.parent));
+        assert!(loaded[1].started_by("lead") && !loaded[1].started_by("worker") && !loaded[0].started_by("lead"));
+
+        // The previous release knows nothing of the field: it still reads
+        // every session, and what it writes back keeps the parent.
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldEntry {
+            id: String,
+            project_path: String,
+            cwd: String,
+            title: String,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldIndex {
+            sessions: Vec<OldEntry>,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        let mut old: OldIndex = serde_json::from_str(&text).expect("the previous release must still parse the index");
+        assert_eq!(old.sessions.iter().map(|session| session.id.as_str()).collect::<Vec<_>>(), ["lead", "worker", "named"]);
+        old.sessions[1].title = "renamed by the previous release".into();
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
+        let back = load().unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!((back[1].title.as_str(), &back[1].parent, &back[2].parent), ("renamed by the previous release", &worker.parent, &named.parent));
+
+        // Deleting the lead clears nothing: the record outlives it.
+        update(|sessions| { sessions.retain(|session| session.id != "lead"); Ok(()) }).unwrap();
+        assert!(load().unwrap().iter().all(|session| session.started_by("lead")));
+    }
+
+    #[test]
+    fn a_parent_this_build_cannot_read_does_not_cost_the_whole_index() {
+        let _home = crate::store::temp_home();
+        let mut rows = Vec::new();
+        for (id, value) in [("text", serde_json::json!("lead")), ("null", serde_json::Value::Null), ("number", serde_json::json!(7)), ("partial", serde_json::json!({"tabId": "t"})), ("known", serde_json::json!({"sessionId": "lead", "since": "a newer build's field"}))] {
+            let mut row = serde_json::to_value(entry(id)).unwrap();
+            row["parent"] = value;
+            rows.push(row);
+        }
+        std::fs::write(file_path().unwrap(), serde_json::to_vec(&serde_json::json!({"sessions": rows})).unwrap()).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.len(), 5);
+        assert!(loaded[..4].iter().all(|session| session.parent.is_none()));
+        assert_eq!(loaded[4].parent, Some(ParentRef { session_id: "lead".into(), tab_id: None }));
+    }
+
     #[test]
     fn a_kind_this_build_does_not_know_does_not_cost_the_whole_index() {
         let _home = crate::store::temp_home();
@@ -1343,12 +1888,12 @@ mod tests {
         session.worktree_name = Some("feature-one".into());
         session.branch = Some("raccoon/feature-one".into());
         session.base_ref = Some("base-sha".into());
-        session.tabs.push(TabEntry { transport: Default::default(),
+        session.tabs.push(TabEntry { marked_unread: false, transport: Default::default(),
             id: "tab-one".into(),
             harness: "codex".into(),
             title: None,
             model: "gpt-5".into(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: DEFAULT_PERMISSION_MODE.into(),
             provider_session_id: Some("provider-session".into()),
             status: TabStatus::InProgress,
@@ -1356,7 +1901,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });
@@ -1379,6 +1924,7 @@ mod tests {
                 path: "/p/.raccoon/worktrees/feature-one".into(),
                 name: "feature-one".into(),
                 branch: Some("raccoon/feature-one".into()),
+                ..Default::default()
             })
         );
         assert!(claimed_worktree_names(&[session]).is_empty());
@@ -1398,7 +1944,38 @@ mod tests {
                 path: "/worktrees/existing-feature".into(),
                 name: "existing-feature".into(),
                 branch: Some("feature/existing".into()),
+                ..Default::default()
             })
         );
     }
+    #[test]
+    fn unread_reminders_round_trip_per_tab_without_changing_activity_or_live_status() {
+        let _home = crate::store::temp_home();
+        let mut session = entry("s");
+        session.modified = "2026-10-01T00:00:00Z".into();
+        let mut working = tab("working");
+        working.status = TabStatus::InProgress;
+        let mut done = tab("done");
+        done.status = TabStatus::Completed;
+        session.tabs = vec![working, done];
+        save(&[session.clone()]).unwrap();
+        assert!(!get("s").unwrap().tabs[0].marked_unread, "old entries default to read");
+        set_tab_unread("s", "working", true).unwrap();
+        let stored: IndexFile = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
+        let saved = &stored.sessions[0];
+        assert!(saved.tabs[0].marked_unread);
+        assert!(!saved.tabs[1].marked_unread);
+        assert_eq!(saved.tabs[0].status, TabStatus::InProgress);
+        assert_eq!(saved.modified, session.modified);
+        assert_eq!(saved.tabs[0].modified, session.tabs[0].modified);
+        set_tab_unread("s", "working", false).unwrap();
+        set_tab_unread("s", "done", false).unwrap();
+        let saved = get("s").unwrap();
+        assert!(!saved.tabs[0].marked_unread);
+        assert_eq!(saved.tabs[0].status, TabStatus::InProgress);
+        assert_eq!(saved.tabs[1].status, TabStatus::Idle);
+        assert!(set_tab_unread("s", "missing", true).is_err());
+        assert!(!get("s").unwrap().tabs.iter().any(|tab| tab.marked_unread));
+    }
+
 }

@@ -68,6 +68,8 @@ fn emit(app: &AppHandle, kind: &'static str, text: Option<String>, message: Opti
     emit_segment(app, kind, text, message, None);
 }
 
+// Only macOS dictation requests access through the system privacy services.
+#[cfg(target_os = "macos")]
 fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) {
     trace("error", None, Some(&message), None);
     let _ = app.emit(
@@ -77,6 +79,8 @@ fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) 
 }
 
 /// The microphone is open and the engine is ready to hear it.
+// The listening engines are currently implemented only by macOS dictation.
+#[cfg(target_os = "macos")]
 fn emit_listening(app: &AppHandle, live: bool) {
     trace("listening", None, Some(if live { "live" } else { "words at stop" }), None);
     let _ = app.emit("dictation", DictationEvent { kind: "listening", text: None, raw: None, message: None, settings: None, segment: None, live: Some(live) });
@@ -176,7 +180,10 @@ mod mac {
     /// Shown when a local model heard real sound and still made no words of it.
     const NOT_RECOGNISED: &str = "Nothing was recognised. Try again, speak closer to the microphone, or pick another model under Settings → Transcription.";
     /// Shown when macOS will not let this app near the microphone at all.
-    const MIC_DENIED: &str = "TerminalX is not allowed to use the microphone. Enable it under System Settings → Privacy & Security → Microphone.";
+    /// The row's title ("Microphone access is off for TerminalX") is the
+    /// frontend's, as is the key: it puts the dictation shortcut, which the
+    /// reader can rebind, in place of "the dictation shortcut".
+    const MIC_DENIED: &str = "Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press the dictation shortcut again.";
     /// Shown when the system recogniser cannot be used, with a route to the
     /// privacy pane that can change the decision.
     const SPEECH_DENIED: &str = "Speech recognition is not allowed. Enable it for TerminalX under System Settings → Privacy & Security → Speech Recognition, or pick a local model in Settings → Transcription.";
@@ -1093,7 +1100,7 @@ mod mac {
     mod tests {
         use super::{
             is_no_speech_error, is_silent, permission, restart_decision, settle, AppleSegmentTracker,
-            Dictation, RestartDecision, MAX_RESTARTS, NOT_RECOGNISED, NO_SPEECH_CODE, NO_SPEECH_DOMAIN,
+            Dictation, RestartDecision, MAX_RESTARTS, MIC_DENIED, NOT_RECOGNISED, NO_SPEECH_CODE, NO_SPEECH_DOMAIN,
             RESTART_INTERVAL, TARGET_RATE,
         };
         use crate::transcription::noise::{NoiseResult, NoiseStatus};
@@ -1179,6 +1186,16 @@ mod mac {
 
             assert!(matches!(start, permission::Start::Pending));
             assert_eq!(gateway.calls.lock().unwrap().as_slice(), ["microphone_status", "request_microphone"]);
+        }
+
+        #[test]
+        fn denied_microphone_message_names_the_pane_and_leaves_the_key_to_the_frontend() {
+            // The frontend titles the row and puts the reader's own shortcut in place of this phrase.
+            assert_eq!(
+                MIC_DENIED,
+                "Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press the dictation shortcut again."
+            );
+            assert!(MIC_DENIED.contains("the dictation shortcut"));
         }
 
         #[test]

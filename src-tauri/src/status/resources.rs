@@ -451,7 +451,7 @@ impl ResourceStore {
         if let Some(answer) = settle_kill(process, confirmed, stop_agent)? {
             return Ok(answer);
         }
-        terminals.kill_and_wait(pane_id, std::time::Duration::from_secs(3));
+        terminals.kill_and_wait_confirmed(pane_id, std::time::Duration::from_secs(3))?;
         Ok(KillResult { killed: true, confirmation: None })
     }
 }
@@ -490,6 +490,25 @@ fn orphan_count(panes: &[PaneInfo], sessions: &[index::SessionEntry]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_kill_refuses_unconfirmed_stop_and_keeps_other_panes() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink = std::sync::Arc::new(crate::sink::BroadcastSink::new(32));
+        let spec = || crate::pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 60"), env: &[] };
+        terminals.spawn(sink.clone(), "resource-failed:shell", spec()).unwrap();
+        terminals.spawn(sink, "resource-other:shell", spec()).unwrap();
+        let other = terminals.pid("resource-other:shell").unwrap();
+        let failure = terminals.inspection_failure_for_test("resource-failed:shell");
+        failure.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = ResourceStore::default().kill(&terminals, "resource-failed:shell", true, &|_, _| anyhow::bail!("no agent in this fixture"));
+        failure.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(result.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{result:?}");
+        assert!(crate::harness::host::is_alive(other));
+        terminals.kill_all_and_wait_confirmed(&["resource-failed:shell".into(), "resource-other:shell".into()], std::time::Duration::from_secs(5)).unwrap();
+    }
 
     const FIXTURE: &str = include_str!("fixtures/ps_macos.txt");
 
@@ -534,11 +553,11 @@ mod tests {
     fn only_an_idle_bound_agent_can_be_stopped() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let rule = |status: index::TabStatus| {
-            let tab = index::TabEntry { transport: Default::default(),
-                id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            let tab = index::TabEntry { marked_unread: false, transport: Default::default(),
+                id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
                 permission_mode: "auto".into(), provider_session_id: None, status,
                 created: String::new(), modified: String::new(), context_used: None, context_max: None,
-                fork_from: None, continuation: None, parked: false, unknown: Default::default(),
+                fork_from: None, continuation: None, parked: false, usage: None, unknown: Default::default(),
                 follow: Default::default(),
             };
             let session = index::SessionEntry {
@@ -546,9 +565,10 @@ mod tests {
                 kind: crate::store::index::SessionKind::Project,
                 branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, issue_work: Default::default(), automation: None,
                 title: "Safe session".into(),
-                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, tabs: vec![tab],
+                created: String::new(), modified: String::new(), archived: false, archive: Default::default(), pinned: false, manual_status: Default::default(), tabs: vec![tab],
                 active_tab: Some("t1".into()), unknown: Default::default(),
                 link: None,
+                parent: None,
             };
             bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default())).kill_rule
         };

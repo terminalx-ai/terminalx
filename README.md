@@ -67,6 +67,35 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   tone), a Dock badge, four themes in light and dark, and a pixel raccoon that
   potters about while you wait.
 
+## Workspace setup
+
+Save a setup command in Settings → Repositories → your repository → Scripts,
+for example `bun install`. This uses the local `scripts.setup` field in the
+project store. Repository files, including `terminalx.json`, never supply
+commands; committed or managed configuration with trust is deferred to PRO-136.
+
+New worktrees run the saved command through the same private-file `/bin/sh`
+runner as archive scripts, independently of the login shell. Scripts receive
+Settings environment variables and `TERMINALX_WORKSPACE_PATH`,
+`TERMINALX_REPO_ROOT`, `TERMINALX_BRANCH`, and their owning `TERMINALX_SESSION_ID`.
+Inherited agent attribution is removed. Setup is scheduled after worktree
+creation: the file-copy step from #804 completes first when that dependency
+is present. Agent tabs can start during setup; their first turn is not delayed
+and may encounter files or dependencies that setup has not finished preparing.
+
+At most two setup scripts run concurrently per runtime; additional attempts
+queue. A run times out after 30 minutes. The terminal dock's **Setup** tab keeps
+status and output, with **Stop** (including queued attempts) and **Rerun**.
+The Scripts page also offers **Run setup now** for an existing worktree.
+Rerun reads the current local setting, and queued work is cancelled if that
+setting changes. Opening an existing checkout never runs setup automatically.
+
+Failures offer **Show log** and **Ask agent to fix**, which attaches a bounded
+log to a diagnostic prompt. Live terminal output retains up to 512 KiB; saved
+logs and fix attachments use the most recent 32 KiB. Finished logs survive a
+runtime restart; an interrupted attempt is stopped and requires an explicit
+rerun. Clearing the local setup script disables it for new worktrees.
+
 ## What leaves your machine
 
 TerminalX has **no telemetry, no analytics and no crash reporting**. An account
@@ -245,13 +274,25 @@ every mode names something the CLI will accept.
 
 ## Install
 
-Download the `.dmg` from this repository's Releases page and drag TerminalX to
-Applications. You will also need `claude` and/or `codex` installed and
+[Download TerminalX for macOS](https://github.com/terminalx-ai/terminalx/releases/latest/download/TerminalX-latest-aarch64.dmg)
+(Apple silicon). The link always gets the newest release. Open the `.dmg` and
+drag TerminalX to Applications. Each release is also on this repository's
+[Releases page](https://github.com/terminalx-ai/terminalx/releases), with a
+`SHA256SUMS` file. You will also need `claude` and/or `codex` installed and
 logged in — TerminalX runs them, it does not replace them.
 
-The macOS release is signed with a Developer ID certificate but is not notarized.
-If macOS blocks the first launch, allow TerminalX under System Settings →
-Privacy & Security → Open Anyway.
+The app and the disk image are signed with a Developer ID certificate,
+notarized by Apple and stapled, so TerminalX opens like any Mac app, with no
+Gatekeeper warning. To check a download yourself:
+
+```sh
+spctl -a -vv -t open --context context:primary-signature TerminalX-latest-aarch64.dmg
+spctl -a -vv /Applications/TerminalX.app
+```
+
+Both should say `accepted` and `source=Notarized Developer ID`. Releases have
+been notarized since 0.2.27. Once you have installed a notarized version,
+updates install themselves from within the app.
 
 ## Development
 

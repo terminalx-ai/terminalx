@@ -283,6 +283,8 @@ mod tests {
             workspace: AutomationWorkspace::NewWorktree,
             session_id: None,
             reuse_session: false,
+            archive_on_complete: false,
+            keep_latest_run_visible: false,
             base_ref: Some("origin/main".into()),
             schedule: AutomationSchedule {
                 kind: ScheduleKind::Preset,

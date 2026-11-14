@@ -25,6 +25,7 @@ import { RowActions } from "@/components/layout/RowActions";
 import {
   AgentTabRow,
   BrowserTabRow,
+  ReviewTabRow,
   DiffStats,
   GroupTitle,
   ItemTitle,
@@ -79,7 +80,8 @@ import {
 import { LOCAL_HOST, useMergedStatus } from "@/lib/mergedCleanup";
 import { useTabViews } from "@/lib/tabViews";
 import { tabViewIn } from "@/lib/tabFront";
-import { activatePeer, closePeer, isShellPeer, peerLabel, peerShell, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { closeTabTelling, openAgentTabTelling } from "@/components/session/TabMenu";
+import { activatePeer, isShellPeer, peerLabel, peerShell, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { openBrowserTab } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { TabMenuItems } from "@/components/session/TabMenu";
@@ -361,7 +363,7 @@ export function SessionNode({
   const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
   const isActive = (peer: PeerTab) => selected && activePeer?.kind === peer.kind && peer.id === activePeer.id;
-  const close = (peer: PeerTab) => () => void closePeer(session.id, peer, peers, activePeer);
+  const close = (peer: PeerTab) => () => void closeTabTelling(session.id, peer, peers, activePeer, labelOf(peer));
   const open = (peer: PeerTab) => () => { selectSession(session.id); activatePeer(session.id, peer); };
   const labelOf = (peer: PeerTab) => peerLabel(peer, row.layout, (id) => harnessNames.get(id));
 
@@ -414,6 +416,9 @@ export function SessionNode({
                     }}
                     onClose={close(peer)}
                   />
+                ) : peer.kind === "review" ? (
+                  <ReviewTabRow nodeId={tabNodeId(peer)} panelId={tabPanelId(peer)} label={labelOf(peer)} kind={peer.editor.kind}
+                    dirty={peer.editor.dirty} pinned={peer.pinned} selected={isActive(peer)} onOpen={open(peer)} onClose={close(peer)} />
                 ) : peer.kind === "browser" ? (
                   <BrowserTabRow
                     nodeId={tabNodeId(peer)}
@@ -459,7 +464,8 @@ function NewTabButton({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
   const add = async (harness: string) => {
     const prefs = getPrefs();
-    await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
+    // A failed start closes the tab again and says why (PRO-291).
+    await openAgentTabTelling(session, harness, () => addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode));
     selectSession(session.id);
   };
   return (

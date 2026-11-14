@@ -17,6 +17,7 @@ const { orderConversations } = await import("./SessionSidebar");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const selection = await import("@/lib/rowSelection");
+const privacy = await import("@/lib/dataPrivacy");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git" }];
@@ -31,6 +32,7 @@ beforeEach(async () => {
   // Folds are remembered; each test starts from the defaults.
   prefs.setPrefs({ sidebarLayout: "simple", sidebarSections: {}, branchSessions: "sidebar" });
   mocks.invoke.mockReset().mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "data_privacy_status") return { enabled: false, managed: false };
     if (command === "list_projects") return { projects, lastSelected: null };
     if (command === "list_sessions") return sessions;
     // As the backend answers: the sessions as they are now, archived or back.
@@ -44,6 +46,8 @@ beforeEach(async () => {
     if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }];
     return undefined;
   });
+  // AppShell normally loads native policy before mounting these components.
+  await privacy.refreshDataPrivacy();
 });
 afterEach(cleanup);
 
@@ -59,16 +63,22 @@ async function boot(list: SessionEntry[]) {
 }
 
 describe("new-chat entry points", () => {
+  it("announces manual status alongside the branch row's accessible name", async () => {
+    await boot([session("here", "/repos/web", new Date().toISOString(), { manualStatus: "in_review" })]);
+    mount();
+    expect(screen.getByRole("button", { name: "main, Talk here", description: /Status: In review$/ })).toBeTruthy();
+  });
+
   it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     mount();
     const titlebar = screen.getByTestId("sidebar-titlebar");
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });
@@ -104,8 +114,8 @@ describe("a project's picture", () => {
     const avatar = await within(web).findByTestId("project-avatar");
     expect(avatar.getAttribute("src")).toBe("https://github.com/acme-inc.png?size=32");
     expect(avatar.getAttribute("title")).toBe("On GitHub as acme-inc/web");
-    // Asked for the project's folder, not a chat's.
-    expect(mocks.invoke.mock.calls.filter(([command]) => command === "github_identity").map(([, args]) => args)).toEqual([{ projectPath: "/repos/web", refresh: false }]);
+    // The project's first lookup refreshes native metadata for this policy generation.
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "github_identity").map(([, args]) => args)).toEqual([{ projectPath: "/repos/web", refresh: true }]);
   });
 });
 
@@ -400,8 +410,9 @@ describe("the conversation list", () => {
     const main = within(web).getByRole("button", { name: "main, 2 sessions" });
     expect(within(web).queryByText("Talk m1")).toBeNull();
     expect(within(web).queryByText("Talk m2")).toBeNull();
-    // The row's state is the most pressing among them.
-    expect(within(main).getByRole("img", { name: "Needs you" })).toBeTruthy();
+    // The row's state is the most pressing among them: its mark, with no label on the row.
+    expect(main.querySelector("[data-session-status]")?.getAttribute("data-status-label")).toBe("Needs you");
+    expect(within(main).queryByText("Needs you")).toBeNull();
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
@@ -465,13 +476,135 @@ describe("renaming from the sidebar", () => {
       session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
     ]);
 
+  it("explains a rename on a detached HEAD, and makes a branch at its commit from the toast (PRO-295)", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const base = mocks.invoke.getMockImplementation()!;
+    let branched: string | null = null;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [...(await base(command, args)), { ...tree("crane", "", false), branch: branched, head: "3f2a91c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f", placeholder: false }];
+      if (command === "git_branch_here") { branched = "dc/talk-crane"; return branched; }
+      return base(command, args);
+    });
+    await boot([session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" })]);
+    render(<Toasts />);
+    mount();
+    try {
+      fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      // No dialog for a branch that is not there: the toast says why, and what to do.
+      expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+      const toast = await screen.findByRole("alert");
+      expect(within(toast).getByText("Check out a branch before renaming")).toBeTruthy();
+      expect(toast.textContent).toContain("This worktree is on a detached HEAD at 3f2a91c, so there's no branch to rename.");
+      expect(toast.getAttribute("data-tone")).toBe("warning");
+      expect(within(toast).getAllByRole("button").map((button) => button.textContent)).toEqual(["Create a branch here", ""]);
+
+      await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Create a branch here" })));
+      expect(mocks.invoke).toHaveBeenCalledWith("git_branch_here", { projectPath: "/repos/web", cwd: "/repos/web/.worktrees/crane", name: "Talk crane" });
+      await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+      // The worktree is on the new branch now, which is what the session header names.
+      expect(store.getSessionStore().workspaces["/repos/web"].find((entry) => entry.name === "crane")?.branch).toBe("dc/talk-crane");
+      expect(screen.queryByRole("button", { name: /detached at/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "dc/talk-crane, Talk crane" })).toBeTruthy();
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
+  it("keeps the toast and says so when the branch can't be made", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [...(await base(command, args)), { ...tree("crane", ""), branch: null, head: "3f2a91c8d0" }];
+      if (command === "git_branch_here") throw "Repository configuration needs trust.";
+      return base(command, args);
+    });
+    await boot([session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" })]);
+    render(<Toasts />);
+    mount();
+    try {
+      fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
+      const alerts = await screen.findAllByRole("alert");
+      expect(alerts.map((alert) => alert.textContent)).toEqual([
+        expect.stringContaining("Check out a branch before renaming"),
+        expect.stringContaining("Couldn't create a branch at 3f2a91c: Repository configuration needs trust."),
+      ]);
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
+  // Two worktrees detached at one commit read the same, but are two checkouts: each row stands for one (PRO-367).
+  const sameCommit = (names: string[]) => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [...(await base(command, args)), ...names.map((name) => ({ ...tree(name, ""), branch: null, head: "3f2a91c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f" }))];
+      if (command === "git_branch_here") return "dc/new";
+      return base(command, args);
+    });
+  };
+  const createBranchFrom = async (row: HTMLElement) => {
+    fireEvent.contextMenu(row);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
+  };
+
+  it("gives each checkout detached at the same commit its own row, and branches the one chosen (PRO-367)", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    sameCommit(["panda", "crane"]);
+    await boot([
+      session("panda", "/repos/web", at(2), { branch: "dc/panda", worktreeName: "panda", cwd: "/repos/web/.worktrees/panda" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+    // The newer one is open: it must not stand in for the row the person right-clicks.
+    act(() => store.selectSession("panda"));
+    render(<Toasts />);
+    mount();
+    try {
+      const web = screen.getByRole("group", { name: "web" });
+      expect(within(web).getAllByRole("button", { name: /^detached at/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["detached at 3f2a91c, Talk panda", "detached at 3f2a91c, Talk crane"]);
+      await createBranchFrom(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
+      expect(mocks.invoke).toHaveBeenCalledWith("git_branch_here", { projectPath: "/repos/web", cwd: "/repos/web/.worktrees/crane", name: "Talk crane" });
+      expect(mocks.invoke).not.toHaveBeenCalledWith("git_branch_here", expect.objectContaining({ cwd: "/repos/web/.worktrees/panda" }));
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
+  it("keeps Rename… on a detached row while a session in it is live, its newest gone with its worktree (PRO-367)", async () => {
+    const { Toasts } = await import("@/components/ui/Toasts");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    sameCommit(["crane"]);
+    await boot([
+      session("panda", "/repos/web", at(3), { branch: "dc/panda", worktreeName: "panda", cwd: "/repos/web/.worktrees/panda", worktreeRemoved: true, removedWorkspace: { path: "/repos/web/.worktrees/panda", branch: null } } as Partial<SessionEntry>),
+      session("crane-2", "/repos/web", at(2), { title: "Talk heron", branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+      session("crane", "/repos/web", at(1), { branch: "dc/crane", worktreeName: "crane", cwd: "/repos/web/.worktrees/crane" }),
+    ]);
+    render(<Toasts />);
+    mount();
+    try {
+      // Both of crane's sessions share its row (its count says 2); the removed worktree's conversation is kept apart.
+      const rows = screen.getAllByRole("button", { name: /^detached at 3f2a91c/ });
+      expect(rows.map((row) => row.textContent)).toEqual(["detached at 3f2a91c2"]);
+      await createBranchFrom(rows[0]);
+      expect(mocks.invoke).toHaveBeenCalledWith("git_branch_here", expect.objectContaining({ projectPath: "/repos/web", cwd: "/repos/web/.worktrees/crane" }));
+    } finally {
+      for (const toast of getErrorToasts()) dismissError(toast.id);
+    }
+  });
+
   it("offers a developer's few actions on a right-click", async () => {
     withTrees();
     await bootTwo();
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -591,6 +724,22 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
 });
 
+it.each(["simple", "list"] as const)("offers Restore workspace for a removed conversation in the %s sidebar", async (sidebarLayout) => {
+  prefs.setPrefs({ sidebarLayout });
+  await boot([session("restore", "/repos/web", new Date().toISOString(), {
+    worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" },
+  })]);
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk restore" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Restore workspace…" }));
+  const dialogs = await import("@/lib/dialogs");
+  const Probe = () => <div data-testid="restore-request">{dialogs.useDialogs().workspaceRestore}</div>;
+  render(<Probe />);
+  expect(screen.getByTestId("restore-request").textContent).toBe("restore");
+  act(dialogs.closeWorkspaceRestore);
+});
+
 
 /** #696: "Review #590", its workspace gone on Oct 24, sat among the live work for good. */
 it("sets removed workspaces apart under a fold, which opens while it holds the open conversation", async () => {
@@ -665,7 +814,8 @@ describe("the archive (#718)", () => {
     const web = screen.getByRole("group", { name: "web" });
     const webArchive = within(web).getByTestId("archived-sessions");
     expect(within(webArchive).getByRole("button", { name: "Archived (1)" }).getAttribute("aria-expanded")).toBe("true");
-    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).textContent).toContain("dev");
+    // Its branch is in the row's tooltip; the row itself ends in its time (02.04).
+    expect(within(webArchive).getByRole("button", { name: /^Talk old-web/ }).closest("[title]")?.getAttribute("title")).toContain("dev");
     // The live list is as it was.
     expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
 
@@ -780,5 +930,136 @@ describe("the archive (#718)", () => {
     act(() => { fireEvent.click(row); });
     expect(store.getSessions().selectedSessionId).toBe("b");
     expect(selection.getPickedSessions()).toEqual([]);
+  });
+});
+
+describe("row extras and unread reminders (PRO-179)", () => {
+  it.each(["simple", "list"] as const)("renders background count updates and live drafts in the %s layout", async (sidebarLayout) => {
+    const { setDraft, clearDrafts } = await import("@/lib/drafts");
+    const { setTabStatus } = await import("@/lib/agentEvents");
+    let additions = 12;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", additions: 1, deletions: 1, branchAdditions: additions, branchDeletions: 4 }];
+      return base(command, args);
+    });
+    const row = session("background", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "in_progress";
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
+    mount();
+    if (sidebarLayout === "simple") {
+      // A working row ends in its time, as 02.04 draws it; its lines show once it stops.
+      await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
+      expect(screen.queryByText("+12")).toBeNull();
+    } else {
+      // The chat list keeps its own time column, and its lines beside it.
+      expect(await screen.findByText("+12")).toBeTruthy();
+    }
+    expect(store.getSessionStore().selectedSessionId).not.toBe("background");
+    additions = 27;
+    await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
+    expect(await screen.findByText("+27")).toBeTruthy();
+    expect(screen.getByText("−4")).toBeTruthy();
+    act(() => setDraft("background-tab", "Finish the\nregression test"));
+    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Finish the regression test");
+    expect(screen.getByRole("button", { name: "Archive Talk background" })).toBeTruthy();
+    act(() => clearDrafts((id) => id === "background-tab"));
+    expect(screen.queryByTestId("row-draft")).toBeNull();
+  });
+
+  it.each(["simple", "list"] as const)("toggles the persisted flag with R without changing waiting state in the %s layout", async (sidebarLayout) => {
+    const row = session("reminder", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "waiting";
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_tab_unread") {
+        const { sessionId, tabId, unread } = args as { sessionId: string; tabId: string; unread: boolean };
+        sessions = sessions.map((entry) => entry.id !== sessionId ? entry : { ...entry, tabs: entry.tabs.map((tab) => tab.id !== tabId ? tab : { ...tab, markedUnread: unread }) });
+        return;
+      }
+      return base(command, args);
+    });
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout });
+    mount();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Menu for Talk reminder" }), { key: "ArrowDown" });
+    const menu = await screen.findByRole("menu");
+    fireEvent.keyDown(menu, { key: "r", metaKey: true });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_tab_unread")).toBe(false);
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as read" });
+    expect(mocks.invoke).toHaveBeenCalledWith("set_tab_unread", { sessionId: "reminder", tabId: "reminder-tab", unread: true });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: true, status: "waiting" });
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as unread" });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: false, status: "waiting" });
+  });
+});
+
+describe("custom order (PRO-169)", () => {
+  it("uses the saved order inside the archive and restores recency when off", async () => {
+    const { archivedConversations, groupConversations } = await import("./SessionSidebar");
+    const entries = [session("recent", "/repos/web", "2026-11-02", { archived: true }), session("older", "/repos/web", "2026-11-01", { archived: true })];
+    const order = { custom: true, sessions: ["older", "recent"], projects: [], revision: 1 };
+    expect(archivedConversations(entries, "updated", order).map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(archivedConversations(entries, "updated", { ...order, custom: false }).map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(groupConversations(entries, projects, chatsPath, {}, null, true, true, "updated", order).groups[0].archived.map((s) => s.id)).toEqual(["older", "recent"]);
+  });
+  it("restores recency when off without losing either saved order, and keeps new sessions first", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const order = { custom: true, sessions: ["older", "recent"], projects: ["/repos/other", "/repos/web"], revision: 1 };
+    const entries = [session("recent", "/repos/web", "2026-11-02"), session("older", "/repos/web", "2026-11-01"), session("other", "/repos/other", "2026-11-01")];
+    const attached = [...projects, { path: "/repos/other", name: "other", kind: "git" as const }];
+    const grouped = (custom: boolean, list = entries) => groupConversations(list, attached, chatsPath, {}, null, true, false, "updated", { ...order, custom });
+    expect(grouped(true).groups.map((g) => g.path)).toEqual(["/repos/other", "/repos/web"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(false).groups[0].sessions.map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(true, [...entries, session("new", "/repos/web", "2026-11-03")]).groups[1].sessions.map((s) => s.id)).toEqual(["new", "older", "recent"]);
+  });
+  it("uses one mutually exclusive View sort in both sidebar layouts", async () => {
+    const ordering = await import("@/lib/sidebarOrder");
+    let saved = { custom: false, sessions: ["older", "recent"], projects: [], revision: 10 };
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_sidebar_order") {
+        saved = { ...saved, ...(args as { patch: object }).patch, revision: saved.revision + 1 };
+        return saved;
+      }
+      return base(command, args);
+    });
+    await boot([session("recent", "/repos/web", "2026-11-02", { branch: "recent" }), session("older", "/repos/web", "2026-11-01", { branch: "raccoon/quiet-amber-fox" })]);
+    await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
+    mount();
+    fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Sort by: Updated" }), { key: "ArrowRight" });
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Custom order" })).toBeNull();
+    expect((await screen.findByRole("menuitemradio", { name: "Updated" })).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Custom" }));
+    // The handle names the displayed conversation, not its hidden generated branch.
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rowIds()).toEqual(["older", "recent"]);
+    act(() => prefs.setPrefs({ sidebarLayout: "list" }));
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    expect(rowIds()).toEqual(["older", "recent"]);
+    const choose = async (current: string, next: string) => {
+      fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+      fireEvent.keyDown(await screen.findByRole("menuitem", { name: `Sort by: ${current}` }), { key: "ArrowRight" });
+      const choices = await Promise.all(["Updated", "Created", "Custom"].map((name) => screen.findByRole("menuitemradio", { name })));
+      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current]);
+      fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+      await waitFor(() => expect(prefs.getPrefs().sidebarSort).toBe(next.toLowerCase()));
+    };
+    await choose("Custom", "Created");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    await choose("Created", "Custom");
+    expect(rowIds()).toEqual(["older", "recent"]);
+    await choose("Custom", "Updated");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    expect(saved.sessions).toEqual(["older", "recent"]);
   });
 });

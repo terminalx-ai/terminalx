@@ -151,7 +151,7 @@ function ChoicesStatus({ choices, what }: { choices: FilterChoices; what: string
   return null;
 }
 
-const popoverClass = "z-(--z-menu) w-64 max-w-[calc(100vw-16px)] overflow-hidden rounded-lg bg-popover glass text-popover-foreground shadow-surface hairline animate-fade-in";
+const popoverClass = "z-(--z-menu) w-64 max-w-[calc(100vw-16px)] overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-surface hairline animate-fade-in";
 
 function AssigneeFilterMenu({
   filter,

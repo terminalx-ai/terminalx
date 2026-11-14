@@ -108,7 +108,12 @@ const read = (page) =>
   });
 
 /** The dialog as it is; one too tall for its fixed parts is read scrolled to its foot, where the buttons are. */
+// A dialog rises and grows into place as it opens: measure it once it is there.
+const settled = (page) =>
+  page.evaluate(() => Promise.all([...document.querySelectorAll('[role="dialog"]')].flatMap((dialog) => dialog.getAnimations().map((animation) => animation.finished))));
+
 const measure = async (page) => {
+  await settled(page);
   const state = await read(page);
   if (state.dialogScrolls <= 0) return state;
   await page.evaluate(() => { const dialog = [...document.querySelectorAll('[role="dialog"]')].at(-1); dialog.scrollTop = dialog.scrollHeight; });

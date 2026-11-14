@@ -20,6 +20,14 @@ pub struct Sessions(Arc<Client>);
 impl Sessions {
     pub fn new(client: Arc<Client>) -> Self { Self(client) }
 
+    pub fn create(&self, req: &crate::session_ops::NewSession) -> Result<crate::store::index::SessionEntry> {
+        self.call("runtime.session.create", json!({"req": req}))
+    }
+
+    pub fn workspace_setup(&self, operation: &str, session: Option<&str>, pane: Option<&str>) -> Result<Value> {
+        self.call("runtime.session.workspaceSetup", json!({"operation": operation, "sessionId": session, "paneId": pane}))
+    }
+
     fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.0.call(command,params)
     }
@@ -45,7 +53,12 @@ impl Sessions {
     }
 
     pub fn pipeline<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        self.call("runtime.session.pipeline",json!({"operation":operation,"params":params}))
+        self.0.network_call("runtime.session.pipeline", operation, params, crate::github_process::ticket())
+    }
+
+    /// Orchestration runs (`orchestration`): the runtime owns the workers.
+    pub fn orchestration<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        self.call("runtime.session.orchestration", json!({"operation": operation, "params": params}))
     }
 
     /// An older owner ignores unknown project fields; it must not silently
@@ -58,6 +71,7 @@ impl Sessions {
     }
 
     pub fn workspace<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        let origin = crate::github_process::ticket();
         // Archive hooks may take five minutes each. Keep the caller waiting
         // for the result rather than reporting a timeout while removal runs.
         let seconds = match operation {
@@ -65,13 +79,21 @@ impl Sessions {
             "remove" => 120 + 360 * params["items"].as_array().map_or(1, |items| items.len() as u64),
             "removeLeftovers" => 120 + 360 * params["ids"].as_array().map_or(1, |items| items.len() as u64),
             "mergedSweep" => 3600 + 360 * crate::merged_cleanup::ARCHIVES_PER_PASS as u64,
-            _ => 120,
+            _ => return self.0.workspace(operation, params, origin),
         };
-        self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
+        self.0.workspace_within(operation, params, origin, std::time::Duration::from_secs(seconds))
+    }
+
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
     }
 
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
+    }
+
+    pub fn set_manual_status(&self, session: &str, status: crate::store::index::ManualStatus) -> Result<()> {
+        self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
@@ -138,6 +160,10 @@ impl Sessions {
         self.tab("resumeConversation", session, tab, json!({"harness":harness,"providerSessionId":provider_session_id}))
     }
 
+    pub fn row_statuses(&self, ids: Vec<String>) -> Result<Value> {
+        self.quick("runtime.session.rowStatuses", json!({"ids":ids}))
+    }
+
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {
         self.quick("runtime.session.running", json!({}))
     }
@@ -193,18 +219,26 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.send_pressed(session, tab, text, images, None)
+        self.send_pressed(session, tab, text, images, None, Vec::new())
     }
 
     /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
-    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>) -> Result<SendOutcome> {
-        self.tab("send", session, tab, json!({"text":text,"images":images,"pressedAt":pressed_at}))
+    /// `files`: stored attachments (PRO-290), sent only when there are any,
+    /// so an older runtime is never handed a parameter it does not know.
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>) -> Result<SendOutcome> {
+        let mut params = json!({"text":text,"images":images,"pressedAt":pressed_at});
+        if !files.is_empty() { params["files"] = json!(files); }
+        self.tab("send", session, tab, params)
     }
 
     /// The window drew a sent message (`SessionManager::note_shown`).
     pub fn note_shown(&self, session: &str, tab: &str, seq: u64, timings: &crate::session::SendShown) -> Result<()> {
         self.quick_tab("sendShown", session, tab, json!({"seq":seq,"timings":{
             "pressedAt":timings.pressed_at,"drawnAt":timings.drawn_at,"answeredAt":timings.answered_at,"shownAt":timings.shown_at}}))
+    }
+
+    pub fn note_terminal_view(&self, session: &str, tab: &str, report: &crate::session::TerminalViewReport) -> Result<()> {
+        self.quick_tab("terminalViewReport", session, tab, json!({"report":report}))
     }
 
     /// A window's report of a tab's warning (`SessionManager::note_incident_ui`).
@@ -236,8 +270,8 @@ impl Sessions {
         self.quick_tab("interrupt", session, tab, json!({}))
     }
 
-    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool) -> Result<Option<String>> {
-        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files}))
+    pub fn reset_chat(&self, session: &str, tab: &str, end_seq: Option<u64>, reset_files: bool, confirm: Option<&str>) -> Result<Option<String>> {
+        self.tab("resetChat", session, tab, json!({"endSeq":end_seq,"resetFiles":reset_files,"confirm":confirm}))
     }
 
     pub fn stop(&self, session: &str, tab: &str) -> Result<()> {
@@ -248,6 +282,10 @@ impl Sessions {
         self.tab("closeTab", session, tab, json!({}))
     }
 
+
+    pub fn change_held(&self, session: &str, tab: &str, change: crate::session::held::Change) -> Result<SendOutcome> {
+        self.tab("heldQueue", session, tab, json!({"change":change}))
+    }
 
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
         self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))
@@ -277,6 +315,10 @@ impl Sessions {
         self.tab("effort", session, tab, json!({"effort":effort}))
     }
 
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
+    }
+
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {
         self.quick_tab("markRead", session, tab, json!({}))
     }
@@ -285,8 +327,10 @@ impl Sessions {
         self.tab("handoff", session, tab, json!({}))
     }
 
-    pub fn to_terminal(&self, session: &str, tab: &str) -> Result<()> {
-        self.tab("toTerminal", session, tab, json!({}))
+    pub fn to_terminal(&self, session: &str, tab: &str, transition_id: Option<uuid::Uuid>) -> Result<bool> {
+        // Older local runtimes returned null for a completed handoff.
+        let ready: Option<bool> = self.tab("toTerminal", session, tab, json!({"transitionId":transition_id,"deferUntilIdle":true}))?;
+        Ok(ready.unwrap_or(true))
     }
 }
 

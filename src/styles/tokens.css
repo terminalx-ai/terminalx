@@ -9,7 +9,11 @@
  * Rules that keep it honest:
  *   - Never hard-code oklch(1 0 0 / N%) in a component. Use --veil-* / --hairline*.
  *   - --card, --popover, --composer all alias --surface-card so a palette cannot
- *     set one and forget another.
+ *     set one and forget another. Glass mode veils --card only: whatever
+ *     floats over other content stays opaque.
+ *   - Text keeps three rungs, --ink-strong over --ink-muted over --ink-faint.
+ *     Both muted and faint text meet WCAG AA (4.5:1) on every surface they
+ *     sit on, veils and highlights included (inkContrast.test.ts).
  *   - Rules attach to body, never html: palette blocks carry two attributes and
  *     out-specify anything aimed at html.
  */
@@ -33,6 +37,8 @@
   --background: var(--surface-page);
   /* Behind a tab's chat and terminal: the page itself, a shade darker in dark mode. */
   --surface-chat: var(--surface-page);
+  /* A terminal's ground, edge to edge: its canvas and the space around it are one colour, never a box. */
+  --surface-terminal: var(--surface-page);
   --foreground: var(--ink-strong);
   --card: var(--surface-card);
   --card-foreground: var(--ink-strong);
@@ -75,16 +81,22 @@
 /* ---------- Mode ramps ---------- */
 
 [data-mode="dark"] {
+  --status-backlog: #c2c7d0;
+  --status-in-progress: #9ccaff;
+  --status-in-review: #e0bdff;
+  --status-done: #9cdeb6;
+  --status-canceled: #ffb3b3;
   --veil-card: oklch(1 0 0 / 5.5%);
   --veil-raised: oklch(1 0 0 / 8%);
   --veil-strong: oklch(1 0 0 / 11.5%);
-  --veil-float: color-mix(in oklab, var(--surface-card) 74%, transparent);
   --veil-selected: oklch(1 0 0 / 9%);
   --hairline: oklch(1 0 0 / 6%);
   --hairline-strong: oklch(1 0 0 / 8%);
   --border: oklch(1 0 0 / 10%);
   --surface-well: oklch(0 0 0 / 28%);
   --surface-chat: color-mix(in oklab, var(--surface-page) 88%, black);
+  /* Near black in the dark: a terminal reads as a terminal at a glance, apart from the chat. */
+  --surface-terminal: oklch(0.13 0 0);
   --surface-thumb: color-mix(in oklab, var(--surface-card) 70%, white 30%);
   --shadow-surface: none;
   --shadow-card: none;
@@ -97,10 +109,14 @@
 }
 
 [data-mode="light"] {
+  --status-backlog: #343b45;
+  --status-in-progress: #15477b;
+  --status-in-review: #642c7d;
+  --status-done: #195232;
+  --status-canceled: #812c34;
   --veil-card: oklch(1 0 0 / 60%);
   --veil-raised: oklch(0 0 0 / 4%);
   --veil-strong: oklch(0 0 0 / 10%);
-  --veil-float: color-mix(in oklab, var(--surface-card) 82%, transparent);
   --veil-selected: oklch(0 0 0 / 7%);
   --hairline: oklch(0 0 0 / 6%);
   --hairline-strong: oklch(0 0 0 / 9%);
@@ -121,14 +137,19 @@
 
 /* Den — the default. A warm charcoal with an amber accent, like a raccoon's mask. */
 [data-theme="den"][data-mode="dark"] {
+  --status-backlog: #c2c7d0;
+  --status-in-progress: #9ccaff;
+  --status-in-review: #e0bdff;
+  --status-done: #9cdeb6;
+  --status-canceled: #ffb3b3;
   --surface-page: oklch(0.205 0.006 270);
   --surface-card: oklch(0.245 0.007 270);
   --surface-raised: oklch(0.225 0.006 270);
   --surface-muted: oklch(0.29 0.008 270);
   --surface-selected: oklch(0.31 0.009 270);
   --ink-strong: oklch(0.93 0.005 80);
-  --ink-muted: oklch(0.66 0.01 270);
-  --ink-faint: oklch(0.5 0.01 270);
+  --ink-muted: oklch(0.78 0.01 270);
+  --ink-faint: oklch(0.72 0.01 270);
   --ring: oklch(0.78 0.13 70);
   --accent: oklch(0.78 0.13 70);
   --accent-fg: oklch(0.2 0.03 70);
@@ -143,14 +164,19 @@
 }
 
 [data-theme="den"][data-mode="light"] {
+  --status-backlog: #343b45;
+  --status-in-progress: #15477b;
+  --status-in-review: #642c7d;
+  --status-done: #195232;
+  --status-canceled: #812c34;
   --surface-page: oklch(0.975 0.003 80);
   --surface-card: oklch(1 0 0);
   --surface-raised: oklch(0.955 0.004 80);
   --surface-muted: oklch(0.935 0.005 80);
   --surface-selected: oklch(0.891 0.006 80);
   --ink-strong: oklch(0.22 0.01 270);
-  --ink-muted: oklch(0.48 0.01 270);
-  --ink-faint: oklch(0.62 0.01 270);
+  --ink-muted: oklch(0.41 0.01 270);
+  --ink-faint: oklch(0.48 0.01 270);
   --ring: oklch(0.6 0.14 65);
   --accent: oklch(0.6 0.14 65);
   --accent-fg: oklch(0.99 0 0);
@@ -166,14 +192,19 @@
 
 /* Slate — cool neutral greys. */
 [data-theme="slate"][data-mode="dark"] {
+  --status-backlog: #c2c7d0;
+  --status-in-progress: #9ccaff;
+  --status-in-review: #e0bdff;
+  --status-done: #9cdeb6;
+  --status-canceled: #ffb3b3;
   --surface-page: oklch(0.2 0.012 255);
   --surface-card: oklch(0.24 0.014 255);
   --surface-raised: oklch(0.22 0.013 255);
   --surface-muted: oklch(0.29 0.016 255);
   --surface-selected: oklch(0.31 0.017 255);
   --ink-strong: oklch(0.94 0.005 255);
-  --ink-muted: oklch(0.66 0.015 255);
-  --ink-faint: oklch(0.5 0.015 255);
+  --ink-muted: oklch(0.78 0.015 255);
+  --ink-faint: oklch(0.72 0.015 255);
   --ring: oklch(0.72 0.12 250);
   --accent: oklch(0.72 0.12 250);
   --accent-fg: oklch(0.15 0.03 250);
@@ -188,14 +219,19 @@
 }
 
 [data-theme="slate"][data-mode="light"] {
+  --status-backlog: #343b45;
+  --status-in-progress: #15477b;
+  --status-in-review: #642c7d;
+  --status-done: #195232;
+  --status-canceled: #812c34;
   --surface-page: oklch(0.975 0.004 255);
   --surface-card: oklch(1 0 0);
   --surface-raised: oklch(0.955 0.005 255);
   --surface-muted: oklch(0.935 0.006 255);
   --surface-selected: oklch(0.891 0.008 255);
   --ink-strong: oklch(0.22 0.015 255);
-  --ink-muted: oklch(0.48 0.015 255);
-  --ink-faint: oklch(0.62 0.015 255);
+  --ink-muted: oklch(0.41 0.015 255);
+  --ink-faint: oklch(0.48 0.015 255);
   --ring: oklch(0.55 0.14 250);
   --accent: oklch(0.55 0.14 250);
   --accent-fg: oklch(0.99 0 0);
@@ -211,14 +247,19 @@
 
 /* Moss — green-tinted, easy on the eyes at night. */
 [data-theme="moss"][data-mode="dark"] {
+  --status-backlog: #c2c7d0;
+  --status-in-progress: #9ccaff;
+  --status-in-review: #e0bdff;
+  --status-done: #9cdeb6;
+  --status-canceled: #ffb3b3;
   --surface-page: oklch(0.2 0.012 160);
   --surface-card: oklch(0.24 0.014 160);
   --surface-raised: oklch(0.22 0.013 160);
   --surface-muted: oklch(0.29 0.016 160);
   --surface-selected: oklch(0.31 0.017 160);
   --ink-strong: oklch(0.94 0.008 120);
-  --ink-muted: oklch(0.66 0.02 150);
-  --ink-faint: oklch(0.5 0.02 150);
+  --ink-muted: oklch(0.78 0.02 150);
+  --ink-faint: oklch(0.72 0.02 150);
   --ring: oklch(0.76 0.13 150);
   --accent: oklch(0.76 0.13 150);
   --accent-fg: oklch(0.15 0.03 150);
@@ -233,14 +274,19 @@
 }
 
 [data-theme="moss"][data-mode="light"] {
+  --status-backlog: #343b45;
+  --status-in-progress: #15477b;
+  --status-in-review: #642c7d;
+  --status-done: #195232;
+  --status-canceled: #812c34;
   --surface-page: oklch(0.975 0.006 140);
   --surface-card: oklch(1 0 0);
   --surface-raised: oklch(0.955 0.008 140);
   --surface-muted: oklch(0.935 0.01 140);
   --surface-selected: oklch(0.891 0.012 140);
   --ink-strong: oklch(0.22 0.02 150);
-  --ink-muted: oklch(0.48 0.02 150);
-  --ink-faint: oklch(0.62 0.02 150);
+  --ink-muted: oklch(0.41 0.02 150);
+  --ink-faint: oklch(0.48 0.02 150);
   --ring: oklch(0.55 0.14 150);
   --accent: oklch(0.55 0.14 150);
   --accent-fg: oklch(0.99 0 0);
@@ -257,14 +303,19 @@
 /* Ember — dark only; deep plum with a coral accent. */
 [data-theme="ember"][data-mode="dark"],
 [data-theme="ember"][data-mode="light"] {
+  --status-backlog: #c2c7d0;
+  --status-in-progress: #9ccaff;
+  --status-in-review: #e0bdff;
+  --status-done: #9cdeb6;
+  --status-canceled: #ffb3b3;
   --surface-page: oklch(0.19 0.02 330);
   --surface-card: oklch(0.235 0.022 330);
   --surface-raised: oklch(0.215 0.021 330);
   --surface-muted: oklch(0.28 0.024 330);
   --surface-selected: oklch(0.3 0.025 330);
   --ink-strong: oklch(0.94 0.01 30);
-  --ink-muted: oklch(0.67 0.02 330);
-  --ink-faint: oklch(0.5 0.02 330);
+  --ink-muted: oklch(0.78 0.02 330);
+  --ink-faint: oklch(0.72 0.02 330);
   --ring: oklch(0.74 0.16 25);
   --accent: oklch(0.74 0.16 25);
   --accent-fg: oklch(0.15 0.03 25);
@@ -280,13 +331,20 @@
 
 /* ---------- Glass (macOS vibrancy) ---------- */
 
-/* Windowed on macOS the body tints the desktop instead of painting flat. */
+/*
+ * Windowed on macOS the body tints the desktop instead of painting flat.
+ * index.html sets data-glass on a Mac unless the reader turned on Reduce
+ * transparency. Glass is for the window's own large surfaces only, the
+ * sidebar and title bar, where nothing lies behind their text. Anything that
+ * floats over other content (tooltips, hover cards, menus, popovers, dialogs,
+ * toasts, the composer) keeps --popover and --composer, which stay the opaque
+ * --surface-card here: a translucent panel lets the text behind it show
+ * through its own (PRO-336).
+ */
 html[data-glass] body {
   --backdrop-top: color-mix(in oklab, var(--surface-page) var(--vibrancy-alpha), transparent);
   --backdrop-bottom: color-mix(in oklab, var(--surface-page) var(--vibrancy-alpha), transparent);
   --card: var(--veil-card);
-  --popover: var(--veil-float);
-  --composer: var(--veil-float);
   --secondary: var(--veil-raised);
   --muted: var(--veil-raised);
   --surface-selected: var(--veil-selected);

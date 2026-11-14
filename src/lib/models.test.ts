@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@/lib/api";
-import { BYPASS_MODE, EFFORT_LABEL, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelLabel, modelNote, modelOptionText, offeredOn, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, upgradeHint } from "@/lib/models";
+import { BYPASS_MODE, EFFORT_LABEL, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelLabel, modelNote, modelOptionText, offeredOn, onAgentSettingsRequest, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, upgradeHint } from "@/lib/models";
 
 const model = (id: string, label: string, upgrade: string | null = null): ModelInfo => ({
   id,
@@ -172,5 +172,17 @@ describe("a permission mode reported by the agent (#417)", () => {
     );
     expect(pendingSettingsNote({ requestedEffort: "high", requestedPermissionMode: "auto" }, [], false)).toBe("Switching to High effort and Auto mode…");
     expect(pendingSettingsNote({}, [], true)).toBeNull();
+  });
+});
+
+describe("the way from an empty model picker to Settings › Agents", () => {
+  it("reaches whoever listens, and stops reaching one that has gone", () => {
+    const open = vi.fn();
+    const off = onAgentSettingsRequest(open);
+    requestAgentSettings();
+    expect(open).toHaveBeenCalledTimes(1);
+    off();
+    requestAgentSettings();
+    expect(open).toHaveBeenCalledTimes(1);
   });
 });

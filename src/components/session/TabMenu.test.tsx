@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", async () => {
@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: native.ask, message: vi.fn(),
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: native.reveal, openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
+vi.mock("@/lib/terminalWebgl", () => ({ showWebgl: vi.fn(), hideWebgl: vi.fn(), recoverWebgl: vi.fn() }));
 // The menu's parts drawn in place, submenus open: what is offered is what is in the document.
 vi.mock("@/components/ui/menu", () => {
   const Item = ({ children, onSelect, disabled }: { children: ReactNode; onSelect?: () => void; disabled?: boolean }) => (
@@ -41,8 +42,12 @@ const { bootBrowser, refreshBrowserPages } = await import("@/lib/browser");
 const { dropSessionTerminals, openTerminal, setSelectedAgent, getTerminalState } = await import("@/lib/terminal");
 const { getTabState, layoutOf, resetTabLayouts } = await import("@/lib/tabLayouts");
 const { useTabRow } = await import("@/lib/sessionTabs");
-const { useDialogs } = await import("@/lib/dialogs");
+const { useDialogs, closeAgentHandoff } = await import("@/lib/dialogs");
 const { TabMenuItems } = await import("./TabMenu");
+const { agent } = await import("@/lib/api");
+const { peekInstance, disposeInstance } = await import("@/lib/terminal");
+const { resetTabViews, tabViewOf, useTabViews } = await import("@/lib/tabViews");
+const { TerminalView } = await import("@/components/terminal/TerminalView");
 
 const flush = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
 
@@ -57,7 +62,7 @@ function Menu({ tab, readOnlyReason }: { tab: string; readOnlyReason?: string })
   return (
     <>
       {target ? <TabMenuItems row={row} tab={target} selected={selected} readOnlyReason={readOnlyReason} /> : null}
-      <output data-testid="asked">{JSON.stringify({ rename: dialogs.renameTab, close: dialogs.closeTabs })}</output>
+      <output data-testid="asked">{JSON.stringify({ rename: dialogs.renameTab, close: dialogs.closeTabs, handoff: dialogs.agentHandoff })}</output>
       <output data-testid="row">{row.tabs.map((item) => item.key).join(",")}</output>
     </>
   );
@@ -77,6 +82,7 @@ const layout = () => layoutOf(getTabState(), FEATURE);
 let shell = "";
 
 beforeEach(async () => {
+  closeAgentHandoff();
   backend.reset();
   await bootSessions();
   await refreshSessions();
@@ -93,9 +99,74 @@ beforeEach(async () => {
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn(async () => undefined) } });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  disposeInstance("tab:b1");
+  resetTabViews();
+  vi.restoreAllMocks();
+});
 
 describe("a tab's right-click menu", () => {
+  it.each([["a1", "codex", "Codex"], ["a2", "claude", "Claude Code"], ["b1", "claude", "Claude Code"]])("hands off the clicked tab %s in its own workspace", async (id, harness, name) => {
+    render(<Menu tab={`agent:${id}`} />);
+    await choose(`Hand off to ${name}`);
+    const request = asked().handoff;
+    expect(request).toMatchObject({ harness, source: { id }, session: { id: id === "b1" ? "b" : "a", cwd: FEATURE } });
+    expect(backend.callsOf("add_tab")).toEqual([]);
+    expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
+    await choose(`Hand off to ${name}`);
+    expect(asked().handoff).toEqual(request);
+  });
+  it("hides handoff when the counterpart is not installed", () => {
+    const store = getSessionStore();
+    const codex = store.harnesses.find((harness) => harness.id === "codex")!;
+    const available = codex.available;
+    codex.available = false;
+    try {
+      render(<Menu tab="agent:a1" />);
+      expect(offered("Hand off to Codex")).toBe(false);
+    } finally { codex.available = available; }
+  });
+  it.each([
+    { name: "PTY Codex", harness: "codex", transport: "pty" },
+    { name: "native Codex", harness: "codex", transport: "experimentalCodexStdio" },
+    { name: "Claude", harness: "claude", transport: "pty" },
+  ] as const)("switches an unmounted $name tab in another session and reuses its attachment when opened", async ({ harness, transport }) => {
+    // Draw the actual menu, but no SessionView or TerminalView for session b.
+    const target = backend.sessions.find((entry) => entry.id === "b")!;
+    Object.assign(target.tabs[0], { harness, transport });
+    await refreshSessions();
+    const tab = getSessionStore().sessions.find((entry) => entry.id === "b")!.tabs[0];
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation((() =>
+      new Proxy({}, { get: () => () => ({ width: 8, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }), set: () => true })) as never);
+    window.matchMedia ??= (() => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })) as never;
+    vi.spyOn(agent, "tabPane").mockResolvedValue({ sessionId: "b", tabId: "b1", paneId: "tab:b1", command: harness, harness });
+    const handoff = vi.spyOn(agent, "tabToTerminal").mockResolvedValue(true);
+    expect(peekInstance("tab:b1")).toBeUndefined();
+    expect(getSessionStore().selectedSessionId).toBe("a");
+    render(<Menu tab="agent:b1" />);
+    const view = renderHook(useTabViews);
+
+    await choose("Switch to terminal view");
+    await waitFor(() => {
+      expect(view.result.current.errors.b1).toBeNull();
+      expect(tabViewOf(tab)).toBe("terminal");
+    });
+    expect(getSessionStore().selectedSessionId).toBe("a");
+    expect(handoff).toHaveBeenCalledTimes(transport === "experimentalCodexStdio" ? 1 : 0);
+    expect(backend.callsOf("pty_attach_sized")).toHaveLength(1);
+    expect(backend.callsOf("pty_attach_sized")[0].id).toBe("tab:b1");
+    const attached = peekInstance("tab:b1")!;
+    expect(attached.el.isConnected).toBe(false);
+
+    // Opening the destination later uses the already attached terminal.
+    render(<TerminalView id="tab:b1" visible />);
+    expect(peekInstance("tab:b1")).toBe(attached);
+    expect(attached.el.isConnected).toBe(true);
+    await flush();
+    expect(backend.callsOf("pty_attach_sized")).toHaveLength(1);
+  });
+
   it("offers an agent tab everything that applies to one, and nothing that does not", () => {
     render(<Menu tab="agent:a3" />);
     expect(items()).toEqual([
@@ -103,6 +174,7 @@ describe("a tab's right-click menu", () => {
       "Switch to terminal view",
       "Duplicate tab",
       "Fork conversation",
+      "Hand off to Codex",
       "Open in floating window",
       "Restart agent",
       "Copy",
@@ -117,7 +189,9 @@ describe("a tab's right-click menu", () => {
       "Archive",
       "Share…",
       "Link to issue…",
+      "Link pull request…",
       "Delete…",
+      "Split right",
       "Move tab",
       "Move tab left",
       "Move tab right",
@@ -303,7 +377,7 @@ describe("a tab's right-click menu", () => {
     const reason = "View only: this session is shared with you to watch.";
     render(<Menu tab="agent:a2" readOnlyReason={reason} />);
     expect(screen.getByRole("note").textContent).toBe(reason);
-    const off = ["Rename…", "Duplicate tab", "Fork conversation", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs…", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
+    const off = ["Rename…", "Duplicate tab", "Fork conversation", "Hand off to Claude Code", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs…", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
     for (const name of off) expect(item(name).getAttribute("aria-disabled")).toBe("true");
     // Looking is still allowed.
     for (const name of ["Tab title", "Working directory", "Reveal working directory in the file manager", "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();

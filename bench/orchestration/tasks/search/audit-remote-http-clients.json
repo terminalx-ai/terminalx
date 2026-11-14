@@ -1,0 +1,21 @@
+{
+  "id": "audit-remote-http-clients",
+  "shape": "search",
+  "title": "Find every native HTTP client that can send data off the machine",
+  "prompt": "A data privacy mode is coming. When it is on, no native HTTP request may leave this machine unless it passes one shared gate, so every place that builds its own HTTP client for remote traffic must be moved onto that gate. Audit the Rust code under `src-tauri/`: find every source file that builds a `ureq` agent with `ureq::AgentBuilder::new()` for requests that can reach a remote service (the TerminalX cloud, GitHub, Linear, model or file downloads, usage endpoints, and so on). Leave out files whose agents only talk to a process on this machine (localhost).\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "22e6b853b364b43b7fe2f6f4559a1f69780e7faf",
+  "solution": "audit-remote-http-clients.patch",
+  "check": {
+    "run": "node .bench-check/audit-remote-http-clients.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-remote-http-clients.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "1baf1075126a",
+    "pr": 817
+  },
+  "notes": "Large (19 of 21 files), Rust only, cloud and integration modules. Two files at the start commit build agents only for localhost; listing both fails the precision bar (0.95)."
+}

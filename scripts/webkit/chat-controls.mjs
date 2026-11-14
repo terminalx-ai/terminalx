@@ -5,8 +5,7 @@
 import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { webkit } from 'playwright';
-import { open, openConversation, serve, tab } from './harness.mjs';
+import { launch, open, openConversation, serve, tab } from './harness.mjs';
 
 const table = '| Item | Current status |\n| --- | --- |\n| [Example task](https://example.com/task) | **Active:** checking a long description that should wrap within its cell. |\n| Another example with a longer title | Waiting for validation and a follow-up review. |\n| Completed task | **Done:** all example checks passed. |';
 const rows = [
@@ -56,13 +55,13 @@ async function download(page, trigger, format, expected) {
  assert.equal(await readFile(await file.path(), 'utf8'), expected, `${format} exact bytes`);
 }
 try {
- browser = await webkit.launch({ headless: !process.env.WEBKIT_CONTROLS_HEADED });
+ browser = await launch({ headless: !process.env.WEBKIT_CONTROLS_HEADED });
  for (const floating of [false,true]) {
   const extra = `localStorage.setItem("raccoon.prefs", JSON.stringify({linkBrowser:"system",linkBrowserChosen:true})); window.__PW_STUB__.answers.load_tab_events = ({tabId}) => [{id:'controls',seq:1,sessionId:'local-s1',tabId,harness:'claude',ts:'2026-10-24T00:00:00Z',payload:{type:'assistant_text',text:${JSON.stringify(text)}}}];
    window.__copies = []; const nativeClipboard = navigator.clipboard;
    Object.defineProperty(navigator, 'clipboard', {value:{write:async items => { if (${clipboard}) await nativeClipboard.write(items); window.__copies.push(await (await items[0].getType('text/plain')).text()); },writeText:async text=>{if (${clipboard}) await nativeClipboard.writeText(text); window.__copies.push(text);}}});`;
   const page = await open(browser, server.url, {cloud:false,localProjects:1,localSession:true,floating}, {width:1100,height:800}, {extra});
-  if (!floating) { await openConversation(page,'claude tab'); await tab(page,'gemini tab').click(); }
+  if (!floating) { await openConversation(page, 'Local long session'); await tab(page,'gemini tab').click(); }
   const chat = page.locator('[data-chat-scroller]:visible');
   const wrapper = chat.locator('[data-streamdown="table-wrapper"]').first();
   await wrapper.waitFor();

@@ -36,6 +36,7 @@ pub struct IssueTemplate {
 
 /// Cloud repositories use the reader's local `gh`; local projects keep their checkout templates.
 pub fn load(project: &Path) -> OpResult<Vec<IssueTemplate>> {
+    let _request = crate::github_process::scope();
     let Some(repo) = crate::issues::cloud_project_repo(project) else { return Ok(list(project)) };
     let cwd = crate::issues::gh_dir(project);
     list_repository(&mut |method, path, body| github::gh_api(&cwd, method, path, body), &repo)

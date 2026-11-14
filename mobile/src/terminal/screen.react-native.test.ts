@@ -109,7 +109,7 @@ describe("the phone's terminal screen under React Native's globals", () => {
     // A full-screen agent CLI: alternate screen, cursor addressing, bracketed paste.
     await screen.write("\x1b[?1049h\x1b[?2004h\x1b[2J\x1b[2;3Hmiddle\x1b[3;1H> prompt");
     expect(text(screen)).toEqual(["", "  middle", "> prompt"]);
-    expect(screen.modes()).toEqual({ bracketedPaste: true, applicationCursorKeys: false });
+    expect(screen.modes()).toEqual({ bracketedPaste: true, applicationCursorKeys: false, mouse: false, alternate: true });
 
     // Following the Mac's pane size.
     await screen.write("\x1b[?1049l");

@@ -97,6 +97,7 @@ pub struct PullRequestItem {
 }
 
 pub fn overview(project: &Path) -> ProjectOverview {
+    let _request = crate::github_process::scope();
     if !git::is_repo(project) {
         return ProjectOverview { pull_request_note: Some("Not a Git repository.".into()), ..Default::default() };
     }
@@ -221,7 +222,9 @@ fn pull_requests(project: &Path, today: NaiveDate) -> anyhow::Result<PullRequest
 /// Why there are no pull requests, in a line for the page.
 fn gh_note(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("not found") && lower.contains("gh") || lower.contains("no such file") {
+    if error.contains(crate::data_privacy::MESSAGE) {
+        crate::data_privacy::MESSAGE.into()
+    } else if lower.contains("not found") && lower.contains("gh") || lower.contains("no such file") {
         "Install the GitHub CLI (gh) to see pull requests.".into()
     } else if lower.contains("auth") || lower.contains("login") {
         "Sign in to the GitHub CLI (gh auth login) to see pull requests.".into()

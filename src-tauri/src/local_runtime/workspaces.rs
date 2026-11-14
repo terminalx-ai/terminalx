@@ -41,6 +41,7 @@ struct Removal {
 }
 
 pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &str, params: Value) -> Result<Value> {
+    let _github_request = crate::github_process::scope();
     if method == "archiveSupport" { return Ok(json!(true)); }
     // Cancellation must not wait behind the operation it is cancelling.
     if method == "cancelSizes" {
@@ -59,6 +60,12 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
     manager.accepting_work()?;
     let stop = |entry: &SessionEntry| manager.stop_session_confirmed(entry).map_err(|error| format!("{error:#}"));
     match method {
+        "previewRestore" => Ok(serde_json::to_value(crate::workspace_restore::preview(text(&params, "sessionId")?)?)?),
+        "restoreWorkspace" => {
+            let expected = serde_json::from_value(params["expected"].clone())?;
+            let stop = |entry: &SessionEntry| manager.stop_session_confirmed(entry);
+            Ok(serde_json::to_value(crate::workspace_restore::restore(sink, text(&params, "sessionId")?, &expected, params["newBranch"].as_str(), &stop)?)?)
+        }
         "scan" => host(manager, |host| {
             let paths: Option<Vec<String>> = serde_json::from_value(params["projectPaths"].clone())?;
             Ok(serde_json::to_value(cleanup::scan(host,paths.as_deref())?)?)

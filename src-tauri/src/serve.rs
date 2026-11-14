@@ -155,6 +155,9 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    #[cfg(target_os = "linux")]
+    if let Some(code) = crate::run_pty_supervisor() { return code; }
+    if crate::startup::probe_cli() { return 0; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {
         return 0;
@@ -251,6 +254,7 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
+    crate::data_privacy::initialize();
     // A runtime taking over from the one this process was (#765) holds the
     // home already: its lock, its sockets and its terminals came with it.
     #[cfg(unix)]
@@ -566,6 +570,9 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         Arc::new(crate::status::StatusState::default()),
         control_endpoint.clone(),
     );
+    if cfg!(target_os = "macos") && options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
+    }
     manager.follow_pane_exits();
     // Terminals first, then the tabs whose CLIs run in them; the hooks those
     // CLIs fire are answered only once their tabs are there to hear them.
@@ -574,6 +581,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         Some(adopted) => Some(take_over(adopted, &sink, &terminals, &manager)?),
         None => None,
     };
+    crate::workspace_setup::recover(&manager);
     let hooked = manager.clone();
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
@@ -658,6 +666,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         crate::local_runtime::platform::install(&manager,lifetime,&(sink.clone() as Arc<dyn crate::sink::EventSink>));
         #[cfg(unix)]
         crate::store::environment::start(lifetime)?;
+        #[cfg(unix)]
+        crate::agent_keys::start(lifetime)?;
         lifetime.ready();
         if options.relay_link.is_none() && !options.self_test {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());
@@ -695,28 +705,49 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     let record = &mut adopted.record;
     log::info!("taking over {} terminal(s) and {} agent tab(s) from runtime {}", record.panes.len(), record.tabs.len(), record.from);
     // Before anything here starts a child of its own.
-    crate::local_runtime::handover::reap_strays(&record.panes.iter().filter_map(|pane| pane.pid).collect());
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut kept: std::collections::HashSet<u32> = record.panes.iter().filter_map(|pane| pane.pid).collect();
+    // Supervisors are this process's children too, and theirs to reap (#467).
+    #[cfg(target_os = "linux")]
+    kept.extend(record.panes.iter().filter_map(|pane| pane.supervisor.as_ref()).chain(record.supervised.iter().map(|launch| &launch.supervisor)).map(|supervisor| supervisor.state.supervisor()));
+    crate::local_runtime::handover::reap_strays(&kept);
     let panes = std::mem::take(&mut record.panes);
     let retained = std::mem::take(&mut record.retained);
     let groups = std::mem::take(&mut record.groups);
+    #[cfg(target_os = "linux")]
+    let supervised = std::mem::take(&mut record.supervised);
     let tabs = std::mem::take(&mut record.tabs);
     let frames = std::mem::take(&mut record.frames);
     let decisions = std::mem::take(&mut record.decisions);
+    // Before any tab taken over can record a change.
+    crate::store::activity::carry_on(std::mem::take(&mut record.activity));
     let (own, published) = (record.control.own, record.control.published);
     let emit: Arc<dyn EventSink> = sink.clone();
     for pane in panes {
         let master = adopted.take(pane.fd)?;
         let id = pane.id.clone();
+        #[cfg(target_os = "linux")]
+        let supervised = match pane.supervisor { Some(supervisor) => Some((supervisor.state, adopted.take(supervisor.fd)?)), None => None };
         let frozen = crate::pty::FrozenPane {
             id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: pane.environment.unwrap_or_else(|| crate::store::environment::Stamp::unconfigured(&pane.cwd)), cwd: pane.cwd, created: pane.created,
             tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
-            quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed,
+            quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed, docked: pane.docked,
+            #[cfg(target_os = "linux")]
+            supervised,
         };
         if let Err(error) = terminals.adopt(emit.clone(), frozen) {
-            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched");
+            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched, or, under a supervisor whose channel is let go, is ended by it");
         }
     }
     terminals.adopt_rest(retained, groups);
+    #[cfg(target_os = "linux")]
+    for launch in supervised {
+        let id = launch.id.clone();
+        let socket = adopted.take(launch.supervisor.fd)?;
+        if let Err(error) = terminals.adopt_supervised(&launch.id, launch.supervisor.state, socket) {
+            log::error!("take over the supervised launch of {id}: {error:#}; its supervisor, its channel let go, ends what it runs");
+        }
+    }
     let mut waits = Vec::new();
     for tab in tabs {
         let name = format!("{}/{}", tab.session_id, tab.tab_id);

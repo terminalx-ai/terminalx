@@ -1,17 +1,18 @@
-export type PairingStage = "parsing" | "transport" | "host-verification" | "credential-installation" | "persistence";
-export type PairingCategory = "invalid-offer" | "expired-offer" | "connection-failed" | "relay-rejected" | "invalid-host" | "credential-rejected" | "save-failed";
+export type PairingStage = "parsing" | "transport" | "approval" | "host-verification" | "credential-installation" | "persistence";
+export type PairingCategory = "invalid-offer" | "expired-offer" | "connection-failed" | "relay-rejected" | "not-approved" | "invalid-host" | "credential-rejected" | "save-failed";
 
 const recovery: Record<PairingCategory, string> = {
   "invalid-offer": "This pairing code is invalid or unsupported. Generate a fresh offer in Settings → Devices on your Mac and copy the full code.",
   "expired-offer": "This pairing offer has expired. Generate a fresh offer in Settings → Devices on your Mac. Check both devices’ clocks if a new offer also expires immediately.",
   "connection-failed": "Couldn’t establish a secure connection to your Mac. Keep TerminalX open, check Relay and your network, then retry. If this offer was already used, generate a fresh one.",
   "relay-rejected": "Relay rejected this pairing attempt. The offer may have expired or already been used. Retry to recover an interrupted pairing, or generate a fresh offer on your Mac.",
+  "not-approved": "Your Mac didn’t approve this phone, or the request timed out. On your Mac, generate a new code, scan it, and approve when the fingerprints match.",
   "invalid-host": "Couldn’t verify the Mac’s secure pairing response. Update both apps and generate a fresh pairing offer.",
   "credential-rejected": "Couldn’t finish installing the pairing credential. Keep TerminalX open on your Mac and retry to recover this attempt. If it still fails, generate a fresh offer.",
   "save-failed": "Couldn’t save the pairing on this phone. Unlock the phone and retry to recover the pairing.",
 };
 const categoryForStage: Record<PairingStage, PairingCategory> = {
-  parsing: "invalid-offer", transport: "connection-failed", "host-verification": "invalid-host",
+  parsing: "invalid-offer", transport: "connection-failed", approval: "not-approved", "host-verification": "invalid-host",
   "credential-installation": "credential-rejected", persistence: "save-failed",
 };
 

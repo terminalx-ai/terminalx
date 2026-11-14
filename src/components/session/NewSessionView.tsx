@@ -2,7 +2,7 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Github, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
+import { Check, ChevronDown, Cloud, FileCode2, FolderOpen, FolderGit2, GitBranch, Github, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,20 +16,21 @@ import {
 } from "@/components/ui/menu";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
 import { insertNewLine } from "@/components/chat/Composer";
-import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
+import { AttachButton, DropHint, useAttachments } from "@/components/chat/useImageAttachments";
+import { AttachmentChips } from "@/components/chat/ComposerAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
-import { api, errorMessage, type ImageInput, type Issue } from "@/lib/api";
+import { api, errorMessage, type FileInput, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
-import { clearNewSessionPreset, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
 import { AgentSetup } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
-import { BranchPicker, type BranchTarget } from "./BranchPicker";
-import { IssuePicker } from "./IssuePicker";
+import { StartFromPicker, type BranchTarget } from "./StartFromPicker";
+import { usePrMention } from "@/components/chat/usePrMention";
 import { SessionOptions } from "./SessionOptions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { usePromptTextProps } from "@/lib/autocorrect";
@@ -37,6 +38,9 @@ import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
+import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/lib/orchestrateStart";
+import { showRunView } from "@/lib/orchestration";
+import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -45,6 +49,12 @@ import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
+
+/** The first line of a setup script, with a mark when there is more, or null when none is saved. */
+function setupScriptSummary(script: string | undefined): string | null {
+  const lines = (script ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length ? lines[0] + (lines.length > 1 ? " …" : "") : null;
+}
 
 /** The dialog's unsent prompt (see `modal`). */
 let dialogDraft = "";
@@ -67,7 +77,8 @@ export function NewSessionView({
   compact = false,
   modal = false,
 }: {
-  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[]) => void;
+  /** `files`: attached files besides images (PRO-290), passed only when there are any, to be stored once the session exists. */
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[], files?: FileInput[]) => void;
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
   /** Start a quick chat: a session with no project. */
@@ -78,7 +89,9 @@ export function NewSessionView({
   modal?: boolean;
 }) {
   const store = useSessionStore();
-  const quick = quickOverride ?? store.newSessionQuick ?? false;
+  const quick = quickOverride ?? false;
+  const projectless = quick || (quickOverride === undefined && store.newSessionChat);
+  const defaultFolder = quick ? "Scratch folder" : "Chats folder";
   const prefs = usePrefs();
   // In the dialog, an unsent prompt outlives a stray Escape or click outside: it is there again when the dialog reopens.
   const [text, setText] = useState(() => (modal ? dialogDraft : ""));
@@ -97,10 +110,10 @@ export function NewSessionView({
   const ref = useRef<HTMLTextAreaElement>(null);
   const textProps = usePromptTextProps();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
-  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A quick chat is local.
+  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A projectless chat is local.
   const cloudDraft = useCloudDraft();
-  const cloud = quick ? null : cloudDraft;
-  /** A folder the quick chat runs in instead of its scratch folder; it does not become a project. */
+  const cloud = projectless ? null : cloudDraft;
+  /** A folder the chat runs in instead of its default directory; it does not become a project. */
   const [quickCwd, setQuickCwd] = useState<string | null>(null);
   const folderMenu = useRowMenu();
   const cloudChoices = useCloudProjectChoices();
@@ -112,15 +125,19 @@ export function NewSessionView({
   const [checkoutBranch, setCheckoutBranch] = useState<string | null>(null);
   /** The issue the session starts from: its prompt, branch name and link. */
   const [issue, setIssue] = useState<Issue | null>(null);
+  const [pullRequest, setPullRequest] = useState<PullRequest | null>(null);
+  const [startFromOpen, setStartFromOpen] = useState(!!store.startFromRequest);
+  useEffect(() => { if (store.startFromRequest) setStartFromOpen(true); }, [store.startFromRequest]);
+  const [caret, setCaret] = useState(0);
 
   const preset = store.newSessionPreset;
   // The rail is what the reader last pointed at, so it beats the project they
   // happened to start a session in some other day; a preset beats both.
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
-  const project = quick ? null : (store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null);
-  // A quick chat cuts no worktree, whatever the folder it is pointed at.
-  const isGit = quick ? false : cloud ? true : project?.kind !== "folder";
-  const useWorktree = isGit && (!!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
+  const project = projectless ? null : (store.projects.find((p) => p.path === wanted) ?? (preset ? null : store.projects[0]) ?? null);
+  // A projectless chat cuts no worktree, whatever the folder it is pointed at.
+  const isGit = projectless ? false : cloud ? true : project?.kind !== "folder";
+  const useWorktree = isGit && (!!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
@@ -130,14 +147,21 @@ export function NewSessionView({
     const state = readiness.values?.[item.id]?.state;
     return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
   });
+  // Only the agents that are installed and whose local login was found just now: a guess is not "signed in".
+  const signedIn = cloud ? [] : harnesses.filter((item) => item.available && readiness.values?.[item.id]?.state === "ready");
+  const setupCommand = !projectless && !cloud ? setupScriptSummary(project?.scripts?.setup) : null;
   const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
   const { harness, modelId, effort, mode } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
-    quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
+    projectless ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
     cloud ? "Cloud workspaces require a person to merge." : undefined,
     // A picked issue makes this a session started from an issue: switches nobody touched follow it.
     issue ? "issue" : "session");
+  // Orchestrate (PRO-337): a session of a local git project can lead a run; a cloud draft, a chat or the compact window cannot.
+  const orchestrateShown = useOrchestrateOffered({ local: !projectless && !cloud && !!project, git: isGit, cloud: !!cloud, quick: projectless, compact });
+  /** The start in progress is an Orchestrate start. */
+  const [orchestrating, setOrchestrating] = useState(false);
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -172,6 +196,7 @@ export function NewSessionView({
   /** An issue names the branch after itself, as a session started from the Issues list does. */
   const pickIssue = (picked: Issue) => {
     setIssue(picked);
+    setPullRequest(null);
     if (!project || preset?.cwd || !useWorktree) return;
     api
       .previewWorkspaceName(project.path, issueWorktreeName(picked.identifier, picked.title))
@@ -187,7 +212,8 @@ export function NewSessionView({
   useEffect(() => {
     setIssue(null);
     setCheckoutBranch(null);
-  }, [project?.path, !!cloud, quick]); // eslint-disable-line react-hooks/exhaustive-deps
+    setPullRequest(null);
+  }, [project?.path, !!cloud, projectless]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const branchTarget: BranchTarget = preset?.cwd
     ? { kind: "open", cwd: preset.cwd }
@@ -198,11 +224,21 @@ export function NewSessionView({
         : { kind: "open", cwd: project?.path ?? "" };
   const pickBranch = (next: BranchTarget) => {
     if (!project) return;
+    setPullRequest(null);
     setCheckoutBranch(next.kind === "existing" ? next.branch : null);
     if (next.kind === "open" && next.cwd !== project.path) return startSessionIn(project.path, next.cwd);
-    clearNewSessionPreset();
+    startSessionIn(project.path, null, next.kind === "new" ? preset?.fromBranch : undefined);
     setUseWorktree(next.kind !== "open");
   };
+
+  const pickPr = (pr: PullRequest) => {
+    clearNewSessionPreset();
+    setCheckoutBranch(null);
+    setIssue(null);
+    setUseWorktree(true);
+    setPullRequest(pr);
+  };
+  const prMention = usePrMention(!cloud && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { inline: true });
 
   const pickProject = async () => {
     try {
@@ -217,18 +253,19 @@ export function NewSessionView({
   useDictationShortcuts(dictation);
   const keymap = useKeymap();
   const sendKeys = keymap["composer.send"][0];
-  const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
-  const hasImages = attach.attachments.length > 0;
+  const attach = useAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
+  // Refused chips are never sent, and alone make no prompt.
+  const hasImages = attach.images.length + attach.files.length > 0;
 
-  // A screenshot alone is a prompt, as it is in the session composer.
+  // A screenshot or a file alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
     () =>
       cloud
         ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
-        : quick
+        : projectless
           ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
-          : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
-    [cloud, quick, project, harness, available, text, hasImages, issue, useWorktree, preset?.cwd, workspaceName, busy, confirm],
+          : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue || !!pullRequest) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy && !prMention.attaching,
+    [cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -309,8 +346,8 @@ export function NewSessionView({
     }
   };
 
-  /** Start a quick chat: no project, no worktree; the first prompt is sent as for any session. */
-  const createQuick = async () => {
+  /** Share the composer without changing ordinary chats into disposable quick chats. */
+  const createProjectless = async () => {
     if (!harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
     setBusy(true);
@@ -321,12 +358,14 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
+      const files = attach.files;
+      const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, text, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, text, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, text, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -334,11 +373,13 @@ export function NewSessionView({
     }
   };
 
-  const create = async () => {
-    if (quick) return createQuick();
+  const create = async (orchestrateAsked = false) => {
+    if (projectless) return createProjectless();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
+    const orchestrate = orchestrateAsked && orchestrateShown;
     if (dictation.dictating) await stopDictation();
+    setOrchestrating(orchestrate);
     setBusy(true);
     setError(null);
     try {
@@ -347,11 +388,12 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       // The backend names an untitled session itself, so an image-only prompt
       // sends an empty title rather than inventing one here.
-      const title = (text.trim().split("\n")[0] || issue?.title || "").slice(0, 60);
+      const title = (text.trim().split("\n")[0] || issue?.title || pullRequest?.title || "").slice(0, 60);
       const images = attach.images;
+      const files = attach.files;
       // Named for the work: the issue's name when there is one, else the prompt's words; the drawn name when they say nothing.
       // An existing branch's worktree is named after the branch.
-      const named = checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
+      const named = pullRequest ? `pr-${pullRequest.number}-${pullRequest.title}` : checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
       const worktreeName = named ? await api.previewWorkspaceName(project.path, named).catch(() => workspaceName) : workspaceName;
       const s = await api.createSession({
         ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}),
@@ -361,24 +403,31 @@ export function NewSessionView({
         onMain: !preset?.cwd && !useWorktree,
         worktreeName: !preset?.cwd && useWorktree ? worktreeName : null,
         checkoutBranch: !preset?.cwd && useWorktree ? checkoutBranch : null,
+        ...(pullRequest ? { checkoutPr: pullRequest.number } : {}),
         baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
+        // Any run it leads waits for the person's Approve, whatever the project's setting.
+        ...(orchestrate ? { orchestrate: true } : {}),
       });
       upsertSession(s);
-      let first = text;
+      let first = pullRequest ? [text.trim(), `Continue work on pull request #${pullRequest.number}: ${pullRequest.title}\n${pullRequest.url}`].filter(Boolean).join("\n\n") : text;
       if (issue) {
         const ref = { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url };
         // The link is a convenience; a session that could not be linked still starts.
         await linkSessionIssue(s.id, ref).catch((cause) => console.error("the new session was not linked to its issue", cause));
         first = [text.trim(), await issuePromptWithComments(project.path, issue)].filter(Boolean).join("\n\n");
       }
-      const prompt = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      const launched = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      // The plan-a-run request ends the first prompt, and the session opens on its Run tab.
+      const prompt = orchestrate ? orchestratePrompt(launched) : launched;
+      if (orchestrate) showRunView(s.id, true);
       setText("");
       setIssue(null);
       attach.clear();
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, prompt, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, prompt, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, prompt, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -387,8 +436,8 @@ export function NewSessionView({
   };
 
   const projectButton = "flex h-8 min-w-0 items-center gap-1.5 rounded-md px-2 text-[14px] font-medium text-foreground transition-colors hover:bg-veil-raised";
-  const localGit = !quick && !cloud && isGit && !!project;
-  const branchInfo = quick ? null : cloud ? (
+  const localGit = !projectless && !cloud && isGit && !!project;
+  const branchInfo = projectless ? null : cloud ? (
     <span className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
       <Cloud className="size-3.5 shrink-0" /> {cloud.orgName} cloud
     </span>
@@ -420,6 +469,7 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
+          {!cloud && !projectless && preset && !project && <p role="alert" className="mb-3 text-sm text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
           {!cloud && (
             <div className="mb-3 space-y-2">
               {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
@@ -439,16 +489,16 @@ export function NewSessionView({
             </div>
           )}
 
-          <div className={cn("relative overflow-hidden rounded-2xl bg-composer glass shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
+          <div className={cn("relative overflow-hidden rounded-2xl bg-composer shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-12 items-center gap-1 border-b border-hairline px-2">
-              {quick ? (
+              {projectless ? (
                 <DropdownMenu {...folderMenu.root}>
                   <DropdownMenuTrigger asChild {...folderMenu.trigger}>
-                    <button type="button" className={projectButton} title={quickCwd ?? "A scratch folder made for this chat"} aria-label="Working directory">
+                    <button type="button" className={projectButton} title={quickCwd ?? (quick ? "A scratch folder made for this chat" : "The shared folder for ordinary chats")} aria-label="Working directory">
                       {quickCwd ? <FolderOpen className="size-4 text-muted-foreground" /> : <MessageCircle className="size-4 text-muted-foreground" />}
-                      <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : "Scratch folder"}</span>
+                      <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : defaultFolder}</span>
                       <ChevronDown className="size-3.5 text-faint" />
                     </button>
                   </DropdownMenuTrigger>
@@ -456,7 +506,7 @@ export function NewSessionView({
                     <DropdownMenuLabel>Runs in</DropdownMenuLabel>
                     <DropdownMenuItem onSelect={() => setQuickCwd(null)}>
                       <MessageCircle />
-                      <span>Scratch folder</span>
+                      <span>{defaultFolder}</span>
                       <span className="ml-auto pl-3 text-[11px] text-faint">default</span>
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => void pickQuickFolder()}>
@@ -526,11 +576,13 @@ export function NewSessionView({
                 </DropdownMenu>
               )}
               {localGit && project ? (
-                <BranchPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"} target={branchTarget} onChange={pickBranch} />
+                <StartFromPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
+                  label={pullRequest ? `PR #${pullRequest.number}` : issue ? issue.identifier : branchTarget.kind === "new" ? "New branch" : branchTarget.kind === "existing" ? branchTarget.branch : workspace?.branch ?? status?.branch ?? "Current checkout"}
+                  open={startFromOpen} onOpenChange={setStartFromOpen} onBranch={pickBranch} onIssue={pickIssue} onPr={pickPr} onSession={selectSession} disabled={busy} />
               ) : (
                 branchInfo
               )}
-              {!quick && isGit && !preset?.cwd && (
+              {!projectless && isGit && !preset?.cwd && (
                 <SessionOptions
                   useWorktree={useWorktree}
                   onUseWorktreeChange={cloud ? setUseWorktree : undefined}
@@ -540,13 +592,11 @@ export function NewSessionView({
                   pipeline={pipelineLaunch}
                 />
               )}
-              {!quick && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
-              <div className="ml-auto flex shrink-0 items-center">
-                {localGit && project && <IssuePicker projectPath={project.path} picked={issue} onPick={pickIssue} disabled={busy} />}
-              </div>
+              {!projectless && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
             </div>
 
-            <div className="px-4 pt-3">
+            <div className="relative px-4 pt-3">
+              {prMention.menu}
               {issue && (
                 <div className="mb-2 flex max-w-full items-center gap-1.5 self-start rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-issue">
                   {issue.provider === "github" ? <Github className="size-3.5 shrink-0" /> : <LogoLinear className="size-3.5 shrink-0" />}
@@ -557,16 +607,25 @@ export function NewSessionView({
                   </button>
                 </div>
               )}
-              <AttachmentThumbs attach={attach} />
+              {pullRequest && (
+                <div className="mb-2 flex items-center gap-1.5 rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-pr">
+                  <span className="shrink-0 font-mono text-muted-foreground">PR #{pullRequest.number}</span>
+                  <span className="min-w-0 flex-1 truncate">{pullRequest.title}</span>
+                  <button type="button" aria-label="Remove pull request" onClick={() => setPullRequest(null)} className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3" /></button>
+                </div>
+              )}
+              <AttachmentChips attach={attach} />
               <textarea
                 ref={ref}
                 autoFocus
                 data-new-session-prompt
                 {...textProps}
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
+                onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onKeyDown={(e) => {
                   if (e.nativeEvent.isComposing) return;
+                  if (prMention.onKeyDown(e)) return;
                   if (matchesShortcut(e.nativeEvent, "composer.send")) {
                     e.preventDefault();
                     void create();
@@ -577,7 +636,7 @@ export function NewSessionView({
                 }}
                 rows={compact ? 3 : 5}
                 placeholder={
-                  quick
+                  projectless
                     ? "Ask anything"
                     : !project && !cloud
                       ? "Add a project to get started"
@@ -587,6 +646,14 @@ export function NewSessionView({
                 }
                 className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
               />
+              {setupCommand && (
+                <p className="mt-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground" data-testid="setup-script-line">
+                  <FileCode2 className="size-3.5 shrink-0" aria-hidden />
+                  <span className="min-w-0 truncate">
+                    Setup script found · <code className="font-mono text-foreground">{setupCommand}</code> runs by itself in each new worktree, without asking
+                  </span>
+                </p>
+              )}
             </div>
 
             <div className="flex items-center gap-1 px-2 pb-2">
@@ -599,16 +666,31 @@ export function NewSessionView({
               <div className="ml-auto flex items-center gap-0.5">
                 <MicButton dictation={dictation} />
                 {!cloud && <AttachButton attach={attach} />}
-                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={create} aria-label={quick ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
-                  {busy ? <Loader2 className="animate-spin" /> : null}
-                  {quick ? "Ask" : "Create"}
+                {orchestrateShown && (
+                  <WithTooltip label={ORCHESTRATE_TITLE} side="top">
+                    <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create(true)}>
+                      {busy && orchestrating ? <Loader2 className="animate-spin" /> : null}
+                      Orchestrate
+                    </Button>
+                  </WithTooltip>
+                )}
+                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create()} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
+                  {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
+                  {projectless ? "Ask" : "Create"}
                   {sendKeys && !busy && <span className="font-sans opacity-70">{keycaps(sendKeys).join("")}</span>}
                 </Button>
               </div>
             </div>
           </div>
 
-          {!cloud && <p className="mt-2 px-1 text-xs text-faint">Nothing starts until you press {quick ? "Ask" : "Create"}.</p>}
+          {!cloud && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint">
+              {signedIn.map((item) => (
+                <span key={item.id} className="flex items-center gap-1" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
+              ))}
+              <p className="ml-auto">Nothing starts until you press {projectless ? "Ask" : "Create"}.</p>
+            </div>
+          )}
           {!cloud && harness && !available && (
             <p className="mt-2 px-1 text-xs text-muted-foreground">
               {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}

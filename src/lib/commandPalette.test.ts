@@ -3,6 +3,10 @@ import {
   buildCloudPaletteProjects,
   buildPaletteIndex,
   movePaletteSelection,
+  PALETTE_TABS,
+  paletteScopeShows,
+  palettePlaceholder,
+  paletteTabOf,
   parseSmartInput,
   searchPaletteIndex,
   withCloudProjects,
@@ -184,5 +188,33 @@ describe("cloud projects in the palette (PRO-23)", () => {
     const mixed = withCloudProjects(local, cloud);
     expect(mixed.projects.filter((item) => item.project).map((item) => item.secondary)).toEqual(local.projects.map((item) => `Local · ${item.secondary}`));
     expect(searchPaletteIndex(mixed, "local").projects.every((match) => !!match.item.project)).toBe(true);
+  });
+});
+
+describe("palette tabs and scopes (design 07.05)", () => {
+  it("draws the five tabs in order", () => {
+    expect(PALETTE_TABS.map((tab) => tab.label)).toEqual(["All", "Sessions", "Projects", "Actions", "Settings"]);
+  });
+
+  it("shows the cloud sessions under the Sessions tab, every other scope under its own", () => {
+    expect(paletteTabOf("cloud")).toBe("sessions");
+    for (const tab of PALETTE_TABS) expect(paletteTabOf(tab.id)).toBe(tab.id);
+  });
+
+  it("keeps each scope's groups, and every group in All", () => {
+    const groups = ["smart", "sessions", "workspaces", "projects", "files", "commands", "settings", "settings-pages", "settings-projects"];
+    expect(groups.filter((group) => paletteScopeShows("all", group))).toEqual(groups);
+    expect(groups.filter((group) => paletteScopeShows("sessions", group))).toEqual(["sessions"]);
+    expect(groups.filter((group) => paletteScopeShows("cloud", group))).toEqual(["sessions"]);
+    expect(groups.filter((group) => paletteScopeShows("projects", group))).toEqual(["workspaces", "projects"]);
+    expect(groups.filter((group) => paletteScopeShows("actions", group))).toEqual(["commands"]);
+    expect(groups.filter((group) => paletteScopeShows("settings", group))).toEqual(["settings", "settings-pages", "settings-projects"]);
+  });
+
+  it("says what each scope searches", () => {
+    expect(palettePlaceholder("settings")).toBe("Search settings…");
+    expect(palettePlaceholder("cloud")).toBe("Search cloud sessions…");
+    expect(palettePlaceholder("all")).toBe("Search sessions, workspaces, projects, files, settings and commands…");
+    expect(new Set(PALETTE_TABS.map((tab) => palettePlaceholder(tab.id))).size).toBe(PALETTE_TABS.length);
   });
 });

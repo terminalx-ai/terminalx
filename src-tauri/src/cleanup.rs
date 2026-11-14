@@ -176,7 +176,7 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
 
 fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
     let project_path = Path::new(&project.path);
-    let prefix = crate::store::settings::load().branch_prefix;
+    let Ok(prefix) = crate::store::configuration::branch_prefix(project_path) else { return };
     // Without a prefix every branch would look like one of Raccoon's.
     if prefix.is_empty() {
         return;
@@ -206,6 +206,8 @@ fn branch_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry], o
                 None => Some("Git could not compare the branch, so it is kept.".to_string()),
             },
         };
+        let kept_because = if crate::github_process::ticket().valid() { kept_because }
+            else { Some(format!("Not verified: {}", crate::data_privacy::MESSAGE)) };
         out.push(Leftover {
             id: format!("branch:{}:{branch}", project.path),
             kind: LeftoverKind::Branch,
@@ -361,6 +363,7 @@ fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry],
 }
 
 pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
+    let _github_request = crate::github_process::scope();
     let mut out = Vec::new();
     for project in sources.projects {
         let path = Path::new(&project.path);
@@ -417,7 +420,10 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(leftover.size_bytes)
         }
         LeftoverKind::Branch => {
-            let prefix = crate::store::settings::load().branch_prefix;
+            // The scan's fetch is no longer proof once its request expires,
+            // including a privacy toggle in a progress callback between items.
+            let _verified = crate::github_process::ticket().enter().map_err(|error| error.to_string())?;
+            let prefix = crate::store::configuration::branch_prefix(project).map_err(|e| e.to_string())?;
             let plain = leftover.name.strip_prefix(&prefix).is_some_and(|name| !prefix.is_empty() && !name.is_empty() && !name.contains("..") && !name.starts_with('-'));
             if !plain || leftover.name.starts_with('-') {
                 return Err("refusing to delete: not one of Raccoon's branches".into());
@@ -471,6 +477,7 @@ pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String], report:
 }
 
 fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report: &dyn Fn(&Progress), runner: Option<crate::archive_script::Runner<'_>>) -> Removal {
+    let _github_request = crate::github_process::scope();
     // Worktrees first: removing one also removes its branch when it can.
     let mut wanted: Vec<&String> = ids.iter().collect();
     wanted.sort_by_key(|id| !id.starts_with("worktree:"));
@@ -499,6 +506,7 @@ fn remove_from_sources_with_runner(sources: &Sources<'_>, ids: &[String], report
 }
 
 fn with_sources<R>(f: impl FnOnce(&Sources<'_>) -> R) -> anyhow::Result<R> {
+    let _github_request = crate::github_process::scope();
     let (projects, _) = crate::store::projects::list()?;
     let sessions = crate::store::index::load()?;
     let claude_root = agent_data::claude_projects_root();
@@ -623,8 +631,10 @@ mod tests {
                 archived: false,
                 archive: Default::default(),
                 pinned: false,
+                manual_status: Default::default(),
                 active_tab: None,
                 link: None,
+                parent: None,
                 tabs,
                 unknown: BTreeMap::new(),
             }
@@ -648,12 +658,12 @@ mod tests {
     }
 
     fn tab(harness: &str, conversation: &str) -> TabEntry {
-        TabEntry { transport: Default::default(),
+        TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: harness.into(),
             title: None,
             model: String::new(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: "default".into(),
             provider_session_id: Some(conversation.into()),
             status: TabStatus::Idle,
@@ -661,7 +671,7 @@ mod tests {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         }
@@ -677,7 +687,7 @@ mod tests {
         let f = Fixture::new();
         let project = crate::store::projects::add(f.project.path.as_str()).unwrap();
         let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         save("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; case $TERMINALX_BRANCH in *fails*) echo cleanup-failed; exit 7;; esac");
         let success = f.worktree("success");
@@ -1079,7 +1089,7 @@ mod tests {
 
         // A session settled out of the worktree still resumes from the old folder.
         let mut settled = f.session(f.path(), vec![tab("claude", CONV_A)]);
-        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None });
+        settled.removed_workspace = Some(index::RemovedWorkspace { path: gone.to_string_lossy().into_owned(), name: "gone".into(), branch: None, ..Default::default() });
         assert_eq!(f.scan(&[settled]), vec![]);
 
         // A session elsewhere that holds one of the Codex conversations keeps that one.

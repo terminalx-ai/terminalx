@@ -1010,6 +1010,9 @@ fn owner_hook_process_fails_closed_when_its_socket_disappears() {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
             Err(error) => panic!("hook fixture accept: {error}"),
         });
+        // macOS inherits the listener's nonblocking mode on accepted sockets.
+        // Frame reads need the timeout, even if the writer has not sent yet.
+        connection.set_nonblocking(false).unwrap();
         connection.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut reader = BufReader::new(connection);
         let mut frame = String::new();
@@ -1290,6 +1293,7 @@ fn window_services_follow_only_the_registered_live_owner_attachment() {
         loop {
             match listener.accept() {
                 Ok((mut socket,_)) => {
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut line = String::new();
                     BufReader::new(socket.try_clone().unwrap()).read_line(&mut line).unwrap();
@@ -1361,6 +1365,7 @@ fn window_publication_process_fixture() {
         while calls < 2 {
             match listener.accept() {
                 Ok((mut socket,_)) => {
+                    socket.set_nonblocking(false).unwrap();
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut line = String::new();
                     BufReader::new(socket.try_clone().unwrap()).read_line(&mut line).unwrap();
@@ -1413,6 +1418,19 @@ fn window_publication_process_fixture() {
 
 #[test]
 fn stop_all_reaps_terminal_descendants_after_the_leader_and_output_exit() {
+    check_exited_terminal_descendants(false);
+}
+
+// macOS keeps main's leader-group stop (src/pty.rs `pid`): the strict session
+// census these rely on is not applied there while the Darwin census work is on
+// hold (#467, #939).
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn stop_all_reaps_separate_job_group_after_the_shell_and_output_exit() {
+    check_exited_terminal_descendants(true);
+}
+
+fn check_exited_terminal_descendants(separate_group: bool) {
     let alive = |pid: u32| std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).output().unwrap().status.success();
     let world = AgentWorld::new();
     let mut command = world.command();
@@ -1423,19 +1441,21 @@ fn stop_all_reaps_terminal_descendants_after_the_leader_and_output_exit() {
     serve.wait_events(created["tabId"].as_str().unwrap(), "fixture ready", |events| count(events, "turn_completed") == 1);
     // Python fork preserves the PTY launch group. Close all inherited PTY
     // descriptors so output EOF cannot disguise the exited leader as live.
-    std::fs::write(world.project.join("fork.py"), r#"import os,signal,time
+    std::fs::write(world.project.join("fork.py"), r#"import os,signal,time,sys
 signal.signal(signal.SIGHUP,signal.SIG_IGN)
 signal.signal(signal.SIGTERM,signal.SIG_IGN)
 pid=os.fork()
 if pid:
     open('orphan.pid','w').write(str(pid))
     os._exit(0)
+if sys.argv[1] == 'separate':
+    os.setpgid(0,0)
 for fd in range(3):
     os.close(fd)
 time.sleep(120)
 "#).unwrap();
     let pane = format!("{}:orphan", created["sessionId"].as_str().unwrap());
-    serve.control("runtime.pty.spawn", json!({"id":pane,"cwd":world.project,"cols":80,"rows":24,"command":"python3 fork.py"}));
+    serve.control("runtime.pty.spawn", json!({"id":pane,"cwd":world.project,"cols":80,"rows":24,"command":format!("python3 fork.py {}", if separate_group { "separate" } else { "original" })}));
     let child: u32 = common::agent::wait_until("forked descendant", || std::fs::read_to_string(world.project.join("orphan.pid")).ok().and_then(|value|value.parse().ok()));
     struct Cleanup(u32);
     impl Drop for Cleanup { fn drop(&mut self) { let _ = std::process::Command::new("/bin/kill").args(["-KILL",&self.0.to_string()]).output(); } }
@@ -1511,4 +1531,45 @@ fn linux_desktop_attaches_to_a_local_owner_without_a_macos_tray() {
     let status: serde_json::Value = client.call("status",json!({})).unwrap();
     assert_eq!(status["localRuntime"]["nativeTray"],false);
     client.stop_all().unwrap(); stopped(&mut serve);
+}
+
+// macOS keeps main's leader-group stop (src/pty.rs `pid`): the strict session
+// census these rely on is not applied there while the Darwin census work is on
+// hold (#467, #939).
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn stop_all_reaps_interactive_shell_job_groups() {
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({"project":world.project,"agent":"claude","prompt":"echo:jobs","useWorktree":false,"onMain":true,"mode":"manual"}));
+    serve.wait_events(created["tabId"].as_str().unwrap(), "fixture ready", |events| count(events, "turn_completed") == 1);
+    std::fs::write(world.project.join("job.py"), r#"import os,signal,time,sys,json
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+open(sys.argv[1], 'w').write(json.dumps([os.getpid(),os.getpgrp(),os.getsid(0)]))
+time.sleep(120)
+"#).unwrap();
+    struct Cleanup(Vec<u32>);
+    impl Drop for Cleanup { fn drop(&mut self) { for pid in &self.0 { let _ = std::process::Command::new("/bin/kill").args(["-KILL",&pid.to_string()]).output(); } } }
+    let mut cleanup = Cleanup(Vec::new());
+    // An unrelated same-UID process must not become collateral of session cleanup.
+    let mut unrelated = std::process::Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    cleanup.0.push(unrelated.id());
+    let pane = format!("{}:jobs", created["sessionId"].as_str().unwrap());
+    serve.control("runtime.pty.spawn", json!({"id":pane,"cwd":world.project,"cols":80,"rows":24,"command":"/bin/bash --noprofile --norc -i -c 'python3 job.py background.json & python3 job.py foreground.json; wait'"}));
+    let leader = serve.control("runtime.pty.output",json!({"id":pane}))["pid"].as_u64().unwrap() as u32;
+    for name in ["background.json","foreground.json"] {
+        let ids: Vec<u32> = common::agent::wait_until("interactive job ready", || std::fs::read(world.project.join(name)).ok().and_then(|bytes|serde_json::from_slice(&bytes).ok()));
+        cleanup.0.push(ids[0]);
+        assert_ne!(ids[1],leader,"fixture must use job control, not the original shell group");
+        assert_eq!(ids[2],leader,"job must belong to the PTY session");
+    }
+    let status = serve.control("status",json!({}));
+    serve.control("runtime.stopAll",json!({"epoch":status["localRuntime"]["epoch"]}));
+    for pid in &cleanup.0[1..] {
+        assert!(!std::process::Command::new("/bin/kill").args(["-0",&pid.to_string()]).output().unwrap().status.success(),"Stop all acknowledged while interactive job {pid} survived");
+    }
+    stopped(&mut serve);
+    assert!(unrelated.try_wait().unwrap().is_none(),"unrelated process was stopped");
+    unrelated.kill().unwrap(); unrelated.wait().unwrap();
 }

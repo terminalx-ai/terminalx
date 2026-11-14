@@ -16,7 +16,7 @@ let browser;
 try {
   browser = await launch();
   const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, chatLinks: true }, { width: 1100, height: 720 });
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   await tab(page, "gemini tab").click();
   const link = page.getByRole("link", { name: "website", exact: true });
   const chooser = page.getByRole("dialog", { name: "Open website link" });

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY: &str = "account-bound-host-pairing.v1";
 pub const OFFER_TTL_MS: i64 = 5 * 60 * 1000;
+/// How long a scanned code waits for the person to approve it on the Mac.
+pub const APPROVAL_TTL_MS: i64 = 120_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +30,42 @@ pub struct DeviceEntry {
     pub installation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_request_id: Option<String>,
+    /// "7F3A·91C2" (docs/PAIRING-APPROVAL.md); absent until the device has connected once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// When the person approved this pairing on the Mac; absent for pairings
+    /// made before PRO-314, which are treated as approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+    /// Set while at least one connection from this device is live. Never
+    /// saved: only the status the Mac reports carries it.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<PairedDeviceConnection>,
+    /// How the device reached this Mac the last time it connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_transport: Option<PairingTransport>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedDeviceConnection {
+    pub transport: PairingTransport,
+    /// RFC 3339.
+    pub since: String,
+}
+
+/// A phone has scanned the code and waits for the person to approve it on this Mac.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingApprovalRequest {
+    pub request_id: String,
+    pub device_id: String,
+    pub fingerprint: String,
+    pub transport: PairingTransport,
+    /// Epoch milliseconds.
+    pub requested_at: i64,
+    /// Epoch milliseconds; declined automatically after this.
+    pub expires_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,7 +148,7 @@ pub enum PairingConnectionMode {
     LocalOnly,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PairingTransport {
     Direct,
@@ -156,6 +194,9 @@ pub struct PairingStatus {
     pub host: Option<HostMetadata>,
     pub devices: Vec<DeviceEntry>,
     pub active_pairing: Option<PairingCode>,
+    pub pending_approval: Option<PairingApprovalRequest>,
+    /// Keep this Mac awake while a phone is connected (default on).
+    pub keep_awake: bool,
     pub last_error: Option<String>,
 }
 

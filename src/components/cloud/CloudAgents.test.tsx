@@ -311,7 +311,7 @@ describe("cloud agent tabs", () => {
     fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
     const form = await screen.findByTestId("cloud-agent-new");
     // The workspace's own CLI says what its alias runs.
-    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus 4.6"));
     await choose("Model", "Opus 4.6");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
@@ -853,7 +853,7 @@ describe("a new agent tab's launch settings (#554)", () => {
   it("switches agent to that agent's saved model and effort, from the workspace's own list", async () => {
     setPrefs({ lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Agent", "Codex", "menuitem");
     expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "high"]);
     fireEvent.click(screen.getByTitle("Model"));
@@ -866,7 +866,7 @@ describe("a new agent tab's launch settings (#554)", () => {
 
   it("never sends an effort the chosen model does not take", async () => {
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Effort", "max");
     // Sonnet has no max: its own default goes, not the one picked for Opus.
     await choose("Model", /^Sonnet/);
@@ -880,7 +880,7 @@ describe("a new agent tab's launch settings (#554)", () => {
 
   it("drops the effort for a model without one", async () => {
     await openForm();
-    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Effort", "max");
     await choose("Model", /^Haiku/);
     expect(screen.queryByTitle("Effort")).toBeNull();

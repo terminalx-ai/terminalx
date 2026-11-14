@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, TriangleAlert, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
+import { fileChipIcon } from "@/components/chat/FileChip";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -12,7 +13,8 @@ import { registerHotkey } from "@/lib/hotkeys";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
-import { closePeer, isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { closeTabTelling } from "@/components/session/TabMenu";
+import { isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { tabViewIn } from "@/lib/tabFront";
 import { landingIndex, moveTab } from "@/lib/tabActions";
 import { useTabViews } from "@/lib/tabViews";
@@ -41,6 +43,9 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 
 /** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
+  if (tab.kind === "review" && tab.editor.kind === "attachment") { const Icon = fileChipIcon(tab.editor.name); return <Icon className={className} />; }
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} />
+    : tab.editor.kind === "conflict" ? <TriangleAlert className={cn(className, "text-warning")} aria-label="Merge conflict" /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
@@ -85,6 +90,8 @@ export function WorkspaceTabStrip({
   hideSingle = false,
   trailing,
   className,
+  paneRow,
+  paneDrag,
 }: {
   session: SessionEntry;
   /** The tab on screen in `session`. */
@@ -96,8 +103,15 @@ export function WorkspaceTabStrip({
   /** What ends the row of tabs: the "+" that opens one. */
   trailing?: ReactNode;
   className?: string;
+  paneRow?: TabRow;
+  paneDrag?: {
+    move: (tab: PeerTab, x: number, y: number) => boolean;
+    drop: (tab: PeerTab) => boolean;
+    cancel: () => void;
+  };
 }) {
-  const row = useTabRow(session);
+  const wholeRow = useTabRow(session);
+  const row = paneRow ?? wholeRow;
   const store = useSessionStore();
   const tabViews = useTabViews();
   const mobileDriven = useMobileDrivenTabs();
@@ -156,6 +170,7 @@ export function WorkspaceTabStrip({
   const beginDrag = (event: ReactPointerEvent<HTMLElement>, tab: PeerTab) => {
     if (event.button !== 0 || readOnlyReason || (event.target as Element).closest("[data-tab-close]")) return;
     const startX = event.clientX;
+    const startY = event.clientY;
     let moving = false;
     let to = -1;
     const place = (x: number) => {
@@ -173,11 +188,22 @@ export function WorkspaceTabStrip({
     };
     let unbindEscape: (() => void) | null = null;
     const onMove = (move: PointerEvent) => {
-      if (!moving && Math.abs(move.clientX - startX) < DRAG_THRESHOLD) return;
+      if (!moving && Math.hypot(move.clientX - startX, move.clientY - startY) < DRAG_THRESHOLD) return;
       if (!moving) {
         moving = true;
         // Escape puts the tab back; it is not a key for anything else while a tab is in the hand.
         unbindEscape = registerHotkey("escape", () => end(false, true), { global: true, priority: 1000 });
+      }
+      if (paneDrag?.move(tab, move.clientX, move.clientY)) {
+        to = -1;
+        setDrag({ key: tab.key, to, x: null });
+        return;
+      }
+      const box = scroller.current?.getBoundingClientRect();
+      if (!box || move.clientY < box.top || move.clientY > box.bottom) {
+        to = -1;
+        setDrag({ key: tab.key, to, x: null });
+        return;
       }
       place(move.clientX);
     };
@@ -190,7 +216,7 @@ export function WorkspaceTabStrip({
       unbindEscape?.();
       dropHeld.current = null;
       setDrag(null);
-      if (!moving) return;
+      if (!moving) { paneDrag?.cancel(); return; }
       // The click that ends this press belongs to the drag, not to the tab under the pointer.
       const release = () => window.setTimeout(() => (dragged.current = false), 0);
       if (commit || held) dragged.current = true;
@@ -198,7 +224,9 @@ export function WorkspaceTabStrip({
       else if (held) window.addEventListener("pointerup", release, { once: true });
       const now = latest.current;
       const current = now.tabs.find((candidate) => candidate.key === tab.key);
-      if (commit && current && to >= 0) moveTab(now, current, to);
+      const transferred = commit && current ? paneDrag?.drop(current) : false;
+      paneDrag?.cancel();
+      if (commit && current && !transferred && to >= 0) moveTab(now, current, to);
     };
     const onUp = () => end(true);
     const onCancel = () => end(false);
@@ -262,7 +290,7 @@ export function WorkspaceTabStrip({
                   onAuxClick={(event) => {
                     if (event.button !== 1 || readOnlyReason) return;
                     event.preventDefault();
-                    void closePeer(session.id, tab, tabs, selected);
+                    void closeTabTelling(session.id, tab, tabs, selected, label);
                   }}
                   className={cn(
                     "group/tab relative flex h-9 select-none items-center",
@@ -296,6 +324,7 @@ export function WorkspaceTabStrip({
                           tab.pinned ? "justify-center px-0" : "pl-3 pr-1",
                         )}
                       >
+                        {tab.kind === "review" && tab.editor.dirty ? <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-label="Unsaved" /> : null}
                         {status ? <StatusStripe status={status} size="tab" /> : null}
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
@@ -316,7 +345,7 @@ export function WorkspaceTabStrip({
                       type="button"
                       data-tab-close
                       aria-label={`Close ${label}`}
-                      onClick={() => void closePeer(session.id, tab, tabs, selected)}
+                      onClick={() => void closeTabTelling(session.id, tab, tabs, selected, label)}
                       // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
                       // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
                       // narrow tab shows its title instead.

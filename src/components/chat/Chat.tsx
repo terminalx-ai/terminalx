@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { COMPACTING_LINE, type Transcript } from "@/lib/transcript";
+import { COMPACTING_LINE, type Transcript, type Turn } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { SendingMessage, TurnBlock } from "./TurnBlock";
 import { PermissionCard, QuestionCard } from "./AskCards";
@@ -15,6 +15,7 @@ import { useChatFind } from "./ChatFind";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
 import { turnDivider } from "@/lib/turnDivider";
+import { GoalBanner } from "./GoalBanner";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -104,6 +105,7 @@ export function Chat({
   onSendQueuedNow,
   sending = null,
   onSendAgain,
+  onSecondOpinion,
   onReset,
 }: {
   sessionId: string;
@@ -128,9 +130,11 @@ export function Chat({
   /** Send a message queued behind the running turn now, where the backend can (local). */
   onSendQueuedNow?: (seq: number) => void;
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
-  sending?: { text: string; images: { url: string; name?: string }[]; pressedAt: number } | null;
+  /** `files`: the names of the files attached to it (PRO-290), drawn as chips that do not open yet. */
+  sending?: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[]; pressedAt: number } | null;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
+  onSecondOpinion?: (turn: Turn) => void;
   onReset?: (endSeq: number) => void;
 }) {
   // Guest and workspace chats render requests here, without a TabView banner.
@@ -420,6 +424,7 @@ export function Chat({
         }
       }}>
       {find.bar}
+      {transcript.goal && <GoalBanner goal={transcript.goal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
@@ -454,6 +459,7 @@ export function Chat({
                 // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
+                onSecondOpinion={onSecondOpinion}
                 onReset={!isLast && !live && !sending ? onReset : undefined}
                 divider={turnDivider(turns[start + i - 1], t)}
               />

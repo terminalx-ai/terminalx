@@ -98,11 +98,32 @@ describe("Home in the command palette (PRO-183)", () => {
     store.openIssues();
     render(<Palette />);
     fireEvent.change(screen.getByLabelText("Command palette search"), { target: { value: "home" } });
-    await screen.findByRole("option", { name: /Home/ });
+    // Settings rows that mention home are listed too; the exact command comes first.
+    expect((await screen.findAllByRole("option", { name: /Home/ }))[0].id).toBe("command:shortcut:app.home");
 
     fireEvent.keyDown(screen.getByLabelText("Command palette search"), { key: "Enter" });
 
     await waitFor(() => expect(store.getSessionStore().view).toBe("home"));
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+
+describe("setting a session’s manual status from the command palette", () => {
+  it("offers a status chooser for the selected session and persists its choice", async () => {
+    act(() => {
+      store.upsertSession({ id: "s1", title: "Review login", projectPath: "/alpha", cwd: "/alpha", created: "2026-01-01", modified: "2026-01-01", archived: false, pinned: false, worktreeRemoved: false, tabs: [], manualStatus: "in_progress" });
+      store.selectSession("s1");
+    });
+    const changed = vi.fn();
+    render(<CommandPalette open onOpenChange={changed} onOpenSettings={vi.fn()} onCreated={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Command palette search"), { target: { value: "Set status" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Set status…/ }));
+    const review = await screen.findByRole("option", { name: "In review" });
+    expect(screen.getAllByRole("option")).toHaveLength(5);
+    expect(screen.getByRole("option", { name: /In progress/ }).textContent).toContain("Current status");
+    fireEvent.click(review);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("set_session_status", { sessionId: "s1", status: "in_review" }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith(false));
   });
 });

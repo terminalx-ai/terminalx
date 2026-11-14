@@ -102,8 +102,8 @@ try {
       // it shows, long titles and branches cut with "…" at its edge, and
       // nothing drawn outside it over the rows below. Work that went quiet
       // is not dimmed there: its "Was working on this" line says so. The
-      // card stays solid in macOS glass mode too, where popovers are
-      // translucent, so glass mode is on here whatever the platform.
+      // card stays solid in macOS glass mode too, where every tooltip is
+      // opaque (PRO-336), so glass mode is on here whatever the platform.
       const glass = await page.evaluate(() => document.documentElement.hasAttribute("data-glass"));
       await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
       for (const [index, chip] of [[0, "a chip of current work"], [1, "a chip of work that went quiet"]]) {

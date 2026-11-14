@@ -1,14 +1,14 @@
-//! Local archive hooks. Only scripts explicitly saved in the project store run.
+//! Local archive hooks. The script comes from `configuration::archive_script`: the
+//! Scripts page's saved value, or a repository file once it is trusted.
 //! A failed run grants a short-lived, single-use receipt, bound to its checkout
 //! and script. A force-delete flag is never consent to skip a failed hook.
 use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, Mutex, OnceLock, Weak}, time::{Duration, Instant}};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::{pty::{PaneSpec, PtyExit, Terminals}, sink::EventSink, store::{index::SessionEntry, projects}};
+use crate::{pty::{PaneSpec, PtyExit, Terminals}, sink::EventSink, store::{configuration, index::SessionEntry}};
 
 pub const FAILURE_PREFIX: &str = "ARCHIVE_SCRIPT_FAILED:";
-const TIMEOUT: Duration = Duration::from_secs(300);
-// A bulk run can contain many five-minute timeouts. Consent remains usable
+// A bulk run can contain many long timeouts. Consent remains usable
 // when that run finally presents all failures together.
 const RECEIPT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -30,12 +30,19 @@ pub struct Failure {
     pub log: Option<String>,
     #[serde(default)]
     pub sessions_stopped: bool,
+    /// The script's last line of output, for the failure dialog's detail line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The timeout the run had; absent from failures recorded before it was configurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_minutes: Option<u64>,
 }
 
 impl Failure {
     pub fn message(&self) -> String {
+        let minutes = self.timeout_minutes.unwrap_or(configuration::DEFAULT_ARCHIVE_TIMEOUT_MINUTES);
         format!("Archive script failed (exit {}). Remove anyway?{}", self.code.map_or("unknown".into(), |code| code.to_string()),
-            if self.timed_out { " The script timed out after 5 minutes." } else { "" })
+            if self.timed_out { format!(" The script timed out after {minutes} minute{}.", if minutes == 1 { "" } else { "s" }) } else { String::new() })
             + if self.sessions_stopped { " Its sessions are stopped." } else { "" }
     }
     pub fn from_error(error: &str) -> Option<Self> {
@@ -114,7 +121,8 @@ impl Drop for RemovalLease {
 /// Called inside the removal fence, before the final Git/session checks.
 pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
     anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
-    let script = projects::scripts(project)?.archive;
+    let archive = configuration::archive_script(project)?;
+    let script = archive.script;
     if script.trim().is_empty() || !path.exists() {
         // A cleared hook no longer needs consent. Release its matching old log
         // immediately rather than retaining it until expiry.
@@ -164,7 +172,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     }
     let session = sessions.iter().find(|session| canonical(Path::new(&session.cwd)) == path);
     let env = environment(&project, &path, session);
-    let failure = run(runner, &path, &script, &env, TIMEOUT, started)?;
+    let failure = run(runner, &path, &script, &env, archive.timeout, started)?;
     if let Some(mut failure) = failure {
         failure.sessions_stopped = !sessions.is_empty();
         if !runner.unattended { remember(runner, project, path, identity, script, &failure); }
@@ -173,7 +181,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
     Ok(true)
 }
 
-fn environment(project: &Path, path: &Path, session: Option<&SessionEntry>) -> Vec<(String, String)> {
+pub(crate) fn environment(project: &Path, path: &Path, session: Option<&SessionEntry>) -> Vec<(String, String)> {
     // The PTY applies Settings user/repository variables over the runtime
     // environment, then the login-shell PATH and these lifecycle variables.
     // Provider credentials and per-agent hook tokens belong only to the agent.
@@ -186,41 +194,123 @@ fn environment(project: &Path, path: &Path, session: Option<&SessionEntry>) -> V
     env
 }
 
+/// Shared lifecycle-script execution. The private file stays alive until the
+/// process group has stopped; script text is never an argument to a login shell.
+pub(crate) struct ScriptRun<'a> {
+    privacy: crate::data_privacy::Ticket,
+    _privacy_lease: crate::data_privacy::RemoteWrite,
+    runner: Runner<'a>,
+    id: String,
+    _file: tempfile::NamedTempFile,
+    listener: crate::sink::ListenerId,
+    exits: std::sync::mpsc::Receiver<Option<i32>>,
+}
+
+pub(crate) struct ScriptResult {
+    pub code: Option<i32>,
+    pub timed_out: bool,
+    pub stopped: bool,
+    pub log: String,
+}
+
+pub(crate) fn output_tail(terminals: &Terminals, id: &str) -> String {
+    let bytes = terminals.read_output(id).unwrap_or_default();
+    let tail = bytes.len().saturating_sub(32 * 1024);
+    String::from_utf8_lossy(&bytes[tail..]).into_owned()
+}
+
+impl<'a> ScriptRun<'a> {
+    /// Keep the caller's launch/admission lock only around this step, never
+    /// around `wait`: agents must be able to start while setup is running.
+    pub(crate) fn spawn(runner: Runner<'a>, id: &str, path: &Path, script: &str, env: &[(String, String)], started: &dyn Fn()) -> Result<Self> {
+        let privacy = crate::github_process::ticket();
+        let privacy_lease = privacy.enter()?;
+        let mut file = tempfile::Builder::new().prefix("terminalx-script-").suffix(".sh").tempfile()?;
+        use std::io::Write;
+        file.write_all(script.as_bytes())?;
+        file.flush()?;
+        let (send, exits) = std::sync::mpsc::channel();
+        let watched = id.to_string();
+        let listener = runner.sink.listen("pty_exit", Box::new(move |raw| {
+            if let Ok(exit) = serde_json::from_str::<PtyExit>(raw) {
+                if exit.id == watched { let _ = send.send(exit.code); }
+            }
+        }));
+        let run = Self { privacy, _privacy_lease: privacy_lease, runner, id: id.into(), _file: file, listener, exits };
+        runner.terminals.spawn_program(runner.sink.clone(), id,
+            PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env },
+            std::ffi::OsStr::new("/bin/sh"), &[run._file.path().as_os_str()], started)?;
+        Ok(run)
+    }
+
+    pub(crate) fn wait(self, timeout: Duration, cancelled: &std::sync::atomic::AtomicBool) -> Result<ScriptResult> {
+        use std::sync::{atomic::Ordering, mpsc::RecvTimeoutError};
+        let deadline = Instant::now() + timeout;
+        let (code, timed_out, stopped) = loop {
+            if !self.privacy.valid() || cancelled.load(Ordering::Acquire) { break (Some(130), false, true) }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() { break (Some(124), true, false) }
+            match self.exits.recv_timeout(left.min(Duration::from_millis(100))) {
+                Ok(code) => break (code, false, false),
+                Err(RecvTimeoutError::Timeout) => {},
+                Err(RecvTimeoutError::Disconnected) => break (None, false, false),
+            }
+        };
+        // Successful scripts can leave descendants too. Preserve the bounded
+        // PTY output while stopping the entire owned process group.
+        anyhow::ensure!(self.runner.terminals.stop_keep_output(&self.id, Duration::from_secs(5)),
+            "The script's processes could not be stopped.");
+        Ok(ScriptResult { code, timed_out, stopped, log: output_tail(self.runner.terminals, &self.id) })
+    }
+}
+
+impl Drop for ScriptRun<'_> {
+    fn drop(&mut self) {
+        self.runner.sink.unlisten(self.listener);
+        // Includes spawn/wait errors and early returns; the file is removed
+        // only after the last attempt to stop the process that reads it.
+        self.runner.terminals.stop_keep_output(&self.id, Duration::from_secs(5));
+    }
+}
+
 fn run(runner: Runner<'_>, path: &Path, script: &str, env: &[(String, String)], timeout: Duration, started: &dyn Fn()) -> Result<Option<Failure>> {
     let id = format!("archive:{}", uuid::Uuid::new_v4());
-    // Literal argv avoids the user's shell syntax altogether (including nu).
-    let mut file = tempfile::Builder::new().prefix("terminalx-archive-").suffix(".sh").tempfile()?;
-    use std::io::Write;
-    file.write_all(script.as_bytes())?;
-    file.flush()?;
-    let (send, recv) = std::sync::mpsc::channel();
-    let watched = id.clone();
-    let listener = runner.sink.listen("pty_exit", Box::new(move |raw| {
-        if let Ok(exit) = serde_json::from_str::<PtyExit>(raw) {
-            if exit.id == watched { let _ = send.send(exit.code); }
-        }
-    }));
-    let spawned = runner.terminals.spawn_program(runner.sink.clone(), &id, PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env }, std::ffi::OsStr::new("/bin/sh"), &[file.path().as_os_str()], started);
-    if let Err(error) = spawned { runner.sink.unlisten(listener); return Err(error) }
     struct PaneCleanup<'a> { terminals: &'a Terminals, id: &'a str, keep: bool }
     impl Drop for PaneCleanup<'_> { fn drop(&mut self) { if !self.keep { self.terminals.kill(self.id); } } }
     let mut pane = PaneCleanup { terminals: runner.terminals, id: &id, keep: false };
+    let run = ScriptRun::spawn(runner, &id, path, script, env, started)?;
     if !runner.unattended { runner.sink.emit("archive_script_started", &serde_json::json!({"path": path, "pane": id})); }
-    let exit = recv.recv_timeout(timeout);
-    runner.sink.unlisten(listener);
-    let timed_out = matches!(exit, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
-    // Even successful scripts may leave children behind. Wait for the whole
-    // owned group before permitting removal, while preserving the terminal.
-    anyhow::ensure!(runner.terminals.stop_keep_output(&id, Duration::from_secs(5)), "The archive script's processes could not be stopped. Nothing was removed.");
-    let code = if timed_out { Some(124) } else { exit.ok().flatten() };
-    if code == Some(0) { return Ok(None) }
-    let log = runner.unattended.then(|| {
-        let bytes = runner.terminals.read_output(&id).unwrap_or_default();
-        let tail = bytes.len().saturating_sub(32 * 1024);
-        String::from_utf8_lossy(&bytes[tail..]).into_owned()
-    });
+    let result = run.wait(timeout, &std::sync::atomic::AtomicBool::new(false))?;
+    if result.code == Some(0) { return Ok(None) }
     pane.keep = !runner.unattended;
-    Ok(Some(Failure { token: uuid::Uuid::new_v4().to_string(), pane: id.clone(), code, timed_out, log, sessions_stopped: false }))
+    let detail = last_line(&result.log);
+    Ok(Some(Failure { token: uuid::Uuid::new_v4().to_string(), pane: id.clone(), code: result.code, timed_out: result.timed_out,
+        log: runner.unattended.then_some(result.log), sessions_stopped: false, detail, timeout_minutes: Some(timeout.as_secs().div_ceil(60)) }))
+}
+
+/// The last line a person would read in the terminal: escape sequences and
+/// control characters removed, at most 200 characters.
+pub(crate) fn last_line(log: &str) -> Option<String> {
+    let mut plain = String::with_capacity(log.len());
+    let mut chars = log.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                // CSI ends at its final byte; OSC at BEL or ESC \.
+                Some('[') => { for c in chars.by_ref() { if ('@'..='~').contains(&c) { break } } }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' { break }
+                        if c == '\u{1b}' { chars.next(); break }
+                    }
+                }
+                _ => {}
+            }
+        } else if c == '\n' || c == '\r' { plain.push('\n'); }
+        else if !c.is_control() || c == '\t' { plain.push(c); }
+    }
+    let line = plain.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    Some(if line.chars().count() > 200 { format!("{}…", line.chars().take(199).collect::<String>()) } else { line.to_string() })
 }
 
 #[cfg(all(test, unix))]
@@ -241,10 +331,28 @@ mod tests {
         let failure = run(runner, &path, "printf '%s\\n' \"$PWD\" \"$PRO149_VALUE\"; exit 17", &env, Duration::from_secs(10), &|| {}).unwrap().unwrap();
         assert_eq!(failure.code, Some(17));
         assert!(!failure.timed_out);
+        assert_eq!(failure.detail.as_deref(), Some("spaces ' and $literal"));
+        assert_eq!(failure.timeout_minutes, Some(1));
+        assert_eq!(failure.message(), "Archive script failed (exit 17). Remove anyway?");
         let output = String::from_utf8_lossy(&terminals.read_output(&failure.pane).unwrap()).into_owned();
         assert!(output.contains(path.to_str().unwrap()), "{output}");
         assert!(output.contains("spaces ' and $literal"), "{output}");
         assert!(run(runner, &path, "exit 0", &[], Duration::from_secs(10), &|| {}).unwrap().is_none());
+        terminals.kill_all();
+    }
+
+    #[test]
+    fn scripts_use_a_file_with_literal_multiline_and_backslash_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (terminals, sink) = runtime();
+        let runner = Runner { terminals: &terminals, sink: &sink, unattended: false };
+        // Larger than Linux's per-argument limit: it must never enter argv.
+        let script = format!("# {}\nprintf '%s\\n' 'a\\b'\nprintf '%s\\n' \"it's literal\"\nexit 7", "x".repeat(200_000));
+        let failure = run(runner, dir.path(), &script, &[], Duration::from_secs(10), &|| {}).unwrap().unwrap();
+        let log = output_tail(&terminals, &failure.pane);
+        assert_eq!(failure.code, Some(7));
+        assert!(log.contains("a\\b"), "{log}");
+        assert!(log.contains("it's literal"), "{log}");
         terminals.kill_all();
     }
 
@@ -257,6 +365,8 @@ mod tests {
             let failed = run(Runner { terminals: &terminals, sink: &sink, unattended }, dir.path(), "echo before-timeout; sleep 60 & wait", &[], Duration::from_secs(2), &|| {}).unwrap().unwrap();
             assert_eq!(failed.code, Some(124));
             assert!(failed.timed_out);
+            assert_eq!(failed.detail.as_deref(), Some("before-timeout"));
+            assert_eq!(failed.message(), "Archive script failed (exit 124). Remove anyway? The script timed out after 1 minute.");
             assert!(start.elapsed() < Duration::from_secs(12));
             if unattended {
                 assert!(terminals.panes().is_empty());
@@ -281,6 +391,18 @@ mod tests {
         reap_receipts(Instant::now());
         assert!(terminals.panes().is_empty());
         assert!(!receipts().lock().unwrap().contains_key(&failure.token));
+    }
+
+    #[test]
+    fn the_detail_line_is_the_last_readable_line() {
+        assert_eq!(last_line("one\r\n\u{1b}[31mno such project\u{1b}[0m\r\n\r\n").as_deref(), Some("no such project"));
+        assert_eq!(last_line("\u{1b}]0;title\u{7}done\u{8}"), Some("done".into()));
+        assert_eq!(last_line(" \n\t\n"), None);
+        assert_eq!(last_line(&"x".repeat(500)).unwrap().chars().count(), 200);
+        let recorded = Failure { token: "t".into(), pane: "p".into(), code: Some(1), timed_out: true, log: None, sessions_stopped: true, detail: None, timeout_minutes: None };
+        assert_eq!(recorded.message(), "Archive script failed (exit 1). Remove anyway? The script timed out after 5 minutes. Its sessions are stopped.");
+        let older: Failure = serde_json::from_str(r#"{"token":"t","pane":"p","code":null,"timedOut":false}"#).unwrap();
+        assert_eq!((older.detail, older.timeout_minutes), (None, None));
     }
 
     #[test]

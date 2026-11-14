@@ -1,0 +1,53 @@
+diff --git a/bench-answer.txt b/bench-answer.txt
+new file mode 100644
+--- /dev/null
++++ b/bench-answer.txt
+@@ -0,0 +1,7 @@
++src-tauri/src/commands.rs
++src-tauri/src/lib.rs
++src/components/chat/Dictation.test.tsx
++src/components/chat/DictationStream.test.tsx
++src/components/settings/TranscriptionTab.tsx
++src/lib/api.ts
++src/lib/dictation.ts
+diff --git a/.bench-check/audit-transcription-settings-command.mjs b/.bench-check/audit-transcription-settings-command.mjs
+new file mode 100644
+--- /dev/null
++++ b/.bench-check/audit-transcription-settings-command.mjs
+@@ -0,0 +1,36 @@
++// Outcome check for the orchestration benchmark task audit-transcription-settings-command
++// (docs/ORCHESTRATION-BENCH.md). Reads the agent's answer from bench-answer.txt,
++// one repository-relative path per line, and compares it to the files the
++// real change had to touch. Exit 0 means solved.
++
++import { existsSync, readFileSync } from "node:fs";
++
++const ANSWER = "bench-answer.txt";
++const MIN_RECALL = 0.9;
++const MIN_PRECISION = 0.9;
++const TRUTH = new Set([
++  "src-tauri/src/commands.rs",
++  "src-tauri/src/lib.rs",
++  "src/components/chat/Dictation.test.tsx",
++  "src/components/chat/DictationStream.test.tsx",
++  "src/components/settings/TranscriptionTab.tsx",
++  "src/lib/api.ts",
++  "src/lib/dictation.ts",
++]);
++
++if (!existsSync(ANSWER)) {
++  console.log(`no ${ANSWER} at the repository root`);
++  process.exit(1);
++}
++// Forgiving about form: bullets, backticks, a leading ./ and a :line suffix are dropped.
++const listed = new Set(
++  readFileSync(ANSWER, "utf8")
++    .split(/\r?\n/)
++    .map((line) => line.trim().replace(/^[-*]\s+/, "").replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/:\d+(:\d+)?$/, "").trim())
++    .filter((line) => line && !line.startsWith("#")),
++);
++const found = [...listed].filter((path) => TRUTH.has(path)).length;
++const recall = found / TRUTH.size;
++const precision = listed.size ? found / listed.size : 0;
++console.log(`listed ${listed.size}, ${found} of ${TRUTH.size} right: recall ${recall.toFixed(2)} (need ${MIN_RECALL}), precision ${precision.toFixed(2)} (need ${MIN_PRECISION})`);
++process.exit(recall >= MIN_RECALL && precision >= MIN_PRECISION ? 0 : 1);

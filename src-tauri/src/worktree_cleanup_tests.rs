@@ -93,12 +93,12 @@ impl Fixture {
     }
 
     fn session(&self, project: &Path, cwd: &Path, status: TabStatus) -> SessionEntry {
-        let tab = TabEntry { transport: Default::default(),
+        let tab = TabEntry { marked_unread: false, transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: "claude".into(),
             title: None,
             model: String::new(),
-            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None, request_privacy: Default::default(),
             permission_mode: "default".into(),
             provider_session_id: None,
             status,
@@ -106,7 +106,7 @@ impl Fixture {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None, parked: false,
+            fork_from: None, continuation: None, parked: false, usage: None,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         };
@@ -114,6 +114,7 @@ impl Fixture {
             id: uuid::Uuid::now_v7().to_string(),
             kind: crate::store::index::SessionKind::Project,
             link: None,
+            parent: None,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: (cwd != project).then(|| cwd.file_name().unwrap().to_string_lossy().into_owned()),
@@ -131,6 +132,7 @@ impl Fixture {
             archived: false,
             archive: Default::default(),
             pinned: false,
+            manual_status: Default::default(),
             active_tab: None,
             tabs: vec![tab],
             unknown: BTreeMap::new(),
@@ -219,6 +221,8 @@ fn a_clean_pushed_worktree_is_eligible_and_its_branch_and_conversations_stay() {
     // The conversation is kept, filed under the project as from a removed workspace.
     let kept = index::get(&session.id).unwrap();
     assert!(kept.worktree_removed && kept.removed_workspace.is_some());
+    assert_eq!(kept.removed_workspace.as_ref().unwrap().commit, candidate.head);
+    assert_eq!(kept.removed_workspace.as_ref().unwrap().branch.as_deref(), Some(branch.as_str()));
     assert_eq!(canonical(Path::new(&kept.cwd)), alpha);
     assert!(crate::store::sessions_dir().unwrap().join(&session.id).exists());
     // The project's own session is exactly as it was.
@@ -917,7 +921,7 @@ fn bulk_archive_runs_every_hook_and_keeps_failures_for_separate_confirmation() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "case $TERMINALX_BRANCH in *fails*) exit 23;; esac\nexit 0".into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "case $TERMINALX_BRANCH in *fails*) exit 23;; esac\nexit 0".into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let fails = f.worktree(&f.alpha(), "fails");
     let succeeds = f.worktree(&f.alpha(), "succeeds");
@@ -946,7 +950,7 @@ fn archive_changes_are_checked_again_before_bulk_removal() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "echo keep > new-file".into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: "echo keep > new-file".into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let tree = f.worktree(&f.alpha(), "changes");
     let item = f.item(&f.find(&tree));
@@ -977,7 +981,7 @@ fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
     let f = Fixture::new();
     let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
     let save = |script: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into() }), ..Default::default()
+        scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: script.into(), archive_timeout_minutes: None }), ..Default::default()
     }).unwrap();
     let shrinks = f.worktree(&f.alpha(), "shrinks");
     std::fs::write(shrinks.join(".env"), "local-data").unwrap();

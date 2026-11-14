@@ -217,10 +217,11 @@ export function getTabLog(sessionId: string, tabId: string): TabLog {
 /**
  * Claim a request before calling the backend, including clicks from a render
  * that predates a terminal/other-card answer. The runtime remains the authority:
- * only a confirmed response retires it; a cloud mailbox enqueue is not an answer.
+ * only its delivery/terminal event retires it. A successful command can merely
+ * enqueue a reply, including for a local headless agent.
  */
 export async function respondPermissionOnce(
-  sessionId: string, tabId: string, requestId: string, send: () => Promise<void>, confirmed: boolean,
+  sessionId: string, tabId: string, requestId: string, send: () => Promise<void>,
 ): Promise<"sent" | "sending" | "already_answered"> {
   const k = key(sessionId, tabId);
   const log = getLog(k);
@@ -241,7 +242,7 @@ export async function respondPermissionOnce(
   set("sending");
   try {
     await send();
-    set(confirmed ? "answered" : undefined);
+    set();
     return "sent";
   } catch (error) {
     // Another window or the terminal can win after our check but before the
@@ -395,7 +396,7 @@ export async function reconcileAgentEvents() {
           // A live update during the read wins over its snapshot. Only status
           // is reconciled here; recovery must not close panes or change drafts.
           if (old === current && syncHistoryGeneration(session.id, tab.id, tab.resetLogId)) {
-            patchTab(session.id, tab.id, { resetLogId: tab.resetLogId, resetBackupId: tab.resetBackupId });
+            patchTab(session.id, tab.id, { resetLogId: tab.resetLogId, resetBackupId: tab.resetBackupId, resetTurn: tab.resetTurn, resetFilesRestored: tab.resetFilesRestored });
             await reloadTabHistory(session.id, tab.id, tab.resetLogId);
           }
           if (old && old === current && old.status !== tab.status) setTabStatus(session.id, tab.id, tab.status);

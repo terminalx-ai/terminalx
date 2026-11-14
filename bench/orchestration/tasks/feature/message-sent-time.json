@@ -1,0 +1,21 @@
+{
+  "id": "message-sent-time",
+  "shape": "feature",
+  "title": "Show the time each chat message was sent",
+  "prompt": "Chat views do not show when a message was sent. Show a compact local time under each message, with the full date and time available by keyboard or tap, across local, cloud and phone chats.\n\nThe event's existing `ts` cannot be trusted as a send time: an older runtime imported whole multi-day conversations in one batch, so their `ts` is the import time. Add a separate, verified `messageTs` to agent events (Rust `AgentEvent.message_ts`, serialized as `messageTs` and omitted when absent; and in `@terminalx/portable/events`). Record it at the source: the message's own time for imported transcripts, the send time for prompts, and the first text chunk's time for streamed replies. Legacy records without `messageTs` show no time; never infer one from `ts`, and leave their `ts` as it was.\n\nShared (packages/portable/src/transcript.ts):\n- Carry `messageTs` onto the turn's prompt, onto text work items, and onto queued and mid-turn message items. A queued message keeps its own time when the agent absorbs it or when it becomes the next prompt; when it has none, the prompt's `messageTs` stays empty rather than borrowing another time.\n- Export `messageTime(ts?, locales?, timeZone?)` returning `{ short, full, iso }` or `undefined`. `short` uses `Intl.DateTimeFormat` with `timeStyle: \"short\"`, `full` uses `dateStyle: \"full\", timeStyle: \"long\"`. Only ISO strings with an explicit zone (Z or ±hh:mm) count; empty, invalid or zoneless values are unknown.\n\nDesktop:\n- src/components/chat/MessageTime.tsx exports `MessageTime({ ts })`: nothing for an unknown time; otherwise a native `<details>` whose `<summary>` is focusable, has aria-label `Message time: <full>` and contains `<time dateTime={iso}>{short}</time>`, and which expands to the full date.\n- TurnBlock shows one MessageTime per prompt, reply text and mid-turn message, from `messageTs` only, the same with or without a cwd and after a reload.\n- In src/lib/agentEvents.ts, a streaming text block keeps the `messageTs` of its first text chunk; a queued user message must not clear the stream (only a non-queued one or turn end does); the time survives commit, merge and reload.\n\nPhone (mobile/src/ui/transcript-rows.ts): each `TurnRow` gains an optional `ts`, set only on the first row of a prompt, reply or mid-turn message when it is split into chunks; queued rows keep their `messageTs` only on the first chunk. Show the time in the phone's transcript.",
+  "startCommit": "faa2e622f77167f515f71c46bb9c2a816b0590a1",
+  "solution": "a25b27a213e3ad9f97d81a47ba5e9cc345a0cdbe",
+  "check": {
+    "run": "pnpm exec vitest run src/components/chat/MessageTime.test.tsx src/lib/agentEvents.timestamps.test.ts",
+    "timeoutSeconds": 600,
+    "files": [
+      "src/components/chat/MessageTime.test.tsx",
+      "src/lib/agentEvents.timestamps.test.ts"
+    ]
+  },
+  "source": {
+    "pr": 606,
+    "commit": "a25b27a213e3ad9f97d81a47ba5e9cc345a0cdbe"
+  },
+  "notes": "Modules touched by the change: src-tauri (events gain a verified message time; harness and session record it), packages/portable (events and transcript), mobile/src (transcript rows), src/lib and src/components/chat (desktop chat). Check: vitest, 2.0 s failing at the start, 1.7 s passing measured by check-task on 2026-11-12 (a fresh pnpm install adds 8 to 17 s; a cached one about 1 s). Start is the merge's first parent; solution is the merge commit."
+}
