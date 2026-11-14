@@ -132,5 +132,11 @@ fn ensure_terminalx_launcher() {
         let _ = std::fs::remove_file(&temporary);
         panic!("native CLI launcher build failed");
     }
+    // tauri-build watches the published file. Dated by this run, it read as
+    // changed after every build, so each Cargo command on a Mac ran this script
+    // again and rebuilt the whole crate. Dated by its source, it reads as
+    // changed when the source is.
+    let written = std::fs::metadata(source).and_then(|source| source.modified()).expect("native CLI launcher source time");
+    std::fs::File::options().write(true).open(&temporary).and_then(|built| built.set_modified(written)).expect("date native CLI launcher");
     std::fs::rename(&temporary, &output).expect("publish native CLI launcher");
 }
