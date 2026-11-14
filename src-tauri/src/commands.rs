@@ -4693,7 +4693,10 @@ mod command_tests {
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());
         assert_eq!(session.active_tab, None);
-        assert_eq!(session.worktree_name, None);
+        // Opening an existing checkout records its workspace identity without
+        // creating another worktree or inventing creation-time provenance.
+        assert_eq!(session.worktree_name.as_deref(), Some("external"));
+        assert!(session.base_ref.is_none() && session.worktree_base.is_none());
         assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
         assert_eq!(crate::store::index::load().unwrap(), vec![session]);
     }
