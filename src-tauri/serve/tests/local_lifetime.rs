@@ -268,8 +268,8 @@ fn native_bridge_replays_bytes_and_releases_only_its_own_views() {
     });
     let client = Client::connect(&world.data).unwrap();
     let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(16));
-    let first = Bridge::connect(&client, sink.clone()).unwrap();
-    let second = Bridge::connect(&client, sink).unwrap();
+    let first = Bridge::connect(&client, sink.clone(), None).unwrap();
+    let second = Bridge::connect(&client, sink, None).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     first.attach(&id, "same-token", Box::new(move |bytes| tx.send(bytes.to_vec()).is_ok())).unwrap();
     let (tx2, rx2) = std::sync::mpsc::channel();
@@ -630,7 +630,7 @@ fn desktop_reconnect_revokes_old_views_without_replaying_or_replacing_the_owner(
     let sink = Arc::new(raccoon_lib::sink::BroadcastSink::new(32));
     let previous = Desktop::connect(client.clone(), sink).unwrap();
     let old_attachment = previous.attachment().unwrap();
-    let next = previous.reconnect().unwrap();
+    let next = previous.reconnect(client.clone()).unwrap();
     assert_eq!(next.attachment().unwrap().epoch, old_attachment.epoch);
     assert_ne!(next.attachment().unwrap().lease, old_attachment.lease);
     assert!(previous.sessions().is_err(), "retained old handles must not pretend their view is still connected");
@@ -644,8 +644,111 @@ fn desktop_reconnect_revokes_old_views_without_replaying_or_replacing_the_owner(
     stopped(&mut serve);
     drop(serve);
     let replacement = Serve::start(world.command(), &world.data);
-    assert!(next.reconnect().is_err(), "reconnect must not follow a replacement owner or replay an earlier request");
-    assert_ne!(replacement.control("status", json!({}))["localRuntime"]["epoch"], old_attachment.epoch);
+    assert!(next.reconnect(client.clone()).is_err(), "a pinned client must not follow a replacement owner or replay an earlier request");
+    // Only discovery finds the replacement, and only a new attachment reaches it.
+    let replaced = next.reconnect(Client::connect(&world.data).unwrap()).unwrap();
+    let epoch = replacement.control("status", json!({}))["localRuntime"]["epoch"].clone();
+    assert_ne!(epoch, old_attachment.epoch);
+    assert_eq!(replaced.attachment().unwrap().epoch, epoch);
+    assert!(replaced.generation() > next.generation());
+}
+
+#[test]
+fn a_hung_owner_is_noticed_and_attaching_again_neither_replaces_it_nor_replays() {
+    use raccoon_lib::local_runtime::{client::Client, desktop::{Desktop, Lost}};
+    use std::sync::Arc;
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"echo:once-before-hang",
+        "useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let session = created["sessionId"].as_str().unwrap();
+    let tab = created["tabId"].as_str().unwrap();
+    serve.wait_events(tab, "initial turn completion", |events| count(events, "turn_completed") == 1);
+    let liveness = Duration::from_secs(2);
+    let client = Client::connect(&world.data).unwrap().with_liveness(Duration::from_millis(250), liveness);
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel();
+    let desktop = Desktop::connect_watched(client, Arc::new(raccoon_lib::sink::BroadcastSink::new(32)),
+        Some(Arc::new(move |lost| { let _ = lost_tx.send(lost); }))).unwrap();
+    // Pings keep a quiet, healthy connection open past its deadline.
+    assert!(lost_rx.recv_timeout(liveness * 5 / 2).is_err(), "a healthy owner was taken for a hung one");
+    let old = desktop.attachment().unwrap();
+    let pid = serve.child.id().to_string();
+    let signal = |name: &str| assert!(std::process::Command::new("kill").args([name, pid.as_str()]).status().unwrap().success());
+    // A stopped owner keeps its sockets open: only the missing pongs show it.
+    signal("-STOP");
+    let lost = lost_rx.recv_timeout(liveness * 5);
+    signal("-CONT");
+    assert_eq!(lost.expect("a hung owner went unnoticed"), Lost::Events { generation: desktop.generation() });
+    assert!(desktop.sessions().is_err(), "a hung owner's attachment must not look connected");
+    let next = desktop.reconnect(Client::connect(&world.data).unwrap()).unwrap();
+    assert_eq!(next.attachment().unwrap().epoch, old.epoch, "an owner that answers again is attached to, not replaced");
+    assert_ne!(next.attachment().unwrap().lease, old.lease);
+    let events: Vec<serde_json::Value> = next.sessions().unwrap().load_events(session, tab).unwrap().into_iter().map(|event| serde_json::to_value(event).unwrap()).collect();
+    assert_eq!(texts(&events, "user_message"), ["echo:once-before-hang"], "attaching again must not resend a prompt");
+    assert_eq!(count(&events, "turn_completed"), 1);
+    assert_eq!(serve.control("status", json!({}))["pid"], serve.child.id());
+    assert!(lost_rx.try_recv().is_err(), "replacing an attachment on purpose is not a loss");
+    next.stop_all().unwrap();
+    stopped(&mut serve);
+}
+
+#[test]
+fn a_window_view_that_stops_reading_is_dropped_alone_and_its_window_attaches_again() {
+    use raccoon_lib::local_runtime::{client::Client, desktop::{Desktop, Lost}};
+    use std::sync::{Arc, Mutex};
+    let world = AgentWorld::new();
+    let mut serve = Serve::start(world.command(), &world.data);
+    let created = serve.control("sessions.create", json!({
+        "project":world.project,"agent":"claude","prompt":"echo:ready",
+        "useWorktree":false,"onMain":true,"mode":"manual"
+    }));
+    let session = created["sessionId"].as_str().unwrap();
+    let (quiet, flood) = (format!("{session}:11"), format!("{session}:12"));
+    serve.control("runtime.pty.spawn", json!({"id":quiet,"cwd":world.project,"cols":80,"rows":24,
+        "command":"sh -c 'stty -echo; printf quiet-ready; exec cat'"}));
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel();
+    let desktop = Desktop::connect_watched(Client::connect(&world.data).unwrap(), Arc::new(raccoon_lib::sink::BroadcastSink::new(32)),
+        Some(Arc::new(move |lost| { let _ = lost_tx.send(lost); }))).unwrap();
+    let text = |buffer: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
+    let collect = |buffer: &Arc<Mutex<Vec<u8>>>| -> Tap {
+        let buffer = buffer.clone();
+        Box::new(move |bytes| { buffer.lock().unwrap().extend_from_slice(bytes); true })
+    };
+    let floating = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("floating", &quiet, "floating-view", collect(&floating)).unwrap();
+    common::agent::wait_until("the floating window's replay", || text(&floating).contains("quiet-ready").then_some(()));
+    // The main window stops reading, as a frozen page would: its first frame
+    // is held until the owner has given up on the connection.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    serve.control("runtime.pty.spawn", json!({"id":flood,"cwd":world.project,"cols":80,"rows":24,
+        "command":"sh -c 'exec yes output-that-no-one-reads'"}));
+    desktop.attach("main", &flood, "main-view", Box::new(move |_| { let _ = held.lock().unwrap().recv(); true })).unwrap();
+    common::agent::wait_until("the owner to drop the window that fell behind", || {
+        (serve.control("runtime.pty.stats", json!({}))["views"] == 1).then_some(())
+    });
+    drop(release);
+    let lost = lost_rx.recv_timeout(Duration::from_secs(10)).expect("the lost view went unreported");
+    assert_eq!(lost, Lost::View { generation: desktop.generation(), window: "main".into() });
+    assert!(lost_rx.recv_timeout(Duration::from_millis(500)).is_err(), "one window's view must not report the app connection lost");
+    assert!(desktop.sessions().is_ok(), "the app-wide event connection is unaffected");
+    // The other window keeps receiving live output throughout.
+    desktop.terminals().unwrap().write(&quiet, b"still-live\n").unwrap();
+    common::agent::wait_until("live output in the healthy window", || text(&floating).contains("still-live").then_some(()));
+    // No reconnect: the window's view is opened again and reads the tail.
+    let renewed = desktop.reopen_view("main").unwrap();
+    assert_eq!(desktop.renewed("main"), renewed);
+    assert_eq!(desktop.renewed("floating"), 0, "a healthy window has nothing to attach again");
+    let main = Arc::new(Mutex::new(Vec::new()));
+    desktop.attach("main", &quiet, "main-view-again", collect(&main)).unwrap();
+    common::agent::wait_until("the main window's replay after it attached again", || text(&main).contains("still-live").then_some(()));
+    assert_eq!(serve.control("runtime.pty.output", json!({"id":flood}))["running"], true, "a lost view never stops its process");
+    desktop.terminals().unwrap().kill(&flood).unwrap();
+    desktop.stop_all().unwrap();
+    stopped(&mut serve);
 }
 
 #[test]
@@ -1132,7 +1235,7 @@ fn window_publication_process_fixture() {
             }
         }
     });
-    let first = Arc::new(Desktop::connect(client,Arc::new(raccoon_lib::sink::BroadcastSink::new(32))).unwrap());
+    let first = Arc::new(Desktop::connect(client.clone(),Arc::new(raccoon_lib::sink::BroadcastSink::new(32))).unwrap());
     let publish = |next: &Arc<Desktop>| -> anyhow::Result<()> {
         // A live caller must not reach the endpoint while its validator still
         // has no identity (or the previous identity during reconnection).
@@ -1143,7 +1246,7 @@ fn window_publication_process_fixture() {
     first.activate_window(endpoint.clone(),publish).unwrap();
     assert_eq!(serve.control("floating.show",json!({}))["delivered"],1);
     let old = first.attachment().unwrap();
-    let next = Arc::new(first.reconnect().unwrap());
+    let next = Arc::new(first.reconnect(client.clone()).unwrap());
     assert_eq!(serve.try_control("runtime.heartbeat",serde_json::to_value(&old).unwrap())["ok"],false,
         "reconnect returned before revoking its old owner lease");
     assert!(first.attachment().is_err());
@@ -1151,7 +1254,7 @@ fn window_publication_process_fixture() {
     assert_eq!(serve.control("floating.show",json!({}))["delivered"],2);
     responder.join().unwrap();
     let old = next.attachment().unwrap();
-    let failed = Arc::new(next.reconnect().unwrap());
+    let failed = Arc::new(next.reconnect(client.clone()).unwrap());
     assert_eq!(serve.try_control("runtime.heartbeat",serde_json::to_value(&old).unwrap())["ok"],false,
         "reconnect returned before revoking its old owner lease");
     endpoint.token = "invalid-registration".into();

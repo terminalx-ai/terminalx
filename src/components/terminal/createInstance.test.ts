@@ -108,4 +108,51 @@ describe("a local terminal's attachment", () => {
     expect(pty.detach).toHaveBeenCalledWith("s1:shell", token);
     inst.term.dispose();
   });
+
+  it("attaches again in place over a new connection: redrawn from the replay, answered under its new name", async () => {
+    pty.detachAll.mockResolvedValue(undefined);
+    const { createInstance } = await import("./TerminalView");
+    // An agent's pane: acknowledged as soon as it is parsed, shown or not.
+    const inst = createInstance("tab:t1", "dark");
+    await settled();
+    const [, oldToken, oldFeed] = pty.attach.mock.calls[0] as [string, string, (bytes: Uint8Array) => void];
+    oldFeed(new TextEncoder().encode("before the gap"));
+    inst.reattach!();
+    expect(pty.detach).toHaveBeenCalledWith("tab:t1", oldToken);
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    await settled();
+    expect(pty.attach).toHaveBeenCalledTimes(2);
+    const [, newToken, newFeed] = pty.attach.mock.calls[1] as [string, string, (bytes: Uint8Array) => void];
+    expect(newToken).not.toBe(oldToken);
+    // A late byte from the old connection is not drawn; the replay is, on a clean screen.
+    oldFeed(new TextEncoder().encode("stale"));
+    newFeed(new TextEncoder().encode("replayed tail"));
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    expect(inst.term.buffer.active.getLine(0)?.translateToString(true)).toBe("replayed tail");
+    newFeed(new Uint8Array(300 * 1024));
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    expect(pty.ack).toHaveBeenCalled();
+    expect(pty.ack.mock.calls.every(([, token]) => token === newToken)).toBe(true);
+    inst.release?.();
+    expect(pty.detach).toHaveBeenLastCalledWith("tab:t1", newToken);
+    inst.term.dispose();
+  });
+
+  it("attaches again once for reattaches in quick succession, and never once released", async () => {
+    pty.detachAll.mockResolvedValue(undefined);
+    const { createInstance } = await import("./TerminalView");
+    const inst = createInstance("s1:shell", "dark");
+    await settled();
+    inst.reattach!();
+    inst.reattach!();
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    await settled();
+    expect(pty.attach).toHaveBeenCalledTimes(2);
+    inst.reattach!();
+    inst.release!();
+    await new Promise<void>((resolve) => inst.term.write("", resolve));
+    await settled();
+    expect(pty.attach).toHaveBeenCalledTimes(2);
+    inst.term.dispose();
+  });
 });

@@ -95,6 +95,8 @@ export interface TerminalInstance {
   fit: FitAddon;
   /** Stops whatever feeds it output; called when the instance is disposed. */
   release?: () => void;
+  /** Attach again over a new connection, the screen redrawn from the backend's scrollback. */
+  reattach?: () => void;
   /** May be rebuilt from the backend's bounded scrollback without ending the process. */
   restorable?: boolean;
 }
@@ -203,6 +205,20 @@ export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
   disposals.add(listener);
 }
 
+/**
+ * This window's connection to its panes' output was replaced (#643): the old
+ * one delivers nothing more. A terminal on screen attaches again in place and
+ * is redrawn from the backend's scrollback; one off screen is let go, and the
+ * next view to show it builds it afresh from that same scrollback.
+ */
+export function reattachLocalTerminals() {
+  for (const [id, inst] of [...instances]) {
+    if (!inst.reattach) continue;
+    if (inst.el.isConnected) inst.reattach();
+    else disposeInstance(id);
+  }
+}
+
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
@@ -278,6 +294,7 @@ async function register() {
     // Closed in another window: its process is already gone, so only this window's tab and xterm are left to drop.
     await listen<string>("pty_closed", (e) => forgetPane(e.payload));
     await listen<PaneAgent>("pane_agent", (e) => notePaneAgent(e.payload));
+    await listen("local_runtime_reattached", () => void resyncPanes().catch(() => {}));
   } catch {
     /* outside a webview */
   }
@@ -309,6 +326,26 @@ async function register() {
     .catch(() => {
       /* outside a webview, or a backend that does not follow terminals */
     });
+}
+
+/** Shell tabs whose spawn is on its way: not listed by the backend yet, and not closed. */
+const spawning = new Set<string>();
+
+/**
+ * The live connection was replaced: shells opened, renamed, closed or ended,
+ * and agents started in them, while this window could not hear of it.
+ */
+async function resyncPanes() {
+  const known = new Set(state.panes.map((pane) => pane.id));
+  const [shells, agents] = await Promise.all([pty.shells(), pty.agents()]);
+  for (const shell of shells) adoptShell(shell);
+  const listed = new Map(shells.map((shell) => [shell.id, shell]));
+  set({ panes: state.panes.map((pane) => (listed.get(pane.id)?.exited && !pane.exited ? { ...pane, exited: true } : pane)) });
+  // Only shell tabs and dock terminals: an agent tab's pane is the tab's to close.
+  const closed = state.panes.filter((pane) => known.has(pane.id) && (!pane.hidden || pane.docked) && !pane.owned
+    && !isAgentPane(pane.id) && !listed.has(pane.id) && !spawning.has(pane.id));
+  for (const pane of closed) forgetPane(pane.id);
+  set({ agents: Object.fromEntries(agents.flatMap(({ paneId, harness }) => (harness ? [[paneId, harness]] : []))) });
 }
 
 /** An agent came to the front of a pane's terminal, or the one that was there left. */
@@ -383,6 +420,7 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
     active: hidden ? state.active : { ...state.active, [sessionId]: id },
     selected: hidden ? state.selected : { ...state.selected, [sessionId]: { kind: "terminal", id } },
   });
+  spawning.add(id);
   try {
     // A shell tab or dock terminal is named for every window; an agent tab's own pane is not a tab.
     await pty.spawn(id, cwd, cols, rows, opts.command, opts.hidden ? undefined : pane.title);
@@ -400,6 +438,8 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
       selected,
     });
     throw e;
+  } finally {
+    spawning.delete(id);
   }
   return pane;
 }
