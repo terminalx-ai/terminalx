@@ -458,6 +458,115 @@ fn a_project_that_asks_for_no_approval_starts_at_once() {
     assert!(host.world().told.is_empty(), "the lead started it itself");
 }
 
+/// PRO-365: with approval off, the lead stores a `planned` run and stops. The person starts it
+/// from the Run view: its ready pieces start as `runs start` starts them, the start is recorded
+/// as theirs (not as an approval), and the lead is told as an approval tells it.
+#[test]
+fn a_person_starts_a_planned_run_from_the_run_view() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(run.state, RunState::Planned);
+
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!((start.started.clone(), start.run.state, start.run.approval.clone()), (vec!["map".to_string()], RunState::Running, None));
+    assert!(start.run.started_by_person.is_some());
+    assert_eq!(start.edited, None, "the lead is told, not the caller");
+    assert_eq!(host.made(), vec!["map"]);
+    assert_eq!(engine::shown(&store::get(&run.id).unwrap())["startedByPerson"]["at"].as_str().map(|at| !at.is_empty()), Some(true), "`runs show` says who started it");
+    let told = host.world().told.clone();
+    assert_eq!(told.len(), 1);
+    assert!(told[0].starts_with(&format!("The person started run {} from the Run view.", run.id)) && told[0].contains("Workers were started for: map.") && told[0].contains("terminalx wait --children-of lead"), "{}", told[0]);
+    assert!(!told[0].contains("changed"), "{}", told[0]);
+
+    // Once: a started run is not started again from the view, and the lead goes on with `runs start`.
+    assert_eq!(engine::start_planned(&host, &run.id).unwrap_err().code, "not_planned");
+    assert_eq!(host.made(), vec!["map"]);
+    assert_eq!(host.world().told.len(), 1);
+}
+
+#[test]
+fn start_run_is_not_an_approval() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(run.state, RunState::AwaitingApproval);
+    assert_eq!(engine::start_planned(&host, &run.id).unwrap_err().code, "awaiting_approval");
+    assert!(host.made().is_empty());
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::AwaitingApproval);
+}
+
+/// What the person last saved is what starts: the plan and the limits, both told to the lead.
+#[test]
+fn a_planned_run_the_person_changed_starts_as_saved_and_the_lead_is_told() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    // The same limits again is no change.
+    assert!(!engine::set_limits(&host, &run.id, run.limits.clone()).unwrap().limits_edited);
+    let mut edited = plan();
+    edited.pieces[0].model = "sonnet".into();
+    engine::update_plan(&host, &run.id, &edited).unwrap();
+    let limits = RunLimits { points: Cap::At(10.0), ceiling: Cap::At(95.0), ..run.limits.clone() };
+    let saved = engine::set_limits(&host, &run.id, limits.clone()).unwrap();
+    assert_eq!((saved.plan_edited, saved.limits_edited, saved.state), (true, true, RunState::Planned));
+
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!(start.run.limits, limits);
+    assert_eq!(start.run.piece("map").unwrap().model, "sonnet");
+    assert_eq!(start.run.piece("map").unwrap().tries[0].model, "sonnet");
+    // Cloned: the fake's lock is not held into the next call.
+    let told = host.world().told[0].clone();
+    assert!(told.contains(&format!("They changed the plan and its limits (workers at once, points, dollars or the level it pauses past) first: read it again with `terminalx runs show {} --json`.", run.id)), "{told}");
+
+}
+
+/// The lead's own `runs start` on a `planned` run works as before, and says what the person changed.
+#[test]
+fn the_leads_start_of_a_planned_run_says_what_the_person_changed() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let unchanged = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &unchanged.id).unwrap().edited, None);
+    // Changing a limit once it runs is not an edit before the start.
+    assert!(!engine::set_limits(&host, &unchanged.id, RunLimits { workers: 2, ..unchanged.limits.clone() }).unwrap().limits_edited);
+    engine::stop(&host, &unchanged.id, By::Cli).unwrap();
+
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::set_limits(&host, &run.id, RunLimits { points: Cap::At(10.0), ..run.limits.clone() }).unwrap();
+    let start = engine::start(&host, &run.id).unwrap();
+    assert_eq!((start.run.state, start.run.started_by_person.clone()), (RunState::Running, None));
+    assert_eq!(start.edited.as_deref(), Some(format!("The person changed its limits (workers at once, points, dollars or the level it pauses past) after it was stored: read it again with `terminalx runs show {} --json`.", run.id).as_str()));
+    assert!(host.world().told.is_empty(), "the lead started it itself");
+    // Said for the start that began it, not for each start after.
+    assert_eq!(engine::start(&host, &run.id).unwrap().edited, None);
+}
+
+/// The window warning is a warning: Start run starts the run while it shows, and a run past its
+/// level pauses as any run does, with the lead told why nothing started.
+#[test]
+fn a_window_warning_does_not_hold_start_run() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let host = free_host(|_| {});
+    host.world().clock = now;
+    host.world().windows = vec![window("seven_day", "7d", 65.0, now + 3_600_000)];
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    let fit = super::budget::fit(&run, now);
+    assert!(fit.iter().any(|warning| warning.contains("This run may use up to 25 points, but it stops at 85%")), "{fit:?}");
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!((start.started, start.run.state), (vec!["map".to_string()], RunState::Running));
+    engine::stop(&host, &run.id, By::Person).unwrap();
+
+    host.world().windows = vec![window("seven_day", "7d", 90.0, now + 3_600_000)];
+    let past = engine::create(&host, &plan(), "lead", None).unwrap();
+    let start = engine::start_planned(&host, &past.id).unwrap();
+    assert!(start.started.is_empty());
+    assert_eq!((start.run.state, start.run.pause.as_ref().map(|pause| pause.kind)), (RunState::NeedsYou, Some(PauseKind::Window)));
+    assert!(start.run.started_by_person.is_some());
+    assert!(host.world().told.last().unwrap().contains("No worker was started"), "{:?}", host.world().told);
+}
+
 /// PRO-337: a lead started with Orchestrate asks first, even where the project asks for no approval.
 #[test]
 fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {

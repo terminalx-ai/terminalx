@@ -3,7 +3,8 @@
 // at the window's wide and narrow sizes, light and dark: a plan waiting for
 // approval, a run with workers and results being checked, a piece blocked
 // after three tries with the done-check that failed, a merge stopped on a
-// conflict with the three ways out of it, a session with no run,
+// conflict with the three ways out of it, a planned run of a project that asks
+// for no approval with its Start run (PRO-365), a session with no run,
 // and the settings with the routing table. A synthetic run
 // behind the Tauri stub; nothing is started, and Approve, Edit, Stop and the
 // settings are answered by the stub the way the engine answers them.
@@ -201,6 +202,8 @@ function setup({ mode, scene, enabled }) {
       // A blocked piece leaves the run running: it waits on the person (PRO-361).
       : scene === "blocked" ? { ...base, state: "running", approval: { at: at(46) }, pieces: pieces.map((piece) => ({ ...piece, ...blocked[piece.id] })) }
       : scene === "running" ? { ...base, state: "running", approval: { at: at(14) }, pieces: pieces.map((piece) => ({ ...piece, ...running[piece.id] })) }
+      // PRO-365: approval is off for the project, and the 7d window is far enough in for the plan's warning.
+      : scene === "planned" ? { ...base, state: "planned", usage: { dollars: 0, subscription: true, windows: [{ agent: "claude", key: "seven_day", label: "7d", percent: 65, resetsAt: resets, points: 0 }] }, fit: ["The Claude 7d window is at 65%. This run may use up to 25 points, but it stops at 85%, about 20 points from now."], pieces }
       : { ...base, state: "awaitingApproval", pieces },
     // Every value Settings → Orchestrator shows, as `orchestrator_settings` answers.
     settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, reviewDiffLines: 400, projects: {} },
@@ -217,6 +220,17 @@ function setup({ mode, scene, enabled }) {
       called("approve", args);
       state.run = { ...state.run, state: "running", approval: { at: new Date().toISOString() }, pieces: state.run.pieces.map((piece) => (piece.dependsOn.length ? piece : { ...piece, ...started(piece.id, "running") })) };
       return { run: shown(state.run), started: ["map"], waiting: [], failed: [] };
+    },
+    // PRO-365: a person's Start run on a planned run, as `engine::start_planned` answers it.
+    orchestration_start: (args) => {
+      called("start", args);
+      state.run = { ...state.run, state: "running", fit: [], startedByPerson: { at: new Date().toISOString() }, pieces: state.run.pieces.map((piece) => (piece.dependsOn.length ? piece : { ...piece, ...started(piece.id, "running") })) };
+      return { run: shown(state.run), started: ["map"], waiting: [], failed: [] };
+    },
+    orchestration_set_limits: (args) => {
+      called("setLimits", args);
+      state.run = { ...state.run, limits: args.limits, limitsEdited: true };
+      return shown(state.run);
     },
     orchestration_stop: (args) => {
       called("stop", args);
@@ -422,6 +436,39 @@ try {
         checks["Approve and start approves this run once, and the pieces show their states"] = calls.filter((call) => call.name === "approve").length === 1 && calls.at(-1).args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && (await view.getByTestId("run-state").textContent()) === "Run" && after.rows[0].state === "running" && after.rows[1].state === "queued";
         checks["no browser errors"] = errors.length === 0;
         failed += report(`plan waiting, ${at}`, checks, { layout, errors, calls });
+        await page.close();
+      }
+
+      // A planned run in a project that asks for no approval (PRO-365): the person starts it here.
+      {
+        const { page, errors } = await start("planned");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        await view.getByRole("table", { name: "Plan" }).waitFor();
+        const layout = await layoutOf(view);
+        const button = (name) => view.getByRole("button", { name, exact: true });
+        const startRun = button("Start run");
+        await shot(page, "planned");
+        const checks = {
+          "the plan is ready to start, and says the person or the lead starts it": (await view.getByTestId("run-state").textContent()) === "Ready to start" && (await view.getByTestId("run-subtitle").textContent()) === "The lead split this into 6 pieces. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.",
+          "Edit plan, Stop run and Start run are offered, and no approval": (await button("Edit plan").count()) === 1 && (await button("Stop run").count()) === 1 && (await startRun.count()) === 1 && (await button("Approve and start").count()) === 0 && (await button("Discard").count()) === 0,
+          "Start run is the accent button, as Approve and start is": ((await startRun.getAttribute("class")) ?? "").includes("bg-accent"),
+          "the window warning shows, and Start run is still enabled": (await view.getByRole("region", { name: "Plan summary" }).getByRole("alert").textContent()).includes("This run may use up to 25 points, but it stops at 85%") && !(await startRun.isDisabled()),
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+        };
+        // Lower the points, then start: the limit is saved before the start, and the start is the person's.
+        const points = view.getByRole("spinbutton", { name: "Points of a window this run may use" });
+        await points.fill("10");
+        await points.press("Enter");
+        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
+        await startRun.click();
+        await view.getByRole("table", { name: "Pieces" }).waitFor();
+        const calls = await page.evaluate(() => window.__RUNS__.calls);
+        await shot(page, "planned-started");
+        checks["the changed points are saved, then the run is started once"] = JSON.stringify(calls.map((call) => call.name)) === JSON.stringify(["setLimits", "start"]) && calls[0].args.limits.points === 10;
+        checks["the started run says the person started it"] = (await view.getByTestId("run-subtitle").textContent()) === "6 pieces · started by you just now" && (await view.locator('[data-piece="map"]').getAttribute("data-piece-state")) === "running";
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`planned run, ${at}`, checks, { layout, errors, calls });
         await page.close();
       }
 

@@ -1961,6 +1961,11 @@ impl SessionManager {
                 self.accepting_work()?;
                 serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
             }
+            // A person's Start run on a `planned` run (PRO-365): recorded as theirs, and the lead is told.
+            "startPlanned" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?
+            }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
             // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.
             "merge" => {

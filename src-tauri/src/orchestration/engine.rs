@@ -307,6 +307,8 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         effort_ceiling: limits.effort_ceiling,
         worker_mode: limits.worker_mode,
         plan_edited: false,
+        limits_edited: false,
+        started_by_person: None,
         approval: None,
         reason: None,
         integration_check: plan.integration(),
@@ -395,6 +397,10 @@ pub struct Start {
     /// The pieces still queued, each with the unfinished pieces it depends on.
     pub waiting: Vec<Waiting>,
     pub failed: Vec<NotStarted>,
+    /// What a person changed before the lead's `runs start` started a
+    /// `planned` run: the lead reads the run again before going on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edited: Option<String>,
 }
 
 /// Start a worker for every piece whose dependencies are done. Called again,
@@ -433,8 +439,48 @@ pub fn start(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
             error.details = json!({"run": id, "pause": run.pause});
             Err(error)
         }
-        _ => launch_ready(host, id, Launch::Ready),
+        state => {
+            // The first start of a run a person changed says so: the lead's plan is not the one that runs.
+            let edited = if state == RunState::Planned { edits(&run).map(|what| format!("The person changed {what} after it was stored: read it again with `terminalx runs show {id} --json`.")) } else { None };
+            let mut start = launch_ready(host, id, Launch::Ready)?;
+            start.edited = edited;
+            Ok(start)
+        }
     }
+}
+
+/// What a person changed in a run before it started, or `None` when they
+/// changed nothing. The plan and its limits are told apart: both are what
+/// the lead planned around.
+fn edits(run: &Run) -> Option<&'static str> {
+    match (run.plan_edited, run.limits_edited) {
+        (false, false) => None,
+        (true, false) => Some("the plan"),
+        (false, true) => Some("its limits (workers at once, points, dollars or the level it pauses past)"),
+        (true, true) => Some("the plan and its limits (workers at once, points, dollars or the level it pauses past)"),
+    }
+}
+
+/// Tell the lead a person let its run start, by approving it or with Start
+/// run: what started, what queued, and how to wait.
+fn tell_started(host: &dyn Host, start: &Start, decided: &str) {
+    let run = &start.run;
+    let id = &run.id;
+    let lead = &run.lead.session_id;
+    let edited = edits(run).map(|what| format!(" They changed {what} first: read it again with `terminalx runs show {id} --json`.")).unwrap_or_default();
+    let started = match (start.started.is_empty(), run.state) {
+        (_, RunState::NeedsYou) => format!("No worker was started: {}", run.reason.clone().unwrap_or_default()),
+        (true, _) => "No worker could be started; `terminalx runs show` says why for each piece.".to_string(),
+        (false, _) => format!("Workers were started for: {}.", start.started.join(", ")),
+    };
+    let queued: Vec<&str> = start.waiting.iter().filter(|waiting| matches!(waiting.queued_for, Some(Hold::RunLimit | Hold::AppLimit))).map(|waiting| waiting.piece.as_str()).collect();
+    let started = if queued.is_empty() { started } else { format!("{started} Queued for a free worker slot, and started by TerminalX as workers finish: {}.", queued.join(", ")) };
+    host.tell_lead(
+        run,
+        &format!(
+            "{decided}{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
+        ),
+    );
 }
 
 /// Which pieces a launch considers. Whichever it is, every piece passes the
@@ -479,7 +525,7 @@ fn start_retries_locked(host: &dyn Host, id: &str) -> Result<Start, EngineError>
     }
     if !run.state.live() {
         let waiting = waiting(&run);
-        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new(), edited: None });
     }
     launch_ready(host, id, Launch::Retries)
 }
@@ -498,22 +544,31 @@ pub fn approve(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
     })
     .map_err(EngineError::internal)?;
     let start = launch_ready(host, id, Launch::Ready)?;
-    let run = &start.run;
-    let lead = &run.lead.session_id;
-    let edited = if run.plan_edited { format!(" They changed the plan first: read it again with `terminalx runs show {id} --json`.") } else { String::new() };
-    let started = match (start.started.is_empty(), start.run.state) {
-        (_, RunState::NeedsYou) => format!("No worker was started: {}", start.run.reason.clone().unwrap_or_default()),
-        (true, _) => "No worker could be started; `terminalx runs show` says why for each piece.".to_string(),
-        (false, _) => format!("Workers were started for: {}.", start.started.join(", ")),
-    };
-    let queued: Vec<&str> = start.waiting.iter().filter(|waiting| matches!(waiting.queued_for, Some(Hold::RunLimit | Hold::AppLimit))).map(|waiting| waiting.piece.as_str()).collect();
-    let started = if queued.is_empty() { started } else { format!("{started} Queued for a free worker slot, and started by TerminalX as workers finish: {}.", queued.join(", ")) };
-    host.tell_lead(
-        run,
-        &format!(
-            "The person approved the plan of run {id}.{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
-        ),
-    );
+    tell_started(host, &start, &format!("The person approved the plan of run {id}."));
+    Ok(start)
+}
+
+/// A person started a `planned` run from the Run view (PRO-365): a run of a
+/// project that asks for no approval, which the lead stored and left. It
+/// starts as the lead's `runs start` would, with the plan and limits as last
+/// saved, and the lead is told as an approval tells it. A window past its
+/// warning does not hold it: the budget pauses it as it pauses any run.
+pub fn start_planned(host: &dyn Host, id: &str) -> Result<Start, EngineError> {
+    let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    let run = stored(id)?;
+    match run.state {
+        RunState::Planned => {}
+        RunState::AwaitingApproval => return Err(EngineError::new("awaiting_approval", format!("Run {id} waits for approval: approve its plan to start it."), None)),
+        state => return Err(EngineError::new("not_planned", format!("Run {id} has already started ({}).", state_name(state)), None)),
+    }
+    store::update(id, |run| {
+        run.started_by_person = Some(Approval { at: crate::store::index::now() });
+        run.state = RunState::Running;
+        Ok(())
+    })
+    .map_err(EngineError::internal)?;
+    let start = launch_ready(host, id, Launch::Ready)?;
+    tell_started(host, &start, &format!("The person started run {id} from the Run view."));
     Ok(start)
 }
 
@@ -722,7 +777,7 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
         host.watch();
     }
     let waiting = waiting(&run);
-    Ok(Start { run, started, waiting, failed })
+    Ok(Start { run, started, waiting, failed, edited: None })
 }
 
 /// The queued pieces of a run, each with the dependencies that are not done.
@@ -2087,6 +2142,10 @@ pub fn set_limits(host: &dyn Host, id: &str, limits: RunLimits) -> Result<Run, E
         return Err(EngineError::new("run_ended", format!("Run {id} has ended ({}).", state_name(run.state)), None));
     }
     let (run, ()) = store::update(id, |run| {
+        // Before it starts, a changed limit is a change to what the lead planned around: it is told.
+        if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) && run.limits != limits {
+            run.limits_edited = true;
+        }
         run.limits = limits;
         Ok(())
     })
@@ -2133,7 +2192,7 @@ fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Resu
         changed(host, &run);
         host.watch();
         let waiting = waiting(&run);
-        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new() });
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new(), edited: None });
     }
     let mut current = run.clone();
     update_usage(host, &mut current);
