@@ -153,9 +153,11 @@ jobs:
         run: |
           file src-tauri/target/release/terminalx-serve | grep 'Mach-O 64-bit executable arm64'
           # An uninstalled guest must refuse identity-scoped RPCs before it
-          # starts a runtime or reaches any desktop/control endpoint.
-          printf '%s' '{"method":"describe","params":{}}' | src-tauri/target/release/terminalx-serve local-vm-rpc - > "$RUNNER_TEMP/guest-rpc.json"
-          python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["ok"] is False' "$RUNNER_TEMP/guest-rpc.json"
+          # starts a runtime or reaches any desktop/control endpoint: a
+          # well-formed request, refused for the missing identity and not for
+          # any parse or usage error.
+          printf '%s' '{"method":"describe","params":{},"hostKey":"0000000000000000000000000000000000000000000000000000000000000000"}' | src-tauri/target/release/terminalx-serve local-vm-rpc - > "$RUNNER_TEMP/guest-rpc.json"
+          python3 -c 'import json,sys; reply = json.load(open(sys.argv[1])); assert reply["ok"] is False and reply["error"]["code"] == "guest_rpc_failed" and reply["error"]["message"].startswith("Guest identity is not installed"), reply' "$RUNNER_TEMP/guest-rpc.json"
       - name: Stage the asset
         run: |
           mkdir -p "$RUNNER_TEMP/out"
