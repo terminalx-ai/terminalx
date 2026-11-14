@@ -49,6 +49,8 @@ fn ensure_local_runtime_resource_dir() {
     let directory = std::path::Path::new("target/local-runtime");
     if !directory.exists() {
         std::fs::create_dir_all(directory).expect("create local runtime resource directory");
+        // Created once: undated, it costs one more rebuild on the next command.
+        let _ = date_like(directory, "build.rs");
     }
     println!("cargo:rerun-if-changed=target/local-runtime");
 }
@@ -90,6 +92,8 @@ fn ensure_agent_browser_stand_in() {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
         }
+        // Its text is in this file. Written once: undated, it costs one more rebuild on the next command.
+        let _ = date_like(&path, "build.rs");
     }
 }
 
@@ -112,6 +116,17 @@ fn link_clang_builtins() {
     }
 }
 
+/// Give something this script wrote the time of what it was made from.
+/// tauri-build and this script watch what they package. A file written during
+/// a run is newer than the run, so the next Cargo command would run the script
+/// again and rebuild the whole crate with no source changed. Dated like its
+/// source, it reads as changed when the source is.
+#[cfg(feature = "desktop")]
+fn date_like(written: impl AsRef<std::path::Path>, source: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let time = std::fs::metadata(source)?.modified()?;
+    std::fs::File::open(written)?.set_modified(time)
+}
+
 /// Direct Cargo checks also package the real CLI sidecar. No nested Cargo,
 /// downloads or success stand-ins; rustc emits the requested target executable.
 #[cfg(feature = "desktop")]
@@ -132,11 +147,9 @@ fn ensure_terminalx_launcher() {
         let _ = std::fs::remove_file(&temporary);
         panic!("native CLI launcher build failed");
     }
-    // tauri-build watches the published file. Dated by this run, it read as
-    // changed after every build, so each Cargo command on a Mac ran this script
-    // again and rebuilt the whole crate. Dated by its source, it reads as
-    // changed when the source is.
-    let written = std::fs::metadata(source).and_then(|source| source.modified()).expect("native CLI launcher source time");
-    std::fs::File::options().write(true).open(&temporary).and_then(|built| built.set_modified(written)).expect("date native CLI launcher");
+    // Rewritten on every run, so undated it would read as changed after every build.
+    if let Err(error) = date_like(&temporary, source) {
+        println!("cargo:warning=the CLI launcher keeps this build's time, so the next Cargo command rebuilds the crate: {error}");
+    }
     std::fs::rename(&temporary, &output).expect("publish native CLI launcher");
 }
