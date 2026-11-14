@@ -458,6 +458,115 @@ fn a_project_that_asks_for_no_approval_starts_at_once() {
     assert!(host.world().told.is_empty(), "the lead started it itself");
 }
 
+/// PRO-365: with approval off, the lead stores a `planned` run and stops. The person starts it
+/// from the Run view: its ready pieces start as `runs start` starts them, the start is recorded
+/// as theirs (not as an approval), and the lead is told as an approval tells it.
+#[test]
+fn a_person_starts_a_planned_run_from_the_run_view() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(run.state, RunState::Planned);
+
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!((start.started.clone(), start.run.state, start.run.approval.clone()), (vec!["map".to_string()], RunState::Running, None));
+    assert!(start.run.started_by_person.is_some());
+    assert_eq!(start.edited, None, "the lead is told, not the caller");
+    assert_eq!(host.made(), vec!["map"]);
+    assert_eq!(engine::shown(&store::get(&run.id).unwrap())["startedByPerson"]["at"].as_str().map(|at| !at.is_empty()), Some(true), "`runs show` says who started it");
+    let told = host.world().told.clone();
+    assert_eq!(told.len(), 1);
+    assert!(told[0].starts_with(&format!("The person started run {} from the Run view.", run.id)) && told[0].contains("Workers were started for: map.") && told[0].contains("terminalx wait --children-of lead"), "{}", told[0]);
+    assert!(!told[0].contains("changed"), "{}", told[0]);
+
+    // Once: a started run is not started again from the view, and the lead goes on with `runs start`.
+    assert_eq!(engine::start_planned(&host, &run.id).unwrap_err().code, "not_planned");
+    assert_eq!(host.made(), vec!["map"]);
+    assert_eq!(host.world().told.len(), 1);
+}
+
+#[test]
+fn start_run_is_not_an_approval() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(run.state, RunState::AwaitingApproval);
+    assert_eq!(engine::start_planned(&host, &run.id).unwrap_err().code, "awaiting_approval");
+    assert!(host.made().is_empty());
+    assert_eq!(store::get(&run.id).unwrap().state, RunState::AwaitingApproval);
+}
+
+/// What the person last saved is what starts: the plan and the limits, both told to the lead.
+#[test]
+fn a_planned_run_the_person_changed_starts_as_saved_and_the_lead_is_told() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    // The same limits again is no change.
+    assert!(!engine::set_limits(&host, &run.id, run.limits.clone()).unwrap().limits_edited);
+    let mut edited = plan();
+    edited.pieces[0].model = "sonnet".into();
+    engine::update_plan(&host, &run.id, &edited).unwrap();
+    let limits = RunLimits { points: Cap::At(10.0), ceiling: Cap::At(95.0), ..run.limits.clone() };
+    let saved = engine::set_limits(&host, &run.id, limits.clone()).unwrap();
+    assert_eq!((saved.plan_edited, saved.limits_edited, saved.state), (true, true, RunState::Planned));
+
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!(start.run.limits, limits);
+    assert_eq!(start.run.piece("map").unwrap().model, "sonnet");
+    assert_eq!(start.run.piece("map").unwrap().tries[0].model, "sonnet");
+    // Cloned: the fake's lock is not held into the next call.
+    let told = host.world().told[0].clone();
+    assert!(told.contains(&format!("They changed the plan and its limits (workers at once, points, dollars or the level it pauses past) first: read it again with `terminalx runs show {} --json`.", run.id)), "{told}");
+
+}
+
+/// The lead's own `runs start` on a `planned` run works as before, and says what the person changed.
+#[test]
+fn the_leads_start_of_a_planned_run_says_what_the_person_changed() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let unchanged = engine::create(&host, &plan(), "lead", None).unwrap();
+    assert_eq!(engine::start(&host, &unchanged.id).unwrap().edited, None);
+    // Changing a limit once it runs is not an edit before the start.
+    assert!(!engine::set_limits(&host, &unchanged.id, RunLimits { workers: 2, ..unchanged.limits.clone() }).unwrap().limits_edited);
+    engine::stop(&host, &unchanged.id, By::Cli).unwrap();
+
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::set_limits(&host, &run.id, RunLimits { points: Cap::At(10.0), ..run.limits.clone() }).unwrap();
+    let start = engine::start(&host, &run.id).unwrap();
+    assert_eq!((start.run.state, start.run.started_by_person.clone()), (RunState::Running, None));
+    assert_eq!(start.edited.as_deref(), Some(format!("The person changed its limits (workers at once, points, dollars or the level it pauses past) after it was stored: read it again with `terminalx runs show {} --json`.", run.id).as_str()));
+    assert!(host.world().told.is_empty(), "the lead started it itself");
+    // Said for the start that began it, not for each start after.
+    assert_eq!(engine::start(&host, &run.id).unwrap().edited, None);
+}
+
+/// The window warning is a warning: Start run starts the run while it shows, and a run past its
+/// level pauses as any run does, with the lead told why nothing started.
+#[test]
+fn a_window_warning_does_not_hold_start_run() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let host = free_host(|_| {});
+    host.world().clock = now;
+    host.world().windows = vec![window("seven_day", "7d", 65.0, now + 3_600_000)];
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    let fit = super::budget::fit(&run, now);
+    assert!(fit.iter().any(|warning| warning.contains("This run may use up to 25 points, but it stops at 85%")), "{fit:?}");
+    let start = engine::start_planned(&host, &run.id).unwrap();
+    assert_eq!((start.started, start.run.state), (vec!["map".to_string()], RunState::Running));
+    engine::stop(&host, &run.id, By::Person).unwrap();
+
+    host.world().windows = vec![window("seven_day", "7d", 90.0, now + 3_600_000)];
+    let past = engine::create(&host, &plan(), "lead", None).unwrap();
+    let start = engine::start_planned(&host, &past.id).unwrap();
+    assert!(start.started.is_empty());
+    assert_eq!((start.run.state, start.run.pause.as_ref().map(|pause| pause.kind)), (RunState::NeedsYou, Some(PauseKind::Window)));
+    assert!(start.run.started_by_person.is_some());
+    assert!(host.world().told.last().unwrap().contains("No worker was started"), "{:?}", host.world().told);
+}
+
 /// PRO-337: a lead started with Orchestrate asks first, even where the project asks for no approval.
 #[test]
 fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
@@ -1957,6 +2066,12 @@ fn a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts() {
     host.verifier_replies("migrate", 2, &verdict_block(r#"{"verdict": "fail", "evidence": ["src/store/migrate.rs:31: drops keys it does not know"]}"#), 4_000);
     engine::worker_turn_ended(&host, "w1-migrate");
     assert_eq!(store::get(id).unwrap().piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Waiting("Question.".into()));
+    let waiting = engine::refreshed(&host, id).unwrap();
+    assert!(waiting.piece("migrate").unwrap().tries[0].verification.as_ref().unwrap().review_open());
+    assert_eq!(waiting.piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Working);
+    engine::refreshed(&host, id).unwrap();
     // The second pass makes two of three.
     host.verifier_replies("migrate", 3, &verdict_block(PASS), 3_500);
     engine::worker_turn_ended(&host, "w1-migrate");
@@ -2954,4 +3069,100 @@ fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
     host.world().running.insert("w1-cli".into());
     engine::stop(&host, &id, By::Cli).unwrap();
     assert_eq!(host.world().stopped, ["w1-cli", "w1-cli"]);
+}
+
+#[test]
+fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_consumed() {
+    let _home = crate::store::temp_home();
+    for pass in [true, false] {
+        let (host, id) = run_of(&format!("lead-{pass}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        let began = engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Permission needed.".into()));
+        assert!(engine::watch(&host), "a waiting verifier remains watched");
+        let waiting = store::get(&id).unwrap();
+        let piece = waiting.piece("guide").unwrap();
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert_eq!(piece.state, PieceState::Verifying);
+        assert!(check.review_open() && !verifier.settled() && verifier.problem.is_none());
+        assert_eq!(verifier.waiting.as_deref(), Some("Permission needed."));
+        assert!(piece.note.as_deref().unwrap().contains("verifier needs you"));
+        assert!(engine::wake(&began, &waiting, false).unwrap()["why"][0].as_str().unwrap().contains("verifier that needs you"));
+        assert!(engine::wake(&waiting, &waiting, false).is_none(), "an existing verifier prompt must not wake each new wait");
+        assert!(engine::wake(&began, &waiting, true).is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), waiting, "repeated reads preserve the resumable wait");
+        let restored: Run = serde_json::from_value(serde_json::to_value(&waiting).unwrap()).unwrap();
+        assert_eq!(restored, waiting);
+        host.world().verifier_now.insert(session, VerifierNow::Working);
+        let working = engine::refreshed(&host, &id).unwrap();
+        assert_eq!(working.piece("guide").unwrap().note.as_deref(), Some("Written."));
+        assert!(working.piece("guide").unwrap().tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0].waiting.is_none());
+        assert!(engine::wake(&waiting, &working, false).is_none());
+        let reply = if pass { PASS } else { r#"{"verdict":"fail","evidence":["docs/guide.md:1: missing settings"]}"# };
+        host.verifier_replies("guide", 1, &verdict_block(reply), 42);
+        engine::watch(&host);
+        let ended = store::get(&id).unwrap();
+        let check = ended.piece("guide").unwrap().tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(if pass { verify::Outcome::Passed } else { verify::Outcome::Failed }));
+        assert_eq!(check.review.as_ref().unwrap().verifiers[0].tokens.unwrap().total(), 42);
+        engine::refreshed(&host, &id).unwrap();
+        assert_eq!(host.world().verifiers.len(), 1, "no duplicate verifier launch");
+    }
+}
+
+#[test]
+fn capacity_queues_are_not_actionable_ready_work_or_wait_wakeups() {
+    let _home = crate::store::temp_home();
+    let (_, id) = one_piece();
+    let began = store::get(&id).unwrap();
+    for hold in [Hold::RunLimit, Hold::AppLimit] {
+        let mut now = began.clone();
+        let queued = &mut now.pieces[1];
+        queued.depends_on.clear();
+        queued.queued_for = Some(hold);
+        assert_eq!(engine::shown(&now)["ready"], json!([]));
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        // An app limit can be held by another run, with no local worker.
+        now.pieces.remove(0);
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        now.pieces[0].queued_for = None;
+        assert_eq!(engine::shown(&now)["ready"], json!(["docs"]));
+        assert_eq!(engine::wake(&now, &now, false).unwrap()["ready"], json!(["docs"]));
+        // An accepted result or failure still wakes even with a capacity queue.
+        let mut finished = began.clone();
+        finished.pieces[1].queued_for = Some(hold);
+        for state in [PieceState::Done, PieceState::Blocked, PieceState::Failed] {
+            finished.pieces[0].state = state;
+            let woken = engine::wake(&began, &finished, false).unwrap();
+            assert_eq!(woken["ready"], json!([]));
+            assert!(woken["why"][0].as_str().unwrap().starts_with("cli is"));
+        }
+    }
+}
+
+#[test]
+fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invalidly() {
+    let _home = crate::store::temp_home();
+    for (number, terminal) in [VerifierNow::Gone, VerifierNow::Stuck("The agent terminated.".into()), VerifierNow::Replied("No verdict.".into())].into_iter().enumerate() {
+        let (host, id) = run_of(&format!("lead-terminal-{number}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Question.".into()));
+        engine::refreshed(&host, &id).unwrap();
+        host.world().verifier_now.insert(session, terminal);
+        let ended = engine::refreshed(&host, &id).unwrap();
+        let piece = ended.piece("guide").unwrap();
+        assert_eq!(piece.state, PieceState::Blocked);
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(verify::Outcome::Inconclusive));
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert!(verifier.settled() && verifier.problem.is_some() && verifier.waiting.is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), ended);
+        assert_eq!(host.world().verifiers.len(), 1);
+    }
 }

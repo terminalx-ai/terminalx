@@ -10,6 +10,10 @@ The TerminalX companion is an Expo client of the deployed TerminalX account,
 pairing, relay, and runtime contracts. The Mac remains the source of truth for
 sessions and terminal state. The phone does not need a new hosted backend.
 
+Operating one desktop from another reuses this pairing (host key, one-time code,
+fingerprint, direct and relay routes) with a different scope and protocol; see
+[MACHINES.md](./MACHINES.md). A Mac keeps one host key for phones and computers.
+
 ## Product boundary and app shell
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “Scope” and

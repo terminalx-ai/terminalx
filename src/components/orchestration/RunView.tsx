@@ -17,7 +17,7 @@ import {
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
 import { PLAN_A_RUN_PROMPT } from "@/lib/orchestrateStart";
-import { selectSession, useSessionStore } from "@/lib/sessions";
+import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { showPanelTab } from "@/lib/panelTab";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { familyNeeds, modelTier, pieceSpend, runSpend, type Need } from "@/lib/runFamily";
@@ -149,6 +149,12 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
             {(run.state === "running" || run.state === "planned" || run.state === "needsYou" || run.state === "verifying" || run.state === "merging") && (
               <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}><Square />Stop run</Button>
             )}
+            {/* A project that asks for no approval (PRO-365): the person starts the plan as last saved, never while a change is being saved. A window warning does not hold it. */}
+            {run.state === "planned" && (
+              <Button variant="accent" disabled={!!busy} title={busy === "save" || busy === "limits" ? "Saving your change first" : undefined} onClick={() => void act("start", async () => (await orchestration.start(run.id)).run)}>
+                {busy === "start" ? <LoaderCircle className="animate-spin" /> : <Play />}Start run
+              </Button>
+            )}
             {mergeAction && (
               <Button variant="outline" disabled={!!busy || mergeAction.disabled} data-testid="run-merge" title={mergeAction.why ?? "Merge every accepted piece into the lead's branch, in dependency order. Nothing is pushed."} onClick={() => void merge()}>
                 {busy === "merge" || run.mergeUnderWay ? <LoaderCircle className="animate-spin" /> : <GitMerge />}{mergeAction.label}
@@ -207,7 +213,7 @@ function subtitle(run: Run): string {
     case "awaitingApproval":
       return `The lead split this into ${count}. Nothing starts until you approve.`;
     case "planned":
-      return `The lead split this into ${count}. This repository starts runs without asking: the lead starts it with terminalx runs start.`;
+      return `The lead split this into ${count}. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.`;
     default: {
       // A run held up by a blocked piece, with nothing else running, says so (18.03); while workers run, the Needs you list names it.
       const blocked = run.pieces.filter((piece) => piece.state === "blocked");
@@ -217,9 +223,13 @@ function subtitle(run: Run): string {
         const held = run.waiting.filter((entry) => entry.on.some((on) => blocked.some((piece) => piece.id === on))).map((entry) => numbers[entry.piece]);
         return `${blocked.length === 1 ? `Piece ${names} is` : `Pieces ${names} are`} blocked.${held.length ? ` ${held.length === 1 ? `Piece ${held[0]} waits` : `Pieces ${held.join(", ")} wait`} for ${blocked.length === 1 ? "it" : "them"}; nothing else is running.` : " Nothing else is running."}`;
       }
-      if (!run.approval) return `${count} · started without approval, as this repository is set`;
-      const since = relativeTime(run.approval.at);
-      return `${count} · started ${since === "now" ? "just now" : /^\d/.test(since) ? `${since} ago` : since} · approved by you`;
+      const when = (at: string) => {
+        const since = relativeTime(at);
+        return since === "now" ? "just now" : /^\d/.test(since) ? `${since} ago` : since;
+      };
+      if (run.approval) return `${count} · started ${when(run.approval.at)} · approved by you`;
+      if (run.startedByPerson) return `${count} · started by you ${when(run.startedByPerson.at)}`;
+      return `${count} · started without approval, as this repository is set`;
     }
   }
 }
@@ -787,8 +797,9 @@ function ReviewCard({ agent, review, check }: { agent: string; review: RunReview
   const status = check.outcome === "passed" ? { text: review.voters === 1 ? "passed" : `passed · ${passes} of ${review.voters}`, tone: "text-add" }
     : check.outcome === "failed" ? { text: review.voters === 1 ? "failed" : `failed · ${passes} of ${review.voters} passed`, tone: "text-destructive" }
     : check.outcome === "inconclusive" ? { text: "no verdict", tone: "text-warning" }
+    : review.verifiers.some((verifier) => verifier.waiting) ? { text: "needs you", tone: "text-warning" }
     : { text: "reading", tone: "text-info" };
-  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : "Reading");
+  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : verifier.waiting ? "Needs you" : "Reading");
   return (
     <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="piece-review" data-review={check.outcome ?? "open"}>
       <div className="flex items-center gap-2 text-xs">
@@ -799,13 +810,17 @@ function ReviewCard({ agent, review, check }: { agent: string; review: RunReview
       <ul className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{review.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
       <ul className="mt-2 flex flex-col gap-2">
         {review.verifiers.map((verifier, index) => (
-          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : "open")}>
+          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : verifier.waiting ? "waiting" : "open")}>
             <div className="flex items-center gap-2">
               <span className="min-w-0 truncate"><ModelName piece={{ agent, model: verifier.model, effort: verifier.effort }} /></span>
-              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem ? "text-warning" : "text-info")}>{said(verifier)}</span>
-              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(verifier.session!.sessionId)}>Open</button>}
+              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem || verifier.waiting ? "text-warning" : "text-info")}>{said(verifier)}</span>
+              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => {
+                selectSession(verifier.session!.sessionId);
+                if (verifier.session!.tabId) void setActiveTab(verifier.session!.sessionId, verifier.session!.tabId).catch(console.error);
+              }}>Open</button>}
             </div>
             {(verifier.evidence?.length ?? 0) > 0 && <ul className="mt-1 list-disc break-words pl-4 font-mono text-[11.5px] leading-[17px] text-muted-foreground">{verifier.evidence!.map((line) => <li key={line}>{line}</li>)}</ul>}
+            {verifier.waiting && <p className="mt-1 text-[11.5px] leading-[17px] text-warning">{verifier.waiting}</p>}
             {verifier.problem && <p className="mt-1 text-[11.5px] leading-[17px] text-faint">{verifier.problem}</p>}
           </li>
         ))}

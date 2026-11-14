@@ -788,12 +788,24 @@ A project whose setting turns approval off stores the run as `planned`, and `run
 starts it at once. A lead session the person started with Orchestrate is the exception: its
 runs are always `awaitingApproval`, whatever the setting (`approvalRequired` says so).
 
+A `planned` run can also be started by the person: its Run view has Start run, beside Edit
+plan and Stop run. When you were asked to plan a run and stop, store it and end your turn;
+either the person starts it there, or you start it with `runs start` when they ask you to.
+Start run starts the ready pieces as `runs start` does, with the plan and limits as last
+saved, and you are sent the same message an approval sends (what started, what queued, and
+whether they changed the plan or its limits first). The run then has `startedByPerson`
+(`{at}`); `approval` stays absent, so what a run they approved allows (commands in checks,
+`person_only` widening and skipping) holds as for any run of the project. A usage window
+past its warning does not stop either start: the run pauses at its limit as any run does.
+
 #### Start, follow, stop
 
 `runs start` starts a worker for every piece whose dependencies are done, up to the worker
 limits, and returns `started` (piece ids), `waiting` (each queued piece with the pieces it
 waits `on`, and `queuedFor` when a limit holds it) and
-`failed` (pieces whose worker could not be started, with the `error`). Call it again
+`failed` (pieces whose worker could not be started, with the `error`). On a `planned` run
+the person changed before you started it, it also returns `edited`, saying what they changed
+(the plan, its limits, or both): read the run again with `runs show` before going on. Call it again
 whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
 whose worker could not be started. Calling it when nothing new is ready starts nothing. A
 piece whose session was made but could not be made safe to brief keeps that session (`held`
@@ -855,12 +867,28 @@ A piece with a passing `command` check, a small diff, no security area and a kin
 command that really proves it, and keep pieces small: that is what keeps checking free.
 
 A verifier is a conversation of its own in the worker's worktree that cannot edit files and
-runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else, and every
-tool of a connected server, is refused. It
+runs only vetted commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`, `head`, and
+`sed -n '41,60p' file`). `sed` accepts only a positive numeric line or range followed by `p`,
+with `-n`; general scripts and other options are refused. Pipelines and semicolon lists work
+only when every stage is vetted; redirects, substitutions and writes are refused with a
+reason and a supported alternative. TerminalX runs the vetted programs directly, without a
+shell, only when read-only commands are enabled and provider sandbox settings cannot narrow
+their reads. Otherwise use the provider's native `Read`, `Grep`, or `Glob` tools on permitted
+files, or the supplied diff. Those file tools retain provider permissions: allowing one
+outside-worktree Read does not authorize other calls. A hook response distinguishes a policy
+refusal (nothing ran), a provider permission denial, and an executed command's exit status
+(search status 1 can mean no matches). The app's failed-tool row may show a generic recovery
+message; the model receives the hook's reason or execution report. Every tool of a connected
+server is refused. It
 is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
 the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
 medium, unless the person changed it), not on the worker's model, and ends with a verdict:
 pass, or fail with `file:line` evidence.
+
+A verifier waiting for a permission decision or question remains in verification. The run
+shows that the verifier needs you and links to its conversation. Answer there; the same
+verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
+invalid final reply still leaves the review inconclusive.
 
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not

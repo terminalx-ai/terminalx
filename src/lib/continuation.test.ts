@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn(), delivery: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String, onPromptDelivery: mocks.delivery }));
-vi.mock("@/lib/sessions", () => ({ addTab: mocks.add }));
-vi.mock("@/lib/pipelineLaunch", () => ({ preparePipelineContinuation: mocks.pipeline }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn(), delivery: vi.fn(), create: vi.fn(), quick: vi.fn(), archive: vi.fn(), upsert: vi.fn(), select: vi.fn(), pipelineLaunch: vi.fn(), workspaces: vi.fn() }));
+vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list, createSession: mocks.create, createQuickChat: mocks.quick, listWorkspaces: mocks.workspaces }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String, onPromptDelivery: mocks.delivery }));
+vi.mock("@/lib/sessions", () => ({ addTab: mocks.add, archiveSession: mocks.archive, upsertSession: mocks.upsert, selectSession: mocks.select }));
+vi.mock("@/lib/pipelineLaunch", () => ({ preparePipelineContinuation: mocks.pipeline, preparePipelineLaunch: mocks.pipelineLaunch }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: mocks.apply }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-default" }, lastEffort: { codex: "high" }, lastMode: "default" }) }));
-import { continuationPrompt, IN_INPUT, launchContinuation, type ContinuationContext } from "./continuation";
+import { continuationPrompt, IN_INPUT, launchContinuation, launchContinuationInDestination, moveChatToProject, type ContinuationContext } from "./continuation";
 import { clearDrafts, getDraft, setDraft } from "@/lib/drafts";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
+import { containingWorkspace, continuationDefaultProject, continuationWorkspaces } from "./continuation-destination";
+import type { SessionEntry, Project } from "@/types/session";
 import { secondOpinionPrompt } from "./agentHandoff";
 import type { Turn } from "./transcript";
 const settings = (harness: string): LaunchSettings => ({ harness, model: `${harness}-model`, effort: "medium", permissionMode: "acceptEdits" });
@@ -321,4 +323,74 @@ it("does not recover a draft forgotten during pending delivery", async () => {
   delivery.reject(new Error("uncertain delivery"));
   expect((await running).stage).toBe("delivery");
   expect(getDraft(tab.id)).toBe("");
+});
+
+
+describe("destination routing", () => {
+  beforeEach(() => {
+    mocks.create.mockResolvedValue({ id: "destination", tabs: [tab] });
+    mocks.quick.mockResolvedValue({ id: "quick", tabs: [tab] });
+    mocks.pipelineLaunch.mockImplementation(async (_session, _tab, prompt) => prompt);
+  });
+  it("preserves matching cwd, source context and history without archiving or transferring authority", async () => {
+    const before = structuredClone(context);
+    const result = await launchContinuationInDestination(context, { projectPath: "/repo", worktree: false, cwd: "/external/tree/subdir" }, codex, "prompt", vi.fn());
+    expect(result.stage).toBe("delivered");
+    expect(mocks.create).toHaveBeenCalledExactlyOnceWith({ projectPath: "/repo", cwd: "/external/tree/subdir", useWorktree: false, onMain: true, title: context.title, tab: codex });
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith("destination", tab.id, "prompt", undefined, true);
+    expect(mocks.pipeline).not.toHaveBeenCalled();
+    expect(mocks.pipelineLaunch).toHaveBeenCalledExactlyOnceWith("destination", tab.id, "prompt", undefined);
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(context).toEqual(before);
+  });
+  it("creates a quick chat for an explicit No project destination", async () => {
+    expect((await launchContinuationInDestination(context, null, codex, "prompt", vi.fn())).stage).toBe("delivered");
+    expect(mocks.quick).toHaveBeenCalledExactlyOnceWith({ title: context.title, tab: codex });
+    expect(mocks.archive).not.toHaveBeenCalled();
+  });
+  it.each([null, { projectPath: "/repo", worktree: true }])("retries a failed destination start without another session: %j", async (to) => {
+    mocks.start.mockRejectedValueOnce(new Error("spawn failed"));
+    const failed = await launchContinuationInDestination(context, to, codex, "prompt", vi.fn());
+    expect(failed.stage).toBe("launch");
+    expect((await launchContinuationInDestination(context, to, codex, "prompt", vi.fn(), failed.launched)).stage).toBe("delivered");
+    expect(mocks.create.mock.calls.length + mocks.quick.mock.calls.length).toBe(1);
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.archive).not.toHaveBeenCalled();
+  });
+  it("retains explicit Link archive behavior while preserving the matching worktree cwd", async () => {
+    await moveChatToProject({ id: context.sessionId, title: context.title }, { projectPath: "/repo", worktree: false, cwd: "/external/tree" }, codex, "prompt", vi.fn());
+    expect(mocks.create.mock.calls[0][0].cwd).toBe("/external/tree");
+    expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(context.sessionId, true);
+  });
+  it.each([null, { projectPath: "/repo", worktree: false }])("preserves delivery recovery and the source for destination %j", async (to) => {
+    setDraft(context.tabId, "source composer");
+    mocks.send.mockRejectedValueOnce(new Error("uncertain delivery"));
+    const failed = await launchContinuationInDestination(context, to, codex, "prepared prompt", vi.fn());
+    expect(failed.stage).toBe("delivery");
+    expect(getDraft(tab.id)).toBe("prepared prompt");
+    expect(getDraft(context.tabId)).toBe("source composer");
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.pipeline).not.toHaveBeenCalled();
+    expect(mocks.create.mock.calls.length + mocks.quick.mock.calls.length).toBe(1);
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("containing project resolution", () => {
+  it("uses listed external worktrees, path boundaries and the most specific checkout", async () => {
+    const projects = [{ path: "/repo", kind: "git" }, { path: "/external/work/nested", kind: "folder" }] as Project[];
+    mocks.workspaces.mockResolvedValue([{ path: "/external/work" }]);
+    const workspaces = await continuationWorkspaces(projects);
+    expect(mocks.workspaces).toHaveBeenCalledExactlyOnceWith("/repo");
+    expect(containingWorkspace(workspaces, "/external/work/sub")?.projectPath).toBe("/repo");
+    expect(containingWorkspace(workspaces, "/external/work/nested/sub")?.projectPath).toBe("/external/work/nested");
+    expect(containingWorkspace(workspaces, "/external/work-other")).toBeUndefined();
+    expect(containingWorkspace(workspaces, "/repo/sub")?.projectPath).toBe("/repo");
+    expect(containingWorkspace(workspaces, "/repo-other/sub")).toBeUndefined();
+    expect(containingWorkspace(workspaces, "/external/work/", "/repo")?.path).toBe("/external/work");
+    expect(continuationDefaultProject({ kind: "quick" } as SessionEntry, "/external/work/sub", workspaces)).toBe("/repo");
+    expect(continuationDefaultProject({ kind: "quick" } as SessionEntry, "/scratch", workspaces)).toBeNull();
+    expect(continuationDefaultProject({ projectPath: "/attached" } as SessionEntry, "/external/work/sub", workspaces)).toBe("/attached");
+  });
 });
