@@ -10,9 +10,9 @@ import { CloudGitView } from "./CloudGit";
 import { CloudPortsView } from "./CloudPorts";
 import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
 import { CloudShareDialog } from "./CloudShareDialog";
-import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
-import { launchFailureStands } from "@/lib/cloudRowState";
-import { archiving, deletion, isOpen, workspaceFailureText } from "@/lib/cloudLifecycle";
+import { PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
+import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { api, workspaceTargetKey, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
 import {
   closeCloudTerminal,
@@ -81,13 +81,10 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
   if (isOpen(operation) && operation?.action === "suspend") return "Stopping…";
   if (isOpen(operation) && operation?.action === "resume") return "Resuming…";
   const phase = phaseOf(item);
-  if (state === "attention-required") {
-    if (phase === "failed" && launch) return `Needs attention: ${failureMessage(item)}`;
-    if (operation?.state === "failed" && operation.errorCode) return `Needs attention: ${workspaceFailureText(item, operation)}`;
-    return "Needs attention";
-  }
+  const attention = resolveCloudAttention(item, { agentRan });
+  if (attention) return `${state === "ready" && launch ? "The agent did not start" : "Needs attention"}: ${attention.message}`;
+  if (state === "attention-required") return "Ready";
   if (state === "suspended" || state === "archived" || state === "destroyed") return STATE_TEXT[state];
-  if (phase === "failed" && launch && launchFailureStands(item, { agentRan })) return `The agent did not start: ${failureMessage(item)}`;
   if (runtimeNotPickedUp(item, now) !== null) return "Ready · the runtime has not picked up the first task";
   if (state === "provisioning" || (launch && !settled(phase))) return PHASES.find((p) => p.id === phase)?.label ?? phase;
   return STATE_TEXT[state] ?? state;
@@ -108,13 +105,14 @@ export function ExecutionLocation({ provider, name }: { provider: string | null;
 
 type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" } | { kind: "ports" };
 
-export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
+export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = false }: { opened: OpenedWorkspace; state: WorkspaceConnectionState; agentRequest?: number; initialAgent?: boolean }) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
   const { terminals, selected } = useCloudTerminals(key);
-  const [view, setView] = useState<View>({ kind: "terminal" });
+  const [view, setView] = useState<View>({ kind: initialAgent ? "agent" : "terminal" });
+  useEffect(() => { if (agentRequest > 0) setView({ kind: "agent" }); }, [agentRequest]);
   // This window asked for a wake (a command went out) and it has neither connected nor failed yet.
   // Not latched: a wake that fails, like a Resume refused at the running limit, reads stopped again.
   const [woke, setWoke] = useState(false);

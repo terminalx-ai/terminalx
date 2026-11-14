@@ -37,6 +37,9 @@ export interface CloudSessionTab {
   status: TabStatus;
   unread: boolean;
   pendingApprovals: number;
+  /** Agent activity dates retained for launch-failure recovery, including checkpoints. */
+  created?: string;
+  lastMessageAt?: string | null;
   /** Streaming live now. */
   live: boolean;
 }
@@ -273,7 +276,7 @@ export function buildCloudSessions(input: {
   const source: CloudSessionRow["source"] = input.live ? "live" : "cache";
   const listed = input.live ?? input.cached?.sessions ?? [];
 
-  const tabOf = (tabId: string, fallback: { harness: string; title?: string | null; status: TabStatus }, session?: { title: string | null | undefined; first: boolean }): CloudSessionTab => {
+  const tabOf = (tabId: string, fallback: { harness: string; title?: string | null; status: TabStatus; created?: string; lastMessageAt?: string | null }, session?: { title: string | null | undefined; first: boolean }): CloudSessionTab => {
     const known = agentTabs.get(tabId);
     const status = known ? known.info.status : fallback.status;
     const title = known?.info.title ?? fallback.title ?? null;
@@ -286,6 +289,8 @@ export function buildCloudSessions(input: {
       unread: known ? known.unread : status === "completed",
       pendingApprovals: known?.info.pendingPermissions.length ?? 0,
       live: known?.live ?? false,
+      created: known?.info.created ?? fallback.created,
+      lastMessageAt: newestMessageTime(known?.info.lastMessageAt, fallback.lastMessageAt),
     };
   };
 
@@ -307,7 +312,7 @@ export function buildCloudSessions(input: {
       manualStatus: session.manualStatus,
       archived: session.archived,
       automation: session.automation,
-      tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status }, { title: session.title, first: index === 0 })),
+      tabs: session.tabs.map((tab, index) => tabOf(tab.id, { harness: tab.harness, title: tab.title, status: tab.status, created: tab.created, lastMessageAt: tab.lastMessageAt }, { title: session.title, first: index === 0 })),
       activeTab: session.activeTab ?? null,
       source,
     });

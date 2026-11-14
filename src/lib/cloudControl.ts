@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { sessionStatus } from "@terminalx/portable/sessionStatus";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { getTabLog, lastSeq } from "@/lib/agentEvents";
 import { WORKSPACE_STOPPED, type AgentTabInfo, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { getCloudAgents, loadCloudAgents, refreshFromCheckpoint, relistCloudCheckpoints, syncLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
@@ -28,6 +29,7 @@ import { cloudPipelineSettings, pipelineLaunchDefaults } from "@/lib/issuePipeli
 import { issueWorktreeName } from "@/lib/issueSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
+import { cloudAgentRan } from "@/lib/cloudSessions";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
@@ -298,6 +300,7 @@ function workspaceView(item: CloudWorkspaceListItem) {
     state: workspace.state,
     // The words the sidebar shows for it.
     status: deriveCloudActivity(item).label,
+    attention: resolveCloudAttention(item),
     branch: workspace.launch?.workBranch ?? null,
     accessMode: workspace.accessMode,
     role: workspace.you?.role ?? null,
@@ -857,6 +860,13 @@ async function sessionsCreate(params: Params) {
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);
+  if (issue && project.workspaces.length === 1) {
+    const item = project.workspaces[0].item;
+    const { workspace } = item;
+    const manages = workspace.you ? workspace.you.role === "manager" : workspace.authority !== "participate";
+    const attention = manages ? resolveCloudAttention(item, { agentRan: cloudAgentRan(item) }) : null;
+    if (attention) throw new CloudControlError("cloud_workspace_needs_attention", attention.message, attention.recovery.instructions);
+  }
   if (plan.kind === "reuse" || plan.kind === "wake") {
     const { workspace } = plan.node.item;
     // Waiting on a machine that is already starting costs nothing more; resuming a stopped one is said out loud.

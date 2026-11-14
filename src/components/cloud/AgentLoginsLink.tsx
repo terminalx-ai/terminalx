@@ -11,7 +11,7 @@ import { openAgentLogins } from "@/lib/settingsLinks";
 export function AgentLoginsLink({ message, organizationId, className }: { message: string | null | undefined; organizationId: string | null | undefined; className?: string }) {
   if (!mentionsAgentLogins(message)) return null;
   return (
-    <Button type="button" size="xs" variant="outline" className={className} data-testid="open-agent-logins" onClick={() => openAgentLogins(organizationId ?? null)}>
+    <Button type="button" size="xs" variant="outline" className={className} data-testid="open-agent-logins" onClick={(event) => { event.stopPropagation(); openAgentLogins(organizationId ?? null); }}>
       Open Agent logins
     </Button>
   );
