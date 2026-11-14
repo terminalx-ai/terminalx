@@ -1,8 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
+import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { openAgentLogins } from "@/lib/settingsLinks";
 import { agentLoginConfigurerLeft, agentLoginMessage, agentLoginReach, agentLoginStatus, agentLoginUsable, codexSignInLine, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
+
+vi.mock("@/lib/cloudCatalog", () => ({ refreshCloudCatalog: vi.fn(async () => undefined) }));
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -92,6 +95,22 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false, organizationId: "org-1" });
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
     expect(document.querySelector('input[type="text"], input[type="password"], textarea')).toBeNull();
+    expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
+  });
+
+  it("keeps a successful login when the workspace catalog refresh fails", async () => {
+    vi.mocked(refreshCloudCatalog).mockRejectedValueOnce(new Error("offline"));
+    vi.mocked(api.cloudAgentLoginConnect).mockImplementation(async () => {
+      stored = [login({})];
+      return stored[0]!;
+    });
+    await show();
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Lend this Mac's Claude Code sign-in (temporary)" }));
+    consent(within(row("claude")).getByTestId("agent-login-consent"));
+    fireEvent.click(within(row("claude")).getByRole("button", { name: "Read this Mac's sign-in and confirm" }));
+    await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Claude Code is connected"));
+    expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("connects with an API key through the secure dialog, and a second open starts unconsented", async () => {
@@ -102,6 +121,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(within(row("cursor")).getByRole("button", { name: "Enter the key" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Key entry canceled");
     expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("cursor", "api-key", expect.objectContaining({ organizationSharing: true, machineInstallation: true }));
+    expect(refreshCloudCatalog).not.toHaveBeenCalled();
     // The consent does not carry over to the next try.
     await waitFor(() => expect(within(row("cursor")).getByRole("button", { name: "Enter the key" }).hasAttribute("disabled")).toBe(true));
   });
@@ -142,6 +162,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(within(confirm).getByRole("button", { name: "Disconnect Claude Code" }));
     await waitFor(() => expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected"));
     expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision", "org-1");
+    expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
   });
 
   it("says why a disconnect was refused for a workspace created with this login chosen for it, and keeps it listed", async () => {
@@ -325,6 +346,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       await waitFor(() => expect(api.cloudAgentClaudeLoginComplete).toHaveBeenCalledWith("attempt_1", agreed));
       await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toBe("Claude Code is connected for this organization's cloud workspaces: only workspaces that nobody but owners and admins can drive. The account service keeps this login and renews it."));
       expect(within(row("claude")).getByTestId("agent-login-status").textContent).toContain("grace@example.com · only workspaces that nobody but owners and admins can drive");
+      expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
     });
 
     it("says the default as a default for a first login, and no wider for an API key over a narrowed subscription login", async () => {
@@ -577,6 +599,7 @@ describe("agent logins in Settings (PRO-79)", () => {
         expect(JSON.stringify(call)).not.toContain("WXYZ-12345");
       }
       expect(row("codex").textContent).not.toContain("WXYZ-12345");
+      expect(refreshCloudCatalog).toHaveBeenCalledWith("org-1");
       fireEvent.click(dialog.getByRole("button", { name: "Done" }));
       await waitFor(() => expect(screen.queryByTestId("codex-sign-in")).toBeNull());
       expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Codex is connected");

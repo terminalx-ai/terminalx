@@ -13,7 +13,9 @@ writer of each tab's transcript. Desktops talk to it two ways:
   command whose replay would be harmful: `send`, `steer`, `stop`,
   `permission-decision`. A desktop never sends these over live RPC, so there
   is exactly one delivery path and one receipt per command, whether the
-  runtime is online, reconnecting or suspended.
+  runtime is online, reconnecting or suspended. A machine has no mailbox: it
+  takes these as live calls with durable receipts (`agent-commands/1`,
+  [MACHINES.md](MACHINES.md), decision 3), and a cloud runtime never offers that.
 
 One more live path exists since PRO-86: the tab's **terminal view** types
 into the agent's own terminal with `pty.write` (`agent-pty/1`), as into a

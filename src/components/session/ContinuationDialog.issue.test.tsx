@@ -6,16 +6,17 @@ import type { SessionEntry, TabEntry } from "@/types/session";
 // #700: an issue's session starts set to resolve conflicts and merge when green.
 // Continuing it in a new conversation must not take that back unasked: an off
 // sent with the continuation revokes the switch on the session's pipeline.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), prepare: vi.fn(), start: vi.fn(), send: vi.fn(), add: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), prepare: vi.fn(), start: vi.fn(), send: vi.fn(), add: vi.fn(), destination: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
   return { ...actual, agent: { ...actual.agent, prepareContinuation: mocks.prepare, ensureStarted: mocks.start, send: mocks.send }, api: { ...actual.api, listHarnesses: async () => [{ id: "claude", name: "Claude Code", available: true }] } };
 });
+vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof import("@/lib/continuation")>(), launchContinuationInDestination: mocks.destination }));
 // A project that chose nothing for the launch switches.
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({ projects: [{ path: "/repo", kind: "git", issuePipeline: { enabled: true } }] }),
+  useSessionStore: () => ({ projects: [{ path: "/repo", kind: "git", issuePipeline: { enabled: true } }, { path: "/other", name: "Other", kind: "folder" }] }),
   addTab: mocks.add,
 }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn() }));
@@ -116,4 +117,24 @@ it("a second opinion creates one tab and sends one diff prompt while keeping the
   expect(mocks.prepare).not.toHaveBeenCalled();
   expect(mocks.invoke.mock.calls.filter(([command]) => command.startsWith("issue_pipeline_"))).toEqual([]);
   expect(pipelineForSession(result.current, session.id)).toEqual(before);
+});
+
+
+it.each(["/other", ""])("choosing destination %j leaves source pipeline authority and switches behind", async (projectPath) => {
+  const session = issueSession({ autoMerge: true, resolveConflicts: true });
+  const before = structuredClone(session);
+  const { result } = renderHook(() => useIssuePipelines());
+  const authority = structuredClone(pipelineForSession(result.current, session.id));
+  mocks.destination.mockResolvedValue({ stage: "delivered" });
+  mocks.prepare.mockResolvedValue({ sessionId: session.id, tabId: source.id, title: session.title, cwd: session.cwd, provider: "claude", sourceActive: false, transcriptPath: "/history", lastPrompt: "Work", lastUpdate: "Ready" });
+  render(<ContinuationDialog session={session} source={source} onClose={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectPath } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  await waitFor(() => expect(mocks.destination).toHaveBeenCalledTimes(1));
+  expect(mocks.destination.mock.calls[0][2].pipeline).toBeUndefined();
+  expect(mocks.invoke.mock.calls.some(([command]) => command === "issue_pipeline_continue")).toBe(false);
+  expect(session).toEqual(before);
+  expect(pipelineForSession(result.current, session.id)).toEqual(authority);
 });

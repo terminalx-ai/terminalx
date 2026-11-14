@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { onOpenOrganizationSettings, takeAgentLoginsRequest, takeAgentLoginsSignIn } from "@/lib/settingsLinks";
 import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
 
@@ -422,6 +423,11 @@ export function OrganizationAgentLogins({
   onLogins?: (logins: AgentLogin[] | null) => void;
 }) {
   const organization = organizationName?.trim() || "this organization";
+  const refreshWorkspaces = useCallback(() => {
+    // Reconcile the server's current workspace state after credentials change.
+    // A catalog outage must not turn a successful login into a failed save.
+    void refreshCloudCatalog(organizationId).catch(() => undefined);
+  }, [organizationId]);
   const reported = useRef(onLogins);
   reported.current = onLogins;
   const [logins, setLogins] = useState<AgentLogin[] | null>(null);
@@ -560,7 +566,10 @@ export function OrganizationAgentLogins({
         setPending(null);
       }
       await load();
-      if (result.done) setNotice(result.text);
+      if (result.done) {
+        refreshWorkspaces();
+        setNotice(result.text);
+      }
       else setError(result.text);
     } catch (failure) {
       const code = failure && typeof failure === "object" && "code" in failure ? String(failure.code) : "";
@@ -620,11 +629,12 @@ export function OrganizationAgentLogins({
       );
       if (state === "unconfirmed") void load();
       if (state === "complete") {
+        refreshWorkspaces();
         setPending(null);
         void load().then(() => setNotice(`${connectedNotice("Codex", result.credential)} The account service keeps this login and renews it.`));
       }
     },
-    [load],
+    [load, refreshWorkspaces],
   );
 
   // While the code is shown, ask how the sign-in is going; once Codex has finished, that stores the login.
@@ -693,6 +703,7 @@ export function OrganizationAgentLogins({
     setNotice(null);
     try {
       const result = await action();
+      refreshWorkspaces();
       setPending(null);
       await load();
       setNotice(typeof done === "string" ? done : done(result));

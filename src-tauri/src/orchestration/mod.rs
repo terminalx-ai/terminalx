@@ -802,6 +802,14 @@ pub struct Run {
     /// project that asks for no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// A person changed its limits (workers at once, points, dollars, or the
+    /// level it pauses past) before it started.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limits_edited: bool,
+    /// A person started it from the Run view: a `planned` run, of a project
+    /// that asks for no approval (PRO-365). Absent when the lead started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by_person: Option<Approval>,
     /// The command run in the lead's checkout after each piece is merged
     /// ([`merge`]); exit code 0 passes. The plan's; the project's own check
     /// command is run when the plan names none.

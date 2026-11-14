@@ -536,6 +536,29 @@ mod tests {
         assert!(find_method("invoke").is_none());
     }
 
+    /// docs/MACHINES.md says, for every method, whether a machine connection
+    /// serves it, needs a project for it, or does not serve it (PRO-339). A
+    /// method is classified there in the change that adds it.
+    #[test]
+    fn every_method_is_classified_for_machines() {
+        let note = include_str!("../../../docs/MACHINES.md");
+        let table = note.split_once("### Method table").expect("docs/MACHINES.md has a method table").1;
+        let table = table.split_once("\n## ").map_or(table, |(table, _)| table);
+        let rows: Vec<&str> = table.lines().filter(|line| line.starts_with("| `")).collect();
+        for method in METHODS {
+            let prefix = format!("| `{}` |", method.name);
+            let matching: Vec<&&str> = rows.iter().filter(|row| row.starts_with(&prefix)).collect();
+            assert_eq!(matching.len(), 1, "{} needs exactly one row in the docs/MACHINES.md method table", method.name);
+            let cells: Vec<&str> = matching[0].split('|').map(str::trim).collect();
+            assert_eq!(cells.get(2).copied(), Some(format!("`{}`", method.capability).as_str()), "{}: namespace", method.name);
+            assert!(matches!(cells.get(3).copied(), Some("Served" | "Needs a project" | "Not served")), "{}: classification", method.name);
+        }
+        for row in rows {
+            let name = row.trim_start_matches("| `").split('`').next().unwrap_or_default();
+            assert!(find_method(name).is_some(), "docs/MACHINES.md lists {name}, which is not in METHODS");
+        }
+    }
+
     #[test]
     fn negotiation_grants_the_intersection_and_refuses_no_overlap() {
         let granted = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/2", "session/1"]})).unwrap();
