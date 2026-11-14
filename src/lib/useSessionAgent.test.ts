@@ -59,13 +59,32 @@ describe("launch settings from preferences", () => {
     expect(controlled.result.current.harness?.id).toBe("claude");
   });
 
-  it("reads the saved mode in the picker's own spelling, and the default for one it does not offer", () => {
+  it("reads the saved mode in the picker's own spelling, and Ask every time for one it does not offer", () => {
     setPrefs({ lastMode: "ask" });
     const { result, rerender } = renderHook(() => useSessionAgent(HARNESSES));
     expect(result.current.mode).toBe("manual");
+    // Never Bypass for a saved mode the picker cannot read: that is no choice, and starts where a fresh profile does.
     setPrefs({ lastMode: "dontAsk" });
     rerender();
-    expect(result.current.mode).toBe("bypassPermissions");
+    expect(result.current.mode).toBe("manual");
+  });
+
+  it("starts a fresh profile's new chats in Ask every time, then in whatever the reader picked (PRO-162)", async () => {
+    localStorage.clear();
+    vi.resetModules();
+    const fresh = await import("./useSessionAgent");
+    const prefs = await import("@/lib/prefs");
+    expect(fresh.launchDefaults().permissionMode).toBe("manual");
+    const { result } = renderHook(() => fresh.useSessionAgent(HARNESSES));
+    expect(result.current.mode).toBe("manual");
+
+    act(() => result.current.selectMode("plan"));
+    expect(prefs.getPrefs().lastMode).toBe("plan");
+    // After a restart the pick is where the next new chat starts.
+    vi.resetModules();
+    const restarted = await import("./useSessionAgent");
+    expect(restarted.launchDefaults().permissionMode).toBe("plan");
+    expect(renderHook(() => restarted.useSessionAgent(HARNESSES)).result.current.mode).toBe("plan");
   });
 
   it("saves a mode that leaves something asking at once", () => {

@@ -60,8 +60,8 @@ Usage:
       [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
-  terminalx share create SESSION [--read-only] [--people EMAIL,EMAIL]
-      [--expires-in SECONDS] [--approve] [--can-approve] [--max-people COUNT]
+  terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
+      [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
   terminalx share list SESSION [--json]
   terminalx share edit SESSION LINK --settings JSON [--json]
@@ -515,7 +515,18 @@ fn parse_share(tokens: &mut Tokens) -> Result<Action, ControlError> {
     let mut params = json!({ "sessionId": session });
     match action.as_str() {
         "create" => {
-            let role = if tokens.flag("--read-only")? { "viewer" } else { "driver" };
+            // A new link is read only and admits each person once the host
+            // approves them, as the Share dialog's are (PRO-162). Driving the
+            // session and joining unasked are each turned on by name.
+            let (can_drive, read_only) = (tokens.flag("--can-drive")?, tokens.flag("--read-only")?);
+            if can_drive && read_only {
+                return Err(invalid("Choose --can-drive or --read-only, not both."));
+            }
+            let (skip_approval, approve) = (tokens.flag("--no-approve")?, tokens.flag("--approve")?);
+            if skip_approval && approve {
+                return Err(invalid("Choose --approve or --no-approve, not both."));
+            }
+            let role = if can_drive { "driver" } else { "viewer" };
             let people = tokens.option("--people")?;
             let lifetime = tokens.option_u64("--expires-in")?.unwrap_or(3600);
             params["directOnly"] = json!(tokens.flag("--local-only")?);
@@ -523,7 +534,7 @@ fn parse_share(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "audience": if people.is_some() { "people" } else { "anyone" }, "role": role,
                 "people": people.map(|list| list.split(',').map(|email| json!({ "email": email, "role": role })).collect::<Vec<_>>()).unwrap_or_default(),
                 "expiresAt": chrono::Utc::now().timestamp_millis().saturating_add(i64::try_from(lifetime.saturating_mul(1000)).unwrap_or(i64::MAX)),
-                "approveEachPerson": tokens.flag("--approve")?, "canApprove": tokens.flag("--can-approve")?,
+                "approveEachPerson": !skip_approval, "canApprove": tokens.flag("--can-approve")?,
                 "maximumPeople": tokens.option_u64("--max-people")?.unwrap_or(8), "singleUse": tokens.flag("--single-use")?
             });
         }
@@ -1279,6 +1290,19 @@ mod tests {
         assert_eq!(params["settings"]["canApprove"], false);
         assert_eq!(params["settings"]["audience"], "people");
         assert_eq!(params["settings"]["people"][1], json!({ "email": "bob@example.com", "role": "viewer" }));
+        assert_eq!(params["settings"]["approveEachPerson"], true);
+        // With no flags a link is read only and each person waits to be admitted, as the Share dialog's are (PRO-162).
+        let (_, params, _) = rpc_of(&["share", "create", "session"]);
+        assert_eq!((params["settings"]["role"].clone(), params["settings"]["approveEachPerson"].clone()), (json!("viewer"), json!(true)));
+        assert_eq!((params["settings"]["audience"].clone(), params["settings"]["canApprove"].clone()), (json!("anyone"), json!(false)));
+        // Driving and joining unasked are each asked for by name, for every named person too.
+        let (_, params, _) = rpc_of(&["share", "create", "session", "--can-drive", "--no-approve", "--people", "alice@example.com"]);
+        assert_eq!((params["settings"]["role"].clone(), params["settings"]["approveEachPerson"].clone()), (json!("driver"), json!(false)));
+        assert_eq!(params["settings"]["people"][0], json!({ "email": "alice@example.com", "role": "driver" }));
+        for contradiction in [["share", "create", "session", "--can-drive", "--read-only"], ["share", "create", "session", "--approve", "--no-approve"]] {
+            assert!(parse(&args(&contradiction)).is_err(), "{contradiction:?}");
+        }
+        assert!(help_text().contains("[--can-drive|--read-only]") && help_text().contains("[--no-approve|--approve]"));
         let (command, params, _) = rpc_of(&["share", "revoke", "session", "link", "--keep-guests"]);
         assert_eq!(command, "share.revoke");
         assert_eq!(params["removeGuests"], false);

@@ -461,14 +461,15 @@ pub struct PaneFront {
 }
 
 /// The session a shell pane belongs to: shells are named `<session>:<n>`. An
-/// agent tab's own pane (`tab:<id>`) is not a shell tab.
+/// agent tab's own pane (`tab:<id>`) is not a shell tab, and neither is an
+/// agent setup terminal (`setup:<agent>:<run>`, PRO-152), which has no session.
 pub fn is_shell_id(id: &str) -> bool {
     shell_session(id).is_some()
 }
 
 pub fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
-    (session != "tab" && !session.is_empty()).then_some(session)
+    (session != "tab" && session != crate::harness::setup::PANE_NAMESPACE && !session.is_empty()).then_some(session)
 }
 
 #[derive(Default)]

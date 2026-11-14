@@ -1,3 +1,4 @@
+import type { AppWindow } from "./appWindow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
@@ -33,7 +34,7 @@ const chat: SessionEntry = {
   activeTab: "t1",
 };
 
-async function openWindow(label: "main" | "floating", focused: boolean) {
+async function openWindow(label: AppWindow, focused: boolean) {
   vi.resetModules();
   vi.spyOn(document, "hasFocus").mockReturnValue(focused);
   (await import("./appWindow")).setAppWindowForTest(label);
@@ -46,7 +47,7 @@ async function openWindow(label: "main" | "floating", focused: boolean) {
 }
 
 /** What the other window last wrote about itself. */
-function elsewhere(label: "main" | "floating", presence: { focused: boolean; sessionId: string | null }) {
+function elsewhere(label: AppWindow, presence: { focused: boolean; sessionId: string | null }) {
   localStorage.setItem(`raccoon.presence.${label}`, JSON.stringify(presence));
   window.dispatchEvent(new StorageEvent("storage", { key: `raccoon.presence.${label}`, newValue: JSON.stringify(presence), storageArea: localStorage }));
 }
@@ -86,7 +87,37 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("attention across two windows", () => {
+describe("attention across windows", () => {
+  it("stays quiet while any independent chat window is focused", async () => {
+    const main = await openWindow("main", false);
+    elsewhere("floating", { focused: false, sessionId: null });
+    elsewhere("chat-one", { focused: false, sessionId: "chat-1" });
+    elsewhere("chat-two", { focused: true, sessionId: "chat-1" });
+    main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
+    await settle();
+    expect(mocks.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("tracks independent windows separately, ignoring Quick Chat's visibility and clearing presence on close", async () => {
+    const window = await openWindow("chat-one", true);
+    window.sessions.selectSession("chat-1");
+    window.floating.resetFloating({ visible: false });
+    expect(JSON.parse(localStorage.getItem("raccoon.presence.chat-one")!)).toEqual({ focused: true, sessionId: "chat-1" });
+    expect(mocks.setBadgeCount).not.toHaveBeenCalled();
+    globalThis.window.dispatchEvent(new Event("pagehide"));
+    expect(localStorage.getItem("raccoon.presence.chat-one")).toBeNull();
+  });
+
+  it("never redirects an independent chat's notification to Quick Chat", async () => {
+    const main = await openWindow("main", false);
+    elsewhere("chat-one", { focused: false, sessionId: "chat-1" });
+    main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
+    await settle();
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
+  });
+
   it("sends one desktop banner, from the main window, when nobody is looking", async () => {
     const main = await openWindow("main", false);
     main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
@@ -115,6 +146,7 @@ describe("attention across two windows", () => {
   it("ignores what an earlier run of the app left written for the floating window", async () => {
     // The app quit with the floating window focused; this run has not made one.
     localStorage.setItem("raccoon.presence.floating", JSON.stringify({ focused: true, sessionId: "chat-1" }));
+    localStorage.setItem("raccoon.presence.chat-old", JSON.stringify({ focused: true, sessionId: "chat-1" }));
     const main = await openWindow("main", false);
     main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
     await settle();

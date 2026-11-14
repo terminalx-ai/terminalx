@@ -648,8 +648,10 @@ describe("creating a session", () => {
       ["accept_edits", "acceptEdits"],
       ["bypass", "bypassPermissions"],
       ["", "bypassPermissions"],
-      ["   ", "bypassPermissions"],
-      ...(source === "saved" ? [["unknown", "bypassPermissions"]] : []),
+      // Blank sent on its own is no mode, which the runtime launches in Bypass. A saved mode the
+      // picker cannot read is no choice either, and starts where a fresh profile does (PRO-162).
+      ["   ", source === "saved" ? "manual" : "bypassPermissions"],
+      ...(source === "saved" ? [["unknown", "manual"]] : []),
       ["plan", "plan"],
       ["manual", "manual"],
       ["auto", "auto"],

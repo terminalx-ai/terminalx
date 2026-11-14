@@ -22,6 +22,8 @@ function session(patch: Partial<CloudDashboardSession> = {}): CloudDashboardSess
     branch: "441-work-status",
     worktreeName: null,
     title: "Work status",
+    created: "2026-10-18T11:00:00Z",
+    pinned: false,
     modified: "2026-10-18T11:00:00Z",
     archived: false,
     connected: true,
