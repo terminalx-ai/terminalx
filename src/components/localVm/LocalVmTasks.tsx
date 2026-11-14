@@ -4,6 +4,7 @@ import { errorMessage } from "@/lib/api";
 import { contextManifest, contextPaths, localVmModelLabel, localVmRequest, submissionUnavailable, taskMessagePrefix, tasksForConversation } from "@/lib/localVm";
 import type { LocalVmDescription, LocalVmState, LocalVmSubmission } from "@/types/localVm";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { GuestAccountConfirmations } from "./GuestAccountConfirmation";
 import { LocalVmTaskCard } from "./LocalVmTaskCard";
 import { localVmFieldClass } from "./fields";
 import { loadSubmission, submissionStorageKey } from "./submission";
@@ -31,6 +32,7 @@ export function LocalVmTasks({ session, tab, conversation, active, readOnly, sel
         <p>Local environment supervisor disconnected; these are last retained task states, reopen Settings to reconnect.</p>
         {state?.supervisor?.detail ? <p className="whitespace-pre-wrap break-words">{state.supervisor.detail}</p> : null}
       </div> : null}
+      {state?.enabled ? <GuestAccountConfirmations session={session} tab={tab} conversation={conversation} readOnly={readOnly} /> : null}
       <details open={tasks.length > 0 || !!saved.pending || !!saved.error}>
         <summary className="cursor-pointer py-1 font-medium">Local VM tasks{tasks.length ? ` · ${tasks.length}` : ""}</summary>
         <div className="max-h-[40vh] space-y-3 overflow-y-auto overscroll-contain py-2 scrollbar-thin">
