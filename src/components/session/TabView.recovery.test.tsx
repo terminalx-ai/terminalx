@@ -656,6 +656,65 @@ describe("TabView recovery lifecycle", () => {
     expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
   });
 
+  it.each([
+    ["codex", false], ["codex", true], ["claude", false], ["claude", true],
+  ] as const)("allows explicit %s sign-in after Stop (login already pending: %s)", async (harness, pending) => {
+    session.tabs[0].harness = harness;
+    upsertSession(session);
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "stop_tab") { setTabStatus(session.id, session.tabs[0].id, "idle"); return; }
+      return original(command, args);
+    });
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    if (pending) {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await screen.findByText(/After sign-in is verified/);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await screen.findByText(/^Session closed/);
+    await signedIn(harness);
+    expect(sends()).toHaveLength(0);
+    const button = screen.getByRole("button", { name: "Sign in" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await screen.findByText(/After sign-in is verified/);
+    const login = harness === "codex" ? mocks.openTerminal : mocks.enterTerminalView;
+    expect(login).toHaveBeenCalledTimes(pending ? 2 : 1);
+    await signedIn(harness);
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(sends()[0][1].text).toBe(RECOVERY_PROMPT);
+    await signedIn(harness);
+    expect(sends()).toHaveLength(1);
+  });
+
+  it("does not revive a cancelled login's delayed completion after explicit sign-in", async () => {
+    let finishOld!: (pane: { id: string; exited: boolean }) => void;
+    mocks.openTerminal.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "stop_tab") { setTabStatus(session.id, session.tabs[0].id, "idle"); return; }
+      return original(command, args);
+    });
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await screen.findByText(/^Session closed/);
+    const button = screen.getByRole("button", { name: "Sign in" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(button);
+    await screen.findByText(/After sign-in is verified/);
+    await act(async () => finishOld({ id: "old-login", exited: false }));
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledTimes(2);
+    await signedIn();
+    expect(sends()).toHaveLength(1);
+  });
+
   it("continues explicitly after Stop cancels a pending login, even when signed-out recovery remains", async () => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args: unknown) => {

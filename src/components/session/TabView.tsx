@@ -51,6 +51,8 @@ import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
 
+const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
+
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
@@ -235,8 +237,10 @@ export function TabView({
 
   // One login terminal and one automatic authenticated retry belong to this turn.
   // Replacing or unmounting its view revokes even work already awaiting Stop.
-  const loginIncident = useMemo(() => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false }),
+  const initialLogin = useMemo(newLoginIncident,
     [backend.key, backend.generation, session.id, tab.id, tab.harness, conversation, tab.front, loginTurn]);
+  const [replacementLogin, setReplacementLogin] = useState<{ initial: typeof initialLogin; incident: typeof initialLogin } | null>(null);
+  const loginIncident = replacementLogin?.initial === initialLogin ? replacementLogin.incident : initialLogin;
   const currentLogin = useRef(loginIncident);
   currentLogin.current = loginIncident;
   const [loginPending, setLoginPending] = useState<typeof loginIncident | null>(null);
@@ -681,19 +685,19 @@ export function TabView({
   const signInAgent = !local || recovery !== "signed_out"
     ? undefined
     : ptyFirst && tab.harness === "claude"
-      ? async () => {
+      ? async (incident: typeof loginIncident) => {
           await enterTerminalView(session, tab);
-          if (!loginCurrent(loginIncident)) throw new Error("Sign-in cancelled");
+          if (!loginCurrent(incident)) throw new Error("Sign-in cancelled");
           // The command, then Return on its own, as a key and not as pasted text.
           await pty.write(paneId, "/login");
           await new Promise((done) => setTimeout(done, 120));
-          if (!loginCurrent(loginIncident)) throw new Error("Sign-in cancelled");
+          if (!loginCurrent(incident)) throw new Error("Sign-in cancelled");
           await pty.write(paneId, "\r");
         }
       : tab.harness === "codex"
-        ? async () => {
+        ? async (incident: typeof loginIncident) => {
             const pane = await openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" });
-            loginIncident.loginPane = pane.id;
+            incident.loginPane = pane.id;
           }
         : undefined;
 
@@ -713,9 +717,16 @@ export function TabView({
   });
 
   async function requestSignIn() {
-    const incident = loginIncident;
-    if (!signInAgent || !loginCurrent(incident) || recoveryLock.current) return;
-    if (incident.opening) return;
+    if (!signInAgent || !loginAllowed.current || recoveryLock.current) return;
+    let incident = currentLogin.current;
+    if (incident.cancelled) {
+      // Stop revokes the old automatic attempt permanently. An explicit
+      // Sign in starts a new incident; late work from the old one stays revoked.
+      incident = newLoginIncident();
+      currentLogin.current = incident;
+      setReplacementLogin({ initial: initialLogin, incident });
+    }
+    if (!loginCurrent(incident) || incident.opening) return;
     if (incident.loginPane && !getTerminalState().panes.some(pane => pane.id === incident.loginPane && !pane.exited)) {
       // Login commands exit on success too. Verify credentials before deciding
       // that this terminal needs to be opened again.
@@ -746,7 +757,7 @@ export function TabView({
     incident.opening = true;
     const done = actions.start("sign_in");
     try {
-      await signInAgent();
+      await signInAgent(incident);
       // Opening a terminal proves nothing about credentials. Readiness probes
       // while pending, on return, PTY exit, or Retry decide whether the turn can resume.
       if (currentLogin.current === incident && !incident.cancelled) setLoginPending(incident);
