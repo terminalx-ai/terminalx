@@ -115,12 +115,29 @@ pub trait Host: Send + Sync {
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef>;
     fn workspace_idle(&self, pipeline: &Pipeline, _cwd: &Path) -> Result<bool> {
         Ok([Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().all(|who|
-            self.session(&who.session_id).is_ok_and(|session| session.tab(&who.tab_id).is_some_and(|tab| matches!(tab.status, crate::store::index::TabStatus::Idle | crate::store::index::TabStatus::Completed)))))
+            self.session(&who.session_id).ok().and_then(|session| session.tab(&who.tab_id).map(|tab| tab.status))
+                .map_or(pipeline.resolver.as_ref() == Some(who), |status| matches!(status, crate::store::index::TabStatus::Idle | crate::store::index::TabStatus::Completed))))
     }
     /// The base pinned for a merge into the branch, if one is due: where git
     /// finds a conflict, or wherever `required`, GitHub asking for the merge
     /// whatever git finds. `None` once the branch contains its base.
     fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _required: bool, _pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> { Ok(None) }
+    /// A terminal resolver cannot retain checkout ownership or receive reminders.
+    fn resolver_failure(&self, who: &SessionRef) -> Result<Option<String>> {
+        Ok(self.session(&who.session_id)?.tab(&who.tab_id).is_none()
+            .then(|| "The conflict resolver tab was closed.".into()))
+    }
+    fn stop_resolver(&self, who: &SessionRef) -> Result<()> { self.close_resolver(who) }
+    /// Confirm the old process exited before replacing its identity or releasing ownership.
+    fn close_resolver(&self, who: &SessionRef) -> Result<()> {
+        match self.stop_agent(who, "The conflict resolver is being replaced.")? {
+            AgentStop::Busy => bail!("The old conflict resolver is still running."),
+            _ => Ok(()),
+        }
+    }
+    /// Fetch current remote head/base and prove the head contains the base.
+    fn remote_resolution_complete(&self, _cwd: &Path, _pr: &PrSnapshot) -> Result<bool> { Ok(false) }
+    fn adopt_remote_head(&self, _cwd: &Path, _head: &str) -> Result<()> { bail!("Updating the checkout is unavailable on this host") }
     fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
     fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
     /// `git merge --abort`, only while HEAD is `head` and the merge in
@@ -763,6 +780,7 @@ impl Step<'_> {
             self.record("participantsReleased", format!("{why} {}", lines.join(" ")));
         }
         if let Some(resolution) = idle_resolution {
+            if ending == Ending::Stopped { self.p.interrupted_resolution = Some(resolution.clone()); }
             self.unfinished_merge(&resolution, ending != Ending::Stopped);
         }
     }
@@ -774,6 +792,7 @@ impl Step<'_> {
     /// pipeline ([`Step::unfinished_merge`]).
     fn late_reply(&mut self, role: Role, who: &SessionRef, ending: Ending) -> Result<()> {
         let resolution = if role == Role::Resolver { self.p.resolution.take() } else { None };
+        if ending == Ending::Stopped && resolution.is_some() { self.p.interrupted_resolution = resolution.clone(); }
         let after = after(ending);
         if self.p.releasing.contains(who) {
             let stopped = match self.host.stop_agent(who, &prompts::agent_released(&self.ending_why(ending))) {
@@ -980,9 +999,13 @@ impl Step<'_> {
     /// resolver. `Ok(false)`, with nothing reserved, when a conversation
     /// became active in the checkout, the checkout moved, the switch was
     /// turned off or the pipeline was stopped meanwhile.
-    fn start_resolution(&mut self, mut resolution: super::Resolution) -> Result<bool> {
+    fn start_resolution(&mut self, resolution: super::Resolution) -> Result<bool> {
+        self.start_resolution_with(resolution, false)
+    }
+
+    fn start_resolution_with(&mut self, mut resolution: super::Resolution, restart: bool) -> Result<bool> {
         let base = resolution.base.clone();
-        if self.p.resolutions >= self.settings.max_resolutions {
+        if !restart && self.p.resolutions >= self.settings.max_resolutions {
             self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: format!("The limit of {} resolutions has been reached. Review this branch manually.", self.settings.max_resolutions) });
             return Ok(true);
         }
@@ -991,16 +1014,18 @@ impl Step<'_> {
             Some(resolver) if self.host.session(&resolver.session_id).is_ok_and(|session| session.tab(&resolver.tab_id).is_some()) => resolver,
             _ => self.host.open_resolver(&self.p, &author)?,
         };
+        if let Some(detail) = self.host.resolver_failure(&resolver)? { bail!("{detail} Restart the resolver after signing in or fixing its recovery."); }
         if resolver == self.p.author || self.p.reviewer.as_ref() == Some(&resolver) { bail!("The conflict resolver must be independent of the author and reviewer"); }
         {
             let _admission = super::admission::lock();
-            if !self.host.workspace_idle(&self.p, &self.cwd)? || self.halted() || !store::get(&self.p.id)?.resolve_conflicts { return Ok(false); }
+            if !self.host.workspace_idle(&self.p, &self.cwd)? || self.halted() || (!restart && !store::get(&self.p.id)?.resolve_conflicts) { return Ok(false); }
             let Some(current) = self.clean_workspace()? else { return Ok(true) };
             if !same_commit(&current.head, &resolution.head) { return Ok(false); }
-            resolution.return_stage = self.p.stage;
+            resolution.return_stage = if self.p.stage == Stage::Resolve { Stage::Work } else { self.p.stage };
             self.p.resolver = Some(resolver.clone());
+            self.p.interrupted_resolution = None;
             self.p.resolution = Some(resolution.clone());
-            self.p.resolutions += 1;
+            if !restart { self.p.resolutions += 1; }
             self.enter(Stage::Resolve, format!("Resolving conflicts with {base}."));
             self.save()?;
         }
@@ -1013,6 +1038,53 @@ impl Step<'_> {
         }
         self.record("resolutionRequested", format!("Resolution {} with {base} at {}.", self.p.resolutions, short(&resolution.base_commit))).commit = Some(resolution.head);
         Ok(true)
+    }
+
+    fn reconcile_resolver(&mut self) -> Result<()> {
+        let Some(who) = self.p.resolver.clone().filter(|_| self.p.resolution.is_some()) else { return Ok(()) };
+        let Some(detail) = self.host.resolver_failure(&who)? else { return Ok(()) };
+        let _releasing = super::admission::fence(super::admission::Kind::Refuse("The conflict resolver is releasing this checkout. Retry in a moment."),
+            [super::admission::Scope::Tab(who.session_id.clone(), who.tab_id.clone())]);
+        if let Err(error) = self.host.stop_resolver(&who) {
+            let detail = format!("{detail} Its process exit could not be confirmed: {error:#}. The checkout remains reserved.");
+            if ending_of(&self.p).is_none() && !self.p.stopped {
+                self.needs_you(StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: detail.clone() });
+            } else { self.record("note", &detail); }
+            self.save()?;
+            return Err(error.context(detail));
+        }
+        self.p.interrupted_resolution = self.p.resolution.take();
+        self.p.releasing.retain(|old| old != &who);
+        if ending_of(&self.p).is_none() && !self.p.stopped {
+            self.needs_you(StopReason::SessionStopped { role: Role::Resolver.label().into(), detail });
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    fn restart_resolution(&mut self) -> Result<()> {
+        if let Some(old) = self.p.resolver.clone() {
+            self.host.close_resolver(&old)?;
+            self.p.releasing.retain(|who| who != &old);
+        }
+        // An explicit restart includes the independent review of its result,
+        // even if the interrupted attempt used the last automatic round.
+        self.p.max_rounds = self.p.max_rounds.max(self.p.round.saturating_add(1));
+        let previous = self.p.resolution.take().or(self.p.interrupted_resolution.clone());
+        self.p.interrupted_resolution = previous.clone();
+        self.p.resolver = None;
+        self.needs_you(StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: "Restarting the conflict resolver. Inspect any unfinished merge before continuing.".into() });
+        self.save()?;
+        if let Some(resolution) = previous { self.unfinished_merge(&resolution, true); }
+        self.record("resolutionRestarted", "Restart requested; the next resolver uses a fresh conversation and current sign-in.");
+        if self.p.pr.is_some() { self.leave_resolution_with(true) } else {
+            let Some(workspace) = self.clean_workspace()? else { return Ok(()) };
+            let base = workspace.default_branch.context("The checkout has no base branch")?;
+            if let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, false, None)? {
+                if !self.start_resolution_with(resolution, true)? { bail!("The checkout is in use; restart once it is quiet."); }
+            } else { self.open_pull_request()?; }
+            Ok(())
+        }
     }
 
     fn resolver_turn(&mut self, message: &str) -> Result<()> {
@@ -1033,6 +1105,7 @@ impl Step<'_> {
             }
         };
         if !pushed {
+            self.p.interrupted_resolution = Some(resolution.clone());
             self.unfinished_merge(&resolution, true);
         }
         Ok(())
@@ -1399,6 +1472,10 @@ impl Step<'_> {
     /// person with the switch off, rather than sent for a review of a commit
     /// the merge gate would refuse.
     fn leave_resolution(&mut self) -> Result<()> {
+        self.leave_resolution_with(false)
+    }
+
+    fn leave_resolution_with(&mut self, restart: bool) -> Result<()> {
         let link = self.p.pr.clone().context("There is no pull request yet.")?;
         let Some(workspace) = self.clean_workspace()? else {
             return Ok(());
@@ -1416,11 +1493,11 @@ impl Step<'_> {
         let Some(resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &pr.base, required, Some(&pr))? else {
             return self.push_and_review();
         };
-        if !store::get(&self.p.id)?.resolve_conflicts {
+        if !restart && !store::get(&self.p.id)?.resolve_conflicts {
             self.needs_you(StopReason::Conflicts);
             return Ok(());
         }
-        if !self.start_resolution(resolution)? && self.p.state != State::Stopped {
+        if !self.start_resolution_with(resolution, restart)? && self.p.state != State::Stopped {
             bail!("A conversation is at work in this checkout, or it changed while it was compared with {}. Nothing was pushed; try again once it is quiet.", pr.base);
         }
         Ok(())
@@ -1801,6 +1878,24 @@ impl Step<'_> {
                 self.push_and_review()
             }
             Stage::Resolve => {
+                // Remote work may have finished while this resolver was closed or idle.
+                if let Some(link) = self.p.pr.clone() {
+                    let pr = self.host.pull_request(&self.cwd, link.number)?;
+                    if pr.state != "OPEN" { return self.evaluate_snapshot(pr, Merger::Pipeline); }
+                    if self.host.remote_resolution_complete(&self.cwd, &pr)? {
+                        if let Some(old) = self.p.resolver.clone() { self.host.close_resolver(&old)?; }
+                        self.p.resolution = None;
+                        self.p.interrupted_resolution = None;
+                        self.save()?;
+                        let _admission = super::admission::lock();
+                        if !self.host.workspace_idle(&self.p, &self.cwd)? { bail!("A conversation is at work in this checkout."); }
+                        if self.clean_workspace()?.is_none() { return Ok(()); }
+                        self.host.adopt_remote_head(&self.cwd, &pr.head_sha)?;
+                        drop(_admission);
+                        return self.request_review(true);
+                    }
+                }
+                self.reconcile_resolver()?;
                 if self.p.resolution.is_some() { bail!("The conflict resolver is still running."); }
                 if self.p.pr.is_some() { self.leave_resolution() } else { self.open_pull_request() }
             },
@@ -1980,6 +2075,7 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         resolutions: 0,
         resolver: None,
         resolution: None,
+        interrupted_resolution: None,
         cloud,
         issue_body,
         stopped: false,
@@ -2116,6 +2212,8 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
     let message = final_message.unwrap_or_default();
     let who = SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() };
     let result = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
+        if step.p.role_of(session_id, tab_id) != Some(role) { return Ok(()); }
+        if step.reconcile_resolver().is_err() { return Ok(()); }
         let ended = ending_of(&step.p);
         match role {
             // Stopped or not, its turn ending releases the checkout it holds.
@@ -2168,6 +2266,7 @@ fn answer_if_stopped(host: &dyn Host, pipeline: &Pipeline) {
 }
 
 /// What a turn that ended without finishing is said to have done.
+#[cfg(test)]
 pub fn turn_failure(interrupted: bool) -> &'static str {
     if interrupted {
         "Its turn was interrupted."
@@ -2183,8 +2282,10 @@ pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str
     };
     // A resolver a person interrupted leaves its merge to them; one whose
     // agent went leaves it to the pipeline.
-    let interrupted = detail == turn_failure(true);
+    let interrupted = detail.contains("interrupted") || detail.contains("tab was closed");
     let result = run(host, &pipeline.id, role == Role::Resolver, OnError::NeedsYou, |step| {
+        if step.p.role_of(session_id, tab_id) != Some(role) { return Ok(()); }
+        if role == Role::Resolver && step.reconcile_resolver().is_err() { return Ok(()); }
         let waiting_on_it = match role {
             // At any stage, once a person answered it: the stop it was
             // answered out of is not looked at again until its turn ends.
@@ -2196,6 +2297,7 @@ pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str
         // while the resolver was still running. Stop itself must not release it.
         let resolution = if role == Role::Resolver { step.p.resolution.take() } else { None };
         if let Some(resolution) = resolution {
+            if interrupted { step.p.interrupted_resolution = Some(resolution.clone()); }
             if step.p.stopped {
                 step.record("resolutionStopped", format!("{detail} The conflict resolver released the checkout; inspect its changes before continuing."));
             } else if let Some(ending) = ending_of(&step.p) {
@@ -2318,19 +2420,23 @@ pub enum Action {
     Merge,
     /// Look at the pull request again.
     Refresh,
+    /// Replace an interrupted resolver with a fresh conversation.
+    RestartResolve,
 }
 
 /// What an action needs before it may touch anything. Asking for something
 /// the pipeline is not in a position to do is refused and changes nothing.
 fn refuse(pipeline: &Pipeline, action: Action) -> Result<()> {
-    let reviewing = matches!(pipeline.stage, Stage::Review | Stage::Resolve) && pipeline.state == State::Working;
+    let reviewing = pipeline.stage == Stage::Review && pipeline.state == State::Working;
     match action {
+        Action::RestartResolve if pipeline.stage != Stage::Resolve => bail!("{} is not resolving conflicts.", pipeline.label()),
         // Made on the reader's computer, with their own `gh` (`note_merge`).
         Action::Merge if pipeline.cloud => bail!("{} is in a cloud workspace: it is merged from the issue page in TerminalX on your computer, with your own GitHub sign-in.", pipeline.label()),
         Action::Merge if pipeline.state != State::ReadyToMerge => bail!("{} is not at Ready to merge.", pipeline.label()),
         Action::Review if pipeline.pr.is_none() => bail!("{} has no pull request to review yet.", pipeline.label()),
+        Action::Review if pipeline.stage == Stage::Resolve && pipeline.state == State::Working => bail!("The conflict resolver is still running. Advance to recheck remote resolution, or restart it."),
         Action::Review | Action::Advance if reviewing => bail!("A review of {} is already under way.", pipeline.label()),
-        Action::Review | Action::Advance | Action::Stop | Action::Refresh if pipeline.state == State::Merged => bail!("{} is merged.", pipeline.label()),
+        Action::Review | Action::Advance | Action::Stop | Action::Refresh | Action::RestartResolve if pipeline.state == State::Merged => bail!("{} is merged.", pipeline.label()),
         Action::Review | Action::Advance | Action::Merge if pipeline.stopped => bail!("{} is stopped. Resume it first.", pipeline.label()),
         _ => Ok(()),
     }
@@ -2376,6 +2482,10 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
                 }
             })
         }
+        Action::RestartResolve => {
+            store::set_switches(id, |pipeline| pipeline.stopped = false)?;
+            run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.restart_resolution() } else { Ok(()) })
+        },
         Action::Advance => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.advance() } else { Ok(()) }),
         Action::Review => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.request_review(true) } else { Ok(()) }),
         Action::Merge => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.evaluate(Merger::Person) } else { Ok(()) }),
@@ -2458,6 +2568,9 @@ pub fn poll(host: &dyn Host) {
     // a metadata change or a pending recorder finishing. Deduplicated by the
     // persisted reason; no new reviewer, retry, or check is launched here.
     for pipeline in &pipelines {
+        if pipeline.resolution.is_some() {
+            let _ = run(host, &pipeline.id, true, OnError::Background, |step| step.reconcile_resolver());
+        }
         if pipeline.checking_locally && host.validation_pending(pipeline).is_ok_and(|pending| !pending) {
             let _ = run(host, &pipeline.id, true, OnError::Background, |step| {
                 // A final recorder result releases checkout ownership. It does
@@ -2538,12 +2651,19 @@ pub fn poll(host: &dyn Host) {
     }
 }
 
-fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline]) {
+fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline], interrupted: bool) {
     for pipeline in pipelines.iter().filter(|pipeline| pipeline.resolution.is_some() || pipeline.checking_locally) {
         let _ = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
-            step.p.resolution = None;
+            let resolver = step.p.resolver.clone().filter(|_| step.p.resolution.is_some());
+            if !interrupted && resolver.is_some() { return step.reconcile_resolver(); }
+            let _recovering = resolver.as_ref().map(|who| super::admission::fence(
+                super::admission::Kind::Refuse("The conflict resolver is releasing this checkout. Retry in a moment."),
+                [super::admission::Scope::Tab(who.session_id.clone(), who.tab_id.clone())]));
+            if let Some(resolver) = resolver { step.host.stop_resolver(&resolver)?; }
+            if step.p.resolution.is_some() { step.p.interrupted_resolution = step.p.resolution.take(); }
             step.p.checking_locally = step.p.checking_locally && step.host.validation_pending(&step.p)?;
             step.needs_you(StopReason::Failed { step: "Recovering checkout automation".into(), message: "TerminalX restarted during resolution or local checks. Inspect the checkout and any remaining processes before continuing; no result was accepted.".into() });
+            step.save()?;
             Ok(())
         });
     }
@@ -2555,7 +2675,7 @@ pub fn recover(host: &dyn Host) {
     let Ok(pipelines) = store::list() else {
         return;
     };
-    recover_reservations(host, &pipelines);
+    recover_reservations(host, &pipelines, true);
 
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && (pipeline.stage != Stage::Merge || pipeline.answered.is_some()) && pipeline.resolution.is_none() && !pipeline.checking_locally) {
         let result = run(host, &pipeline.id, false, OnError::NeedsYou, |step| {
@@ -2586,7 +2706,7 @@ pub fn handed_over(host: &dyn Host) {
     let Ok(pipelines) = store::list() else {
         return;
     };
-    recover_reservations(host, &pipelines);
+    recover_reservations(host, &pipelines, false);
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
         let waits_on = match pipeline.stage {
             _ if pipeline.answered.is_some() => Some(pipeline.author.clone()),
@@ -2615,7 +2735,7 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
     let Ok(pipelines) = store::list() else {
         return;
     };
-    recover_reservations(host, &pipelines);
+    recover_reservations(host, &pipelines, true);
     let ended = |session: &SessionRef| interrupted.iter().any(|(session_id, tab_id)| *session_id == session.session_id && *tab_id == session.tab_id);
     let restarted = "The workspace's runtime restarted during its turn.";
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
