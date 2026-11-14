@@ -174,6 +174,30 @@ export function useAgentReadiness(harness: string | null, poll = false) {
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
 }
 
+/** Observe fresh login checks only, while an interrupted turn awaits sign-in. */
+export function useSignInReadiness(harness: string | null, onReady: () => void) {
+  const ready = useRef(onReady);
+  ready.current = onReady;
+  const generation = useRef(0);
+  const refresh = useCallback(async () => {
+    const run = ++generation.current;
+    if (!harness) return;
+    const value = await checkAgentReadiness(harness);
+    if (run === generation.current && value.state === "ready") ready.current();
+  }, [harness]);
+  useEffect(() => {
+    void refresh();
+    const stop = onReadiness((id, value) => {
+      if (!harness || id !== harness) return;
+      generation.current++;
+      if (value.state === "ready") ready.current();
+    });
+    return () => { generation.current++; stop(); };
+  }, [harness, refresh]);
+  useReadinessRefresh(!!harness, refresh);
+  return refresh;
+}
+
 export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
 
 /** Check all candidates before choosing a default, without persisting a fallback as a preference. */

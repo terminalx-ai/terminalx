@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), answerPermission: (_request: string, _option: string): void => {}, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openTerminal: vi.fn(), enterTerminalView: vi.fn(), answerPermission: (_request: string, _option: string): void => {}, views: { views: {} as Record<string, string>, errors: {}, info: {}, switching: {}, waiting: {} } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
@@ -12,6 +12,10 @@ vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => ({ 
 vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => true, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
   clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
+  enterTerminalView: mocks.enterTerminalView,
+}));
+vi.mock("@/lib/terminal", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/terminal")>(), openTerminal: mocks.openTerminal,
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => <div>Terminal output</div> }));
 vi.mock("@/components/chat/Chat", async importOriginal => {
@@ -22,7 +26,12 @@ vi.mock("@/components/chat/Chat", async importOriginal => {
   } };
 });
 vi.mock("@/components/chat/Composer", () => ({ Composer: ({ draft }: { draft: string }) => <textarea aria-label="Unsent prompt" value={draft} readOnly /> }));
-vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => <div>Continue dialog</div> }));
+vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: ({ onClose, onDelivered }: {
+  onClose: () => void; onDelivered: (to: { sessionId: string; tabId: string }) => void;
+}) => <div role="dialog" aria-label="Continue dialog">
+  <button onClick={onClose}>Dismiss continuation</button>
+  <button onClick={() => { onDelivered({ sessionId: "destination", tabId: "destination-tab" }); onClose(); }}>Deliver continuation</button>
+</div> }));
 
 import { TabView } from "./TabView";
 import { ProjectNavigation } from "@/components/layout/SidebarTree";
@@ -32,19 +41,21 @@ import { upsertSession, useSessionStore, selectSession } from "@/lib/sessions";
 import { bucketSessions } from "@/lib/dashboard";
 import { getDraft, setDraft } from "@/lib/drafts";
 import { CONTINUE_PROMPT, RECOVERY_PROMPT } from "@/lib/recovery";
+import { announceReadiness } from "@/lib/agentReadiness";
+import { localSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 
 let seq = 0;
 let session: SessionEntry;
 const event = (payload: Payload): AgentEvent => ({ id: `e${++seq}`, seq, sessionId: session.id, tabId: session.tabs[0].id, harness: "codex", ts: new Date().toISOString(), payload });
 const emit = (payload: Payload) => act(() => applyEvent(event(payload)));
-function Harness() {
+function Harness({ backend }: { backend?: SessionBackend } = {}) {
   const store = useSessionStore();
   const current = store.sessions.find(s => s.id === session.id)!;
   const counts = bucketSessions([current]);
   return <TooltipProvider>
     <aside aria-label="Sidebar"><ProjectNavigation project={{ path: "/workspace", name: "Project" }} expanded /></aside>
     <output aria-label="Working count">{counts.working.length}</output>
-    <TabView session={current} tab={current.tabs[0]} active />
+    <TabView session={current} tab={current.tabs[0]} active backend={backend} />
   </TooltipProvider>;
 }
 beforeEach(() => {
@@ -53,8 +64,11 @@ beforeEach(() => {
     tabs: [{ id: `tab${seq}`, harness: "codex", model: "original", permissionMode: "default", status: "in_progress", created: "", modified: "" }] };
   mocks.views.views = { [session.tabs[0].id]: "terminal" };
   mocks.invoke.mockReset();
+  mocks.openTerminal.mockReset().mockResolvedValue({ id: "login" });
+  mocks.enterTerminalView.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
     if (command === "load_tab_events" || command === "list_workspaces") return [];
+    if (command === "check_agent_readiness") return { state: "signed_out", checkedAt: null, version: null };
     if (command === "list_models") return [{ id: "available", harness: "codex", label: "Available model", efforts: [] }];
     if (command === "stop_tab") {
       applyEvent(event({ type: "recovery", kind: null }));
@@ -73,6 +87,246 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("TabView recovery lifecycle", () => {
+  const signedIn = (harness = "codex") => act(() => announceReadiness(harness, { state: "ready", checkedAt: new Date().toISOString(), version: null }));
+  const sends = () => mocks.invoke.mock.calls.filter(([command]) => command === "send_message");
+
+  it("opens one login for repeated sign-in and retry clicks, and retries once only after verified authentication", async () => {
+    const mounted = render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    mounted.rerender(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+    expect(sends()).toHaveLength(0);
+    signedIn("claude");
+    expect(sends()).toHaveLength(0);
+    signedIn();
+    signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(sends()[0][1]).toEqual(expect.objectContaining({ text: RECOVERY_PROMPT, images: [] }));
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "stop_tab")).toHaveLength(1);
+    expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
+    signedIn();
+    expect(sends()).toHaveLength(1);
+  });
+
+  it("uses Retry to check failed sign-in without launching another login", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    act(() => announceReadiness("codex", { state: "unknown", checkedAt: null, version: null }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: "ready", checkedAt: null, version: null }) : original(command, args));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("allows sign-in after opening and dismissing a continuation dialog before login", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
+    await screen.findByRole("dialog", { name: "Continue dialog" });
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the pending login when a continuation dialog is dismissed, without replaying while it is open", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
+    await screen.findByRole("dialog", { name: "Continue dialog" });
+    signedIn();
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("revokes the source's pending retry when the continuation is delivered", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
+    await screen.findByRole("dialog", { name: "Continue dialog" });
+    fireEvent.click(screen.getByRole("button", { name: "Deliver continuation" }));
+    signedIn();
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("keeps sign-in available if stopping to open the continuation dialog fails", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "stop_tab"
+      ? Promise.reject(new Error("Stop failed")) : original(command, args));
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
+    const signIn = screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement;
+    await waitFor(() => expect(signIn.disabled).toBe(false));
+    fireEvent.click(signIn);
+    await screen.findByText(/After sign-in is verified/);
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("waits for local write admission to return before checking and retrying the login", async () => {
+    const backend = localSessionBackend(session.id);
+    const mounted = render(<Harness backend={backend} />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    mounted.rerender(<Harness backend={{ ...backend, caps: { ...backend.caps, write: false } }} />);
+    signedIn();
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: "ready", checkedAt: null, version: null }) : original(command, args));
+    mounted.rerender(<Harness backend={backend} />);
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("types Claude's login command once and waits for verified login before retrying", async () => {
+    session = { ...session, tabs: [{ ...session.tabs[0], harness: "claude" }] };
+    upsertSession(session);
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+    expect(mocks.enterTerminalView).toHaveBeenCalledOnce();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
+    expect(mocks.openTerminal).not.toHaveBeenCalled();
+    expect(sends()).toHaveLength(0);
+    signedIn("claude");
+    await waitFor(() => expect(sends()).toHaveLength(1));
+  });
+
+  it("can start Claude sign-in after a continuation dialog interrupts opening its terminal", async () => {
+    session = { ...session, tabs: [{ ...session.tabs[0], harness: "claude" }] };
+    upsertSession(session);
+    let opened!: () => void;
+    mocks.enterTerminalView.mockImplementationOnce(() => new Promise<void>(resolve => { opened = resolve; }));
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue in new session" }));
+    await screen.findByRole("dialog", { name: "Continue dialog" });
+    await act(async () => opened());
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss continuation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "pty_write").map(([, args]) => args.data)).toEqual(["/login", "\r"]);
+    signedIn("claude");
+    await waitFor(() => expect(sends()).toHaveLength(1));
+  });
+
+  it.each(["stop", "unmount", "replacement", "new turn"])("cancels an authenticated retry after %s", async cancellation => {
+    const mounted = render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    if (cancellation === "stop") fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    if (cancellation === "unmount") mounted.unmount();
+    if (cancellation === "replacement") act(() => upsertSession({ ...session, tabs: [{ ...session.tabs[0], conversation: "replacement" }] }));
+    if (cancellation === "new turn") emit({ type: "user_message", text: "A new task", queued: false });
+    signedIn();
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("does not replay after closing while the authenticated retry awaits confirmed exit", async () => {
+    let settle!: () => void;
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "stop_tab"
+      ? new Promise<void>(resolve => { settle = resolve; }) : original(command, args));
+    const mounted = render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    signedIn();
+    mounted.unmount();
+    await act(async () => settle());
+    expect(sends()).toHaveLength(0);
+  });
+
+  it.each(["replacement", "new turn", "write admission"])("does not replay after %s changes while awaiting confirmed exit", async change => {
+    let settle!: () => void;
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "stop_tab"
+      ? new Promise<void>(resolve => { settle = resolve; }) : original(command, args));
+    const backend = localSessionBackend(session.id);
+    const mounted = render(<Harness backend={backend} />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    signedIn();
+    expect(settle).toBeTypeOf("function");
+    if (change === "replacement") act(() => upsertSession({ ...session, tabs: [{ ...session.tabs[0], conversation: "replacement" }] }));
+    if (change === "new turn") emit({ type: "user_message", text: "A new task", queued: false });
+    if (change === "write admission") mounted.rerender(<Harness backend={{ ...backend, caps: { ...backend.caps, write: false } }} />);
+    await act(async () => settle());
+    expect(sends()).toHaveLength(0);
+    if (change !== "write admission") expect(screen.queryByText("Needs attention")).toBeNull();
+  });
+
+  it("allows another explicit attempt when the login terminal failed to open", async () => {
+    mocks.openTerminal.mockRejectedValueOnce(new Error("Could not open terminal"));
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await act(async () => {});
+    expect(sends()).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    expect(mocks.openTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("attempts delivery only once when backend admission refuses the authenticated retry", async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "send_message"
+      ? Promise.reject(new Error("Agent is signed out")) : original(command, args));
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    await act(async () => {});
+    signedIn();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+    expect(sends()).toHaveLength(1);
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
   it.each([["allow", "chat"], ["deny", "chat"], ["allow", "terminal"], ["deny", "terminal"]])("keeps %s in %s pending until delivery, then retires duplicate Codex requests (PRO-160)", async (option, mode) => {
     const original = mocks.invoke.getMockImplementation()!;
     let enqueued!: () => void;

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, type AgentReadiness } from "./agentReadiness";
+import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, useSignInReadiness, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
 const exits = new Set<() => void>();
@@ -17,6 +17,42 @@ beforeEach(() => {
 afterEach(() => { cleanup(); invoke.mockReset(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("agent readiness", () => {
+  it("verifies pending sign-in on exit and return, and ignores cached readiness and unsuccessful probes", async () => {
+    announceReadiness("codex", answer("ready"));
+    invoke.mockResolvedValue(answer("signed_out"));
+    const ready = vi.fn();
+    const { unmount } = renderHook(() => useSignInReadiness("codex", ready));
+    await act(async () => {});
+    expect(ready).not.toHaveBeenCalled();
+    await act(async () => exits.forEach(notify => notify()));
+    expect(ready).not.toHaveBeenCalled();
+    invoke.mockRejectedValue(new Error("probe failed"));
+    await act(async () => exits.forEach(notify => notify()));
+    expect(ready).not.toHaveBeenCalled();
+    invoke.mockResolvedValue(answer("ready"));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(ready).toHaveBeenCalledOnce());
+    unmount();
+    expect(exits.size).toBe(0);
+    act(() => announceReadiness("codex", answer("ready")));
+    expect(ready).toHaveBeenCalledOnce();
+  });
+
+  it("discards pending login checks after cancellation or replacement", async () => {
+    let resolve!: (value: AgentReadiness) => void;
+    invoke.mockImplementation(() => new Promise<AgentReadiness>(done => { resolve = done; }));
+    const ready = vi.fn();
+    const { rerender } = renderHook(({ harness }) => useSignInReadiness(harness, ready), { initialProps: { harness: "codex" as string | null } });
+    const old = resolve;
+    invoke.mockResolvedValue(answer("signed_out"));
+    rerender({ harness: "claude" });
+    await act(async () => old(answer("ready")));
+    expect(ready).not.toHaveBeenCalled();
+    rerender({ harness: null });
+    act(() => announceReadiness("claude", answer("ready")));
+    expect(ready).not.toHaveBeenCalled();
+  });
+
   it("follows installation and login on return to the app without a manual check", async () => {
     invoke.mockResolvedValue(answer("missing"));
     const { result } = renderHook(() => useAgentReadiness("codex"));

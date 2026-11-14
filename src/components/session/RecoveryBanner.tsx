@@ -22,7 +22,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, onResend, onPressed }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, signInPending = false, onResend, onPressed }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -50,6 +50,8 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onSendContinue?: () => void;
   /** Signed out: sign the agent in again, where it can be (its terminal, or a shell running its login). */
   onSignIn?: () => void;
+  /** One login is open; successful authentication will retry the interrupted turn. */
+  signInPending?: boolean;
   /** Unsent: send the last prompt the agent never received again, as it was sent. */
   onResend?: () => void;
   /** How a control here was pressed, told before its handler runs, for the tab's recovery incidents (#815). */
@@ -86,13 +88,13 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
       ? "max-h-[50vh] overflow-auto rounded-xl border border-warning/30 bg-[color-mix(in_oklab,var(--color-warning)_10%,var(--color-chat))] p-3 text-xs shadow-surface"
       : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
     <p className="font-medium">{offer.title}</p>
-    <p className="mt-1">{offer.message}</p>
+    <p className="mt-1">{signInPending && kind === "signed_out" ? "Finish signing in in the terminal. After sign-in is verified, the interrupted turn will retry once." : offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
-      {offer.signIn && onSignIn && <Button size="sm" disabled={busy} onClick={pressed(onSignIn)}>Sign in</Button>}
+      {offer.signIn && onSignIn && <Button size="sm" disabled={busy || signInPending} onClick={pressed(onSignIn)}>Sign in</Button>}
       {offer.resend && onResend && <Button size="sm" disabled={busy} onClick={pressed(onResend)}>Resend last prompt</Button>}
       {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={pressed(() => onRetry())}>{offer.retry}</Button>}
       {offer.sendContinue && onSendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={pressed(onSendContinue)}>Continue here</Button>}
