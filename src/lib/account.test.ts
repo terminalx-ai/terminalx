@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -85,6 +86,56 @@ describe("account status after a silent token refresh", () => {
     mocks.listeners.get("account_status")!({ payload: signedIn(true) });
     expect(account.getAccount().status.context?.revision).toBe("s:1");
     expect(cachedOrganizationRosters()).toEqual([]);
+  });
+
+  it.each([false, true])("retires roster reads, polling and profile availability across a privacy toggle (managed=%s)", async (managed) => {
+    const account = await import("./account");
+    const { setDataPrivacy } = await import("./dataPrivacy");
+    const { readOrganizationRoster, cachedOrganizationRosters, useOrganizationRoster } = await import("./organizationRoster");
+    const { useFeatureFlag, featureFlags } = await import("./featureFlags");
+    const enabled = signedIn(true);
+    enabled.organizations[0].cloud!.flags = { "team.roster.v1": true };
+    const listed = { members: [{ userId: "a", email: "a@example.com", role: "owner" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "s:1" };
+    let finish!: (value: typeof listed) => void;
+    let hold = false;
+    mocks.invoke.mockImplementation(async (command: string, args?: { enabled?: boolean }) => {
+      if (command === "data_privacy_set") return { enabled: args?.enabled, managed };
+      if (command === "organization_members") return hold ? new Promise<typeof listed>((resolve) => { finish = resolve; }) : listed;
+      if (command === "account_status") return enabled;
+      if (command === "account_refresh_roles") return { status: enabled, fresh: true };
+      return [];
+    });
+    await account.bootAccount();
+    mocks.listeners.get("account_status")!({ payload: enabled });
+    const view = renderHook(() => {
+      const profiles = useFeatureFlag(featureFlags.teamRoster, "org-a");
+      return { profiles, snapshot: useOrganizationRoster("org-a", profiles) };
+    });
+    try {
+      await act(() => readOrganizationRoster("org-a"));
+      expect(view.result.current.snapshot.roster?.members).toHaveLength(1);
+      hold = true;
+      let old!: ReturnType<typeof readOrganizationRoster>;
+      act(() => { old = readOrganizationRoster("org-a", { fresh: true }); });
+      await Promise.resolve();
+      await act(() => setDataPrivacy(true));
+      expect(view.result.current.profiles).toBe(false);
+      expect(cachedOrganizationRosters()).toEqual([]);
+      const reads = () => mocks.invoke.mock.calls.filter(([command]) => command === "organization_members").length;
+      const before = reads();
+      await expect(readOrganizationRoster("org-a")).rejects.toThrow("Turned off by data privacy mode");
+      expect(reads()).toBe(before);
+      hold = false;
+      await act(() => setDataPrivacy(false));
+      expect(view.result.current.profiles).toBe(true);
+      finish({ ...listed, members: [{ userId: "old", email: "old@example.com", role: "owner" }] });
+      await expect(old).rejects.toMatchObject({ code: "account_context_changed" });
+      await act(() => readOrganizationRoster("org-a"));
+      expect(cachedOrganizationRosters()[0].members[0].userId).toBe("a");
+    } finally {
+      view.unmount();
+      await act(() => setDataPrivacy(false));
+    }
   });
 
 });

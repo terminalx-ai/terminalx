@@ -3,17 +3,20 @@ import { Popover } from "radix-ui";
 import { initials } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 import type { OrganizationMember } from "@/lib/organizationMembers";
+import { PrivacyImage, externalImage } from "@/components/ui/privacy-image";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 
 export function memberName(member: OrganizationMember) {
   return member.displayName?.trim() || member.email || `User ${member.userId.slice(0, 8)}`;
 }
 function Photo({ member, className }: { member: OrganizationMember; className?: string }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const privacy = useDataPrivacy();
   const name = memberName(member);
   return (
     <span className={cn("flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-well text-[10px] font-medium", className)}>
-      {member.photoUrl && failedUrl !== member.photoUrl
-        ? <img className="size-full object-cover" src={member.photoUrl} alt={name} onError={() => setFailedUrl(member.photoUrl!)} />
+      {member.photoUrl && failedUrl !== member.photoUrl && !(privacy.enabled && externalImage(member.photoUrl))
+        ? <PrivacyImage className="size-full object-cover" src={member.photoUrl} alt={name} referrerPolicy="no-referrer" onError={() => setFailedUrl(member.photoUrl!)} />
         : <span aria-hidden>{initials(name)}</span>}
     </span>
   );

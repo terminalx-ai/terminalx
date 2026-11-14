@@ -1,7 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+const native = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/api/core", () => ({ invoke: native }));
+import { refreshDataPrivacy } from "@/lib/dataPrivacy";
 import { MemberProfile } from "./MemberProfile";
 const member = { userId: "alice", displayName: "Alice Example", email: "alice@example.com", role: "admin", photoUrl: "https://example.com/alice.png", createdAt: new Date(2025, 1, 3).getTime() };
+beforeEach(async () => { native.mockResolvedValue({ enabled: false, managed: false }); await refreshDataPrivacy(); });
 afterEach(cleanup);
 it("opens a profile with a photo, organization role, join date and presence", async () => {
   render(<MemberProfile member={member} online className="size-7" />);
@@ -24,4 +28,20 @@ it("falls back to initials for missing and broken photos and unknown dates", asy
   const profile = await screen.findByRole("dialog");
   expect(within(profile).getByText("Join date unavailable")).toBeTruthy();
   expect(within(profile).getByLabelText("Presence unavailable")).toBeTruthy();
+});
+
+it.each([false, true])("uses initials without fetching external photos under privacy (managed=%s)", async (managed) => {
+  render(<MemberProfile member={member} />);
+  fireEvent.click(screen.getByRole("button"));
+  const profile = await screen.findByRole("dialog");
+  expect(screen.getAllByRole("img")).toHaveLength(2);
+  native.mockResolvedValue({ enabled: true, managed });
+  await act(() => refreshDataPrivacy());
+  expect(screen.queryByRole("img")).toBeNull();
+  expect(screen.getByRole("button").textContent).toBe("AE");
+  expect(within(profile).getByText("AE")).toBeTruthy();
+  native.mockResolvedValue({ enabled: false, managed: false });
+  await act(() => refreshDataPrivacy());
+  expect(screen.getAllByRole("img")).toHaveLength(2);
+  expect(within(profile).getByRole("img").getAttribute("referrerpolicy")).toBe("no-referrer");
 });

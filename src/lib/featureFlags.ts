@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { AccountStatus } from "@/lib/api";
 import { getAccount, subscribeAccount } from "@/lib/account";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
 
 /** Add a key on the server and a rollout checklist before adding a new team surface. */
 export const featureFlags = {
@@ -24,9 +25,11 @@ export function featureFlagEnabled(status: AccountStatus, flag: FeatureFlag, org
 
 /** Shares the account's capability refresh and invalidates mounted surfaces without restarting. */
 export function useFeatureFlag(flag: FeatureFlag, organizationId?: string | null): boolean {
-  return useSyncExternalStore(
+  const privacy = useDataPrivacy();
+  const enabled = useSyncExternalStore(
     subscribeAccount,
     () => featureFlagEnabled(getAccount().status, flag, organizationId),
     () => false,
   );
+  return enabled && !privacy.enabled;
 }

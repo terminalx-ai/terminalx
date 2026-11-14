@@ -905,6 +905,8 @@ PRO-252. A missing or false capability keeps the prior per-dialog reads, names
 and noninteractive initials. A capability refresh that kills the flag unmounts
 profiles and member action menus, clears cached details, stops polling and
 retires in-flight cache reads/mutations. The additive API timestamp remains
-available independently of rollout. Deploy PRO-252's server foundation and its
-desktop hook before enabling this feature; `src/lib/featureFlags.ts` is identical
-to the shared foundation copy.
+available independently of rollout. The deployed server foundation supplies the
+per-organization flags; `src/lib/featureFlags.ts` shares the account's refresh.
+Data privacy mode also withdraws profiles, suppresses external avatar images,
+clears the roster cache, stops its polling and retires pending reads. Disabling
+privacy restores the server's current rollout state and fetches a fresh roster.

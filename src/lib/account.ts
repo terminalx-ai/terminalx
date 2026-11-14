@@ -106,11 +106,16 @@ function applyStatus(status: AccountStatus) {
     const left = new Set(leftMemberships(state.status, status));
     if (left.size > 0) void purgeCloudMirrors((orgId) => !left.has(orgId));
   }
-  setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "",
-    status.organizations?.filter((org) => featureFlagEnabled(status, featureFlags.teamRoster, org.id)).map((org) => org.id) ?? []);
+  syncRosterContext(status);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
+}
+
+/** Retire cached reads and polling while privacy disables cloud work, including live policy changes. */
+function syncRosterContext(status: AccountStatus) {
+  setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "",
+    privacyEnabled() ? [] : status.organizations?.filter((org) => featureFlagEnabled(status, featureFlags.teamRoster, org.id)).map((org) => org.id) ?? []);
 }
 
 /** Apply the server-confirmed removal through the same membership cleanup as role refresh.
@@ -294,6 +299,7 @@ export function bootAccount(): Promise<void> {
     try {
       await listen<AccountStatus>("account_status", (event) => applyStatus(event.payload));
       subscribeDataPrivacy(() => {
+        syncRosterContext(state.status);
         set({ status: { ...state.status } });
         scheduleRefresh(state.status);
         if (!privacyEnabled()) { void refreshAccount(); void refreshAccountRoles(true); }

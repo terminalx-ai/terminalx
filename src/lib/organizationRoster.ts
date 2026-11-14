@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { organizationMembers, type OrganizationRoster } from "@/lib/organizationMembers";
+import { privacyEnabled, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 
 /** Shared in memory only: member details never survive sign-out. */
 export const ROSTER_MAX_AGE_MS = 60_000;
@@ -77,6 +78,7 @@ export function setRosterContext(orgId: string | null, revision: string, enabled
 }
 
 export function readOrganizationRoster(orgId?: string | null, options: ReadOptions = {}): Promise<OrganizationRoster> {
+  if (privacyEnabled()) return Promise.reject(new Error(PRIVACY_MESSAGE));
   const key = keyOf(orgId);
   const active = options.active ?? (key === activeOrg || key === ACTIVE);
   if (!rosterCacheEnabled(key)) return active ? organizationMembers.list() : organizationMembers.listIn(key);
