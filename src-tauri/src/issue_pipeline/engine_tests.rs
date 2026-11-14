@@ -115,6 +115,10 @@ struct World {
     merges: Vec<(String, String)>,
     moved_to_review: Vec<String>,
     reviewers: u32,
+    resolvers: u32,
+    resolver_recovery: Option<String>,
+    resolver_stop_error: bool,
+    remote_resolved: bool,
     conflict: bool,
     local_runs: Vec<(String, String)>,
     local_error: bool,
@@ -211,6 +215,10 @@ impl FakeHost {
             merges: Vec::new(),
             moved_to_review: Vec::new(),
             reviewers: 0,
+            resolvers: 0,
+            resolver_recovery: None,
+            resolver_stop_error: false,
+            remote_resolved: false,
             conflict: false,
             local_runs: Vec::new(),
             local_error: false,
@@ -400,11 +408,44 @@ impl Host for FakeHost {
         self.world().resolution_push_targets.push(resolution.target.clone());
         self.push(cwd)
     }
+    fn resolver_failure(&self, who: &SessionRef) -> Result<Option<String>> {
+        let world = self.world();
+        Ok(if world.sessions.get(&who.session_id).and_then(|session| session.tab(&who.tab_id)).is_none() {
+            Some("The conflict resolver tab was closed.".into())
+        } else { world.resolver_recovery.clone() })
+    }
+    fn stop_resolver(&self, who: &SessionRef) -> Result<()> {
+        let mut world = self.world();
+        if world.resolver_stop_error { bail!("The resolver process exit could not be confirmed"); }
+        world.busy.remove(&key(who));
+        world.running.remove(&key(who));
+        world.background.remove(&key(who));
+        Ok(())
+    }
+    fn close_resolver(&self, who: &SessionRef) -> Result<()> {
+        self.stop_resolver(who)?;
+        let mut world = self.world();
+        world.sessions.remove(&who.session_id);
+        world.resolver_recovery = None;
+        Ok(())
+    }
+    fn remote_resolution_complete(&self, _cwd: &Path, pr: &PrSnapshot) -> Result<bool> {
+        Ok(self.world().remote_resolved && pr.mergeable != "CONFLICTING" && !matches!(pr.merge_state.as_str(), "DIRTY" | "BEHIND"))
+    }
+    fn adopt_remote_head(&self, _cwd: &Path, head: &str) -> Result<()> {
+        let mut world = self.world();
+        if !world.workspace.dirty.is_empty() || !world.workspace.merging.is_empty() { bail!("Unfinished checkout changes"); }
+        world.workspace.head = head.into();
+        Ok(())
+    }
     fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
-        let mut resolver = session("resolver", None);
+        let mut world = self.world();
+        world.resolvers += 1;
+        let id = if world.resolvers == 1 { "resolver".into() } else { format!("resolver-{}", world.resolvers) };
+        let mut resolver = session(&id, None);
         resolver.cwd = author.cwd.clone();
-        self.world().sessions.insert(resolver.id.clone(), resolver);
-        Ok(SessionRef { session_id: "resolver".into(), tab_id: "t1".into() })
+        world.sessions.insert(resolver.id.clone(), resolver);
+        Ok(SessionRef { session_id: id, tab_id: "t1".into() })
     }
     fn verify_resolution(&self, _cwd: &Path, resolution: &super::Resolution, head: &str, _branch: &str) -> Result<()> {
         let world = self.world();
@@ -1666,6 +1707,7 @@ fn an_action_the_pipeline_is_in_no_position_for_is_refused_and_changes_nothing()
     // No pull request yet: nothing to review, nothing to merge.
     assert!(act(&run.host, &run.id, Action::Review).unwrap_err().to_string().contains("no pull request to review"));
     assert!(act(&run.host, &run.id, Action::Merge).unwrap_err().to_string().contains("not at Ready to merge"));
+    assert!(act(&run.host, &run.id, Action::RestartResolve).unwrap_err().to_string().contains("not resolving conflicts"));
     assert_eq!(run.pipeline(), working);
 
     // A review under way is not asked for twice.
@@ -2441,7 +2483,6 @@ fn a_missing_reviewer_can_be_replaced_when_the_head_moves() {
     assert_eq!(again.reviewer.unwrap().session_id, "author");
     assert_eq!(run.host.world().sessions.len(), 1);
 }
-
 
 #[test]
 fn a_changed_heads_failed_local_checks_survive_polling_and_require_a_pass_for_that_head() {
@@ -3990,6 +4031,275 @@ fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
     assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
 }
 
+#[test]
+fn closed_or_terminal_recovery_resolvers_release_author_admission_without_reminders() {
+    for detail in ["The conflict resolver tab was closed.", crate::recovery::RecoveryKind::SignedOut.message(), crate::recovery::RecoveryKind::Failed.message()] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        crate::store::index::save(&[run.host.world().sessions["author"].clone()]).unwrap();
+        assert!(super::admission::check("author", "t1").is_err());
+        if detail.contains("tab was closed") { run.host.world().sessions.remove("resolver"); }
+        else { run.host.world().resolver_recovery = Some(detail.into()); }
+        let stopped = run.poll();
+        assert!(stopped.resolution.is_none());
+        assert_eq!(stopped.reason, Some(StopReason::SessionStopped { role: "conflict resolver".into(), detail: detail.into() }));
+        assert!(super::admission::check("author", "t1").is_ok());
+        run.poll();
+        turn_completed(&run.host, "resolver", "t1", None);
+        assert_eq!(run.host.prompts_to("resolver").len(), 1);
+        assert_eq!(run.pipeline().reason, stopped.reason);
+        assert!(run.host.aborts().is_empty(), "recovery preserves unfinished changes for inspection");
+    }
+}
+
+#[test]
+fn restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits() {
+    let run = Run::start(&github_issue(), false);
+    let mut pipeline = resolving(&run);
+    pipeline.round = pipeline.max_rounds;
+    pipeline.resolutions = run.host.world().settings.max_resolutions;
+    store::commit(&mut pipeline).unwrap();
+    run.host.agent(&resolver_tab(), true);
+    let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
+    let fresh = restarted.resolver.unwrap();
+    assert_ne!(fresh, resolver_tab());
+    assert!(restarted.resolution.is_some());
+    assert_eq!(run.host.prompts_to(&fresh.session_id).len(), 1);
+    assert_eq!(restarted.round, pipeline.round);
+    turn_failed(&run.host, "resolver", "t1", "Old process exited.");
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Old reply")));
+    assert_eq!(run.pipeline().resolver, Some(fresh));
+    assert!(run.pipeline().resolution.is_some());
+    assert_eq!(serde_json::to_string(&Action::RestartResolve).unwrap(), "\"restartResolve\"");
+    // The restarted resolver's result still receives an independent review
+    // when the original attempt had exhausted the automatic round budget.
+    run.host.commit(C2);
+    run.host.world().workspace.dirty.clear();
+    run.host.world().workspace.merging.clear();
+    let fresh = run.pipeline().resolver.unwrap();
+    turn_completed(&run.host, &fresh.session_id, &fresh.tab_id, Some(&done("Resolved the merge.")));
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.stage, reviewing.state), (Stage::Review, State::Working));
+    assert_eq!(reviewing.review_commit.as_deref(), Some(C2));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn advance_accepts_a_remotely_resolved_head_and_requires_a_fresh_review() {
+    for resolver in ["closed", "live", "no resolver"] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        if resolver == "no resolver" {
+            let mut p = run.pipeline();
+            p.resolver = None;
+            p.resolution = None;
+            store::commit(&mut p).unwrap();
+        }
+        if resolver == "live" { run.host.agent(&resolver_tab(), true); }
+        {
+            let mut world = run.host.world();
+            if resolver != "live" { world.sessions.remove("resolver"); }
+            world.workspace.dirty.clear();
+            world.workspace.merging.clear();
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        let advanced = act(&run.host, &run.id, Action::Advance).unwrap();
+        assert_eq!((advanced.stage, advanced.state), (Stage::Review, State::Working));
+        assert!(advanced.resolution.is_none());
+        assert_eq!(advanced.review_commit.as_deref(), Some(C2));
+        assert!(!run.host.world().running.contains(&key(&resolver_tab())));
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn remote_advance_preserves_process_ownership_local_changes_and_failed_check_gates() {
+    for gate in ["process exit", "local changes", "failed checks"] {
+        let run = Run::start(&github_issue(), true);
+        let mut before = resolving(&run);
+        if gate == "failed checks" {
+            before.failed_local_checks.push(C2.into());
+            store::commit(&mut before).unwrap();
+        }
+        {
+            let mut world = run.host.world();
+            world.workspace.dirty = if gate == "local changes" { vec!["keep.rs".into()] } else { vec![] };
+            world.workspace.merging.clear();
+            world.resolver_stop_error = gate == "process exit";
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        let after = act(&run.host, &run.id, Action::Advance).unwrap();
+        assert_eq!(after.state, State::NeedsYou, "{gate}");
+        assert_eq!(after.round, before.round);
+        assert!(run.merges().is_empty());
+        match gate {
+            "process exit" => {
+                assert_eq!(after.resolution, before.resolution);
+                assert_eq!(after.resolver, before.resolver);
+                assert_eq!(run.host.world().workspace.head, C1);
+            }
+            "local changes" => {
+                assert!(after.resolution.is_none());
+                assert_eq!(run.host.world().workspace.head, C1);
+                assert_eq!(run.host.world().workspace.dirty, ["keep.rs"]);
+                assert!(matches!(after.reason, Some(StopReason::UncommittedChanges { .. })));
+            }
+            _ => {
+                assert!(after.resolution.is_none());
+                assert_eq!(after.reason, Some(StopReason::LocalChecksFailed));
+                assert_eq!(after.failed_local_checks, [C2]);
+            }
+        }
+    }
+}
+
+#[test]
+fn handover_preserves_a_live_resolvers_checkout_ownership() {
+    let run = Run::start(&github_issue(), false);
+    let resolving = resolving(&run);
+    run.host.agent(&resolver_tab(), true);
+    engine::handed_over(&run.host);
+    let after = run.pipeline();
+    assert_eq!(after.resolution, resolving.resolution);
+    assert_eq!((after.stage, after.state), (Stage::Resolve, State::Working));
+}
+
+#[test]
+fn stopped_resolution_can_be_restarted_explicitly_with_automation_disabled() {
+    let run = Run::start(&github_issue(), false);
+    resolving(&run);
+    run.host.agent(&resolver_tab(), false);
+    act(&run.host, &run.id, Action::Stop).unwrap();
+    set_resolve_conflicts(&run.host, &run.id, false).unwrap();
+    let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert!(!restarted.stopped && !restarted.resolve_conflicts);
+    assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
+    assert_ne!(restarted.resolver, Some(resolver_tab()));
+}
+
+#[test]
+fn an_unconfirmed_resolver_exit_keeps_its_reservation_and_identity() {
+    for action in [None, Some(Action::RestartResolve)] {
+        let run = Run::start(&github_issue(), false);
+        let before = resolving(&run);
+        run.host.world().resolver_stop_error = true;
+        run.host.world().resolver_recovery = Some(crate::recovery::RecoveryKind::SignedOut.message().into());
+        if let Some(action) = action { act(&run.host, &run.id, action).unwrap(); }
+        else { run.poll(); }
+        let after = run.pipeline();
+        assert_eq!(after.resolution, before.resolution);
+        assert_eq!(after.resolver, before.resolver);
+        assert_eq!(after.state, State::NeedsYou);
+        assert_eq!(run.host.world().resolvers, 1);
+        assert_eq!(run.host.prompts_to("resolver").len(), 1);
+    }
+}
+
+
+#[test]
+fn a_closed_resolver_restarts_its_pinned_merge_without_discarding_manual_edits() {
+    let run = Run::start(&github_issue(), false);
+    let before = resolving(&run);
+    run.host.world().sessions.remove("resolver");
+    let closed = run.poll();
+    assert!(closed.resolution.is_none());
+    assert_eq!(closed.interrupted_resolution, before.resolution);
+    run.host.world().workspace.dirty.push("manual-resolution.rs".into());
+    let dirty = run.host.world().workspace.dirty.clone();
+    let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
+    assert!(restarted.resolution.is_some() && restarted.interrupted_resolution.is_none());
+    assert_ne!(restarted.resolver, before.resolver);
+    let fresh = restarted.resolver.unwrap();
+    assert!(run.host.prompts_to(&fresh.session_id)[0].contains("Continue the existing merge"));
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+    turn_completed(&run.host, &fresh.session_id, &fresh.tab_id, Some(&resolver_blocked("Needs manual inspection")));
+    assert!(run.host.aborts().is_empty());
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+}
+
+#[test]
+fn restart_without_resolver_identity_retains_the_reservation() {
+    let run = Run::start(&github_issue(), false);
+    let mut before = resolving(&run);
+    before.resolver = None;
+    store::commit(&mut before).unwrap();
+    let after = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(after.resolution, before.resolution);
+    assert_eq!(after.state, State::NeedsYou);
+    assert!(after.note.as_deref().is_some_and(|note| note.contains("identity is missing")));
+    assert_eq!(run.host.world().resolvers, 1);
+    assert!(run.host.aborts().is_empty());
+}
+
+#[test]
+fn remote_advance_and_recovery_keep_reservations_without_resolver_identity() {
+    for action in ["advance", "recover", "handover"] {
+        let run = Run::start(&github_issue(), false);
+        let mut before = resolving(&run);
+        before.resolver = None;
+        store::commit(&mut before).unwrap();
+        {
+            let mut world = run.host.world();
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        match action {
+            "advance" => { act(&run.host, &run.id, Action::Advance).unwrap(); }
+            "recover" => engine::recover(&run.host),
+            _ => engine::handed_over(&run.host),
+        }
+        let after = run.pipeline();
+        assert_eq!(after.resolution, before.resolution, "{action}");
+        assert_eq!(after.state, State::NeedsYou);
+        assert!(after.note.as_deref().is_some_and(|note| note.contains("identity is missing")));
+        assert_eq!(run.host.world().workspace.head, C1);
+        assert!(run.host.aborts().is_empty());
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn restart_can_retry_delivery_without_losing_the_preserved_merge() {
+    let run = Run::start(&github_issue(), false);
+    let before = resolving(&run);
+    run.host.world().sessions.remove("resolver");
+    run.poll();
+    run.host.world().workspace.dirty.push("manual-resolution.rs".into());
+    let dirty = run.host.world().workspace.dirty.clone();
+    run.host.world().send_error = Some("The agent could not be started".into());
+    let failed = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(failed.state, State::NeedsYou);
+    assert!(failed.resolution.is_none());
+    let pinned = failed.interrupted_resolution.as_ref().unwrap();
+    assert_eq!(pinned.head, before.resolution.as_ref().unwrap().head);
+    assert_eq!(pinned.base_commit, before.resolution.as_ref().unwrap().base_commit);
+    let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
+    assert!(restarted.resolution.is_some());
+    assert_ne!(restarted.resolver, failed.resolver);
+    let fresh = restarted.resolver.unwrap();
+    assert!(run.host.prompts_to(&fresh.session_id)[0].contains("Continue the existing merge"));
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+    assert!(run.host.aborts().is_empty());
+}
+
 // ---- #947: a passing verdict carries over merges of the base --------------------
 
 /// Only clean merges of main since the review: the change is what it was.
@@ -4237,4 +4547,93 @@ fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
     assert!(note.contains("whether the new commits only merge main could not be told (Fetching the pull request base failed: timed out)"), "{note}");
     assert!(!note.contains("not only merges"), "{note}");
     assert!(stopped.events.iter().any(|event| event.kind == "note" && event.message.contains("timed out")));
+}
+
+#[test]
+fn agent_resolver_actions_cannot_grant_more_automation() {
+    for limit in ["review", "resolution", "remote advance"] {
+        let run = Run::start(&github_issue(), false);
+        let mut p = resolving(&run);
+        if limit == "resolution" { p.resolutions = run.host.world().settings.max_resolutions; }
+        else { p.round = p.max_rounds; }
+        store::commit(&mut p).unwrap();
+        if limit == "remote advance" {
+            let mut world = run.host.world();
+            world.workspace.dirty.clear();
+            world.workspace.merging.clear();
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        let action = if limit == "remote advance" { Action::Advance } else { Action::RestartResolve };
+        let after = engine::act_from_agent(&run.host, &run.id, action).unwrap();
+        assert_eq!(after.max_rounds, p.max_rounds);
+        assert_eq!(after.resolutions, p.resolutions);
+        assert_eq!(after.round, p.round);
+        assert_eq!(after.state, State::NeedsYou);
+        assert!(run.merges().is_empty());
+        if limit != "remote advance" { assert_eq!(after.resolver, p.resolver); }
+    }
+}
+
+#[test]
+fn agent_resolver_restart_within_limits_consumes_a_resolution() {
+    let run = Run::start(&github_issue(), false);
+    let p = resolving(&run);
+    run.host.world().settings.max_resolutions = p.resolutions + 1;
+    let after = engine::act_from_agent(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((after.stage, after.state), (Stage::Resolve, State::Working));
+    assert_eq!(after.resolutions, p.resolutions + 1);
+    assert_eq!(after.max_rounds, p.max_rounds);
+    let refused = engine::act_from_agent(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(refused.state, State::NeedsYou);
+    assert_eq!(refused.resolver, after.resolver);
+}
+
+#[test]
+fn signed_out_resolver_retry_restores_ownership_before_delivery() {
+    for outcome in ["sent", "failed", "unconfirmed exit"] {
+        let failure = outcome != "sent";
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        let sessions: Vec<_> = run.host.world().sessions.values().cloned().collect();
+        crate::store::index::save(&sessions).unwrap();
+        run.host.world().resolver_recovery = Some(crate::recovery::RecoveryKind::SignedOut.message().into());
+        run.poll();
+        assert!(super::admission::check("author", "t1").is_ok());
+        let result = engine::retry_interrupted_resolver(&run.host, "resolver", "t1", || {
+            assert!(super::admission::check("author", "t1").is_err());
+            assert!(super::admission::check("resolver", "t1").is_ok());
+            assert_eq!(run.pipeline().state, State::Working);
+            assert!(run.pipeline().resolution.is_some());
+            if failure {
+                run.host.world().resolver_stop_error = outcome == "unconfirmed exit";
+                bail!("Delivery failed");
+            }
+            run.host.world().resolver_recovery = None;
+            Ok(())
+        });
+        assert_eq!(result.is_err(), failure);
+        let released = outcome == "failed";
+        assert_eq!(run.pipeline().resolution.is_none(), released);
+        assert_eq!(run.pipeline().interrupted_resolution.is_some(), released);
+        assert_eq!(super::admission::check("author", "t1").is_ok(), released);
+    }
+}
+
+#[test]
+fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
+    for stopped in [false, true] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        run.host.world().resolver_recovery = Some(crate::recovery::RecoveryKind::SignedOut.message().into());
+        run.poll();
+        if stopped { act(&run.host, &run.id, Action::Stop).unwrap(); }
+        else { run.host.commit(C2); }
+        assert!(engine::retry_interrupted_resolver(&run.host, "resolver", "t1", || -> Result<()> { panic!("must not send") }).is_err());
+        assert!(run.pipeline().resolution.is_none());
+    }
 }

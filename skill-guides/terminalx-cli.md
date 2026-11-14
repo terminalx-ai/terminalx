@@ -1483,9 +1483,19 @@ terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
+terminalx pipelines resolve <pipeline> --restart [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`resolve --restart` closes the old resolver after confirming its process exited, releases its
+checkout reservation, and starts a fresh resolver conversation with the current sign-in. It can
+restart stopped resolution even when automatic conflict resolution is off, without changing
+that switch or consuming another automatic resolution round. A restart also allows a fresh
+independent review if the previous attempt exhausted its review rounds. Inspect unfinished changes
+if restart asks for help. `advance` rechecks the remote head and latest base before deciding a
+resolver is still running; a remotely resolved branch continues through the existing review
+and merge gates.
 
 `start` (`attach` is an alias) activates Autopilot in an existing local session. A session
 selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the

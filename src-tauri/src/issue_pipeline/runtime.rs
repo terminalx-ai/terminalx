@@ -67,8 +67,8 @@ impl SessionObserver for RuntimeObserver {
             crate::automations::fail_from_hook(host, session_id, tab_id, message);
         }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
-        let detail = engine::turn_failure(message.contains("interrupted"));
-        self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, detail));
+        let detail = message.to_string();
+        self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, &detail));
     }
 
     /// Off the sender's thread, which may hold the checkout's admission or a
@@ -127,6 +127,8 @@ mod tests {
             reviewer: None,
             resolver: None,
             resolution: None,
+            interrupted_resolution: None,
+            preserve_resolution_edits: false,
             resolutions: 0,
             resolve_conflicts: false,
             auto_merge: false,
@@ -202,5 +204,46 @@ mod tests {
         let moved = store::get("p1").unwrap();
         assert_eq!(moved.reason, Some(StopReason::AuthorNotDone { detail: "Which database?".into() }));
         assert!(*announced.lock().unwrap() >= 1);
+    }
+
+    #[test]
+    fn closing_a_resolver_tab_notifies_the_runtime_and_releases_author_admission() {
+        let _home = crate::store::temp_home();
+        let checkout = tempfile::tempdir().unwrap();
+        let entry: crate::store::index::SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": checkout.path(), "cwd": checkout.path(), "title": "Issue",
+            "created": "2026-11-14T00:00:00Z", "modified": "2026-11-14T00:00:00Z",
+            "tabs": [
+                {"id": "t1", "harness": "claude", "model": "opus", "created": "2026-11-14T00:00:00Z"},
+                {"id": "resolver", "harness": "claude", "model": "opus", "created": "2026-11-14T00:00:00Z"}
+            ]
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        let mut p = pipeline();
+        p.project_path = checkout.path().to_str().unwrap().into();
+        p.stage = Stage::Resolve;
+        p.resolver = Some(SessionRef { session_id: "author".into(), tab_id: "resolver".into() });
+        p.resolution = Some(crate::issue_pipeline::Resolution { head: "head".into(), remote_head: None, target: None,
+            base: "main".into(), base_commit: "base".into(), return_stage: Stage::Work, waiting_since: None });
+        store::insert(&p).unwrap();
+        assert!(crate::issue_pipeline::admission::check("author", "t1").is_err());
+        let sink = Arc::new(BroadcastSink::new(16));
+        let observer = Arc::new(RuntimeObserver::default());
+        let manager = crate::session::SessionManager::new(
+            sink.clone(), observer.clone(), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        observer.attach(Arc::new(LocalHost::new(sink, manager.clone())));
+        manager.close_tab("author", "resolver").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while store::get(&p.id).unwrap().resolution.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let after = store::get(&p.id).unwrap();
+        assert!(after.resolution.is_none());
+        assert_eq!(after.state, State::NeedsYou);
+        assert_eq!(after.reason, Some(StopReason::SessionStopped { role: "conflict resolver".into(), detail: "The conflict resolver tab was closed.".into() }));
+        assert!(crate::issue_pipeline::admission::check("author", "t1").is_ok());
     }
 }
