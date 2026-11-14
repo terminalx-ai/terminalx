@@ -786,7 +786,7 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
                     Some(base) if verified => matches!(landed::merged_rev(&path, base, "HEAD"), Some((Some(_), _))),
                     _ => false,
                 };
-                if !merged {
+                if !merged && !candidate.head.as_deref().is_some_and(|head| crate::orchestration::retirement::landed(&repository.root, &path, head)) {
                     let against = match &base {
                         Some(base) if verified => format!("and not merged into {base}"),
                         _ => "and whether they were merged could not be verified".to_string(),

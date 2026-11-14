@@ -180,6 +180,8 @@ export interface PieceTry {
   branch?: string;
   /** Absent while it runs, and before it starts. */
   outcome?: TryOutcome;
+  /** Automatic archival is held at this HEAD until it changes or cleanup is retried. */
+  archiveFailure?: { head: string | null; reason: string };
   /** The worker's result line, or the failure text the next try is given. */
   detail?: string;
   /** What its worker's session used, at API list prices. */

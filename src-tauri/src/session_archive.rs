@@ -424,6 +424,15 @@ pub fn local_work(session: &SessionEntry) -> bool {
 /// them. `shown`: the sessions open in a window. Nothing is archived while
 /// the limit is Never, or while the pipelines cannot be read.
 pub fn sweep_owned(manager: &crate::session::SessionManager, sink: &dyn EventSink, shown: &HashSet<String>) -> Result<Vec<SessionEntry>> {
+    // Run archival is independent of the user's idle-retention preference.
+    // Retry failed preservation after restart, without repeatedly stopping final workers
+    // or re-archiving a conversation the person deliberately recovered.
+    let host = crate::orchestration::host::ManagerHost::new(manager.sink().clone(), manager.clone());
+    if let Ok(runs) = crate::orchestration::store::list() {
+        for run in runs.iter().filter(|run| run.state.ended()) {
+            host.retire_automatically(run, false);
+        }
+    }
     let Some(limit) = crate::store::settings::load().conversations.archive_after() else {
         return Ok(Vec::new());
     };

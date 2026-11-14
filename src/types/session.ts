@@ -327,7 +327,7 @@ export interface Landed {
   /** Stash entries made on this branch. */
   stashes: number;
   clean: boolean;
-  merged: "ancestor" | "rebase" | "squash" | "noChanges" | null;
+  merged: "ancestor" | "rebase" | "squash" | "noChanges" | "superseded" | null;
   unmergedCommits: number;
   pushed: boolean;
   /** The default branch was fetched for this check. */

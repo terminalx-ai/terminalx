@@ -41,6 +41,18 @@ struct Repo {
     stopped: Mutex<Vec<String>>,
     /// The lead's session is gone (deleted with its worktree once its pull request merged).
     lead_gone: Mutex<bool>,
+    lead_path: Mutex<Option<PathBuf>>,
+    merged_pr: Mutex<bool>,
+    no_preserve: Mutex<bool>,
+    no_tip_preserve: Mutex<bool>,
+    no_archive: Mutex<bool>,
+    no_stop: Mutex<bool>,
+    archived: Mutex<Vec<String>>,
+    preserved_tips: Mutex<Vec<(String, String)>>,
+    move_tip: Mutex<bool>,
+    move_before_remove: Mutex<bool>,
+    fail_tip_on_remove: Mutex<bool>,
+    stash_during_preserve: Mutex<bool>,
 }
 
 impl Repo {
@@ -59,7 +71,7 @@ impl Repo {
         git(&lead, &["remote", "add", "origin", root.path().join("origin.git").to_str().unwrap()]);
         git(&lead, &["push", "-q", "origin", "main"]);
         git(&lead, &["checkout", "-q", "-b", "lead"]);
-        Self { root, mode: Mutex::new("bypassPermissions".into()), held: Mutex::new(None), reserved: Mutex::new(Vec::new()), busy: Mutex::new(BTreeSet::new()), project_check: Mutex::new(None), prs: Mutex::new(Vec::new()), hold: Mutex::new(None), stopped: Mutex::new(Vec::new()), lead_gone: Mutex::new(false) }
+        Self { root, mode: Mutex::new("bypassPermissions".into()), held: Mutex::new(None), reserved: Mutex::new(Vec::new()), busy: Mutex::new(BTreeSet::new()), project_check: Mutex::new(None), prs: Mutex::new(Vec::new()), hold: Mutex::new(None), stopped: Mutex::new(Vec::new()), lead_gone: Mutex::new(false), lead_path: Mutex::new(None), merged_pr: Mutex::new(false), no_preserve: Mutex::new(false), no_tip_preserve: Mutex::new(false), no_archive: Mutex::new(false), no_stop: Mutex::new(false), archived: Mutex::new(Vec::new()), preserved_tips: Mutex::new(Vec::new()), move_tip: Mutex::new(false), move_before_remove: Mutex::new(false), fail_tip_on_remove: Mutex::new(false), stash_during_preserve: Mutex::new(false) }
     }
 
     fn lead(&self) -> PathBuf {
@@ -133,11 +145,47 @@ impl Repo {
 }
 
 impl Checkouts for Repo {
+    fn stop_agents_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        self.stop_agents(worker)
+    }
+
+    fn run_pr_merged(&self, _run: &Run) -> anyhow::Result<bool> {
+        Ok(*self.merged_pr.lock().unwrap())
+    }
+
+    fn preserve_worker(&self, _run: &Run, _worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::ensure!(!*self.no_preserve.lock().unwrap(), "backup unavailable");
+        Ok(())
+    }
+
+    fn archive_worker(&self, _run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::ensure!(!*self.no_archive.lock().unwrap(), "archive unavailable");
+        assert!(!self.busy.lock().unwrap().contains(&worker.session_id));
+        let mut archived = self.archived.lock().unwrap();
+        if !archived.contains(&worker.session_id) {
+            archived.push(worker.session_id.clone());
+        }
+        Ok(())
+    }
+
+    fn preserve_worker_tip(&self, _run: &Run, worker: &SessionRef, _worktree: &Worktree, tip: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!*self.no_tip_preserve.lock().unwrap(), "exact-tip backup unavailable");
+        self.preserved_tips.lock().unwrap().push((worker.session_id.clone(), tip.into()));
+        if std::mem::take(&mut *self.stash_during_preserve.lock().unwrap()) {
+            std::fs::write(_worktree.path.join("notes.txt"), "concurrent notes\n").unwrap();
+            git(&_worktree.path, &["stash", "push", "-u", "-m", "Concurrent notes"]);
+        }
+        if std::mem::take(&mut *self.move_tip.lock().unwrap()) {
+            git(&_worktree.path, &["commit", "--allow-empty", "-q", "-m", "Concurrent work"]);
+        }
+        Ok(())
+    }
+
     fn lead_checkout(&self, _run: &Run) -> anyhow::Result<PathBuf> {
         if *self.lead_gone.lock().unwrap() {
             anyhow::bail!("the lead's session is gone");
         }
-        Ok(self.lead())
+        Ok(self.lead_path.lock().unwrap().clone().unwrap_or_else(|| self.lead()))
     }
 
     fn lead_mode(&self, _run: &Run) -> Option<String> {
@@ -170,12 +218,19 @@ impl Checkouts for Repo {
     }
 
     fn remove(&self, _run: &Run, _worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> {
+        if std::mem::take(&mut *self.move_before_remove.lock().unwrap()) {
+            git(&worktree.path, &["commit", "--allow-empty", "-q", "-m", "Work before removal guard"]);
+        }
+        if std::mem::take(&mut *self.fail_tip_on_remove.lock().unwrap()) {
+            *self.no_tip_preserve.lock().unwrap() = true;
+        }
         still_safe().map_err(|why| anyhow::anyhow!(why))?;
         git(&self.lead(), &["worktree", "remove", worktree.path.to_str().unwrap()]);
         Ok(())
     }
 
     fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        anyhow::ensure!(!*self.no_stop.lock().unwrap(), "stop unavailable");
         let was_running = self.busy.lock().unwrap().remove(&worker.session_id);
         if was_running {
             self.stopped.lock().unwrap().push(worker.session_id.clone());
@@ -491,6 +546,9 @@ fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
     let d = repo.work("d", &[("d.txt", "d\n")]);
     let id = repo.run(&[("a", &[], &a, &["a.txt"], "true"), ("b", &[], &b, &["b.txt"], "true"), ("c", &[], &c, &["c.txt"], "true"), ("d", &[], &d, &["d.txt"], "true")], None);
     assert!(repo.merge(&[], false).done);
+    // Preserve the pre-existing policy for accepted pieces of a run still integrating.
+    // Completed runs instead keep their final conversations visible.
+    store::update(&id, |run| { run.state = RunState::Merging; Ok(()) }).unwrap();
     // b went on after its result was accepted: a commit that is in no merge.
     std::fs::write(repo.worker("b").join("later.txt"), "more\n").unwrap();
     git(&repo.worker("b"), &["add", "."]);
@@ -532,12 +590,13 @@ fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
             pass.join().unwrap().unwrap();
         });
     }
-    // That pass ended the run again, which stopped the agent left in d: its try is finished, so it goes now.
+    // That pass ended the run again and stopped d; successful final workers now stay visible.
     assert_eq!(*repo.stopped.lock().unwrap(), ["d"]);
     // Asked again, what is gone is not listed and what stays still does.
     let again = merge::cleanup(&repo, &id, true).unwrap();
-    assert_eq!(again.removed.iter().map(|fate| fate.piece.as_str()).collect::<Vec<_>>(), ["d"]);
-    assert_eq!(again.refused.iter().map(|fate| fate.piece.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+    assert!(again.removed.is_empty());
+    assert_eq!(again.refused.iter().map(|fate| fate.piece.as_str()).collect::<Vec<_>>(), ["b", "c", "d"]);
+    assert!(again.refused.iter().all(|fate| fate.reason.as_ref().unwrap().contains("final worker")));
 }
 
 #[test]
@@ -756,7 +815,7 @@ fn nothing_is_merged_while_a_piece_is_with_the_lead_so_its_work_is_its_own() {
 }
 
 #[test]
-fn a_run_that_is_done_stops_its_finished_workers_and_cleanup_then_removes_every_merged_one() {
+fn a_run_that_is_done_stops_finished_workers_but_cleanup_only_removes_superseded_ones() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
     // `a` took two tries: the first, in `a0`, failed and committed nothing; `b` took one.
@@ -775,7 +834,7 @@ fn a_run_that_is_done_stops_its_finished_workers_and_cleanup_then_removes_every_
     // Each worker's turn ended with its report, and its agent sits idle in its worktree.
     repo.busy.lock().unwrap().extend(["a0".to_string(), "a".to_string(), "b".to_string()]);
     let before = merge::cleanup(&repo, &id, true).unwrap();
-    assert_eq!(before.refused.iter().map(|fate| (fate.piece.as_str(), fate.attempt, fate.reason.as_deref().unwrap())).collect::<Vec<_>>(), [("a", 1, "An agent is running in it."), ("a", 2, "An agent is running in it."), ("b", 1, "An agent is running in it.")]);
+    assert_eq!(before.refused.iter().map(|fate| (fate.piece.as_str(), fate.attempt, fate.reason.as_deref().unwrap())).collect::<Vec<_>>(), [("a", 1, "Its run has not completed successfully."), ("a", 2, "An agent is running in it."), ("b", 1, "An agent is running in it.")]);
     assert!(before.removed.is_empty() && repo.stopped.lock().unwrap().is_empty(), "a run that has not ended stops nothing");
 
     let merged = repo.merge(&[], false);
@@ -783,10 +842,14 @@ fn a_run_that_is_done_stops_its_finished_workers_and_cleanup_then_removes_every_
     assert!(merged.done && merged.run.state == RunState::Done);
     assert_eq!(*repo.stopped.lock().unwrap(), ["a0", "a", "b"], "the superseded try's worker and both accepted ones are stopped");
     assert!(repo.busy.lock().unwrap().is_empty());
+    *repo.merged_pr.lock().unwrap() = true;
     let cleaned = merge::cleanup(&repo, &id, true).unwrap();
-    assert_eq!(cleaned.removed.iter().map(|fate| (fate.piece.as_str(), fate.attempt)).collect::<Vec<_>>(), [("a", 1), ("a", 2), ("b", 1)]);
-    assert!(cleaned.refused.is_empty(), "{:?}", cleaned.refused);
-    assert!(["a0", "a", "b"].iter().all(|worker| !repo.worker(worker).exists()));
+    assert_eq!(cleaned.removed.iter().map(|fate| (fate.piece.as_str(), fate.attempt)).collect::<Vec<_>>(), [("a", 1)]);
+    assert_eq!(cleaned.refused.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    assert!(cleaned.refused.iter().all(|fate| fate.reason.as_ref().unwrap().contains("final worker")));
+    assert_eq!(*repo.archived.lock().unwrap(), ["a0"]);
+    assert!(!repo.worker("a0").exists());
+    assert!(["a", "b"].iter().all(|worker| repo.worker(worker).is_dir()));
     // Merged again, nothing more is stopped.
     repo.merge(&[], false);
     assert_eq!(repo.stopped.lock().unwrap().len(), 3);
@@ -802,6 +865,9 @@ fn with_the_leads_session_gone_cleanup_measures_each_worktree_against_the_base_b
     let d = repo.work("d", &[("d.txt", "d\n")]);
     let id = repo.run(&[("a", &[], &a, &["a.txt"], "true"), ("b", &[], &b, &["b.txt"], "true"), ("c", &[], &c, &["c.txt"], "true"), ("d", &[], &d, &["d.txt"], "true")], None);
     assert!(repo.merge(&[], false).done);
+    // Preserve the pre-existing policy for accepted pieces of a run still integrating.
+    // Completed runs instead keep their final conversations visible.
+    store::update(&id, |run| { run.state = RunState::Merging; Ok(()) }).unwrap();
     // The lead's pull request merged into `main`, and its session went with its worktree.
     git(&repo.lead(), &["push", "-q", "origin", "lead:main"]);
     *repo.lead_gone.lock().unwrap() = true;
@@ -836,4 +902,454 @@ fn with_the_leads_session_gone_cleanup_measures_each_worktree_against_the_base_b
     let known = merge::cleanup(&repo, &id, true).unwrap();
     assert_eq!(known.removed.iter().map(|fate| fate.piece.as_str()).collect::<Vec<_>>(), ["b", "c"]);
     assert_eq!(known.refused.iter().map(|fate| (fate.piece.as_str(), fate.reason.as_deref().unwrap())).collect::<Vec<_>>(), [("d", "An agent is running in it.")]);
+}
+
+/// Insert an interrupted and a failed try ahead of the accepted one.
+fn add_superseded(repo: &Repo, id: &str) -> (String, String) {
+    let first = repo.work("first", &[("abandoned.txt", "unpublished\n")]);
+    let second = repo.work("second", &[("second.txt", "also unpublished\n")]);
+    store::update(id, |run| {
+        let piece = &mut run.pieces[0];
+        for (worker, outcome) in [("second", Some(super::Outcome::Failed)), ("first", None)] {
+            let mut attempt = piece.tries.last().unwrap().clone();
+            attempt.worker = Some(SessionRef { session_id: worker.into(), tab_id: Some("t1".into()) });
+            attempt.branch = Some(format!("piece-{worker}"));
+            attempt.outcome = outcome;
+            attempt.verification = None;
+            piece.tries.insert(0, attempt);
+        }
+        Ok(())
+    }).unwrap();
+    (first, second)
+}
+
+#[test]
+fn three_try_run_archives_only_superseded_workers_and_requires_merge_and_exact_tip_for_deletion() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    let (first, second) = add_superseded(&repo, &id);
+    repo.busy.lock().unwrap().extend(["first".into(), "second".into(), "final".into()]);
+    *repo.no_preserve.lock().unwrap() = true;
+    assert!(repo.merge(&[], false).done);
+    assert!(repo.archived.lock().unwrap().is_empty(), "backup failure never hides a conversation");
+    assert!(repo.worker("first").exists() && repo.worker("second").exists());
+
+    *repo.no_preserve.lock().unwrap() = false;
+    // A successful run is not proof of its PR's merge, even for --yes.
+    let waiting = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(waiting.refused.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["first", "second", "final"]);
+    assert!(waiting.refused[..2].iter().all(|fate| fate.reason.as_ref().unwrap().contains("not been verified merged")));
+    assert!(repo.worker("final").is_dir());
+    assert_eq!(*repo.archived.lock().unwrap(), ["first", "second"]);
+    assert!(repo.preserved_tips.lock().unwrap().is_empty());
+
+    *repo.merged_pr.lock().unwrap() = true;
+    *repo.lead_gone.lock().unwrap() = true;
+    *repo.no_tip_preserve.lock().unwrap() = true;
+    let failed = merge::cleanup(&repo, &id, true).unwrap();
+    assert!(failed.removed.is_empty());
+    assert!(failed.refused[..2].iter().all(|fate| fate.reason.as_ref().unwrap().contains("exact tip could not be preserved")));
+    *repo.no_tip_preserve.lock().unwrap() = false;
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(cleaned.removed.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(cleaned.refused.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["final"]);
+    assert!(repo.worker("final").is_dir());
+    assert!(!repo.archived.lock().unwrap().contains(&"final".to_string()));
+    let tips = repo.preserved_tips.lock().unwrap();
+    assert_eq!(*tips, [("first".into(), first.clone()), ("second".into(), second.clone()), ("first".into(), first.clone()), ("second".into(), second.clone())], "preservation is repeated behind the deletion guard");
+    assert_eq!(git(&repo.lead(), &["rev-parse", "piece-first"]), first);
+    assert_eq!(git(&repo.lead(), &["rev-parse", "piece-second"]), second);
+    assert!(merge::cleanup(&repo, &id, true).unwrap().removed.is_empty(), "retry is harmless");
+}
+
+#[test]
+fn failed_run_cleanup_archives_but_keeps_worktrees_even_when_commits_are_integrated() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    store::update(&id, |run| { run.state = RunState::Failed; Ok(()) }).unwrap();
+    *repo.merged_pr.lock().unwrap() = true;
+    repo.busy.lock().unwrap().extend(["first".into(), "second".into(), "final".into()]);
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+    assert!(cleaned.removed.is_empty());
+    assert_eq!(cleaned.refused.len(), 3);
+    assert!(cleaned.refused.iter().all(|fate| fate.reason.as_ref().unwrap().contains("kept for recovery")));
+    assert_eq!(*repo.archived.lock().unwrap(), ["first", "second", "final"]);
+    assert!(["first", "second", "final"].iter().all(|worker| repo.worker(worker).is_dir()));
+    assert!(repo.busy.lock().unwrap().is_empty());
+}
+
+#[test]
+fn superseded_cleanup_preserves_dirty_and_stashed_worktrees() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    std::fs::write(repo.worker("first").join("notes.txt"), "recover me\n").unwrap();
+    let dirty = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(dirty.refused.len(), 2);
+    assert!(dirty.refused[0].reason.as_ref().unwrap().contains("uncommitted"));
+    git(&repo.worker("first"), &["stash", "push", "-u", "-m", "recover notes"]);
+    let stashed = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(stashed.refused.len(), 2);
+    assert!(stashed.refused[0].reason.as_ref().unwrap().contains("stashes"));
+    assert!(repo.worker("first").exists());
+}
+
+
+#[test]
+fn missing_or_unreadable_lead_checkout_cleans_legacy_workers_against_the_projects_base_branch() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    assert!(repo.merge(&[], false).done);
+    git(&repo.lead(), &["push", "-q", "origin", "lead:main"]);
+    // Legacy accepted workers of a run still integrating also use the base fallback.
+    store::update(&id, |run| { run.state = RunState::Merging; run.pieces[0].tries.clear(); Ok(()) }).unwrap();
+    let absent = repo.root.path().join("missing-checkout");
+    *repo.lead_path.lock().unwrap() = Some(absent.clone());
+    let preview = merge::cleanup(&repo, &id, false).unwrap_err();
+    assert_eq!(preview.details["wouldRemove"].as_array().unwrap().len(), 1);
+    // An existing folder that cannot resolve HEAD must also use the base fallback.
+    std::fs::create_dir(&absent).unwrap();
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(cleaned.removed.len(), 1);
+    assert!(cleaned.refused.is_empty());
+}
+
+#[test]
+fn superseded_cleanup_refuses_files_hidden_from_status() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    git(&repo.worker("first"), &["update-index", "--assume-unchanged", "abandoned.txt"]);
+    std::fs::write(repo.worker("first").join("abandoned.txt"), "hidden changes\n").unwrap();
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(cleaned.refused.len(), 2);
+    assert!(cleaned.refused[0].reason.as_ref().unwrap().contains("hidden from git status"));
+    assert_eq!(std::fs::read_to_string(repo.worker("first").join("abandoned.txt")).unwrap(), "hidden changes\n");
+}
+
+
+#[test]
+fn a_tip_moving_during_preservation_is_retained_then_preserved_again_on_retry() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    let (old, _) = add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    *repo.move_tip.lock().unwrap() = true;
+    let changed = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(changed.refused.len(), 2);
+    assert_eq!(changed.refused[0].session, "first");
+    assert!(changed.refused[0].reason.as_ref().unwrap().contains("tip changed"));
+    let current = git(&repo.worker("first"), &["rev-parse", "HEAD"]);
+    assert_ne!(current, old);
+    let retried = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(retried.removed.len(), 1);
+    assert_eq!(retried.refused.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["final"]);
+    assert!(repo.preserved_tips.lock().unwrap().contains(&("first".into(), current)));
+}
+
+#[test]
+fn lifecycle_failures_block_deletion_even_when_exact_tip_preservation_would_succeed() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    *repo.no_preserve.lock().unwrap() = true;
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    *repo.lead_gone.lock().unwrap() = true;
+    // The exact-tip hook is deliberately independent: it succeeds throughout.
+    assert!(!*repo.no_tip_preserve.lock().unwrap());
+    for failure in ["preserved", "archived", "stopped"] {
+        *repo.no_preserve.lock().unwrap() = failure == "preserved";
+        *repo.no_archive.lock().unwrap() = failure == "archived";
+        *repo.no_stop.lock().unwrap() = failure == "stopped";
+        let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+        assert!(cleaned.removed.is_empty(), "{failure}: {cleaned:?}");
+        assert_eq!(cleaned.refused.len(), 3);
+        assert!(cleaned.refused[..2].iter().all(|fate| fate.reason.as_ref().unwrap().contains(failure)));
+        assert!(repo.archived.lock().unwrap().is_empty());
+        assert!(repo.preserved_tips.lock().unwrap().is_empty(), "a lifecycle failure cannot fall through to tip preservation");
+        assert!(["first", "second", "final"].iter().all(|worker| repo.worker(worker).is_dir()));
+    }
+    *repo.no_stop.lock().unwrap() = false;
+    let retry = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(retry.removed.iter().map(|fate| fate.session.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(*repo.archived.lock().unwrap(), ["first", "second"]);
+    assert!(repo.worker("final").is_dir());
+}
+
+#[test]
+fn cleanup_preview_has_no_lifecycle_side_effects_and_completed_legacy_finals_stay_visible() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    *repo.no_preserve.lock().unwrap() = true;
+    assert!(repo.merge(&[], false).done);
+    *repo.no_preserve.lock().unwrap() = false;
+    *repo.merged_pr.lock().unwrap() = true;
+    let before = repo.stopped.lock().unwrap().len();
+    let preview = merge::cleanup(&repo, &id, false).unwrap_err();
+    assert_eq!(preview.code, "confirmation_required");
+    assert_eq!(preview.details["wouldRemove"].as_array().unwrap().len(), 2);
+    assert_eq!(preview.details["wouldRefuse"][0]["session"], "final");
+    assert!(repo.archived.lock().unwrap().is_empty());
+    assert!(repo.preserved_tips.lock().unwrap().is_empty());
+    assert_eq!(repo.stopped.lock().unwrap().len(), before);
+
+    // Legacy runs do not have tries; their piece worker is still their final conversation.
+    store::update(&id, |run| { run.pieces[0].tries.clear(); Ok(()) }).unwrap();
+    *repo.lead_gone.lock().unwrap() = true;
+    let cleaned = merge::cleanup(&repo, &id, true).unwrap();
+    assert!(cleaned.removed.is_empty());
+    assert_eq!(cleaned.refused.len(), 1);
+    assert!(cleaned.refused[0].reason.as_ref().unwrap().contains("final worker"));
+    assert!(repo.archived.lock().unwrap().is_empty());
+    assert!(repo.worker("final").is_dir());
+}
+
+#[test]
+fn removal_guard_preserves_the_latest_tip_and_keeps_the_worktree_when_that_backup_fails() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    let (old, _) = add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    *repo.move_before_remove.lock().unwrap() = true;
+    *repo.fail_tip_on_remove.lock().unwrap() = true;
+    let blocked = merge::cleanup(&repo, &id, true).unwrap();
+    assert!(blocked.removed.is_empty());
+    assert!(blocked.refused.iter().filter(|fate| fate.session != "final").all(|fate| fate.reason.as_ref().unwrap().contains("exact tip could not be preserved")));
+    let current = git(&repo.worker("first"), &["rev-parse", "HEAD"]);
+    assert_ne!(current, old);
+    assert!(!repo.preserved_tips.lock().unwrap().contains(&("first".into(), current.clone())));
+
+    *repo.no_tip_preserve.lock().unwrap() = false;
+    let retry = merge::cleanup(&repo, &id, true).unwrap();
+    assert_eq!(retry.removed.len(), 2);
+    assert!(repo.preserved_tips.lock().unwrap().contains(&("first".into(), current)));
+    assert!(repo.worker("final").is_dir());
+}
+
+#[test]
+fn a_stash_created_during_exact_tip_preservation_also_blocks_removal() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    assert!(repo.merge(&[], false).done);
+    *repo.merged_pr.lock().unwrap() = true;
+    *repo.stash_during_preserve.lock().unwrap() = true;
+    let blocked = merge::cleanup(&repo, &id, true).unwrap();
+    assert!(blocked.removed.is_empty());
+    assert_eq!(blocked.refused.len(), 3);
+    assert!(blocked.refused[..2].iter().all(|fate| fate.reason.as_ref().unwrap().contains("stashes")));
+    assert!(repo.worker("first").is_dir());
+    assert!(!git(&repo.worker("first"), &["stash", "list"]).is_empty());
+}
+
+#[test]
+fn legacy_process_stop_cannot_authorize_archival_without_cleanup_stop_handling() {
+    // A host which only implements the old process stop API cannot claim to
+    // have cleared idle turn state, even when it returns Ok(false).
+    struct LegacyStop;
+    impl Checkouts for LegacyStop {
+        fn lead_checkout(&self, _: &Run) -> anyhow::Result<PathBuf> { unreachable!() }
+        fn lead_mode(&self, _: &Run) -> Option<String> { unreachable!() }
+        fn reserve(&self, _: &Run, _: &Path, _: bool) -> Result<Box<dyn std::any::Any + Send>, String> { unreachable!() }
+        fn project_check(&self, _: &str) -> Option<String> { unreachable!() }
+        fn open_prs_into(&self, _: &Path, _: &str) -> Option<Vec<u64>> { unreachable!() }
+        fn worktree(&self, _: &SessionRef) -> Option<Worktree> { unreachable!() }
+        fn remove(&self, _: &Run, _: &SessionRef, _: &Worktree, _: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> { unreachable!() }
+        fn stop_agents(&self, _: &SessionRef) -> anyhow::Result<bool> { Ok(false) }
+        fn changed(&self, _: &Run) { unreachable!() }
+    }
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], None);
+    add_superseded(&repo, &id);
+    let (run, ()) = store::update(&id, |run| { run.state = RunState::Done; Ok(()) }).unwrap();
+    let failures = super::end_workers(&run, &|worker| LegacyStop.stop_agents_for_cleanup(worker),
+        &|_| panic!("an unconfigured cleanup stop must not reach preservation"),
+        &|_| panic!("an unconfigured cleanup stop must not reach archival"));
+    assert_eq!(failures.len(), 3);
+    assert!(failures.values().all(|reason| reason.contains("cleanup stop handling is not configured")));
+}
+
+#[test]
+fn production_retirement_backs_up_three_tries_and_cleans_them_with_the_lead_session_gone() {
+    use crate::store::index;
+    use std::sync::Arc;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    let (first, second) = add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let run = store::get(&id).unwrap();
+    let entries: Vec<index::SessionEntry> = ["first", "second", "final"].into_iter().map(|name| serde_json::from_value(json!({
+        "id": name, "projectPath": repo.lead(), "cwd": repo.worker(name), "title": name,
+        "created": index::now(), "modified": index::now(), "tabs": []
+    })).unwrap()).collect();
+    index::save(&entries).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(1024));
+    let manager = crate::session::SessionManager::new(sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()), Arc::default(), Arc::default(), crate::hooks::prepare_control().unwrap());
+    let host = super::host::ManagerHost::new(sink, manager.clone());
+    crate::github::stand_in::set(&repo.lead(), Ok(Default::default()));
+    let pending = merge::cleanup(&host, &id, true).unwrap();
+    assert!(pending.removed.is_empty());
+    for (name, tip, attempt) in [("first", &first, 1), ("second", &second, 2)] {
+        assert!(index::get(name).unwrap().archived);
+        assert_eq!(git(&repo.root.path().join("origin.git"), &["rev-parse", &format!("refs/heads/raccoon/archive/{id}/final-try{attempt}")]), *tip);
+        assert!(!crate::landed::check(&repo.lead(), &repo.worker(name), crate::landed::Fetch::Fresh).safe);
+    }
+    assert!(!index::get("final").unwrap().archived);
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+        number: 962, state: "MERGED".into(), head: run.merge.as_ref().unwrap().final_head.clone().unwrap(), base: "main".into(), ..Default::default()
+    })].into()));
+    assert!(crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    let clean = merge::cleanup(&host, &id, true).unwrap();
+    assert_eq!(clean.removed.len(), 2, "{:?}", clean.refused);
+    assert!(repo.worker("final").exists());
+    for name in ["first", "second"] {
+        assert!(!repo.worker(name).exists());
+        let session = index::get(name).unwrap();
+        assert!(session.archived && session.worktree_removed);
+    }
+    assert!(merge::cleanup(&host, &id, true).unwrap().removed.is_empty());
+    manager.closing();
+}
+
+#[test]
+fn production_retirement_proof_rejects_failed_runs_new_commits_and_missing_backups() {
+    use super::retirement;
+    use crate::store::index;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    let (first, _) = add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    index::save(&[serde_json::from_value(json!({"id":"first", "projectPath":repo.lead(), "cwd":repo.worker("first"), "title":"first", "created":index::now(), "modified":index::now(), "tabs":[]})).unwrap()]).unwrap();
+    let run = store::get(&id).unwrap();
+    let worker = run.superseded_workers()[0];
+    retirement::preserve(&run, worker).unwrap();
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr { state:"MERGED".into(), head:repo.head(), base:"main".into(), ..Default::default() })].into()));
+    assert!(retirement::landed(&repo.lead(), &repo.worker("first"), &first));
+    store::update(&id, |r| { r.state = RunState::Failed; Ok(()) }).unwrap();
+    assert!(!retirement::landed(&repo.lead(), &repo.worker("first"), &first));
+    store::update(&id, |r| { r.state = RunState::Done; Ok(()) }).unwrap();
+    git(&repo.worker("first"), &["commit", "--allow-empty", "-qm", "New work"]);
+    assert!(!crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    retirement::preserve(&run, worker).unwrap();
+    assert!(crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    git(&repo.root.path().join("origin.git"), &["update-ref", "-d", &format!("refs/heads/raccoon/archive/{id}/final-try1")]);
+    assert!(!crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+}
+
+fn production_cleanup_host(repo: &Repo, names: &[&str]) -> (super::host::ManagerHost, crate::session::SessionManager) {
+    use crate::store::index;
+    use std::sync::Arc;
+    let entries = names.iter().map(|name| serde_json::from_value(json!({
+        "id": name, "projectPath": repo.lead(), "cwd": repo.worker(name), "title": name,
+        "created": index::now(), "modified": index::now(), "tabs": []
+    })).unwrap()).collect::<Vec<_>>();
+    index::save(&entries).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(1024));
+    let manager = crate::session::SessionManager::new(sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()), Arc::default(), Arc::default(), crate::hooks::prepare_control().unwrap());
+    (super::host::ManagerHost::new(sink, manager.clone()), manager)
+}
+
+#[test]
+fn bulk_cleanup_keeps_a_recovered_try_and_its_ignored_files() {
+    use crate::store::index;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let run = store::get(&id).unwrap();
+    let (host, manager) = production_cleanup_host(&repo, &["first", "second", "final"]);
+    let mut entries = index::load().unwrap();
+    entries.iter_mut().find(|s| s.id == "first").unwrap().archive.unarchived_at = Some(index::now());
+    index::save(&entries).unwrap();
+    let exclude = git(&repo.worker("first"), &["rev-parse", "--git-path", "info/exclude"]);
+    std::fs::write(exclude, ".env\n").unwrap();
+    std::fs::write(repo.worker("first").join(".env"), "PERSONS_LOCAL_DATA=keep\n").unwrap();
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+        number: 962, state: "MERGED".into(), head: run.merge.as_ref().unwrap().final_head.clone().unwrap(), base: "main".into(), ..Default::default()
+    })].into()));
+    let cleanup = merge::cleanup(&host, &id, true).unwrap();
+    assert!(cleanup.refused.iter().any(|f| f.session == "first" && f.reason.as_deref().unwrap().contains("Recovered")));
+    assert!(!index::get("first").unwrap().archived);
+    assert_eq!(std::fs::read_to_string(repo.worker("first").join(".env")).unwrap(), "PERSONS_LOCAL_DATA=keep\n");
+    assert_eq!(cleanup.removed.len(), 1, "the other superseded try still goes");
+    manager.closing();
+}
+
+#[test]
+fn cleanup_reports_an_unverifiable_rebased_or_unfetched_pr_head() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let (host, manager) = production_cleanup_host(&repo, &["first", "second", "final"]);
+    for head in ["a".repeat(40), git(&repo.lead(), &["rev-parse", "main"])] {
+        crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+            number: 962, state: "MERGED".into(), head, base: "main".into(), ..Default::default()
+        })].into()));
+        let result = merge::cleanup(&host, &id, false).unwrap_err();
+        assert!(result.message.contains("Cannot confirm the merge"), "{}", result.message);
+        assert!(repo.worker("first").exists());
+    }
+    manager.closing();
+}
+
+#[test]
+fn removing_the_lead_can_clean_final_workers_offline_without_an_archive_script() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    repo.merge(&[], false);
+    let (host, manager) = production_cleanup_host(&repo, &["final"]);
+    // No transport can succeed. The final worker is already in the intact lead.
+    git(&repo.lead(), &["remote", "set-url", "origin", "/nonexistent-terminalx-test-remote"]);
+    // The lead need not itself have a session for the other tests, but this one
+    // deliberately measures its local integrated branch while offline.
+    let mut entries = crate::store::index::load().unwrap();
+    entries.push(serde_json::from_value(json!({"id":"lead", "projectPath":repo.lead(), "cwd":repo.lead(), "title":"lead", "created":crate::store::index::now(), "modified":crate::store::index::now(), "tabs":[]})).unwrap());
+    crate::store::index::save(&entries).unwrap();
+    let cleanup = merge::cleanup_before_lead_removal(&host, &id, true).unwrap();
+    assert_eq!(cleanup.removed.len(), 1, "{:?}", cleanup.refused);
+    assert!(!repo.worker("final").exists());
+    manager.closing();
 }
