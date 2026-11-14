@@ -110,7 +110,8 @@ Use an additive local lifecycle namespace for attach/lease/detach and stop-all;
 the current protocol is described in HEADLESS-SERVE.md. Do not proxy arbitrary Tauri
 command names. Inventory `commands.rs`, `src/lib/api.ts` and portable workspace
 methods before wiring: local mode must support multiple projects, unlike the
-existing one-root cloud connection. Destructive worktree operations stay at the
+existing one-root cloud connection ([MACHINES.md](MACHINES.md) settles this for
+machines: `machine/1` and project scoping). Destructive worktree operations stay at the
 runtime owner and preserve #464 history retention and removal dispositions.
 
 ## Lifetime and honest recovery
@@ -214,6 +215,8 @@ paired-device admission and writes, notification decisions and tray count/action
 The paired-device network endpoint remains window-owned: phones cannot connect
 while the desktop is closed, but pending provider questions remain in the owner.
 Closing the window revokes its mobile attachment and undelivered mobile permits.
+The Machines epic moves the endpoint into the runtime when "Let other computers
+operate this Mac" is on ([MACHINES.md](MACHINES.md), decision 4).
 
 The optional macOS `local-ui` feature hosts an AppKit accessory menu-bar item and
 notifications inside the owner. The packaged helper enables it; ordinary/cloud
