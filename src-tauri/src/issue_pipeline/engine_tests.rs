@@ -4548,3 +4548,92 @@ fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
     assert!(!note.contains("not only merges"), "{note}");
     assert!(stopped.events.iter().any(|event| event.kind == "note" && event.message.contains("timed out")));
 }
+
+#[test]
+fn agent_resolver_actions_cannot_grant_more_automation() {
+    for limit in ["review", "resolution", "remote advance"] {
+        let run = Run::start(&github_issue(), false);
+        let mut p = resolving(&run);
+        if limit == "resolution" { p.resolutions = run.host.world().settings.max_resolutions; }
+        else { p.round = p.max_rounds; }
+        store::commit(&mut p).unwrap();
+        if limit == "remote advance" {
+            let mut world = run.host.world();
+            world.workspace.dirty.clear();
+            world.workspace.merging.clear();
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        let action = if limit == "remote advance" { Action::Advance } else { Action::RestartResolve };
+        let after = engine::act_from_agent(&run.host, &run.id, action).unwrap();
+        assert_eq!(after.max_rounds, p.max_rounds);
+        assert_eq!(after.resolutions, p.resolutions);
+        assert_eq!(after.round, p.round);
+        assert_eq!(after.state, State::NeedsYou);
+        assert!(run.merges().is_empty());
+        if limit != "remote advance" { assert_eq!(after.resolver, p.resolver); }
+    }
+}
+
+#[test]
+fn agent_resolver_restart_within_limits_consumes_a_resolution() {
+    let run = Run::start(&github_issue(), false);
+    let p = resolving(&run);
+    run.host.world().settings.max_resolutions = p.resolutions + 1;
+    let after = engine::act_from_agent(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((after.stage, after.state), (Stage::Resolve, State::Working));
+    assert_eq!(after.resolutions, p.resolutions + 1);
+    assert_eq!(after.max_rounds, p.max_rounds);
+    let refused = engine::act_from_agent(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(refused.state, State::NeedsYou);
+    assert_eq!(refused.resolver, after.resolver);
+}
+
+#[test]
+fn signed_out_resolver_retry_restores_ownership_before_delivery() {
+    for outcome in ["sent", "failed", "unconfirmed exit"] {
+        let failure = outcome != "sent";
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        let sessions: Vec<_> = run.host.world().sessions.values().cloned().collect();
+        crate::store::index::save(&sessions).unwrap();
+        run.host.world().resolver_recovery = Some(crate::recovery::RecoveryKind::SignedOut.message().into());
+        run.poll();
+        assert!(super::admission::check("author", "t1").is_ok());
+        let result = engine::retry_interrupted_resolver(&run.host, "resolver", "t1", || {
+            assert!(super::admission::check("author", "t1").is_err());
+            assert!(super::admission::check("resolver", "t1").is_ok());
+            assert_eq!(run.pipeline().state, State::Working);
+            assert!(run.pipeline().resolution.is_some());
+            if failure {
+                run.host.world().resolver_stop_error = outcome == "unconfirmed exit";
+                bail!("Delivery failed");
+            }
+            run.host.world().resolver_recovery = None;
+            Ok(())
+        });
+        assert_eq!(result.is_err(), failure);
+        let released = outcome == "failed";
+        assert_eq!(run.pipeline().resolution.is_none(), released);
+        assert_eq!(run.pipeline().interrupted_resolution.is_some(), released);
+        assert_eq!(super::admission::check("author", "t1").is_ok(), released);
+    }
+}
+
+#[test]
+fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
+    for stopped in [false, true] {
+        let run = Run::start(&github_issue(), false);
+        resolving(&run);
+        run.host.world().resolver_recovery = Some(crate::recovery::RecoveryKind::SignedOut.message().into());
+        run.poll();
+        if stopped { act(&run.host, &run.id, Action::Stop).unwrap(); }
+        else { run.host.commit(C2); }
+        assert!(engine::retry_interrupted_resolver(&run.host, "resolver", "t1", || -> Result<()> { panic!("must not send") }).is_err());
+        assert!(run.pipeline().resolution.is_none());
+    }
+}

@@ -1100,7 +1100,10 @@ impl Step<'_> {
         Ok(())
     }
 
-    fn restart_resolution(&mut self) -> Result<()> {
+    fn restart_resolution(&mut self, person: bool) -> Result<()> {
+        if !person && (self.p.round >= self.p.max_rounds || self.p.resolutions >= self.settings.max_resolutions) {
+            bail!("The automation limit has been reached. A person must authorize another resolution and review.");
+        }
         self.require_resolver_identity()?;
         if let Some(old) = self.p.resolver.clone() {
             self.host.close_resolver(&old)?;
@@ -1108,7 +1111,8 @@ impl Step<'_> {
         }
         // An explicit restart includes the independent review of its result,
         // even if the interrupted attempt used the last automatic round.
-        self.p.max_rounds = self.p.max_rounds.max(self.p.round.saturating_add(1));
+        if person { self.p.max_rounds = self.p.max_rounds.max(self.p.round.saturating_add(1)); }
+        else { self.p.resolutions += 1; }
         let previous = self.p.resolution.take().or(self.p.interrupted_resolution.clone());
         self.p.interrupted_resolution = previous.clone();
         self.p.resolver = None;
@@ -2038,14 +2042,14 @@ impl Step<'_> {
     }
 
     /// Push the current stage forward on a person's say-so.
-    fn advance(&mut self) -> Result<()> {
+    fn advance(&mut self, person: bool) -> Result<()> {
         match self.p.stage {
             Stage::Work => {
                 self.record("workDone", "Taken as done by a person.");
                 self.open_pull_request()
             }
             Stage::PullRequest => self.open_pull_request(),
-            Stage::Review => self.request_review(true),
+            Stage::Review => self.request_review(person),
             Stage::Address => {
                 // Findings that never reached the author are sent, not skipped past.
                 if let Some(verdict) = self.p.verdict.clone().filter(|verdict| self.p.findings_sent_round < verdict.round) {
@@ -2070,7 +2074,7 @@ impl Step<'_> {
                         if self.clean_workspace()?.is_none() { return Ok(()); }
                         self.host.adopt_remote_head(&self.cwd, &pr.head_sha)?;
                         drop(_admission);
-                        return self.request_review(true);
+                        return self.request_review(person);
                     }
                 }
                 self.reconcile_resolver()?;
@@ -2436,6 +2440,56 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
     }
 }
 
+/// Reclaim an interrupted resolver's checkout before its authenticated retry
+/// can send. Keep the pipeline lock through delivery so a poll cannot release
+/// the reservation on the old sign-in incident between preparation and send.
+pub(crate) fn retry_interrupted_resolver<T>(host: &dyn Host, session_id: &str, tab_id: &str, send: impl FnOnce() -> Result<T>) -> Result<T> {
+    let Some((pipeline, Role::Resolver)) = taking_part(session_id, tab_id) else { return send() };
+    if pipeline.interrupted_resolution.is_none() || pipeline.resolution.is_some() { return send(); }
+    let mut result = None;
+    run(host, &pipeline.id, true, OnError::Report, |step| {
+        if step.p.stopped || step.p.stage != Stage::Resolve || step.p.role_of(session_id, tab_id) != Some(Role::Resolver) {
+            bail!("The interrupted resolver no longer owns this pipeline. Restart it from the issue page.");
+        }
+        let resolution = step.p.interrupted_resolution.clone().context("The interrupted resolution changed. Try again.")?;
+        {
+            let _admission = super::admission::lock();
+            super::admission::check(session_id, tab_id)?;
+            if step.halted() { bail!("The pipeline was stopped before the resolver retry."); }
+            if !step.host.workspace_idle(&step.p, &step.cwd)? { bail!("The checkout is in use. Retry once it is quiet."); }
+            let workspace = step.host.workspace(&step.cwd)?;
+            let merging = matches!(workspace.merging.as_slice(), [base] if same_commit(base, &resolution.base_commit));
+            if workspace.branch.as_deref() != Some(step.p.branch.as_str()) || !same_commit(&workspace.head, &resolution.head)
+                || (!merging && (!workspace.merging.is_empty() || !workspace.dirty.is_empty())) {
+                bail!("The checkout changed after the resolver stopped. Inspect it and restart the resolver.");
+            }
+            step.p.resolution = Some(resolution);
+            step.p.interrupted_resolution = None;
+            step.p.preserve_resolution_edits = merging;
+            step.p.releasing.retain(|who| who.session_id != session_id || who.tab_id != tab_id);
+            step.enter(Stage::Resolve, "Retrying the conflict resolver after sign-in.");
+            step.save()?;
+        }
+        let sent = send();
+        if let Err(error) = &sent {
+            // A failed delivery may have launched a process. Confirm its exit
+            // before lending the checkout back to the author.
+            let who = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
+            let detail = match step.host.stop_resolver(&who) {
+                Ok(()) => {
+                    step.p.interrupted_resolution = step.p.resolution.take();
+                    format!("The resolver retry failed: {error:#}")
+                }
+                Err(stop) => format!("The resolver retry failed: {error:#}. Process exit could not be confirmed: {stop:#}. The checkout remains reserved."),
+            };
+            step.needs_you(StopReason::SessionStopped { role: Role::Resolver.label().into(), detail });
+        }
+        result = Some(sent);
+        Ok(())
+    })?;
+    result.context("The resolver retry was not started")?
+}
+
 /// A person sent a session a message, or answered its question or
 /// permission request. For the author of a pipeline stopped on something
 /// only its work can settle, that is the answer the stop waits for: the
@@ -2639,6 +2693,10 @@ fn refuse(pipeline: &Pipeline, action: Action) -> Result<()> {
 }
 
 pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
+    act_with_authority(host, id, action, true)
+}
+
+fn act_with_authority(host: &dyn Host, id: &str, action: Action, person: bool) -> Result<Pipeline> {
     // Refused here for the caller's sake, and again under the pipeline's lock:
     // a step that was running while this waited may have changed the answer,
     // and then the action is quietly dropped.
@@ -2672,7 +2730,7 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
                         Ok(())
                     }
                     Stage::PullRequest => step.open_pull_request(),
-                    Stage::Review => step.request_review(true),
+                    Stage::Review => step.request_review(person),
                     Stage::Resolve => bail!("Inspect the interrupted resolution before resuming."),
                     Stage::Merge => step.evaluate(Merger::Pipeline),
                 }
@@ -2680,11 +2738,11 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
         }
         Action::RestartResolve => {
             store::set_switches(id, |pipeline| pipeline.stopped = false)?;
-            run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.restart_resolution() } else { Ok(()) })
+            run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.restart_resolution(person) } else { Ok(()) })
         },
-        Action::Advance => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.advance() } else { Ok(()) }),
-        Action::Review => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.request_review(true) } else { Ok(()) }),
-        Action::Merge => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.evaluate(Merger::Person) } else { Ok(()) }),
+        Action::Advance => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.advance(person) } else { Ok(()) }),
+        Action::Review => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.request_review(person) } else { Ok(()) }),
+        Action::Merge => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.evaluate(if person { Merger::Person } else { Merger::Agent }) } else { Ok(()) }),
         Action::Refresh => run(host, id, false, OnError::Report, |step| if step.p.stage == Stage::Merge && step.p.pr.is_some() { step.evaluate(Merger::Pipeline) } else { Ok(()) }),
     }
 }
@@ -2692,14 +2750,7 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
 /// Control-socket actions carry agent authority, never the issue page's
 /// person override. Explicit merge may override auto-merge being off only.
 pub fn act_from_agent(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
-    if !matches!(action, Action::Merge | Action::Review) {
-        return act(host, id, action);
-    }
-    refuse(&store::get(id)?, action)?;
-    run(host, id, false, OnError::NeedsYou, |step| {
-        refuse(&step.p, action)?;
-        if action == Action::Merge { step.evaluate(Merger::Agent) } else { step.request_review(false) }
-    })
+    act_with_authority(host, id, action, false)
 }
 
 /// A person merged a cloud workspace's pull request from their computer, with
