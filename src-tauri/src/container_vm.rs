@@ -114,6 +114,23 @@ fn runtime_name(path: &Path) -> String {
     path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "docker".into())
 }
 
+/// A command that ran to its end and exited unsuccessfully, as opposed to one
+/// given up on: whatever it started inside the container has ended too.
+#[derive(Debug)]
+struct Exited(String);
+
+impl std::fmt::Display for Exited {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { out.write_str(&self.0) }
+}
+
+impl std::error::Error for Exited {}
+
+/// Whether `result` came from a command that exited, successfully or not.
+#[cfg(unix)]
+fn exited<T>(result: &Result<T>) -> bool {
+    result.as_ref().err().is_none_or(|error| error.downcast_ref::<Exited>().is_some())
+}
+
 /// Run `program args`, failing after `timeout` with what it printed to stderr.
 fn run(program: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let mut child = Command::new(program)
@@ -146,7 +163,7 @@ fn run(program: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let (stdout, stderr) = reader.join().map_err(|_| anyhow!("read command output"))?;
     if !status.success() {
         let reason = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("failed").trim().to_string();
-        bail!("{reason}");
+        return Err(Exited(reason).into());
     }
     Ok(stdout)
 }
@@ -323,6 +340,10 @@ pub fn start() -> Result<VmStatus> {
     }
     #[cfg(unix)]
     let admission = lifecycle_admission(&path, false)?;
+    // A container that is stopped now shows that whatever an earlier
+    // operation left running in it has ended.
+    #[cfg(unix)]
+    let stopped = admission.as_ref().filter(|admission| admission.fenced()).and_then(|admission| exit_evidence(&admission.target).ok());
     if run(&path, &["image", "inspect", IMAGE], QUICK).is_err() {
         run(&path, &["pull", IMAGE], PULL).context("download the desktop image")?;
     }
@@ -367,7 +388,9 @@ pub fn start() -> Result<VmStatus> {
     }
     set_enabled(true)?;
     #[cfg(unix)]
-    if let Some(guard) = admission { guard.completed()?; }
+    if let Some(admission) = admission {
+        match stopped { Some(evidence) => admission.ended(evidence)?, None => admission.ended_keeping_prior()? }
+    }
     Ok(status())
 }
 
@@ -380,8 +403,12 @@ pub fn stop() -> Result<VmStatus> {
             ours(&path)?;
             run(&path, &["stop", "-t", "5", CONTAINER], QUICK).context("stop the Local VM")?;
         }
+        // Stopped, every process in it has ended, including one an earlier
+        // desktop operation left without an exit receipt.
         #[cfg(unix)]
-        if let Some(guard) = admission { guard.completed()?; }
+        if let Some(admission) = admission {
+            match exit_evidence(&admission.target) { Ok(evidence) => admission.ended(evidence)?, Err(_) => admission.ended_keeping_prior()? }
+        }
     }
     set_enabled(false)?;
     Ok(status())
@@ -397,7 +424,10 @@ pub fn reset() -> Result<VmStatus> {
             run(&path, &["rm", "-f", CONTAINER], QUICK).context("remove the Local VM")?;
         }
         #[cfg(unix)]
-        if let Some(guard) = admission { guard.completed()?; }
+        if let Some(admission) = admission {
+            let evidence = serde_json::json!({"target":admission.target,"status":"removed","removedAt":chrono::Utc::now().to_rfc3339()});
+            admission.ended(evidence)?;
+        }
     }
     set_enabled(false)?;
     Ok(status())
@@ -430,10 +460,12 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     #[cfg(unix)]
     let admission = attach(target)?;
-    let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120))?;
+    let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120));
+    // A call that exited, even unsuccessfully, has ended in the container;
+    // only one given up on leaves the container fenced (review 2).
     #[cfg(unix)]
-    admission.completed()?;
-    Ok(result)
+    if exited(&result) { admission.completed()?; }
+    result
 }
 
 /// The driver's tools, or one tool's description and argument schema.
@@ -461,10 +493,12 @@ pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
     #[cfg(unix)]
     let admission = attach(target)?;
     let inside = "/tmp/terminalx-screen.png";
-    run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK).context("capture the screen")?;
-    run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out")?;
+    let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK)
+        .context("capture the screen")
+        .and_then(|_| run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out"));
     #[cfg(unix)]
-    admission.completed()?;
+    if exited(&copied) { admission.completed()?; }
+    copied?;
     Ok(out)
 }
 
@@ -574,7 +608,7 @@ pub(crate) fn mcp_args(harness: &str, runtime: &str, args: &[&str]) -> String {
 }
 
 #[cfg(unix)]
-fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::local_vm::admission::Guard>> {
+fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::local_vm::admission::Lifecycle>> {
     if container_running(path).is_none() { return Ok(None); }
     let runtime = match runtime_name(path).as_str() { "docker" => Runtime::Docker, "podman" => Runtime::Podman, _ => bail!("Unknown container runtime") };
     let (target, _) = identity(path, runtime)?;
@@ -582,7 +616,7 @@ fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::loca
     if deleting && journal.read()?.environments.values().any(|e| e.transport.container().as_ref() == Some(&target)) {
         bail!("This container has retained guest task history. Reset requires explicit guest disposition; it cannot remove that history through the desktop shortcut");
     }
-    Ok(Some(attach(&target)?))
+    Ok(Some(crate::local_vm::admission::Lifecycle::begin(&crate::local_vm::host::root()?, &target, &journal)?))
 }
 
 #[cfg(unix)]
@@ -656,6 +690,20 @@ mod tests {
         assert!(!joined.contains("SYS_CHROOT"));
         assert!(run_args("podman", "x").contains(&"SYS_CHROOT".to_string()));
         assert_eq!(args.last().map(String::as_str), Some(IMAGE));
+    }
+
+    /// A command that exits, however it exits, has ended; one given up on
+    /// at its deadline has not been seen to (review 2).
+    #[cfg(unix)]
+    #[test]
+    fn only_a_command_given_up_on_counts_as_still_running() {
+        assert!(exited(&run(Path::new("/bin/sh"), &["-c", "true"], QUICK)));
+        let failed = run(Path::new("/bin/sh"), &["-c", "echo refused >&2; exit 3"], QUICK);
+        assert_eq!(failed.as_ref().unwrap_err().to_string(), "refused");
+        assert!(exited(&failed));
+        assert!(exited(&failed.context("capture the screen")), "context keeps what happened");
+        let abandoned = run(Path::new("/bin/sh"), &["-c", "sleep 5"], Duration::from_millis(200));
+        assert!(abandoned.is_err() && !exited(&abandoned));
     }
 
     #[test]

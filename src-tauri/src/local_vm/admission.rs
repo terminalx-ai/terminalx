@@ -79,13 +79,7 @@ impl Guard {
     pub fn attach(root: &Path, target: &Target, journal: &Journal) -> Result<Self> {
         if !matches!(target,Target::LinuxContainer {..}) { bail!("Container proxy requires an exact Linux desktop target"); }
         let guard = Self::acquire(root, target)?;
-        let state = journal.read()?;
-        for env in state.environments.values().filter(|e| e.transport.container().as_ref() == Some(target)) {
-            if env.manual_control || super::setup::busy(env) || state.tasks.values().any(|task|
-                task.target.environment_id == env.id && !task.status.terminal()) {
-                bail!("This container is reserved by a guest task or manual control; attached tools cannot take its workflow lease");
-            }
-        }
+        reserved(target, journal)?;
         atomic_private_write(&guard.marker, &serde_json::to_vec(&serde_json::json!({
             "target":target,"operationId":uuid::Uuid::new_v4().to_string(),"startedAt":super::journal::now(),"status":"awaitingExitReceipt"
         }))?)?;
@@ -99,6 +93,78 @@ impl Guard {
         File::open(self.marker.parent().context("Admission directory missing")?)?.sync_all()?;
         Ok(())
     }
+}
+
+/// The Local VM's own Start, Stop and Reset (`container_vm.rs`). A fence left
+/// by a desktop operation whose exit was never confirmed does not refuse
+/// them: stopping or removing the container ends that operation for certain,
+/// and a container already stopped proves it ended. The lock is still taken,
+/// so a live attachment refuses as before, and so do guest-task reservations.
+pub struct Lifecycle {
+    guard: Guard,
+    pub target: Target,
+    /// The fence an earlier operation left, kept until this one proves it ended.
+    prior: Option<Vec<u8>>,
+}
+
+impl Lifecycle {
+    pub fn begin(root: &Path, target: &Target, journal: &Journal) -> Result<Self> {
+        if !matches!(target, Target::LinuxContainer { .. }) { bail!("The Local VM's lifecycle requires its exact Linux desktop container"); }
+        let guard = Guard::lock(root, target)?;
+        reserved(target, journal)?;
+        let prior = if guard.marker.try_exists()? { Some(read_marker(&guard.marker)?) } else { None };
+        if let Some(bytes) = &prior {
+            let retained: serde_json::Value = serde_json::from_slice(bytes)?;
+            if matches!(retained["kind"].as_str(), Some("linuxRuntimeInstall" | "linuxRuntimeActivation")) {
+                bail!("An interrupted Linux installation or activation requires its own bound operation receipt; the Local VM was not changed");
+            }
+        }
+        let prior_value = prior.as_deref().map(serde_json::from_slice::<serde_json::Value>).transpose()?;
+        atomic_private_write(&guard.marker, &serde_json::to_vec(&serde_json::json!({
+            "target":target,"operationId":uuid::Uuid::new_v4().to_string(),"startedAt":super::journal::now(),
+            "status":"awaitingExitReceipt","kind":"lifecycle","prior":prior_value,
+        }))?)?;
+        Ok(Self { guard, target: target.clone(), prior })
+    }
+
+    /// Whether an earlier operation's fence is waiting on this one.
+    pub fn fenced(&self) -> bool { self.prior.is_some() }
+
+    /// The lifecycle step ended and `evidence` shows every process in the
+    /// container ended with it: an earlier unknown operation is archived, as a
+    /// reconciliation would, and the reservation is released.
+    pub fn ended(self, evidence: serde_json::Value) -> Result<()> {
+        if let Some(bytes) = &self.prior {
+            let retained: serde_json::Value = serde_json::from_slice(bytes)?;
+            let receipt = serde_json::json!({"target":self.target,"status":"released","priorOutcome":"unknown",
+                "retained":retained,"markerDigest":super::journal::digest(bytes),"evidence":evidence,"reconciledAt":super::journal::now()});
+            let archive = self.guard.marker.parent().context("Admission directory missing")?.join("history");
+            private_directory(&archive)?;
+            atomic_private_write(&archive.join(format!("{}.json", uuid::Uuid::new_v4())), &serde_json::to_vec(&receipt)?)?;
+        }
+        self.guard.completed()
+    }
+
+    /// The step ended but proves nothing about an earlier operation, which
+    /// stays fenced exactly as it was.
+    pub fn ended_keeping_prior(self) -> Result<()> {
+        match &self.prior {
+            Some(bytes) => atomic_private_write(&self.guard.marker, bytes),
+            None => self.guard.completed(),
+        }
+    }
+}
+
+/// Refuses while a guest task, manual control or guided setup holds `target`.
+fn reserved(target: &Target, journal: &Journal) -> Result<()> {
+    let state = journal.read()?;
+    for env in state.environments.values().filter(|e| e.transport.container().as_ref() == Some(target)) {
+        if env.manual_control || super::setup::busy(env) || state.tasks.values().any(|task|
+            task.target.environment_id == env.id && !task.status.terminal()) {
+            bail!("This container is reserved by a guest task or manual control; attached tools cannot take its workflow lease");
+        }
+    }
+    Ok(())
 }
 
 /// No process is stopped here. Only a fresh exact-container exit observation
@@ -184,6 +250,47 @@ mod tests {
         drop(Guard::attach(dir.path(), &target, &journal).unwrap());
         assert!(reconcile_using(dir.path(), &target, digest, true, |_| unreachable!()).is_err());
     }
+    /// Review 2: a desktop call that never confirmed its exit must not keep
+    /// TerminalX's own Stop, Reset and Start from working.
+    #[test]
+    fn lifecycle_steps_end_an_earlier_unknown_operation_and_archive_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("journal")).unwrap();
+        let target = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
+        // A call whose exit was never confirmed fences the container.
+        drop(Guard::attach(dir.path(), &target, &journal).unwrap());
+        assert!(Guard::acquire(dir.path(), &target).is_err());
+        let fenced = read_marker(&dir.path().join(format!("computer-admission/docker-{}.json", "a".repeat(64)))).unwrap();
+        // A start against a running container proves nothing: the fence stays as it was.
+        let start = Lifecycle::begin(dir.path(), &target, &journal).unwrap();
+        assert!(start.fenced());
+        start.ended_keeping_prior().unwrap();
+        assert_eq!(read_marker(&dir.path().join(format!("computer-admission/docker-{}.json", "a".repeat(64)))).unwrap(), fenced);
+        // A stop that leaves the container exited ends it, and keeps its history.
+        let stop = Lifecycle::begin(dir.path(), &target, &journal).unwrap();
+        stop.ended(serde_json::json!({"status":"exited"})).unwrap();
+        drop(Guard::acquire(dir.path(), &target).unwrap());
+        let archives: Vec<_> = std::fs::read_dir(dir.path().join("computer-admission/history")).unwrap().collect();
+        assert_eq!(archives.len(), 1);
+        let archived: serde_json::Value = serde_json::from_slice(&std::fs::read(archives[0].as_ref().unwrap().path()).unwrap()).unwrap();
+        assert_eq!(archived["priorOutcome"], "unknown");
+        assert_eq!(archived["retained"]["status"], "awaitingExitReceipt");
+        assert_eq!(archived["markerDigest"], super::super::journal::digest(&fenced));
+        // Unfenced, a lifecycle step archives nothing.
+        Lifecycle::begin(dir.path(), &target, &journal).unwrap().ended(serde_json::json!({})).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path().join("computer-admission/history")).unwrap().count(), 1);
+        // A live attachment still refuses it.
+        let live = Guard::attach(dir.path(), &target, &journal).unwrap();
+        assert!(Lifecycle::begin(dir.path(), &target, &journal).is_err());
+        live.completed().unwrap();
+        // So does a guest task's reservation of the container.
+        let guest = Target::LinuxGuest { runtime: Runtime::Docker, id: "a".repeat(64),
+            environment_id: super::super::journal::new_id(), generation: super::super::journal::new_id() };
+        let env = journal.enroll_container("Linux", &guest, &"e".repeat(64)).unwrap();
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
+        assert!(Lifecycle::begin(dir.path(), &target, &journal).is_err());
+    }
+
     #[test]
     fn proxy_lifetime_and_unknown_exit_survive_reopen_without_timeout_release() {
         let dir = tempfile::tempdir().unwrap();
