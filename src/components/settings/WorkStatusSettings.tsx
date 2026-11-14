@@ -1,3 +1,4 @@
+import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
 import { SettingRow, Switch } from "@/components/ui/controls";
 import { Button } from "@/components/ui/button";
@@ -38,9 +39,7 @@ export function WorkStatusSettings() {
 
   return (
     <div className="rounded-lg border border-hairline px-3 py-2" data-testid="work-status-settings">
-      <SettingRow
-        label="Show my team what I’m working on"
-        description="Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac."
+      <RegisteredSetting setting="account.workStatus"
         control={<Switch aria-label="Show my team what I’m working on" checked={shareWithTeam ?? true} disabled={shareWithTeam === null} onCheckedChange={(on) => void changeShare(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
