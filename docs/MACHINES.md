@@ -244,6 +244,16 @@ of UI states. The first version is for one person's own computers.
   either word that as what TerminalX offers, or enforce it against a shell, for
   example by keeping the device registry's integrity key where a shell cannot
   read it.
+- **Revoking a computer ends its credential, not what it already did.**
+  Revocation closes its connections and removes its token hash, so that
+  credential is refused from then on. It cannot undo anything done through a
+  shell before then. A paired computer could have written its record back into
+  the registry, added an SSH key, installed a launch agent or changed
+  TerminalX's files. Unless PRO-357 enforces more (a registry integrity key a
+  shell cannot read, at least), the UI must not say revocation removes all
+  access. A person who no longer trusts a computer treats the machine as exposed
+  to it: they check its login items, SSH keys and paired computers, and rotate
+  the sign-ins it held.
 - **Every pairing of a computer needs "Allow" on the machine, including through
   the account.** Phones paired through the account skip that step
   (`docs/PAIRING-APPROVAL.md`, Decisions). A computer gets a shell, so a
@@ -312,7 +322,25 @@ need projects on the computer that starts them (`src-tauri/src/control.rs:773`).
 
 ### 8. Key format for machine rows in the sidebar and stores
 
-**Decided.**
+**Why.** Sidebar rows, preferences and stores are keyed by plain strings. A
+local project is its path, a local session its uuid, and every cloud row starts
+with `cloud:` (`src/types/target.ts`). A fixed prefix keeps machine rows apart
+from both, and every guard can recognise them by that prefix. Ids derived from
+the host key, rather than from a name or an address, stay the same through a
+rename and over every route. Keeping `:` and `/` out of the ids means a key can
+be parsed by counting its parts. The layout mirrors the cloud keys, so the code
+that builds and reads cloud rows can be reused.
+
+**Rejected.**
+
+- The machine's name: it changes on rename, and two machines can share one.
+- An address or route: a machine has several, and they change.
+- The project's path: it has `/` in it, means something only on that machine,
+  and would put paths into the operating computer's stores.
+- `cloud:` with a pretend organisation: machine rows would pass every cloud
+  check and reach the organisation, sharing and mailbox code.
+
+**What follows.**
 
 - Every machine key starts with `machine:`, so it cannot collide with a local
   path (absolute, starts with `/`), a session uuid, a `cloud:` key or an `org:`
@@ -331,24 +359,36 @@ need projects on the computer that starts them (`src-tauri/src/control.rs:773`).
 - `isRemotePath` and `assertLocal` refuse the `machine:` prefix as they refuse
   `cloud:` (`src/types/target.ts:32`, `src/types/target.ts:47`).
 
-The key format was proposed under the owner's go-ahead rather than reviewed line
-by line. The code supports it, with three notes:
+The code fits this format. Three things must change with it:
 
 - The central guard covers every Tauri call: `invoke()` runs `assertLocal` on
   each path argument (`src/lib/api.ts:104`). Extending `isRemotePath` protects
   all of them at once.
 - `isLocalKey` is `!key.startsWith("cloud:")` (`src/types/target.ts:56`). It
   must exclude `machine:` too, or every machine key reads as local.
-- Nine checks compare against `"cloud:"` directly instead of through the
-  helpers, and each would treat a machine row as local. PRO-346 moves each to
-  `isLocalKey` or a new `isMachineKey`:
-  `src/components/session/IssueLinkMenuItems.tsx:31`,
-  `src/components/settings/EnvironmentSettings.tsx:16`,
-  `src/components/settings/LayeredConfiguration.tsx:23`,
-  `src/lib/multiOrg.ts:53`, `src/lib/prefs.ts:312`,
-  `src/lib/sessionRowStatus.ts:43`, `src/lib/sessions.ts:682`,
-  `src/lib/sessions.ts:701`. The ninth, `src/lib/cloudTerminals.ts:693`, only
-  matches cloud keys and is correct as written.
+- Every check that reads "not a cloud key" as "local" treats a machine row as
+  local. PRO-346 moves each to `isLocalKey` or a new `isMachineKey`. On
+  `46c6250f` they are:
+  - Eight that compare against `"cloud:"` directly:
+    `src/components/session/IssueLinkMenuItems.tsx:31`,
+    `src/components/settings/EnvironmentSettings.tsx:16`,
+    `src/components/settings/LayeredConfiguration.tsx:23`,
+    `src/lib/multiOrg.ts:53`, `src/lib/prefs.ts:312`,
+    `src/lib/sessionRowStatus.ts:43`, `src/lib/sessions.ts:682` and
+    `src/lib/sessions.ts:701`.
+  - Six that call `isCloudKey` and treat a key it rejects as local:
+    `!isCloudKey` in `src/components/layout/AppShell.tsx:254` (archive),
+    `src/lib/sessionNavigation.ts:22` (custom order) and
+    `src/lib/mergedCleanup.ts:212` (project toggles counted as local); and an
+    `else` that selects a local session or view in
+    `src/components/layout/AppShell.tsx:278`,
+    `src/lib/sessionNavigation.ts:40` and `src/lib/notify.ts:100`.
+  - Correct as written, because they only accept cloud keys:
+    `src/lib/cloudTerminals.ts:693`, `src/lib/cloudSelection.ts:48`,
+    `src/lib/mergedCleanup.ts:384`, and the two refusals in
+    `src/lib/cloudControl.ts:365` and `:806`.
+  - Before PRO-346 merges, it searches again for `"cloud:"` and `isCloudKey(`,
+    since main moves.
 
 #### machineId
 
@@ -639,6 +679,10 @@ merges as it does today. A person can still merge the pull request with
    fingerprint from the connection's client key. It shows the approval dialog
    with the operating computer's name and the fingerprint, and does not send
    `e2ee_authenticated` yet. The approval waits two minutes (`APPROVAL_TTL_MS`).
+   On a machine with no window, the prompt is `terminalx-serve pair` in the
+   terminal that made the code (PRO-353). It names the computer, shows the
+   fingerprint and asks "Allow? [y/N]". Only "y" from that terminal approves.
+   Nothing approves by default, and no answer means "Don't allow".
 6. "Allow" writes the paired computer (token hash, client public key, name,
    fingerprint, `approved_at`) to the paired-computer registry, spends the code,
    and sends `e2ee_authenticated`. "Don't allow" or no answer discards everything
@@ -663,6 +707,21 @@ Five wrong or expired attempts in a minute pause pairing for a minute (PRO-342).
 4. The operating computer opens the envelope and checks that the offer's key is
    the directory's key byte for byte and that `machineId` matches it. It then
    continues at step 4 above, approval included (decision 5).
+
+On a machine with no window, an account pairing waits for a person in a
+terminal, as one by code does. While `terminalx-serve pair` runs, it lists the
+pending request with its name and fingerprint and takes "Allow? [y/N]". With no
+`terminalx-serve pair` running, the runtime keeps the request for
+`APPROVAL_TTL_MS` and then declines it. The operating computer says to approve
+it on the server with `terminalx-serve pair`. The runtime never approves a
+computer by itself, and a signed-in account is not an approval.
+
+Who may answer: the approval comes from the person, never from an agent. An
+agent on the machine has a shell and could run `terminalx-serve pair` itself.
+So `terminalx-serve pair` refuses to approve when it runs inside a terminal or
+agent the runtime started, and when its input is not a terminal. PRO-357 tests
+this ("an agent running on the machine cannot approve a pairing or create a
+pairing code").
 
 ### Connect
 
@@ -702,7 +761,7 @@ PRO-357 adds the threat model and its tests here. What each party can see and do
 | --- | --- | --- | --- |
 | The relay | The `machineId` (relay host id), IP addresses, timing and sizes, and the E2EE hello and ready frames (public keys, nonces) | Drop, delay or cut connections | Read or change any RPC, device token, transcript, terminal or file: frames are sealed and counted, so a change, replay or reorder closes the connection (`docs/MOBILE.md`, "E2EE framing v2") |
 | The account server | The machine's name, public key, capabilities (including whether operating is on), online or last seen, and which installation asked to pair with which machine and when | Withhold or forge directory entries and grants | Read a pairing offer: it is sealed with HPKE to the requester's key. Complete a computer's pairing without "Allow" on the machine and a matching fingerprint on both screens (decision 5). See projects, paths, session titles or prompts: none are in any request (PRO-344) |
-| A paired computer | Everything the runtime's user can read on the machine (decision 5) | Every method marked served or needs a project; through a shell, anything that user can do | Use a method that does not exist: pairing others, the operating switch, the browser, computer use, dictation, Local VM. Keep access after revocation: its connection is closed and its token hash removed |
+| A paired computer | Everything the runtime's user can read on the machine (decision 5) | Every method marked served or needs a project; through a shell, anything that user can do | Use a method that does not exist: pairing others, the operating switch, the browser, computer use, dictation, Local VM. Use its credential after revocation: its connections are closed and its token hash is removed. Revocation does not undo what it did through a shell before then, such as a registry entry it wrote, an SSH key or a launch agent (decision 5) |
 | A phone | What its scope allows, as today | Its phone actions | Get workspace RPC: the runtime serves by the device's scope (decision 4) |
 
 The pairing code is a secret until it is used. Whoever has it can ask to pair,
