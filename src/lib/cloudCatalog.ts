@@ -19,6 +19,7 @@ import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
+import { reconcileCloudAttention } from "@/lib/cloudAttention";
 import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
@@ -351,7 +352,7 @@ export async function ingestCloudList(
 ): Promise<{ workspaces: CloudWorkspaceListItem[]; notices: PurgeNotice[] }> {
   const tombstones = list.tombstones ?? [];
   const deleted = new Set(tombstones.map((tombstone) => tombstone.id));
-  const workspaces = list.workspaces.filter((item) => !deleted.has(item.workspace.id));
+  let workspaces = list.workspaces.filter((item) => !deleted.has(item.workspace.id));
   for (const item of list.workspaces) {
     names.set(item.workspace.id, item.workspace.name);
     providers.set(item.workspace.id, item.workspace.provider ?? null);
@@ -363,6 +364,8 @@ export async function ingestCloudList(
   if (org && !newer) {
     listedAt.set(org, requestedAt);
     const current = state.orgs[org] ?? emptyOrg(org);
+    const previous = new Map(current.workspaces.map((item) => [item.workspace.id, item]));
+    workspaces = workspaces.map((item) => reconcileCloudAttention(item, previous.get(item.workspace.id), current.sessions[item.workspace.id]?.sessions));
     const createMemory = { ...state.createMemory };
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
     // The server now says where these workspaces belong (S1 `repositories`), so what this desktop remembered of them is never read again.
@@ -422,7 +425,11 @@ export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot, requestedAt
   const orgId = snapshot.workspace.orgId;
   const current = state.orgs[orgId];
   if (!current) return;
-  const item: CloudWorkspaceListItem = { workspace: snapshot.workspace, latestOperation: snapshot.operation };
+  const item = reconcileCloudAttention(
+    { workspace: snapshot.workspace, latestOperation: snapshot.operation },
+    current.workspaces.find((row) => row.workspace.id === snapshot.workspace.id),
+    current.sessions[snapshot.workspace.id]?.sessions,
+  );
   const known = current.workspaces.some((row) => row.workspace.id === item.workspace.id);
   const workspaces = known ? current.workspaces.map((row) => (row.workspace.id === item.workspace.id ? item : row)) : [item, ...current.workspaces];
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces } } });
@@ -442,7 +449,8 @@ export function cacheCloudSessions(orgId: string, workspaceId: string, sessions:
   if (!current) return;
   const previous = current.sessions[workspaceId];
   if (previous && JSON.stringify(previous.sessions) === JSON.stringify(sessions) && JSON.stringify(previous.capabilities) === JSON.stringify(capabilities)) return;
-  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
+  const workspaces = current.workspaces.map((item) => item.workspace.id === workspaceId ? reconcileCloudAttention(item, undefined, sessions) : item);
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
 }
 
 /** Read reviewer IDs from runtime records, including older saved catalogs. */

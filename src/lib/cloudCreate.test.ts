@@ -10,6 +10,7 @@ import {
   mentionsAgentLogins,
   createWorkspace,
   failureMessage,
+  launchFailed,
   launchLatency,
   launchLatencyText,
   phaseOf,
@@ -358,5 +359,17 @@ describe("a runtime that never picks up the launch intent", () => {
     expect(phaseOf(item)).toBe("failed");
     expect(failureMessage(item)).toMatch(/runtime cannot start agents from a first prompt/);
     expect(failureMessage(item)).not.toMatch(/runtime-unsupported/);
+  });
+});
+
+
+describe("launch failure evidence", () => {
+  it("does not mistake a later failed lifecycle operation for a failed first task", () => {
+    expect(launchFailed(snapshot({ operation: { state: "failed", action: "suspend" } }))).toBe(false);
+    expect(launchFailed(snapshot({ workspace: { launch: { state: "expired", phase: "failed" } as never } }))).toBe(true);
+  });
+
+  it.each(["agent-credential-required", "agent-credential-invalid", "agent-credential-expired", "cloud_agent_credential_reauth_required", "credential-missing", "credential-invalid"])("explains %s as an agent login failure", (category) => {
+    expect(failureMessage(snapshot({ workspace: { launch: { state: "failed", phase: "failed", category } as never } }))).toContain("Agent logins");
   });
 });

@@ -65,6 +65,26 @@ export function deletion(item: CloudWorkspaceListItem): "running" | "failed" | n
   return null;
 }
 
+/**
+ * A failed operation still needs recovery until the catalog reports its target
+ * state. The operation can remain the latest one after an external recovery;
+ * credentials alone, or an online runtime, do not establish that recovery.
+ * Deletion is unresolved until the workspace is actually destroyed.
+ */
+export function operationFailureStands(item: CloudWorkspaceListItem): boolean {
+  const operation = item.latestOperation;
+  if (operation?.state !== "failed") return false;
+  const state = item.workspace.state;
+  if (state === "attention-required") return true;
+  switch (operation.action) {
+    case "suspend": return state !== "suspended" && state !== "archived" && state !== "destroyed";
+    case "resume": return state !== "ready" && state !== "archived" && state !== "destroyed";
+    case "archive": return state !== "archived" && state !== "destroyed";
+    case "delete": return state !== "destroyed";
+    default: return state !== "ready" && state !== "suspended" && state !== "archived" && state !== "destroyed";
+  }
+}
+
 /** An archive still quiescing, checkpointing or suspending. */
 export function archiving(item: CloudWorkspaceListItem): boolean {
   return item.latestOperation?.action === "archive" && isOpen(item.latestOperation);

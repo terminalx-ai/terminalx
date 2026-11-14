@@ -75,6 +75,8 @@ import {
   usesCatalogFeed,
   type OrgCatalog,
 } from "./cloudCatalog";
+import { resolveCloudAttention } from "./cloudAttention";
+import { deriveCloudActivity } from "./cloudRowState";
 import { cloudWorkspaceDeleted, noteCloudWorkspaceDeleted, resetPurged } from "./cloudLifecycle";
 import { registerAccountRoles } from "./accountRoles";
 
@@ -1303,4 +1305,132 @@ describe("a workspace no longer in this person's list", () => {
     // Nothing of it is saved for the next launch.
     expect(JSON.stringify(serializeCatalog(getCloudCatalog()))).not.toContain("share-demo");
   });
+});
+
+
+describe("attention across catalog refreshes (#934)", () => {
+  it.each([
+    ["suspend", "suspended"], ["resume", "ready"], ["archive", "archived"], ["delete", "destroyed"],
+  ])("clears a failed %s after refresh reports %s", async (action, state) => {
+    signIn();
+    const operation = { id: "failed-operation", action, state: "failed", errorCode: "cloud_provider_unavailable" };
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state: "attention-required" }, operation)] });
+    await refreshCloudCatalog(ORG, () => 100);
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    expect(resolveCloudAttention(read())?.recovery).toMatchObject({ action: "retry-operation", operationAction: action });
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state }, operation)] });
+    await refreshCloudCatalog(ORG, () => 200);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).tone).not.toBe("attention");
+  });
+
+  it("clears a recovered provisioning failure without resetting the catalog", async () => {
+    signIn();
+    const operation = { id: "failed-create", action: null, state: "failed", errorCode: "cloud_workspace_runtime_bootstrap_failed" };
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state: "attention-required" }, operation)] });
+    await refreshCloudCatalog(ORG, () => 100);
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    expect(resolveCloudAttention(read())?.code).toBe("cloud_workspace_runtime_bootstrap_failed");
+    expect(deriveCloudActivity(read()).tone).toBe("attention");
+    // The latest failed operation can remain in the list after an external repair.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state: "ready", updatedAt: 20 }, operation)] });
+    await refreshCloudCatalog(ORG, () => 200);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Ready");
+  });
+
+  it("keeps the failed task after a login repair and clears it on later agent activity", async () => {
+    signIn();
+    const launch = { phase: "failed", state: "failed", category: "agent-sign-in-required" };
+    const runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 100);
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    expect(resolveCloudAttention(read())?.recovery.action).toBe("open-agent-logins");
+    // Installing a credential and an online idle runtime do not prove the task ran.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 2 }, updatedAt: 20 })] });
+    await refreshCloudCatalog(ORG, () => 200);
+    expect(resolveCloudAttention(read())?.code).toBe("agent-sign-in-required");
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 3, activeTurns: 1 } })] });
+    await refreshCloudCatalog(ORG, () => 300);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(deriveCloudActivity(read()).label).toBe("Working");
+    for (const online of [true, false]) {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, online, reportedAt: 4 } })] });
+      await refreshCloudCatalog(ORG, () => online ? 400 : 500);
+      expect(resolveCloudAttention(read())).toBeNull();
+      expect(deriveCloudActivity(read()).label).toBe("Ready");
+    }
+    // Catalog persistence retains the observation; no extra caller evidence is needed.
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])).toBeNull();
+  });
+
+  it("feed deltas replace failures and keep a failed delete recoverable until it is resolved", async () => {
+    const failure = item("w", { state: "archived", archivedAt: 1 }, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" });
+    await ingestCloudList({ workspaces: [failure] }, ORG, 100);
+    expect(resolveCloudAttention(getCloudCatalog().orgs[ORG].workspaces[0])?.recovery.label).toBe("Retry delete");
+    const repaired = item("w");
+    await ingestCloudList(mergeFeedDelta([failure], { workspaces: [repaired], tombstones: [] }, []), ORG, 200);
+    expect(resolveCloudAttention(getCloudCatalog().orgs[ORG].workspaces[0])).toBeNull();
+    expect(deriveCloudActivity(getCloudCatalog().orgs[ORG].workspaces[0]).label).toBe("Ready");
+  });
+
+  it("retains recovery through snapshots, feed deltas and later removal of runtime sessions", async () => {
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 100 } };
+    const failed = item("w", { launch });
+    await ingestCloudList({ workspaces: [failed] }, ORG, 100);
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    cacheCloudSessions(ORG, "w", [{ id: "s", title: "Agent", created: new Date(101).toISOString(), tabs: [{ id: "t", status: "idle" }] }] as never, null);
+    expect(resolveCloudAttention(read())).toBeNull();
+    cacheCloudSessions(ORG, "w", [], null);
+    const snapshot = { workspace: failed.workspace, operation: { action: null, state: "succeeded" } } as Parameters<typeof applyCloudSnapshot>[0];
+    applyCloudSnapshot(snapshot, 200);
+    expect(resolveCloudAttention(read())).toBeNull();
+    await ingestCloudList(mergeFeedDelta([read()], { workspaces: [failed], tombstones: [] }, []), ORG, 300);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // A new failed launch must not inherit the successful agent evidence.
+    await ingestCloudList({ workspaces: [item("w", { launch: { ...launch, launchId: "next" } })] }, ORG, 400);
+    expect(resolveCloudAttention(read())?.code).toBe("agent-sign-in-required");
+  });
+
+  it.each(["before", "after"])("does not resolve a new failure from old sessions cached %s its refresh", async (when) => {
+    const iso = (at: number) => new Date(at).toISOString();
+    const launch = { launchId: "new", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { failedAt: 100 } };
+    const sessions = [{ id: "old", created: iso(10), lastMessageAt: iso(20), modified: iso(200), tabs: [{ id: "t", created: iso(10), lastMessageAt: iso(20), status: "idle" }] }] as Parameters<typeof cacheCloudSessions>[2];
+    await ingestCloudList({ workspaces: [item("w")] }, ORG, 1);
+    if (when === "before") cacheCloudSessions(ORG, "w", sessions, null, 200);
+    await ingestCloudList({ workspaces: [item("w", { launch })] }, ORG, 300);
+    if (when === "after") cacheCloudSessions(ORG, "w", sessions, null, 400);
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    expect(deriveCloudActivity(read(), { agentRan: true, tabs: [{ status: "idle" }] }).tone).toBe("attention");
+    // Repeated reads, snapshots, feed deltas and persisted catalogs cannot turn
+    // a cache fetch time or a session rename into agent activity.
+    cacheCloudSessions(ORG, "w", sessions, null, 500);
+    applyCloudSnapshot({ workspace: read().workspace, operation: null } as never, 600);
+    await ingestCloudList(mergeFeedDelta([read()], { workspaces: [item("w", { launch })], tombstones: [] }, []), ORG, 700);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])?.code).toBe("runtime-interrupted");
+    // A verified message in that same old tab after failure is sufficient.
+    const active = structuredClone(sessions);
+    active[0].tabs[0].lastMessageAt = iso(101);
+    cacheCloudSessions(ORG, "w", active, null, 800);
+    expect(resolveCloudAttention(read())).toBeNull();
+    cacheCloudSessions(ORG, "w", [], null, 900);
+    await ingestCloudList({ workspaces: [item("w", { launch })] }, ORG, 1000);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // A later failure of even the same launch does not inherit this evidence.
+    await ingestCloudList({ workspaces: [item("w", { launch: { ...launch, timings: { failedAt: 102 } } })] }, ORG, 1100);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+  });
+
+  it.each([undefined, null, "invalid", new Date(100).toISOString()])("does not infer recovery from undated or simultaneous session evidence (%s)", async (created) => {
+    const launch = { phase: "failed", state: "failed", category: "agent-start-failed", timings: { failedAt: 100 } };
+    await ingestCloudList({ workspaces: [item("w", { launch })] }, ORG, 100);
+    cacheCloudSessions(ORG, "w", [{ id: "s", created, tabs: [{ id: "t", created, status: "completed" }] }] as never, null, 200);
+    expect(resolveCloudAttention(getCloudCatalog().orgs[ORG].workspaces[0])?.code).toBe("agent-start-failed");
+  });
+
 });
