@@ -37,15 +37,15 @@ export function MemberProfile({ member, online, open, onOpenChange, className, .
       <Popover.Trigger asChild>
         <button type="button" aria-label={`View profile: ${name}`} className={cn("relative inline-flex size-7 shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-accent", className)} {...buttonProps}>
           <Photo member={member} className="size-full" />
-          {online && <span aria-label="Online" className="absolute bottom-0 right-0 size-1.5 rounded-full bg-success ring-1 ring-background" />}
+          {online && <span aria-label="Online" className="absolute bottom-0 right-0 size-1.5 rounded-full bg-add ring-1 ring-background" />}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content aria-label={`Profile of ${name}`} sideOffset={6} collisionPadding={8} className="z-(--z-menu) w-72 rounded-lg bg-popover glass p-4 text-popover-foreground shadow-surface hairline">
+        <Popover.Content aria-label={`Profile of ${name}`} align="start" sideOffset={6} collisionPadding={8} className="z-(--z-menu) w-72 max-w-[calc(100vw-1rem)] rounded-lg bg-popover glass p-4 text-popover-foreground shadow-surface hairline outline-none">
           <div className="flex items-center gap-3">
             <span className="relative shrink-0">
               <Photo member={member} className="size-12 text-base" />
-              <span data-testid="profile-presence" aria-label={online === undefined ? "Presence unavailable" : online ? "Online" : "Offline"} className={cn("absolute bottom-0 right-0 size-2.5 rounded-full ring-2 ring-popover", online ? "bg-success" : "bg-muted-foreground/30")} />
+              <span data-testid="profile-presence" aria-label={online === undefined ? "Presence unavailable" : online ? "Online" : "Offline"} className={cn("absolute bottom-0 right-0 size-2.5 rounded-full ring-2 ring-popover", online ? "bg-add" : "bg-muted-foreground/30")} />
             </span>
             <div className="min-w-0">
               <p className="break-words text-sm font-medium">{name}</p>
