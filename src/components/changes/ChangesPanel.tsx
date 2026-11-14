@@ -87,7 +87,11 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   // here, what is conflicted) leads, so it is read here like the other scopes.
   const reads = choice.scope !== "history";
   const repo = choice.scope === "history" ? "history" : choice.scope === "uncommitted" && !result?.merge ? "uncommitted" : null;
+  // What is chosen now, for a step that finishes after an await: Apply's check must not put back a scope changed meanwhile.
+  const latestChoice = useRef(choice);
+  latestChoice.current = choice;
   const choose = (next: ChangesChoice) => {
+    latestChoice.current = next;
     setChoice(next);
     setTick((t) => t + 1);
     setResult(null);
@@ -197,7 +201,8 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
       setSwitching(false);
     }
     dismissErrorKey("compare-switch");
-    choose({ ...choice, target });
+    // The check took a while: the target joins the choice as it is now, keeping a scope picked during it.
+    choose({ ...latestChoice.current, target });
   };
   // Turn, checkpoint and commit scopes are fixed snapshots; All and Uncommitted are live comparisons a tab can refresh.
   const fixed = choice.scope === "turn" || choice.scope === "checkpoint" || choice.scope === "commit";
