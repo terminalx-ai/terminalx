@@ -39,7 +39,6 @@ fn plist(label: &str, args: &[String], environment: &[(&str, String)], log: &str
 }
 pub fn guest_plist(env: &Environment) -> Result<String> {
     env.transport.require_macos()?;
-    if env.transport.is_personalized() { super::macos_transport::binding(env)?; }
     let install = env.transport.installation()?;
     let home = Path::new(&install).parent().context("Guest account home missing")?.to_string_lossy();
     Ok(plist("com.terminalx.local-guest",&[format!("{install}/bin/terminalx-serve"),"--data-dir".into(),format!("{install}/runtime")],&[
@@ -573,7 +572,6 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     };
     let guest: Task = serde_json::from_value(result).context("Guest task protocol mismatch")?;
     if guest.computer != task.computer
-        || guest.transport_binding != task.transport_binding
         || guest.target != task.target
         || guest.input != task.input
         || guest.idempotency_key != task.idempotency_key

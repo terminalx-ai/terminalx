@@ -60,25 +60,22 @@ pub(super) fn validate_description(env: &Environment, description: &Value) -> Re
 pub enum Transport {
     #[default]
     MacosLume,
-    MacosPersonalized { binding: Box<super::macos_transport::Binding> },
     LinuxContainer { runtime: Runtime, id: String, #[serde(rename = "runtimeSha256")] runtime_sha256: String },
 }
 
 impl Transport {
     pub fn is_legacy_macos(&self) -> bool { matches!(self, Self::MacosLume) }
-    pub fn is_macos(&self) -> bool { matches!(self, Self::MacosLume | Self::MacosPersonalized { .. }) }
-    pub fn is_personalized(&self) -> bool { matches!(self, Self::MacosPersonalized { .. }) }
+    pub fn is_macos(&self) -> bool { matches!(self, Self::MacosLume) }
     pub fn installation(&self) -> Result<String> {
         Ok(match self {
             Self::MacosLume => super::host::GUEST_HOME.into(),
-            Self::MacosPersonalized { binding } => binding.account.installation()?.to_string_lossy().into_owned(),
             Self::LinuxContainer { .. } => LINUX_INSTALL.into(),
         })
     }
 
     pub fn target(&self, environment_id: &str, generation: &str) -> Target {
         match self {
-            Self::MacosLume | Self::MacosPersonalized { .. } => Target::MacosGuest {
+            Self::MacosLume => Target::MacosGuest {
                 environment_id: environment_id.into(), generation: generation.into(),
             },
             Self::LinuxContainer { runtime, id, .. } => Target::LinuxGuest {
@@ -90,7 +87,7 @@ impl Transport {
 
     pub fn container(&self) -> Option<Target> {
         match self {
-            Self::MacosLume | Self::MacosPersonalized { .. } => None,
+            Self::MacosLume => None,
             Self::LinuxContainer { runtime, id, .. } => Some(Target::LinuxContainer { runtime: *runtime, id: id.clone() }),
         }
     }
@@ -102,7 +99,7 @@ impl Transport {
         Ok(())
     }
     pub fn require_legacy(&self) -> Result<()> {
-        if !self.is_legacy_macos() { bail!("This legacy operation cannot use a personalized or Linux transport"); }
+        if !self.is_legacy_macos() { bail!("This legacy operation cannot use a Linux transport"); }
         Ok(())
     }
 }

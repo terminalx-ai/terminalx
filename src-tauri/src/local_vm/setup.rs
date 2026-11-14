@@ -34,7 +34,7 @@ pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
     validate_harness(harness)?;
     validate_key(key)?;
     if env.transport.container().is_some() { return super::linux_setup::initial(env, harness, key); }
-    let mut report = json!({"protocol":PROTOCOL,"environmentId":env.id,"generation":env.generation,
+    let report = json!({"protocol":PROTOCOL,"environmentId":env.id,"generation":env.generation,
         "harness":harness,"idempotencyKey":key,"status":"queued","lastCheckedAt":null,
         "detail":"Preparing the disclosed tool/runtime profile; permissions and account consent remain yours",
         "steps":[
@@ -47,12 +47,6 @@ pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
             {"id":"screenRecording","label":"Allow guest Screen Recording","state":"pending"},
             {"id":"provider","label":"Connect your guest provider account","state":"pending"},
             {"id":"desktop","label":"Verify a usable guest desktop","state":"pending"}]});
-    if env.transport.is_personalized() {
-        super::macos_transport::binding(env)?;
-        report["transportBinding"] = json!(env.transport);
-        report["status"] = json!("needsAttention");
-        report["detail"] = json!("Personalized macOS setup is unavailable until secure account provisioning and VM identity verification are supported. No setup action was started.");
-    }
     Ok(report)
 }
 
@@ -88,8 +82,9 @@ fn env(journal: &Journal, params: &Value) -> Result<Environment> {
 
 fn check_transport(env: &Environment) -> Result<()> {
     if let Some(report) = &env.setup {
-        if (env.transport.is_personalized() || !report["transportBinding"].is_null())
-            && report["transportBinding"] != json!(env.transport) {
+        // Only a build with the macOS account setup records a binding, which
+        // this build cannot check: the original history is kept as it is.
+        if !report["transportBinding"].is_null() {
             bail!("Setup account/key/runtime binding changed; retain the original history");
         }
     }
@@ -178,12 +173,6 @@ pub fn set_step(
 
 pub(super) fn check_binding(env: &Environment, harness: &str, value: &Value) -> Result<()> {
     check_transport(env)?;
-    if let super::transport::Transport::MacosPersonalized { binding } = &env.transport {
-        if value["runtime"]["identity"]["macosAccount"] != json!(binding.account)
-            || value["runtime"]["executableSha256"] != binding.runtime_sha256 {
-            bail!("Setup receipt differs from personalized account/runtime binding");
-        }
-    }
     if value["protocol"] != 1
         || value["environmentId"] != env.id
         || value["generation"] != env.generation
@@ -219,7 +208,6 @@ fn runtime_mismatch(readiness: &Value) -> bool {
 // Queueing retains intent only. The existing installer checks fresh guest
 // task/history quiescence again before replacing or reloading its service.
 fn runtime_update_available(env: &Environment, report: &Value) -> bool {
-    if env.transport.is_personalized() { return false; }
     let read = &report["readiness"];
     report["protocol"] == PROTOCOL
         && report["environmentId"] == env.id
@@ -339,9 +327,6 @@ struct ActionRequest {
 pub fn action(journal: &Journal, params: Value) -> Result<Value> {
     // A known unavailable profile is a refusal before intent, not an uncertain
     // delivered action that would falsely strand a provider/desktop workflow.
-    if env(journal, &params)?.transport.is_personalized() {
-        super::macos_transport::require_available()?;
-    }
     action_using(journal, params, |env, params| {
         host::guest_rpc(env, "environment.setupAction", params)
     })
@@ -521,10 +506,6 @@ pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
 /// Called only by the admitted owner controller. Installer steps are recorded
 /// before effects; the supervisor's startup reconciliation never requeues them.
 pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
-    if target.transport.is_personalized() {
-        check_transport(target)?;
-        return super::macos_transport::require_available();
-    }
     if target.transport.container().is_some() {
         // An attachment is an independent workflow, not a failed setup effect.
         let Ok(_admission) = journal.desktop_admission(target) else { return Ok(()); };

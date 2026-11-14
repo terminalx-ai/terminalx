@@ -69,7 +69,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     }
     let _attachment_admission = if matches!(method,"environment.start"|"environment.stop"|"environment.delete"|"environment.install"|"environment.awake"|"environment.desktop"|"environment.releaseDesktop"|"environment.reconcileProvision") {
         let current=environment(&journal,&params)?;
-        if method=="environment.install" && current.transport.is_personalized() {None} else {journal.desktop_admission(&current)?}
+        journal.desktop_admission(&current)?
     } else { None };
     if method.starts_with("environment.") && !matches!(method, "environment.setup" | "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth") {
         if let Some(id) = params.get("environmentId").and_then(Value::as_str) {
@@ -78,7 +78,6 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 // container binding as a Cua selector. Linux lifecycle setup
                 // remains explicit until its prepared profile is installed.
                 env.transport.require_macos()?;
-                if env.transport.is_personalized() && method!="environment.bootstrapDeliveryStatus" { super::macos_transport::require_available()?; }
             }
         }
     }
@@ -162,40 +161,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 json!({"status":vm.get("state").or(vm.get("status")),"stages":env.provision.as_ref().and_then(|p|p.get("stages")).cloned().unwrap_or(json!([])),"vm":safe_vm(&vm),"runtime":runtime.as_ref().ok(),"deletion":deletion,"detail":runtime.err().map(|e|crate::remote::protocol::redact(&format!("{e:#}")))}),
             )
         }
-        "environment.createPersonalized" | "environment.runPersonalizedProvision" => {
-            confirm(&params)?;super::macos_provision::request(method,&params)
-        }
-        // The person's choice of one guest-reported account; never inferred.
-        "environment.guestAccounts" => super::macos_owner_channel::guest_accounts(&params),
-        "environment.guestAccountConfirmations" => super::macos_owner_channel::guest_account_confirmations(&params),
-        "environment.confirmGuestAccount" => {
-            confirm(&params)?;super::macos_owner_channel::confirm_guest_account(&params)
-        }
-        "environment.grantGuestKey" => {
-            confirm(&params)?;super::macos_owner_channel::grant_guest_key(&params)
-        }
-        "environment.confirmGuestHostKey" => {
-            confirm(&params)?;super::macos_owner_channel::confirm_guest_host_key(&params)
-        }
-        // After the pin: the VM's environment, bound only to verified records.
-        "environment.bindPersonalizedTransport" => {
-            confirm(&params)?;super::macos_environment::bind(&params)
-        }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
-        "environment.bootstrapDeliveryStatus" => {
-            let env=environment(&journal,&params)?;
-            super::macos_delivery::status(&root()?,&env)
-        }
-        "environment.reconcileBootstrap" => {
-            confirm(&params)?;
-            let env=environment(&journal,&params)?;
-            super::macos_delivery::reconcile(&env,field(&params,"inputDigest")?)
-        }
-        "environment.prepareGuestKey" | "environment.reconcileGuestKey" => {
-            confirm(&params)?;
-            let env=environment(&journal,&params)?;
-            super::macos_keys::produce(&root()?,super::macos_transport::binding(&env)?,method=="environment.reconcileGuestKey")
-        }
         "environment.install" => {
             let env = environment(&journal, &params)?;
             install_guest(&env, Path::new(field(&params, "runtimePath")?))?;
@@ -403,7 +369,6 @@ fn recovery_receipt(task: &Task, response: &Value) -> Result<Task> {
     let recovered: Task =
         serde_json::from_value(response.clone()).context("Invalid guest recovery receipt")?;
     if recovered.computer != task.computer
-        || recovered.transport_binding != task.transport_binding
         || recovered.target != task.target
         || recovered.input != task.input
         || recovered.idempotency_key != task.idempotency_key
@@ -515,7 +480,6 @@ fn manual_control_receipt(
     record_manual_control(journal, env, response)
 }
 pub fn guest_rpc(env: &Environment, method: &str, params: Value) -> Result<Value> {
-    if env.transport.is_personalized() { return super::macos_transport::rpc(env, method, params, BUDGET); }
     if env.transport.container().is_some() { return super::transport::linux_rpc(env, method, params, BUDGET); }
     journal::validate_sandbox(&env.sandbox)?;
     let info = inspect_sandbox(&env.sandbox)?;
@@ -529,7 +493,6 @@ pub(super) fn guest_rpc_ready(
     info: &Value,
     budget: Duration,
 ) -> Result<Value> {
-    if env.transport.is_personalized() { return super::macos_transport::rpc(env, method, params, budget); }
     env.transport.require_legacy()?;
     validate_macos_vm(info)?;
     if info["id"] != env.sandbox {
@@ -885,7 +848,6 @@ pub(crate) fn install_current_guest(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
-    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
     env.transport.require_legacy()?;
     let info = inspect_sandbox(&env.sandbox)?;
     validate_macos_vm(&info)?;
@@ -900,7 +862,6 @@ pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
-    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
     env.transport.require_legacy()?;
     // Existing compatible signed app is preserved in place, retaining its
     // designated requirement and user-granted permissions. Never replace or
@@ -983,7 +944,6 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result<()> {
-    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
     env.transport.require_legacy()?;
     if harness != "codex" {
         bail!("This prepared profile supports automatic Codex setup; existing other provider installations are preserved");
@@ -1046,7 +1006,6 @@ pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result
 }
 
 fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
-    if env.transport.is_personalized() { return super::macos_transport::install(env, runtime); }
     env.transport.require_legacy()?;
     compatible()?;
     if !runtime.is_absolute() || !runtime.is_file() {

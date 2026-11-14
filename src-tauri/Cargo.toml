@@ -16,9 +16,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = ["desktop"]
 # AppKit menu-bar presentation for the local owner only; cloud stays headless.
 local-ui = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:notify-rust"]
-# Never in a release: a validation build that reads the restricted Lume pin and
-# the Apple restore entry from a dedicated TERMINALX_HOME (helper validation plan P7).
-vm-validation = []
 desktop = [
     "dep:tauri",
     "dep:tauri-build",

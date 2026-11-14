@@ -78,8 +78,8 @@ pub fn inventory() -> Result<Inventory> {
         for env in state.environments.values().filter(|env| env.deleted_at.is_none()) {
             entries.push(Entry {
                 target: env.transport.target(&env.id, &env.generation),
-                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: if env.transport.is_personalized() {vec![]} else if env.transport.is_macos() {vec![Capability::GuestTask,Capability::AttachedDesktop]} else {vec![Capability::GuestTask]},
-                state: if env.transport.is_personalized() { "bootstrapUnavailable" } else if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
+                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: if env.transport.is_macos() {vec![Capability::GuestTask,Capability::AttachedDesktop]} else {vec![Capability::GuestTask]},
+                state: if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
             });
         }
     }
