@@ -2567,6 +2567,8 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         })
         .map_err(err)?;
         let _ = app.emit("session_created", &entry);
+        // A fork with a worktree always creates it above; other forks share a checkout.
+        if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
         Ok(entry)
     })
     .await
@@ -4691,7 +4693,10 @@ mod command_tests {
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());
         assert_eq!(session.active_tab, None);
-        assert_eq!(session.worktree_name, None);
+        // Opening an existing checkout records its workspace identity without
+        // creating another worktree or inventing creation-time provenance.
+        assert_eq!(session.worktree_name.as_deref(), Some("external"));
+        assert!(session.base_ref.is_none() && session.worktree_base.is_none());
         assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
         assert_eq!(crate::store::index::load().unwrap(), vec![session]);
     }
