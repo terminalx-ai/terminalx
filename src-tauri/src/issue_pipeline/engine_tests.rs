@@ -14,6 +14,7 @@ use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
 use super::engine::{self, act, answered, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, AgentStop, Diff, Host, Workspace};
+use super::carry::{BaseMerges, Carry};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::engine::set_resolve_conflicts;
@@ -155,6 +156,10 @@ struct World {
     /// What each conversation's agent left running, by [`key`]: it goes
     /// with the agent when that is stopped.
     background: BTreeMap<String, String>,
+    /// What git makes of the commits after the reviewed one; new work unless a test says.
+    carry: Option<Carry>,
+    /// The `(reviewed, head)` pairs the pipeline asked git about.
+    carry_asked: Vec<(String, String)>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -231,6 +236,8 @@ impl FakeHost {
             busy: BTreeSet::new(),
             stopped_agents: Vec::new(),
             background: BTreeMap::new(),
+            carry: None,
+            carry_asked: Vec::new(),
         }))
     }
 
@@ -399,6 +406,12 @@ impl Host for FakeHost {
         if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
         if head == resolution.head { bail!("No merge commit was made"); }
         Ok(())
+    }
+
+    fn base_merges(&self, _cwd: &Path, reviewed: &str, head: &str, _pr: &PrSnapshot) -> Result<Carry> {
+        let mut world = self.world();
+        world.carry_asked.push((reviewed.into(), head.into()));
+        Ok(world.carry.clone().unwrap_or_else(|| Carry::NewWork(format!("{} is a commit of its own", &head[..10]))))
     }
 
     fn abort_merge(&self, _cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
@@ -3967,4 +3980,228 @@ fn adopted_fork_identity_reaches_resolution_detection_and_the_push() {
     assert_eq!(host.world().resolution_push_targets, [target]);
     assert_eq!(host.world().pushes, [C2]);
     assert_eq!(store::get(&p.id).unwrap().stage, Stage::Review);
+}
+
+// ---- #947: a passing verdict carries over merges of the base --------------------
+
+/// Only clean merges of main since the review: the change is what it was.
+fn clean_merges() -> Carry {
+    Carry::BaseMerges(BaseMerges { base_commit: BASE.into(), merges: vec![C2.into()], resolution: String::new(), change_set_moved: false })
+}
+
+/// A merge of main that resolved a conflict in `package.json`.
+fn resolved_merge() -> Carry {
+    Carry::BaseMerges(BaseMerges {
+        base_commit: BASE.into(),
+        merges: vec![C2.into()],
+        resolution: format!("Merge {C2}:\ndiff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -2,5 +2,1 @@\n-<<<<<<< {C1}\n-  \"version\": \"1.1.0\"\n-=======\n-  \"version\": \"1.0.1\"\n->>>>>>> {BASE}\n+  \"version\": \"1.1.1\"\n"),
+        change_set_moved: true,
+    })
+}
+
+/// Review 1 of 1 passed C1 while the checks ran; then main moved and the
+/// branch merged it, as `carry` says, to C2. With the checks on C2 green,
+/// the next look is the one that decides.
+fn moved_after_final_review(diff: Option<Diff>, security: &str, carry: Option<Carry>) -> Run {
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.max_rounds = 1;
+    host.world().checks = vec![check("build", "pending")];
+    if let Some(diff) = diff {
+        host.world().diff = diff;
+    }
+    let run = Run::start_in(host, true);
+    run.to_review();
+    let waiting = run.reviewer(&reviewed_with(C1, "merge", "[]", security));
+    assert_eq!((waiting.stage, waiting.state, waiting.round, waiting.max_rounds), (Stage::Merge, State::Waiting, 1, 1), "{:?}", waiting.note);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_sha = C2.into();
+        pr.checks = vec![check("build", "success")];
+        world.carry = carry;
+    }
+    run
+}
+
+#[test]
+fn a_clean_merge_of_main_after_the_final_review_carries_the_verdict_and_merges() {
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert_eq!(run.host.world().carry_asked, [(C1.to_string(), C2.to_string())]);
+    // No review round spent, and the reviewer was not asked anything more.
+    assert_eq!(merged.round, 1);
+    assert_eq!(run.host.prompts_to(&reviewer.session_id).len(), 1);
+    let verdict = merged.verdict.clone().unwrap();
+    assert_eq!((verdict.commit.as_str(), verdict.carried_from.as_deref(), verdict.round), (C2, Some(C1), 1));
+    // The reviewer's checks ran on C1, not on the merge.
+    assert_eq!(verdict.checks, Some(super::verdict::ReviewChecks::NotRun));
+    assert!(verdict.checks_note.as_deref().unwrap().contains("passed on 1111111111, before the merge of main"));
+    let carried = merged.events.iter().find(|event| event.kind == "verdictCarried").expect("the carry is in the record");
+    assert_eq!(carried.commit.as_deref(), Some(C2));
+    assert_eq!(carried.message, "The branch moved to 2222222222 with a clean merge of main and nothing else, and the pull request's change against main is the same as at 1111111111: review 1 of 1 carries forward to the new head.");
+    assert!(!merged.events.iter().any(|event| event.kind == "needsYou"), "{:?}", merged.events);
+    let comments = run.host.world().comments.clone();
+    assert!(comments.last().unwrap().starts_with("### TerminalX review of `1111111111` carries forward to `2222222222`"), "{comments:?}");
+}
+
+#[test]
+fn a_merge_of_main_that_resolved_a_conflict_gets_a_light_check_that_is_not_a_round() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    let checking = run.poll();
+    assert_eq!((checking.stage, checking.state), (Stage::Review, State::Working), "{:?} {:?}", checking.note, checking.reason);
+    assert_eq!((checking.round, checking.max_rounds), (1, 1), "the check is not a round, and the limit did not refuse it");
+    assert_eq!((checking.review_commit.as_deref(), checking.merge_check.as_deref()), (Some(C2), Some(C1)));
+    assert_eq!(checking.note.as_deref(), Some("The branch only merged main since review 1 of 1 passed 1111111111: the reviewer conversation is checking what the merge changed at 2222222222. This is not a review round."));
+    assert_eq!(checking.events.last().unwrap().kind, "mergeCheckRequested");
+    let prompts = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(prompts.len(), 2);
+    let check = &prompts[1];
+    assert!(check.contains("This is not another review round"), "{check}");
+    assert!(check.contains("Commit to check: 2222222222222222222222222222222222222222"));
+    assert!(check.contains("`git show --remerge-diff 2222222222`"));
+    assert!(check.contains("+  \"version\": \"1.1.1\""), "the resolution is quoted: {check}");
+    assert!(check.contains("Compare `git diff 5555555555...1111111111` with `git diff 5555555555...2222222222"), "{check}");
+    assert!(!check.contains("Judge the whole change"), "it is not a full review");
+
+    // The check passes: the verdict stands for the merge, and it merges.
+    let merged = run.reviewer(&reviewed(C2, "merge", LOW));
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert_eq!(merged.round, 1);
+    assert!(merged.merge_check.is_none());
+    let verdict = merged.verdict.unwrap();
+    assert_eq!((verdict.commit.as_str(), verdict.carried_from.as_deref(), verdict.findings.len()), (C2, Some(C1), 1));
+    let line = merged.events.iter().rev().find(|event| event.kind == "verdict").unwrap();
+    assert_eq!(line.message, "Check of the merge in 2222222222 (review 1 of 1 passed 1111111111): merge, 1 finding, none of medium severity or higher. The reviewer's checks passed.");
+    assert!(run.host.world().comments.last().unwrap().starts_with("### TerminalX check of the merge in `2222222222` — no blocking findings"));
+}
+
+#[test]
+fn a_light_check_that_finds_a_bad_resolution_stops_on_what_it_found() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    run.poll();
+    let stopped = run.reviewer(&reviewed(C2, "changes", HIGH));
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert_eq!(stopped.reason, Some(StopReason::RoundLimit { rounds: 1, count: 1, worst: Some(Severity::High) }));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_light_check_with_rounds_left_sends_its_findings_to_the_author() {
+    let run = moved_after_final_review(None, "not_needed", Some(resolved_merge()));
+    { let mut p = run.pipeline(); p.max_rounds = 3; store::commit(&mut p).unwrap(); }
+    assert_eq!(run.poll().round, 1);
+    let addressing = run.reviewer(&reviewed(C2, "changes", HIGH));
+    assert_eq!((addressing.stage, addressing.round), (Stage::Address, 1));
+    assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
+}
+
+#[test]
+fn a_real_commit_after_the_final_review_still_needs_a_review_and_says_so() {
+    let run = moved_after_final_review(None, "not_needed", None);
+    let stopped = run.poll();
+    assert_eq!((stopped.stage, stopped.state), (Stage::Merge, State::NeedsYou));
+    let reason = stopped.reason.clone().unwrap();
+    assert_eq!(reason, StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1 });
+    assert_eq!(stopped.note.as_deref(), Some("The branch moved to 2222222222 after the final review (1 of 1) passed 1111111111. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head."));
+    assert!(!reason.describe().contains("still asks for changes"));
+    assert!(run.merges().is_empty());
+
+    // The one action on the issue page: review the new head once more.
+    let reviewing = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((reviewing.stage, reviewing.round, reviewing.max_rounds, reviewing.review_commit.as_deref()), (Stage::Review, 2, 2, Some(C2)));
+    assert!(reviewing.merge_check.is_none());
+    let reviewer = reviewing.reviewer.unwrap();
+    assert!(run.host.prompts_to(&reviewer.session_id).last().unwrap().contains("Judge the whole change"), "a full review");
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+}
+
+#[test]
+fn with_rounds_left_a_real_commit_gets_a_full_round_and_a_clean_merge_spends_none() {
+    for (carry, round) in [(None, 2), (Some(clean_merges()), 1)] {
+        let run = moved_after_final_review(None, "not_needed", carry.clone());
+        { let mut p = run.pipeline(); p.max_rounds = 3; store::commit(&mut p).unwrap(); }
+        let next = run.poll();
+        assert_eq!(next.round, round, "{carry:?}");
+        assert_eq!(next.state == State::Merged, carry.is_some(), "{carry:?} {:?}", next.note);
+    }
+}
+
+#[test]
+fn a_carried_verdict_keeps_the_security_pass_rule() {
+    let billing = || Some(Diff { paths: vec!["saas/src/billing/plans.ts".into()], patch: String::new() });
+    // A flagged pass, even with nothing blocking, is not carried: the new head is reviewed.
+    let flagged = r#"[{"severity": "low", "title": "Token lifetime is long", "security": true}]"#;
+    let host = FakeHost::new(&github_issue());
+    host.world().settings.max_rounds = 1;
+    host.world().checks = vec![check("build", "pending")];
+    host.world().diff = billing().unwrap();
+    let run = Run::start_in(host, true);
+    run.to_review();
+    assert_eq!(run.reviewer(&reviewed_with(C1, "merge", flagged, "flagged")).state, State::Waiting);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        world.pr.as_mut().unwrap().head_sha = C2.into();
+        world.pr.as_mut().unwrap().checks = vec![check("build", "success")];
+        world.carry = Some(clean_merges());
+    }
+    let stopped = run.poll();
+    assert_eq!(stopped.reason, Some(StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1 }));
+    assert!(run.host.world().carry_asked.is_empty(), "nothing to carry, so git is not asked");
+    assert!(run.merges().is_empty());
+    // One temporary home at a time: a second waits for the first to go.
+    drop(run);
+
+    // A clean pass carries over clean merges.
+    let run = moved_after_final_review(billing(), "clean", Some(clean_merges()));
+    assert_eq!(run.poll().state, State::Merged);
+    assert_eq!(run.pipeline().verdict.unwrap().security_pass, super::verdict::SecurityPass::Clean);
+    drop(run);
+
+    // A light check of a resolution asks for the pass, and one that reports none does not count.
+    let run = moved_after_final_review(billing(), "clean", Some(resolved_merge()));
+    let reviewer = run.pipeline().reviewer.unwrap();
+    run.poll();
+    assert!(run.host.prompts_to(&reviewer.session_id)[1].contains("so a security pass is required as well"));
+    let asked = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((asked.stage, asked.reminded), (Stage::Review, true));
+    assert!(run.merges().is_empty());
+    assert_eq!(run.reviewer(&reviewed_with(C2, "merge", "[]", "clean")).state, State::Merged);
+}
+
+#[test]
+fn a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_light_check() {
+    let run = moved_after_final_review(None, "not_needed", None);
+    // Undo the move: this time GitHub reports the conflict and the resolver merges main.
+    run.host.commit(C1);
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.head_sha = C1.into();
+        pr.merge_state = "DIRTY".into();
+        world.conflict = true;
+    }
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    assert_eq!(run.poll().stage, Stage::Resolve);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        world.conflict = false;
+        world.pr.as_mut().unwrap().merge_state = "CLEAN".into();
+        // The checks the pushed merge gets.
+        world.checks = vec![check("build", "success")];
+        world.carry = Some(resolved_merge());
+    }
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged main, kept both version bumps.")));
+    let checking = run.pipeline();
+    assert_eq!((checking.stage, checking.state, checking.round, checking.merge_check.as_deref()), (Stage::Review, State::Working, 1, Some(C1)), "{:?} {:?}", checking.note, checking.reason);
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
 }
