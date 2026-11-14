@@ -65,6 +65,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("a cloud workspace's pipeline on its issue's page", () => {
+  it("shows a cloud restart failure and leaves the action available", async () => {
+    cloud.actOnCloudPipeline.mockRejectedValue(new Error("Restarting a resolver is not supported by cloud workspaces yet."));
+    render(<IssuePipelinePanel pipeline={pipeline({ stage: "resolve", state: "needsYou" })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Restart resolver" }));
+    expect(await screen.findByText("Restarting a resolver is not supported by cloud workspaces yet.")).toBeTruthy();
+    expect(cloud.actOnCloudPipeline).toHaveBeenCalledWith(expect.objectContaining({ id: "p1" }), "restartResolve");
+    expect(screen.getByRole("button", { name: "Restart resolver" }).hasAttribute("disabled")).toBe(false);
+  });
   it("has no switch to merge by itself, and says who merges", () => {
     render(<IssuePipelinePanel pipeline={pipeline()} />);
     expect(screen.queryByRole("switch", { name: "Merge when green" })).toBeNull();
