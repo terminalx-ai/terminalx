@@ -1074,10 +1074,15 @@ impl Step<'_> {
         Ok(())
     }
 
-    fn restart_resolution(&mut self) -> Result<()> {
+    fn require_resolver_identity(&self) -> Result<()> {
         if self.p.resolution.is_some() && self.p.resolver.is_none() {
             bail!("The checkout remains reserved because the old resolver identity is missing and its process exit cannot be confirmed.");
         }
+        Ok(())
+    }
+
+    fn restart_resolution(&mut self) -> Result<()> {
+        self.require_resolver_identity()?;
         if let Some(old) = self.p.resolver.clone() {
             self.host.close_resolver(&old)?;
             self.p.releasing.retain(|who| who != &old);
@@ -1911,6 +1916,7 @@ impl Step<'_> {
                     let pr = self.host.pull_request(&self.cwd, link.number)?;
                     if pr.state != "OPEN" { return self.evaluate_snapshot(pr, Merger::Pipeline); }
                     if self.host.remote_resolution_complete(&self.cwd, &pr)? {
+                        self.require_resolver_identity()?;
                         if let Some(old) = self.p.resolver.clone() { self.host.close_resolver(&old)?; }
                         self.p.resolution = None;
                         self.p.interrupted_resolution = None;
@@ -2683,6 +2689,7 @@ pub fn poll(host: &dyn Host) {
 fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline], interrupted: bool) {
     for pipeline in pipelines.iter().filter(|pipeline| pipeline.resolution.is_some() || pipeline.checking_locally) {
         let _ = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
+            step.require_resolver_identity()?;
             let resolver = step.p.resolver.clone().filter(|_| step.p.resolution.is_some());
             if !interrupted && resolver.is_some() { return step.reconcile_resolver(); }
             let _recovering = resolver.as_ref().map(|who| super::admission::fence(

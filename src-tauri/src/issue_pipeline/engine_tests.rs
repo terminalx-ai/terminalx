@@ -4066,12 +4066,13 @@ fn restart_replaces_the_resolver_and_ignores_late_events_even_at_round_limits() 
 
 #[test]
 fn advance_accepts_a_remotely_resolved_head_and_requires_a_fresh_review() {
-    for resolver in ["closed", "live", "missing identity"] {
+    for resolver in ["closed", "live", "no resolver"] {
         let run = Run::start(&github_issue(), false);
         resolving(&run);
-        if resolver == "missing identity" {
+        if resolver == "no resolver" {
             let mut p = run.pipeline();
             p.resolver = None;
+            p.resolution = None;
             store::commit(&mut p).unwrap();
         }
         if resolver == "live" { run.host.agent(&resolver_tab(), true); }
@@ -4220,4 +4221,35 @@ fn restart_without_resolver_identity_retains_the_reservation() {
     assert!(after.note.as_deref().is_some_and(|note| note.contains("identity is missing")));
     assert_eq!(run.host.world().resolvers, 1);
     assert!(run.host.aborts().is_empty());
+}
+
+#[test]
+fn remote_advance_and_recovery_keep_reservations_without_resolver_identity() {
+    for action in ["advance", "recover", "handover"] {
+        let run = Run::start(&github_issue(), false);
+        let mut before = resolving(&run);
+        before.resolver = None;
+        store::commit(&mut before).unwrap();
+        {
+            let mut world = run.host.world();
+            world.remote_resolved = true;
+            world.conflict = false;
+            let pr = world.pr.as_mut().unwrap();
+            pr.head_sha = C2.into();
+            pr.mergeable = "MERGEABLE".into();
+            pr.merge_state = "CLEAN".into();
+        }
+        match action {
+            "advance" => { act(&run.host, &run.id, Action::Advance).unwrap(); }
+            "recover" => engine::recover(&run.host),
+            _ => engine::handed_over(&run.host),
+        }
+        let after = run.pipeline();
+        assert_eq!(after.resolution, before.resolution, "{action}");
+        assert_eq!(after.state, State::NeedsYou);
+        assert!(after.note.as_deref().is_some_and(|note| note.contains("identity is missing")));
+        assert_eq!(run.host.world().workspace.head, C1);
+        assert!(run.host.aborts().is_empty());
+        assert!(run.merges().is_empty());
+    }
 }
