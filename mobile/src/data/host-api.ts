@@ -43,6 +43,8 @@ export interface TabControls {
   requestedEffort?: string | null;
   requestedPermissionMode?: string | null;
   status: SessionStatus;
+  /** `experimentalCodexStdio`: native Codex (#644), with no terminal until it moves there. Absent from an older Mac. */
+  transport?: string;
 }
 /** The agent and settings a new tab starts with. */
 export interface NewTabSettings { harness: string; model: string; effort?: string | null; permissionMode?: string | null }

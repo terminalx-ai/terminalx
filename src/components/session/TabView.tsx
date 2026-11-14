@@ -20,7 +20,7 @@ import { Composer, type Handoff } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
-import { History, MessageSquare, Play } from "@/icons";
+import { History, MessageSquare, Play, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -41,6 +41,16 @@ import { interruptUnanswered } from "@/types/events";
 import { LocalVmTasks } from "@/components/localVm/LocalVmTasks";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
+
+/**
+ * Why a cloud tab's terminal view did not open (#644): the runtime's own
+ * words for its refusal (mid-turn, someone else driving, no right to type),
+ * never the recovery text a local tab's failure is mapped to.
+ */
+export function terminalViewRefusal(message: string): string {
+  const said = message.trim();
+  return `The terminal view did not open: ${/[.!?]$/.test(said) ? said : `${said}.`}`;
+}
 
 /**
  * One tab: its event log, the transcript built from it, and the composer.
@@ -122,6 +132,8 @@ export function TabView({
   const remoteTerminal = !local && terminalViewOf(backend, tab).available ? (backend.agentTerminal ?? null) : null;
   const terminalMode = tabViewIn(views.views, tab) === "terminal" && (local || !!remoteTerminal);
   const viewError = views.errors[tab.id] ?? null;
+  // Over the tab, whatever the composer already says (a lease, view only): the switch is in the header.
+  const remoteViewRefusal = !local && viewError ? terminalViewRefusal(viewError) : null;
   const terms = useTerminals();
   const ptyFirst = local && isPtyFirst(tab.harness);
   const paneId = tabPaneId(tab);
@@ -501,7 +513,7 @@ export function TabView({
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
   const banner = (placement: "top" | "composer") => (
-    <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
+    <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onRetry={retry} onStop={stop} onSignIn={signInAgent} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? resend : undefined} onContinue={() => {
           if (recoveryLock.current) return;
@@ -618,7 +630,7 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? error ?? (viewError && local ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />
         </>
@@ -719,6 +731,14 @@ export function TabView({
         noteCount={collab.notes[tab.id]?.notes.length ?? 0}
         unreadNotes={collab.unreadNotes[tab.id] ?? 0}
       />
+    )}
+    {remoteViewRefusal && (
+      <div role="alert" className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground" data-testid="terminal-view-refused">
+        <span className="min-w-0 flex-1">{remoteViewRefusal}</span>
+        <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => clearTabViewError(tab.id)}>
+          <X />
+        </Button>
+      </div>
     )}
     {signIn && <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}

@@ -26,7 +26,7 @@ vi.mock("@/components/chat/Chat", () => ({
     <div>{sending && <div role="status" data-text={sending.text}>Sending…</div>}{footer}</div>
   ),
 }));
-vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }), useDictationShortcuts: vi.fn() }));
+vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn(), prepareSend: vi.fn(() => vi.fn()) }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
 import { TabView } from "./TabView";

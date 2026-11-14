@@ -31,6 +31,8 @@ export interface Delivery {
   inputOccupied?: boolean;
   /** The agent dropped its turn before answering it, and took another prompt in its place. */
   replaced?: boolean;
+  /** Stopped while it waited on the agent's input box: never typed. */
+  withdrawn?: boolean;
   /** What was sent, when the agent received something else; `text` is then what it received. */
   sent?: string;
 }
@@ -156,8 +158,8 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   const found = pullQueued(turns, seq);
   if (!found) return undefined;
   const { item, turn } = found;
-  const { inputOccupied, replaced, sent } = item;
-  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, sent }, from: turn };
+  const { inputOccupied, replaced, withdrawn, sent } = item;
+  return { prompt: { author: item.author, text: item.text, images: item.images, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -440,6 +442,25 @@ export class TranscriptReducer {
       case "prompt_replaced": {
         // Drawn where it was, never answered: what the agent took in its place has a message of its own.
         this.changeMessage(payload.promptSeq, () => ({ replaced: true }));
+        break;
+      }
+      case "prompt_withdrawn": {
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, inputOccupied: undefined }));
+        break;
+      }
+      case "prompt_joined": {
+        // Received inside another message's prompt, which shows it: its own bubble goes, and what was sent stays with that one.
+        const taken = takeMessage(this.turns, payload.promptSeq);
+        if (!taken) break;
+        const { prompt, from } = taken;
+        this.touch(from);
+        this.changeMessage(payload.intoSeq, (into) => ({ sent: [into.sent ?? into.text, prompt.text].join("\n\n") }));
+        if (!from.prompt && !from.work.length && !from.completed) {
+          this.turns.splice(this.turns.indexOf(from), 1);
+          this.versions.delete(from);
+          this.shown.delete(from);
+          if (this.current === from) this.current = null;
+        }
         break;
       }
       case "prompt_changed": {
@@ -863,6 +884,21 @@ export class ConversationView {
   transcript(live: boolean): Transcript {
     return this.reducer.snapshot(live);
   }
+}
+
+/** The line a chat shows while a compaction runs (`Transcript.compacting`), on the desktop and the phone. */
+export const COMPACTING_LINE = "Compacting context…";
+
+/**
+ * What a compaction's row says, the same on the desktop and the phone
+ * (#644). Null while it runs: the chat's `COMPACTING_LINE` says so then.
+ */
+export function compactionStatus(item: Extract<WorkItem, { kind: "compaction" }>): string | null {
+  const lifecycle = item.lifecycle;
+  if (lifecycle?.state === "item_started") return null;
+  if (lifecycle?.state === "stopped") return `Compaction stopped: turn ${lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`;
+  if (lifecycle?.state === "unknown") return item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown";
+  return "Context compacted";
 }
 
 /** Runs of two or more consecutive calls to one groupable tool fold into one row. */

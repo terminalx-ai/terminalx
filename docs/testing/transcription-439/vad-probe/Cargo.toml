@@ -1,0 +1,6 @@
+[package]
+name = "tx439-vad-probe"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+earshot = "=1.2.2"

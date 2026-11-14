@@ -1,0 +1,96 @@
+model,input,baseline_status,candidate_status,baseline_raw,candidate_raw,exact_raw_match,trimmed_match
+parakeet-unified-en-0.6b,samantha-project,0,0,Open transcription tab.tsx and dictation text.ts,Open transcription tab.tsx and dictation text.ts,True,True
+parakeet-unified-en-0.6b,samantha-identifier,0,0,Call refresh dictation engine from the Zephyr workspace,Call refresh dictation engine from the Zephyr workspace,True,True
+parakeet-unified-en-0.6b,samantha-branch,0,0,Switch to fix slash offline dictation.,Switch to fix slash offline dictation.,True,True
+parakeet-unified-en-0.6b,samantha-retake,0,0,Meet at 3pm scratched at 4pm,Meet at 3pm scratched at 4pm,True,True
+parakeet-unified-en-0.6b,samantha-literal,0,0,Document what scratch that means,Document what scratch that means,True,True
+parakeet-unified-en-0.6b,samantha-code,0,0,Snake Case User Profile and Case,Snake case user profile and case,False,False
+parakeet-unified-en-0.6b,samantha-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+parakeet-unified-en-0.6b,samantha-learning,0,0,Open the Parakeet files.,Open the Parakeet files.,True,True
+parakeet-unified-en-0.6b,daniel-project,0,0,Open transcription tab.tsx and dictation text.ts,Open transcription tab.tsx and dictation text.ts,True,True
+parakeet-unified-en-0.6b,daniel-identifier,0,0,Call refresh dictation engine from the Zephyr workspace.,Call refresh dictation engine from the Zephyr workspace.,True,True
+parakeet-unified-en-0.6b,daniel-branch,0,0,Switch to fix slash a flying dictation.,Switch to fix slash a flying dictation.,True,True
+parakeet-unified-en-0.6b,daniel-retake,0,0,Meet at 3pm scratch that 4pm,Meet at 3pm scratch that 4pm,True,True
+parakeet-unified-en-0.6b,daniel-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+parakeet-unified-en-0.6b,daniel-code,0,0,Snake Case User Profile End Case,Snake Case User Profile End Case,True,True
+parakeet-unified-en-0.6b,daniel-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+parakeet-unified-en-0.6b,daniel-learning,0,0,Open the Peroquet files.,Open the Peroquet files.,True,True
+parakeet-unified-en-0.6b,silence,0,0,,,True,True
+parakeet-unified-en-0.6b,white-noise,0,0,,,True,True
+parakeet-unified-en-0.6b,tone,0,0,,,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-project,0,0,Opentrascription tab TSX and dictationtext.,Opentrascription tab TSX and dictationtext.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-identifier,0,0,Call refresh dictation engine from the Zephyr workspace.,Call refresh dictation engine from the Zephyr workspace.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-branch,0,0,Switch to fig slash offline dictation.,Switch to fig slash offline dictation.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-retake,0,0,Meet a three PM scratched at four PM.,Meet a three PM scratched at four PM.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-code,0,0,Snake case user profile and case.,Snake case user profile and case.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+nemotron-3.5-asr-streaming-0.6b,samantha-learning,0,0,Open the paraquet files.,Open the paraquet files.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-project,0,0,Open transcription tabs and dictationtext.,Open transcription tabs and dictationtext.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-identifier,0,0,Cool refresh dictation engine from the Zephyr workspace.,Cool refresh dictation engine from the Zephyr workspace.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-branch,0,0,Switch to fix slash offline dictation.,Switch to fix slash offline dictation.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-retake,0,0,Metad three PM scratch that four PM,Meat ad three PM scratch that four PM,False,False
+nemotron-3.5-asr-streaming-0.6b,daniel-literal,0,0,Document What Scratch that means,Document What Scratch that means,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-code,0,0,Snake case user profile end case.,Snake case user profile end case.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+nemotron-3.5-asr-streaming-0.6b,daniel-learning,0,0,Open the periquet files.,Open the periquet files.,True,True
+nemotron-3.5-asr-streaming-0.6b,silence,0,0,,,True,True
+nemotron-3.5-asr-streaming-0.6b,white-noise,0,0,,,True,True
+nemotron-3.5-asr-streaming-0.6b,tone,0,0,,,True,True
+canary-180m-flash,samantha-project,0,0,Open transcription tab.tsx and dictationtext.ts.,Open transcription tab.tsx and dictationtext.ts.,True,True
+canary-180m-flash,samantha-identifier,0,0,Call Refresh Dictation Engine from the Zephyr workspace.,Call Refresh Dictation Engine from the Zephyr workspace.,True,True
+canary-180m-flash,samantha-branch,0,0,Switch to Fix slash offline dictation.,Switch to Fix slash offline dictation.,True,True
+canary-180m-flash,samantha-retake,0,0,Meet at three PM scratched at four PM.,Meet at three PM scratched at four PM.,True,True
+canary-180m-flash,samantha-literal,0,0,Document what Scratch that means.,Document what Scratch that means.,True,True
+canary-180m-flash,samantha-code,0,0,Snake case user profile and case.,Snake case user profile and case.,True,True
+canary-180m-flash,samantha-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+canary-180m-flash,samantha-learning,0,0,Open the Parraquet files.,Open the Parraquet files.,True,True
+canary-180m-flash,daniel-project,0,0,Open transcription tab.tsx and dictationtext.ts.,Open transcription tab.tsx and dictationtext.ts.,True,True
+canary-180m-flash,daniel-identifier,0,0,Call Refresh Dictation Engine from the Zephyr Workspace.,Call Refresh Dictation Engine from the Zephyr Workspace.,True,True
+canary-180m-flash,daniel-branch,0,0,Switch to fix slash a flying dictation.,Switch to fix slash a flying dictation.,True,True
+canary-180m-flash,daniel-retake,0,0,Meet at three PM scratch at four PM.,Meet at three PM scratch at four PM.,True,True
+canary-180m-flash,daniel-literal,0,0,Document what Scratch that means.,Document what Scratch that means.,True,True
+canary-180m-flash,daniel-code,0,0,Snake case user profile end case.,Snake case user profile end case.,True,True
+canary-180m-flash,daniel-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+canary-180m-flash,daniel-learning,0,0,Open the Pericay files.,Open the Periquet files.,False,False
+canary-180m-flash,silence,0,0,,,True,True
+canary-180m-flash,white-noise,0,0,,,True,True
+canary-180m-flash,tone,0,0,,,True,True
+whisper-small,samantha-project,0,0,Open transcription tab.tsx and dictationtext.ts,Open transcription tab.tsx and dictationtext.ts,True,True
+whisper-small,samantha-identifier,0,0,Call Refresh Dictation Engine from the Zephyr workspace.,Call Refresh Dictation Engine from the Zephyr workspace.,True,True
+whisper-small,samantha-branch,0,0,Switch to fix slash offline dictation.,Switch to fix slash offline dictation.,True,True
+whisper-small,samantha-retake,0,0,Meet at 3pm Scratch that 4pm,Meet at 3pm Scratch that 4pm,True,True
+whisper-small,samantha-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+whisper-small,samantha-code,0,0,Snake case user profile and case.,Snake case user profile and case.,True,True
+whisper-small,samantha-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+whisper-small,samantha-learning,0,0,Open the Parake files.,Open the Parake files.,True,True
+whisper-small,daniel-project,0,0,Open transcription tab.tsx and dictation text.ts.,Open transcription tab.tsx and dictation text.ts.,True,True
+whisper-small,daniel-identifier,0,0,call Refresh Dictation Engine from the Zephyr workspace.,call Refresh Dictation Engine from the Zephyr workspace.,True,True
+whisper-small,daniel-branch,0,0,switch to fix slash offline dictation,switch to fix slash offline dictation,True,True
+whisper-small,daniel-retake,0,0,Meet at 3pm Scratch that 4pm,Meet at 3pm Scratch that 4pm,True,True
+whisper-small,daniel-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+whisper-small,daniel-code,0,0,Snakecase use a profile end case.,Snakecase use a profile end case.,True,True
+whisper-small,daniel-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+whisper-small,daniel-learning,0,0,Open the Periket files.,Open the Periket files.,True,True
+whisper-small,silence,0,0,you,you,True,True
+whisper-small,white-noise,0,0,,,True,True
+whisper-small,tone,0,0,tax,pergunt,False,False
+whisper-large-v3-turbo,samantha-project,0,0,Open transcription tab.tsx and dictation text.ts,Open transcription tab.tsx and dictation text.ts,True,True
+whisper-large-v3-turbo,samantha-identifier,0,0,Call refresh dictation engine from the Zephyr workspace.,Call refresh dictation engine from the Zephyr workspace.,True,True
+whisper-large-v3-turbo,samantha-branch,0,0,Switch to fix slash offline dictation.,Switch to fix slash offline dictation.,True,True
+whisper-large-v3-turbo,samantha-retake,0,0,Meet at 3 p.m. Scratch at 4 p.m.,Meet at 3 p.m. Scratch at 4 p.m.,True,True
+whisper-large-v3-turbo,samantha-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+whisper-large-v3-turbo,samantha-code,0,0,Snake Case User Profile End Case,Snake Case User Profile End Case,True,True
+whisper-large-v3-turbo,samantha-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+whisper-large-v3-turbo,samantha-learning,0,0,Open the Parakeet files.,Open the Parakeet files.,True,True
+whisper-large-v3-turbo,daniel-project,0,0,Open transcription tab.tsx and dictation text.ts,Open transcription tab.tsx and dictation text.ts,True,True
+whisper-large-v3-turbo,daniel-identifier,0,0,Call refresh dictation engine from the Zephyr workspace.,Call refresh dictation engine from the Zephyr workspace.,True,True
+whisper-large-v3-turbo,daniel-branch,0,0,Switch to fix slash offline dictation.,Switch to fix slash offline dictation.,True,True
+whisper-large-v3-turbo,daniel-retake,0,0,Meat at 3pm scratch that 4pm.,Meat at 3pm scratch that 4pm.,True,True
+whisper-large-v3-turbo,daniel-literal,0,0,Document what scratch that means.,Document what scratch that means.,True,True
+whisper-large-v3-turbo,daniel-code,0,0,Snake Case User Profile End Case,Snake Case User Profile End Case,True,True
+whisper-large-v3-turbo,daniel-legitimate,0,0,Thank you for reviewing this change.,Thank you for reviewing this change.,True,True
+whisper-large-v3-turbo,daniel-learning,0,0,Open the Pericay files.,Open the Pericay files.,True,True
+whisper-large-v3-turbo,silence,0,0,Thank you.,Thank you.,True,True
+whisper-large-v3-turbo,white-noise,0,0,.,.,True,True
+whisper-large-v3-turbo,tone,0,0,.,.,True,True

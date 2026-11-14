@@ -5,7 +5,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, Keyboard, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
-import type { Delivery, Turn, WorkItem } from "@/lib/transcript";
+import { compactionStatus, type Delivery, type Turn, type WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { MessageTime } from "./MessageTime";
 import { Markdown } from "./Markdown";
@@ -212,7 +212,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
             <Clock className="size-3.5 shrink-0" />
             {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
             <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
-            {onSendQueuedNow && !item.inputOccupied && (
+            {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
               <WithTooltip label="Interrupt the agent and send this now">
                 <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
                   <Send /> Send now
@@ -221,6 +221,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
             )}
           </div>
           {item.inputOccupied && <InputOccupiedNote />}
+          {item.withdrawn && <WithdrawnNote seq={item.seq} onSendAgain={onSendAgain} />}
         </div>
       );
     case "status":
@@ -290,6 +291,21 @@ function InputOccupiedNote() {
   );
 }
 
+/** A message stopped while it waited on the agent's input box (#722): never typed, and offered again. */
+function WithdrawnNote({ seq, onSendAgain }: { seq?: number; onSendAgain?: (seq: number) => void }) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-withdrawn">
+      <CircleAlert className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1">Not sent: the agent was stopped while its input box had text in it, so this message was never typed.</span>
+      {onSendAgain && seq !== undefined && (
+        <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendAgain(seq)}>
+          <Send /> Send again
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
 /**
  * A message the reader has just sent, before the runtime has it (#727): it is
@@ -346,7 +362,7 @@ function ReaderMessage({
           </div>
         ) : null}
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
-        <div className={cn(message.replaced && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
+        <div className={cn((message.replaced || message.withdrawn) && "text-muted-foreground")}><LinkedText text={message.text} context={linkContext} /></div>
         <MessageTime ts={message.messageTs} />
         {message.sent !== undefined && (
           <details className="mt-2 text-xs text-muted-foreground" data-testid="prompt-changed">
@@ -358,6 +374,7 @@ function ReaderMessage({
           </details>
         )}
         {message.inputOccupied && <InputOccupiedNote />}
+        {message.withdrawn && <WithdrawnNote seq={message.seq} onSendAgain={onSendAgain} />}
         {message.replaced && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-replaced">
             <CircleAlert className="size-3.5 shrink-0" />
@@ -382,11 +399,9 @@ function ReaderMessage({
 function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useDisclosure(item.key);
   // The existing Chat indicator owns animation; do not add a second spinner.
-  if (item.lifecycle?.state === "item_started") return null;
+  const status = compactionStatus(item);
+  if (status === null) return null;
   const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
-  const status = item.lifecycle?.state === "stopped"
-    ? `Compaction stopped: turn ${item.lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`
-    : item.lifecycle?.state === "unknown" ? (item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown") : "Context compacted";
   const label = (
     <>
       {status}{item.preTokens != null ? ` from ${count(item.preTokens)}` : ""}

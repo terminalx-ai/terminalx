@@ -818,10 +818,12 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
         let entry = crate::store::index::get(session)?;
         let current = entry.tab(tab).context("The tab does not belong to this session.")?;
         Ok(match method {
+            // `transport`: a native Codex tab (#644) has no terminal until it moves there, and the phone says so.
             "tab" => serde_json::json!({
                 "harness": current.harness, "model": current.model, "effort": current.effort, "permissionMode": current.permission_mode,
                 "requestedModel": current.requested_model, "requestedEffort": current.requested_effort,
                 "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
+                "transport": current.transport,
             }),
             "stop" => { manager.stop(session, tab)?; Value::Null }
             "interrupt" => serde_json::json!({ "interrupted": manager.interrupt(session, tab)? }),
@@ -1170,6 +1172,9 @@ mod open_terminal_tests {
         manager.mobile.register(&lifetime,actor.clone(),"watch","viewer").unwrap();
         let open = |connection: &str| execute(&manager,&lifetime,"openTerminal",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"}));
         let transport = || store::index::get("open").unwrap().tab("native").unwrap().transport;
+        // What the phone reads of the tab names its transport, so a native tab is never sent to a terminal it lacks (#644).
+        let told = |connection: &str| execute(&manager,&lifetime,"tab",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"})).unwrap()["transport"].clone();
+        assert_eq!(told("watch"), json!("experimentalCodexStdio"));
 
         let refused = open("watch").unwrap_err();
         assert!(format!("{refused:#}").contains("read-only"), "{refused:#}");
@@ -1178,6 +1183,7 @@ mod open_terminal_tests {
 
         assert_eq!(open("phone").unwrap(), json!({"opened":true}));
         assert_eq!(transport(), store::index::AgentTransport::Pty);
+        assert_eq!(told("phone"), json!("pty"));
         let pane = manager.pane_of("open","native").expect("Codex runs in the tab's terminal").pane_id;
         let until = Instant::now() + Duration::from_secs(20);
         let shown = loop {

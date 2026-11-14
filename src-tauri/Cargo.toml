@@ -42,6 +42,7 @@ desktop = [
     "dep:objc2-foundation",
     "dep:objc2-speech",
     "dep:transcribe-cpp",
+    "dep:terminalx-dictation-detector",
 ]
 
 [[bin]]
@@ -136,6 +137,7 @@ block2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSDictionary"], optional = true }
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognitionTaskHint", "SFTranscription", "SFTranscriptionSegment", "SFErrors", "block2", "objc2-avf-audio"], optional = true }
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
+terminalx-dictation-detector = { path = "src/transcription/native-detector", optional = true }
 
 [profile.dev]
 # Keep local builds and per-worktree caches from consuming tens of GB each.

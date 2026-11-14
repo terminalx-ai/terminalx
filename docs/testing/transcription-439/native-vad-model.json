@@ -1,0 +1,10 @@
+{
+  "repo": "handy-computer/silero-vad-v6.2-gguf",
+  "revision": "a9b2d61c20ae4ddf3644edb34969e8185a485448",
+  "filename": "silero-vad-v6.2-F32.gguf",
+  "sizeBytes": 1241056,
+  "sha256": "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
+  "license": "MIT",
+  "url": "https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/a9b2d61c20ae4ddf3644edb34969e8185a485448/silero-vad-v6.2-F32.gguf",
+  "runtimeCommit": "4d7c1ccefd39e5a9ea36cca5f8fefc6dcc14b99b"
+}

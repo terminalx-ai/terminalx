@@ -27,7 +27,11 @@ export interface StreamBlock {
 
 export interface TabLog {
   loaded: boolean;
-  /** True only after a manager history read reconciled current ownership. */
+  /**
+   * True only after a manager history read reconciled current ownership, or,
+   * for a cloud tab, while a live feed that caught up from its runtime's own
+   * history holds (`setFeedContinuity`).
+   */
   compactionContinuityKnown?: boolean;
   events: AgentEvent[];
   stream: StreamBlock[];
@@ -40,6 +44,8 @@ const EMPTY: TabLog = { loaded: false, events: [], stream: [], status: "idle", v
 // A read must match both the cache incarnation and its invalidation generation.
 interface StoredLog extends TabLog {
   readonly admission: { generation: number };
+  /** A cloud tab's live feed, not a history read, says whether continuity is known. */
+  fed?: boolean;
 }
 const logs = new Map<string, StoredLog>();
 const listeners = new Map<string, Set<() => void>>();
@@ -95,6 +101,15 @@ function sameBlock(a: BlockRef, b: BlockRef) {
   return a.messageId === b.messageId && a.index === b.index;
 }
 
+/**
+ * A preview changes by replacement, never in place: a new stream with a new
+ * block, so the memoised turn drawing it (and anything memoised under it)
+ * sees new props and draws the new text at the next frame.
+ */
+function setStreamBlock(log: TabLog, old: StreamBlock | undefined, next: StreamBlock) {
+  log.stream = old ? log.stream.map((s) => (s === old ? next : s)) : [...log.stream, next];
+}
+
 export function applyEvent(ev: AgentEvent) {
   const k = key(ev.sessionId, ev.tabId);
   const log = getLog(k);
@@ -107,29 +122,31 @@ export function applyEvent(ev: AgentEvent) {
   }
   if (p.type === "delta") {
     if (ev.subagent) return; // one preview per tab; subagent output is drawn from committed events
-    let b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const b = log.stream.find((s) => sameBlock(s.ref, p.block));
+    const fresh = (kind: StreamBlock["kind"]): StreamBlock => b ?? { ref: p.block, kind, text: "", partialJson: "", done: false };
     switch (p.delta) {
       case "block_start": {
         const kind = p.blockType === "text" ? "text" : p.blockType === "thinking" ? "thinking" : p.blockType === "tool_use" ? "tool_use" : "other";
-        if (!b) log.stream.push({ ref: p.block, kind, text: "", partialJson: "", done: false });
-        else b.kind = kind;
+        setStreamBlock(log, b, { ...fresh(kind), kind });
         break;
       }
-      case "text_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "text", text: "", partialJson: "", done: false }));
-        b.ts ??= ev.messageTs;
-        b.text += p.text;
+      case "text_delta": {
+        const s = fresh("text");
+        setStreamBlock(log, b, { ...s, ts: s.ts ?? ev.messageTs, text: s.text + p.text });
         break;
-      case "thinking_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "thinking", text: "", partialJson: "", done: false }));
-        b.text += p.text;
+      }
+      case "thinking_delta": {
+        const s = fresh("thinking");
+        setStreamBlock(log, b, { ...s, text: s.text + p.text });
         break;
-      case "input_delta":
-        if (!b) log.stream.push((b = { ref: p.block, kind: "tool_use", text: "", partialJson: "", done: false }));
-        b.partialJson += p.partialJson;
+      }
+      case "input_delta": {
+        const s = fresh("tool_use");
+        setStreamBlock(log, b, { ...s, partialJson: s.partialJson + p.partialJson });
         break;
+      }
       case "block_stop":
-        if (b) b.done = true;
+        if (b) setStreamBlock(log, b, { ...b, done: true });
         break;
     }
     touch(k);
@@ -138,10 +155,7 @@ export function applyEvent(ev: AgentEvent) {
   if (p.type === "status" && p.text.startsWith("tool_pending:")) {
     const [, id, name] = p.text.split(":");
     const b = log.stream.find((s) => s.kind === "tool_use" && !s.toolId);
-    if (b) {
-      b.toolId = id;
-      b.toolName = name;
-    }
+    if (b) setStreamBlock(log, b, { ...b, toolId: id, toolName: name });
     touch(k);
     return;
   }
@@ -193,6 +207,23 @@ export async function loadTab(sessionId: string, tabId: string) {
 /** The tab's log as it stands, outside React. */
 export function getTabLog(sessionId: string, tabId: string): TabLog {
   return logs.get(key(sessionId, tabId)) ?? EMPTY;
+}
+
+/**
+ * Whether a cloud tab's log is continuous with its runtime's own history
+ * (#644): true while a live feed that caught up from that history over a
+ * connected attachment holds, false from when it drops or attaches again.
+ * `cloudAgents` keeps it; a local resume's history read neither sets nor
+ * clears it.
+ */
+export function setFeedContinuity(sessionId: string, tabId: string, known: boolean) {
+  const k = key(sessionId, tabId);
+  const log = known ? getLog(k) : logs.get(k);
+  if (!log) return;
+  log.fed = true;
+  if ((log.compactionContinuityKnown ?? false) === known) return;
+  log.compactionContinuityKnown = known;
+  touch(k, true);
 }
 
 /** Indicators the runtime never saves; their seq may be reused after it restarts. */
@@ -286,7 +317,8 @@ export async function reconcileAgentEvents() {
   reconciling = true;
   for (const [k, log] of logs) {
     log.admission.generation++;
-    log.compactionContinuityKnown = false;
+    // A cloud tab's feed follows its own connection, which this read cannot restore.
+    if (!log.fed) log.compactionContinuityKnown = false;
     dirty.add(k);
   }
   // A frame requested before suspension need not be delivered on resume.
