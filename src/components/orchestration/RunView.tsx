@@ -149,6 +149,12 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
             {(run.state === "running" || run.state === "planned" || run.state === "needsYou" || run.state === "verifying" || run.state === "merging") && (
               <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}><Square />Stop run</Button>
             )}
+            {/* A project that asks for no approval (PRO-365): the person starts the plan as last saved, never while a change is being saved. A window warning does not hold it. */}
+            {run.state === "planned" && (
+              <Button variant="accent" disabled={!!busy} title={busy === "save" || busy === "limits" ? "Saving your change first" : undefined} onClick={() => void act("start", async () => (await orchestration.start(run.id)).run)}>
+                {busy === "start" ? <LoaderCircle className="animate-spin" /> : <Play />}Start run
+              </Button>
+            )}
             {mergeAction && (
               <Button variant="outline" disabled={!!busy || mergeAction.disabled} data-testid="run-merge" title={mergeAction.why ?? "Merge every accepted piece into the lead's branch, in dependency order. Nothing is pushed."} onClick={() => void merge()}>
                 {busy === "merge" || run.mergeUnderWay ? <LoaderCircle className="animate-spin" /> : <GitMerge />}{mergeAction.label}
@@ -207,7 +213,7 @@ function subtitle(run: Run): string {
     case "awaitingApproval":
       return `The lead split this into ${count}. Nothing starts until you approve.`;
     case "planned":
-      return `The lead split this into ${count}. This repository starts runs without asking: the lead starts it with terminalx runs start.`;
+      return `The lead split this into ${count}. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.`;
     default: {
       // A run held up by a blocked piece, with nothing else running, says so (18.03); while workers run, the Needs you list names it.
       const blocked = run.pieces.filter((piece) => piece.state === "blocked");
@@ -217,9 +223,13 @@ function subtitle(run: Run): string {
         const held = run.waiting.filter((entry) => entry.on.some((on) => blocked.some((piece) => piece.id === on))).map((entry) => numbers[entry.piece]);
         return `${blocked.length === 1 ? `Piece ${names} is` : `Pieces ${names} are`} blocked.${held.length ? ` ${held.length === 1 ? `Piece ${held[0]} waits` : `Pieces ${held.join(", ")} wait`} for ${blocked.length === 1 ? "it" : "them"}; nothing else is running.` : " Nothing else is running."}`;
       }
-      if (!run.approval) return `${count} · started without approval, as this repository is set`;
-      const since = relativeTime(run.approval.at);
-      return `${count} · started ${since === "now" ? "just now" : /^\d/.test(since) ? `${since} ago` : since} · approved by you`;
+      const when = (at: string) => {
+        const since = relativeTime(at);
+        return since === "now" ? "just now" : /^\d/.test(since) ? `${since} ago` : since;
+      };
+      if (run.approval) return `${count} · started ${when(run.approval.at)} · approved by you`;
+      if (run.startedByPerson) return `${count} · started by you ${when(run.startedByPerson.at)}`;
+      return `${count} · started without approval, as this repository is set`;
     }
   }
 }

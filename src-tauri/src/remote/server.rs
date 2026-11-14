@@ -370,6 +370,9 @@ pub struct WorkspaceRpc {
     pub collab: Arc<Collaboration>,
     /// Agent tabs, keys and the mailbox (PRO-22); absent in tests without them.
     agents: OnceLock<Arc<CloudAgents>>,
+    /// Receipts of `agent-commands/1` (PRO-343): present only when the
+    /// agents have no cloud mailbox, so the namespace is offered only then.
+    agent_commands: OnceLock<super::agent_commands::Journal>,
     /// Connections that said hello, for workspace-wide notifications.
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
     /// Streams to the workspace's own ports (PRO-28).
@@ -420,6 +423,7 @@ impl WorkspaceRpc {
             in_flight: Mutex::new(HashMap::new()),
             collab: Arc::new(Collaboration::new()),
             agents: OnceLock::new(),
+            agent_commands: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
             ports: Arc::new(super::ports::Ports::default()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
@@ -538,6 +542,18 @@ impl WorkspaceRpc {
     /// the tab list changes. Call inside a Tokio runtime.
     pub fn set_agents(self: &Arc<Self>, agents: Arc<CloudAgents>) {
         agents.share_collaboration(self.collab.clone());
+        // Without a mailbox, send, steer, stop and decisions are live calls
+        // with receipts kept here (docs/MACHINES.md decision 3). With one,
+        // they go through it only. A journal that cannot be opened offers
+        // nothing: no live command without a durable receipt.
+        if agents.api.is_none() && self.agents.get().is_none() {
+            match super::agent_commands::Journal::open(agents.dir(), crate::cloud_agents::now_ms()) {
+                Ok(journal) => {
+                    let _ = self.agent_commands.set(journal);
+                }
+                Err(error) => log::error!("open the agent command receipts; agent-commands/1 is not offered: {error:#}"),
+            }
+        }
         if self.agents.set(agents).is_err() {
             return;
         }
@@ -863,7 +879,7 @@ impl WorkspaceRpc {
         if !ticket.valid() { return Err(RpcError::forbidden(crate::data_privacy::MESSAGE)); }
         if method == "rpc.hello" {
             let _privacy = ticket.scope().map_err(|error| RpcError::forbidden(error.to_string()))?;
-            let granted = protocol::negotiate(&params)?;
+            let granted = protocol::negotiate_offered(&params, &self.offered())?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
             peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
@@ -898,7 +914,8 @@ impl WorkspaceRpc {
             }
             return Ok(hello);
         }
-        let Some(spec) = protocol::find_method(method) else {
+        let Some(spec) = protocol::find_method(method).filter(|spec| spec.capability != protocol::AGENT_COMMANDS || self.agent_commands.get().is_some()) else {
+            // A runtime with a mailbox has no live steer, stop or decision.
             return Err(RpcError::new("method_not_found", format!("{method} is not a workspace method")));
         };
         match &*peer.granted.lock().unwrap() {
@@ -926,14 +943,19 @@ impl WorkspaceRpc {
             .to_string();
         let key = (peer.device_id.clone(), request_id.clone());
         let gate = self.in_flight.lock().unwrap().entry(key.clone()).or_default().clone();
+        // Agent commands keep their own durable receipts (`agent_commands`):
+        // the ten-minute cache would forget them across a sleep or a restart.
+        let durable = self.durable_command(peer, spec);
         let result = {
             let _serial = gate.lock().await;
-            let previous = self.idempotency.lock().unwrap().get(&peer.device_id, &request_id, Instant::now());
+            let previous = if durable { None } else { self.idempotency.lock().unwrap().get(&peer.device_id, &request_id, Instant::now()) };
             match previous {
                 Some(previous) => previous,
                 None => {
                     let result = self.execute(peer, method, params, ticket).await;
-                    self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
+                    if !durable {
+                        self.idempotency.lock().unwrap().put(&peer.device_id, &request_id, &result, Instant::now());
+                    }
                     result
                 }
             }
@@ -1014,6 +1036,17 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        if method == "environment.cancel" {
+            return super::environment::cancel(peer.id(), &params);
+        }
+        if method == "environment.report" {
+            // Retain admission until every probe and its I/O have ended.
+            let _privacy = ticket.enter().map_err(|_| RpcError::forbidden("Environment report is unavailable"))?;
+            return super::environment::report(peer.id(), &params, || {
+                ticket.valid() && !peer.hung_up() && peer.granted("environment/1") &&
+                    self.authority(peer) == Authority::Manage
+            }).await;
+        }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
@@ -1096,7 +1129,11 @@ impl WorkspaceRpc {
                 self.session_create(params)
             },
             "session.close" => self.session_close(params),
+            "session.send" if self.durable_command(peer, protocol::find_method("session.send").expect("session.send is a method")) => {
+                self.agent_command(peer, "session.send", params)
+            }
             "session.send" => self.session_send(peer, params),
+            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params),
             "session.interrupt" => self.session_interrupt(peer, params),
             "session.toTerminal" => self.session_to_terminal(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
@@ -3222,6 +3259,98 @@ impl WorkspaceRpc {
         Ok(json!({ "sessionId": session.id, "tabId": tab.id, "outcome": outcome }))
     }
 
+    /// What this runtime offers in `rpc.hello`: every namespace this build
+    /// speaks, less `agent-commands/1` beside a mailbox.
+    fn offered(&self) -> Vec<&'static str> {
+        protocol::CAPABILITIES.iter().copied().filter(|capability| *capability != protocol::AGENT_COMMANDS || self.agent_commands.get().is_some()).collect()
+    }
+
+    /// Whether `spec` is answered from the durable receipts of
+    /// `agent-commands/1`: its own methods, and `session.send` once a
+    /// connection was granted it.
+    fn durable_command(&self, peer: &Peer, spec: &protocol::Method) -> bool {
+        self.agent_commands.get().is_some()
+            && (spec.capability == protocol::AGENT_COMMANDS || (spec.name == "session.send" && peer.granted(protocol::AGENT_COMMANDS)))
+    }
+
+    /// `agent-commands/1` (PRO-343): send, steer, stop or a permission
+    /// decision, decided and applied by the mailbox's own rules
+    /// (`cloud_agents::mailbox::decide`) and answered once per device and
+    /// `clientRequestId`:
+    /// - A repeat gets the first reply and touches nothing; the same id
+    ///   with another body is refused (`conflict`, `id-reused`).
+    /// - An id whose first try was cut off by a restart is answered
+    ///   `outcome_unknown`, except a stop, which is applied again.
+    /// - A send that arrives while a turn runs, or behind earlier queued
+    ///   ones, waits in the tab's durable follow-up queue and says
+    ///   `queued: true`; its receipt answers a repeat, so it is never queued
+    ///   twice. A steer goes into the running turn.
+    /// - A decision names its `requestId`; one already answered, or gone,
+    ///   is refused (`conflict`, `request-not-pending`).
+    fn agent_command(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+        use super::agent_commands::{self as receipts, Known};
+        let journal = self.agent_commands.get().ok_or_else(|| RpcError::new("method_not_found", format!("{method} is not a workspace method")))?;
+        let agents = self.agents()?;
+        let kind = match method {
+            "session.send" => "send",
+            "session.steer" => "steer",
+            "session.stop" => "stop",
+            "session.decide" => "permission-decision",
+            other => return Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
+        };
+        // Checked by the dispatcher already.
+        let request_id = required_str(&params, "clientRequestId")?.to_string();
+        let key = receipts::Key { device: peer.device_id.clone(), id: request_id.clone() };
+        let digest = receipts::digest(method, &params);
+        let now = crate::cloud_agents::now_ms();
+        match journal.known(&key, now) {
+            Known::Receipt { digest: first, reply } => return if first == digest { reply } else { Err(receipts::id_reused()) },
+            Known::Interrupted { digest: first } if first != digest => return Err(receipts::id_reused()),
+            // Cut off mid-apply: it may have reached the agent. Only a stop
+            // is safe to apply again.
+            Known::Interrupted { .. } if kind != "stop" => {
+                let unknown = Err(receipts::outcome_unknown());
+                if let Err(error) = journal.record(&key, &digest, &unknown, now) {
+                    log::error!("record agent command receipt {request_id}: {error:#}");
+                }
+                return unknown;
+            }
+            Known::Interrupted { .. } | Known::New => {}
+        }
+        let tab = self.visible_tab(peer, &params)?;
+        if kind == "permission-decision" && params.get("requestId").and_then(Value::as_str).is_none_or(str::is_empty) {
+            return Err(RpcError::invalid("requestId names the request this decision answers"));
+        }
+        let actor = attachment_owner(peer);
+        let command = crate::cloud_agents::mailbox::Command {
+            kind,
+            tab_id: &tab.tab_id,
+            client_command_id: &request_id,
+            actor_id: &actor,
+            // As the live `session.send` always did: only a person takes part
+            // in tab leases.
+            leases: peer.user_id.is_some(),
+            access: self.access(peer),
+            plaintext: &params,
+        };
+        match crate::cloud_agents::mailbox::decide(agents, &command, || journal.applying(&key, &digest, now)) {
+            // Nothing reached the agent: decided again if sent again.
+            crate::cloud_agents::mailbox::Decided::Refused((outcome, category, extra)) => receipts::reply(&tab.session_id, &tab.tab_id, outcome, category, extra),
+            crate::cloud_agents::mailbox::Decided::MarkFailed => {
+                Err(RpcError::new("unavailable", "the runtime could not record this command, so it did not apply it; send it again"))
+            }
+            crate::cloud_agents::mailbox::Decided::Applied((outcome, category, extra)) => {
+                let reply = receipts::reply(&tab.session_id, &tab.tab_id, outcome, category, extra);
+                // The agent was (or was not) touched; without a durable
+                // receipt the `applying` mark answers a repeat as unknown.
+                if let Err(error) = journal.record(&key, &digest, &reply, crate::cloud_agents::now_ms()) {
+                    log::error!("record agent command receipt {request_id}: {error:#}");
+                }
+                reply
+            }
+        }
+    }
+
     /// `session/3` (#427): Escape for a tab's running turn. The turn is
     /// interrupted and the agent's process stays up. The follow-up queue is
     /// not touched, so the next queued message goes out once the turn has
@@ -3578,3 +3707,40 @@ mod pipeline_reviewer_tests;
 
 #[cfg(test)]
 pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn environment_rpc_preserves_handshake_capability_and_member_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
+        let (peer, _events) = Peer::for_user("environment-viewer".into(), Authority::Participate, Some("viewer".into()));
+        let call = |method: &'static str, params: Value| {
+            let rpc = rpc.clone();
+            let peer = peer.clone();
+            async move { rpc.handle(&peer, &json!({"id": "env-test", "method": method, "params": params})).await }
+        };
+        let params = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "hello_required");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["fs/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "capability_not_granted");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": "viewer"}]})).unwrap()));
+        for role in ["viewer", "driver", "manager"] {
+            rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": role}]})).unwrap()));
+            assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden", "a listed {role} cannot consume the manager probe slot");
+            assert_eq!(call("environment.cancel", params.clone()).await["error"]["code"], "forbidden");
+        }
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "owner", "role": "manager"}]})).unwrap()));
+        let (manager, _events) = Peer::for_user("environment-owner".into(), Authority::Manage, Some("owner".into()));
+        let invoke = |method: &str, params: Value| json!({"id": "owner-env", "method": method, "params": params});
+        rpc.handle(&manager, &invoke("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]}))).await;
+        assert_eq!(rpc.handle(&manager, &invoke("environment.cancel", params.clone())).await["ok"], true);
+        assert_eq!(rpc.handle(&manager, &invoke("environment.report", json!({"requestId": "bad", "command": "env"}))).await["error"]["code"], "invalid_params");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": []})).unwrap()));
+        assert_eq!(call("environment.report", params).await["error"]["code"], "forbidden");
+    }
+}

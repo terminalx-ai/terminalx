@@ -521,6 +521,8 @@ mod mac {
 
     pub struct Dictation {
         active: Mutex<Option<Active>>,
+        /// Serializes starts with exit, including delayed permission callbacks.
+        shutting_down: Mutex<bool>,
         permissions: Arc<dyn permission::Gateway>,
         /// Bumped per start; a result handler from an older run is ignored.
         generation: Arc<AtomicU64>,
@@ -554,6 +556,7 @@ mod mac {
             let now = Instant::now();
             Self {
                 active: Mutex::new(None),
+                shutting_down: Mutex::new(false),
                 permissions,
                 generation: Arc::new(AtomicU64::new(0)),
                 stopping: Arc::new(AtomicBool::new(false)),
@@ -599,7 +602,11 @@ mod mac {
                 emit(&app, "error", None, Some(msg.clone()));
                 return Err(msg);
             }
-            *self.personalization.lock().unwrap() = context;
+            {
+                let closing = self.shutting_down.lock().unwrap();
+                if *closing { return Err("Dictation is shutting down.".into()); }
+                *self.personalization.lock().unwrap() = context;
+            }
             // Under the hardened runtime a microphone refusal is silent —
             // zeroes rather than an error — so settle every privacy service
             // this engine needs before opening the capture.
@@ -687,6 +694,8 @@ mod mac {
         // ---- local models
 
         fn start_local(self: &Arc<Self>, app: AppHandle, transcription: Arc<Transcription>, id: &str) -> Result<(), String> {
+            let closing = self.shutting_down.lock().unwrap();
+            if *closing { return Err("Dictation is shutting down.".into()); }
             let spec = crate::transcription::catalog::find(id).ok_or_else(|| format!("unknown model {id}"))?;
             let path = crate::transcription::download::model_path(spec).map_err(|e| e.to_string())?;
             // Open first: what is said while the model loads is kept in the
@@ -695,11 +704,14 @@ mod mac {
             let context = self.personalization.lock().unwrap().clone();
             self.stopping.store(false, Ordering::SeqCst);
             *self.active.lock().unwrap() = Some(Active { capture: Some(capture), route: Route::Local, restore_volume });
-            let previous = self.local_worker.lock().unwrap().take();
+            // Keep the old worker joinable even if spawning its successor fails.
+            let previous = Arc::new(Mutex::new(self.local_worker.lock().unwrap().take()));
+            let worker_previous = previous.clone();
             let me = self.clone();
             let worker_app = app.clone();
             let id = id.to_string();
             let spawned = std::thread::Builder::new().name("dictation-local".into()).spawn(move || {
+                let previous = worker_previous.lock().unwrap().take();
                 if let Some(previous) = previous {
                     let _ = previous.join();
                 }
@@ -709,6 +721,9 @@ mod mac {
                 Ok(worker) => *self.local_worker.lock().unwrap() = Some(worker),
                 Err(error) => {
                     self.finish(&app);
+                    if let Some(previous) = previous.lock().unwrap().take() {
+                        let _ = previous.join();
+                    }
                     return Err(error.to_string());
                 }
             }
@@ -955,6 +970,8 @@ mod mac {
         }
 
         fn begin_apple_on_main(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
+            let closing = self.shutting_down.lock().unwrap();
+            if *closing { return Err("Dictation is shutting down.".into()); }
             unsafe {
                 let language = self.personalization.lock().unwrap().data.options.language.clone();
                 let recognizer = if let Some(language) = language {
@@ -1024,6 +1041,39 @@ mod mac {
             }
         }
 
+        /// Called on the main thread during RunEvent::Exit, for quit and restart.
+        /// No model-owning worker may survive into ggml's static destructors.
+        pub fn shutdown(&self, engine: &crate::transcription::engine::Engine) {
+            let mut closing = self.shutting_down.lock().unwrap();
+            *closing = true;
+            self.stopping.store(true, Ordering::SeqCst);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.clear_personalization();
+            let active = self.active.lock().unwrap().take();
+            if let Some(mut active) = active {
+                // Close the frame channel before joining a worker blocked on it.
+                active.capture = None;
+                if let Route::Apple { request, task, .. } = &active.route {
+                    unsafe {
+                        request.lock().unwrap().0.endAudio();
+                        task.cancel();
+                    }
+                }
+                if let Some(level) = active.restore_volume.take() {
+                    volume::set(level);
+                }
+                drop(active);
+            }
+            let worker = self.local_worker.lock().unwrap().take();
+            if let Some(worker) = worker {
+                if worker.join().is_err() {
+                    log::warn!("dictation worker panicked during shutdown");
+                }
+            }
+            engine.unload();
+            engine.noise.unload();
+        }
+
         /// Stop the microphone; the engine then finishes the last phrase.
         pub fn stop(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
             if !self.is_active() {
@@ -1067,7 +1117,14 @@ mod mac {
         /// Release everything, put the volume back, and tell the UI. Safe to
         /// call twice.
         fn finish(&self, app: &AppHandle) {
-            let taken = self.active.lock().unwrap().take();
+            // Close capture while holding the same lock exit uses. Otherwise
+            // finish could park its sender in a main-thread callback while exit
+            // joins the worker waiting for that channel to close.
+            let taken = {
+                let mut guard = self.active.lock().unwrap();
+                if let Some(active) = guard.as_mut() { active.capture = None; }
+                guard.take()
+            };
             if let Some(mut a) = taken {
                 self.clear_personalization();
                 if let Some(level) = a.restore_volume.take() {
@@ -1108,6 +1165,89 @@ mod mac {
         use std::time::Duration;
 
         const SECOND: usize = TARGET_RATE as usize;
+
+        #[test]
+        fn shutdown_cancels_and_joins_even_without_an_active_capture() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let dictation = Dictation::default();
+            let engine = crate::transcription::engine::Engine::default();
+            let context = dictation.personalization.lock().unwrap().clone();
+            let completed = Arc::new(AtomicBool::new(false));
+            let worker_completed = completed.clone();
+            // A preceding dictation can still own a model when the next worker
+            // starts. Joining the newest worker must drain that chain too.
+            let previous = std::thread::spawn(move || {
+                while !context.is_cancelled() { std::thread::yield_now(); }
+                worker_completed.store(true, Ordering::SeqCst);
+            });
+            *dictation.local_worker.lock().unwrap() = Some(std::thread::spawn(move || {
+                previous.join().unwrap();
+            }));
+            dictation.shutdown(&engine);
+            assert!(completed.load(Ordering::SeqCst));
+            assert!(dictation.local_worker.lock().unwrap().is_none());
+            assert!(*dictation.shutting_down.lock().unwrap());
+            dictation.shutdown(&engine);
+        }
+
+        /// A subprocess actually runs ggml's static destructors. Leaking the
+        /// app-owned Arcs mirrors Tauri's process exit: shutdown must explicitly
+        /// free the model even though the surrounding app state is still alive.
+        #[test]
+        #[ignore = "requires model weights in TX_DICTATION_MODELS"]
+        fn metal_shutdown_exits_cleanly() {
+            use crate::transcription::{catalog, context::RunContext, engine::Engine, live::LiveStream};
+            const CHILD: &str = "TX_METAL_EXIT_CHILD";
+            if let Ok(case) = std::env::var(CHILD) {
+                let (mode, code) = case.split_once(':').unwrap();
+                let code: i32 = code.parse().unwrap();
+                let root = std::path::PathBuf::from(std::env::var("TX_DICTATION_MODELS").unwrap());
+                let (spec, path) = catalog::MODELS.iter().find_map(|spec| {
+                    let path = root.join(spec.id).join(spec.filename);
+                    path.is_file().then_some((spec, path))
+                }).expect("a catalog model in TX_DICTATION_MODELS");
+                let engine = Arc::new(Engine::default());
+                let dictation = Arc::new(Dictation::default());
+                let context = RunContext::default();
+                *dictation.personalization.lock().unwrap() = context.clone();
+                if mode == "idle" {
+                    drop(engine.open(spec.id, &path, &context).unwrap());
+                } else {
+                    let worker_engine = engine.clone();
+                    let loading = mode == "loading";
+                    let (ready, started) = std::sync::mpsc::channel();
+                    *dictation.local_worker.lock().unwrap() = Some(std::thread::spawn(move || {
+                        if loading { ready.send(()).unwrap(); }
+                        let mut local = worker_engine.open(spec.id, &path, &context).unwrap();
+                        let mut stream = if local.streams() { Some(local.stream().unwrap()) } else { None };
+                        if let Some(stream) = stream.as_mut() {
+                            stream.feed(&vec![0.0; TARGET_RATE as usize / 10]).unwrap();
+                        }
+                        if !loading { ready.send(()).unwrap(); }
+                        while !context.is_cancelled() { std::thread::yield_now(); }
+                        drop(stream);
+                        drop(local);
+                    }));
+                    started.recv().unwrap();
+                }
+                dictation.shutdown(&engine);
+                std::mem::forget(dictation);
+                std::mem::forget(engine);
+                std::process::exit(code);
+            }
+            for code in [0, tauri::RESTART_EXIT_CODE] {
+                for mode in ["idle", "worker", "loading"] {
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", "dictation::mac::tests::metal_shutdown_exits_cleanly",
+                            "--ignored", "--nocapture"])
+                        .env(CHILD, format!("{mode}:{code}"))
+                        .output().unwrap();
+                    assert_eq!(output.status.code(), Some(code & 0xff),
+                        "{mode}, exit {code}: {}", String::from_utf8_lossy(&output.stderr));
+                }
+            }
+        }
+
 
         struct PermissionGateway {
             microphone: permission::Status,
@@ -1449,6 +1589,10 @@ pub struct Dictation {
 
 #[cfg(not(target_os = "macos"))]
 impl Dictation {
+    pub fn shutdown(&self, engine: &crate::transcription::engine::Engine) {
+        engine.unload();
+        engine.noise.unload();
+    }
     pub fn available() -> bool {
         false
     }

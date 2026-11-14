@@ -63,6 +63,8 @@ def validate(workflow):
     rust = jobs["linux-rust"]["steps"]
     assert any(s.get("run") == "cargo test --locked" and "if" not in s for s in rust), "full Linux Rust suite"
     assert any(s.get("run") == "cargo clippy --locked --all-targets -- -D warnings" for s in rust), "Linux Clippy"
+    # desktop-platforms skips its script tests on Linux because this step runs them all.
+    assert any(s.get("run") == "pnpm vitest run" and "if" not in s for s in jobs["frontend"]["steps"]), "full Vitest run"
     install = next(s for s in rust if s.get("name") == "Install Linux build dependencies")
     assert install["if"] == "runner.environment == 'github-hosted'", "sudo on the private pool"
     assert "ripgrep" in install["run"] and "zsh" in install["run"], "security fixture dependencies"
@@ -144,6 +146,12 @@ class WorkflowSecurity(unittest.TestCase):
         def change(w):
             cache = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("uses", "").startswith("actions/cache/save@"))
             cache["with"]["key"] = "${{ steps.cargo-cache.outputs.cache-matched-key }}"
+        self.rejects(change)
+
+    def test_narrowed_vitest_run_is_rejected(self):
+        def change(w):
+            vitest = next(s for s in w["jobs"]["frontend"]["steps"] if s.get("name") == "vitest")
+            vitest["run"] = "pnpm vitest run src"
         self.rejects(change)
 
     def test_missing_gate_dependency_is_rejected(self):

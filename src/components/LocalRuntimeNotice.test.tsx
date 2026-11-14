@@ -303,3 +303,17 @@ it("lists what a failed handover cannot carry, and Try again stops only that, as
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
   expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", [shown]);
 });
+
+it("keeps a busy handover out of the failure notice and clears a previous failure on retry (#960)", async () => {
+  await mounted();
+  await changed(outdated([], "The updated runtime did not answer", true, true));
+  expect(screen.getByRole("status").textContent).toContain("does not try again by itself");
+  native.replace.mockImplementationOnce(async () => {
+    await changed(outdated([], "Waiting to update the runtime: a prompt is on its way. TerminalX retries automatically while keeping agents and terminals running.", false, true));
+  });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
+  await changed({ ...connected, epoch: "bundled", generation: 2 });
+  expect(screen.queryByRole("status")).toBeNull();
+});
