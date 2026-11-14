@@ -464,8 +464,42 @@ function ProjectGroup({
     }
     return [...byBranch.values()];
   }, [group]);
-  const shown = all || filtered ? branches : branches.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
-  const more = !filtered && (branches.length > shown.length || (all && branches.length > PEEK));
+  // A removed workspace's conversations are kept, read and resumed from here, but set apart from the live ones
+  // under a fold of their own (#696): left in the list, they sat beside live work for good.
+  const live = branches.filter((entry) => !entry.key.startsWith("removed:"));
+  const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
+  const shown = all || filtered ? live : live.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
+  const more = !filtered && (live.length > shown.length || (all && live.length > PEEK));
+  const row = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) =>
+    sessions.length === 1 || asTabs ? (
+      <ConversationRow
+        key={key}
+        // The branch's row opens the session that is open on it, else its latest.
+        session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
+        peers={sessions}
+        selected={sessions.some((session) => session.id === selectedId)}
+        branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}
+        named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
+        merged={!sessions[0].worktreeRemoved && merged.has(branch)}
+        onNewSession={newSessionOn(branch, sessions)}
+        label={labels[branch]}
+        onRenameBranch={renameBranch(branch)}
+        linkTo={null}
+      />
+    ) : (
+      <BranchRow
+        key={key}
+        path={group.path}
+        branch={branch}
+        label={labels[branch]}
+        sessions={sessions}
+        selectedId={selectedId}
+        opened={filtered}
+        merged={!sessions[0].worktreeRemoved && merged.has(branch)}
+        onNewSession={newSessionOn(branch, sessions)}
+        onRename={renameBranch(branch)}
+      />
+    );
   return (
     <div role="group" aria-label={group.name} className="mb-1">
       <DropdownMenu>
@@ -557,37 +591,7 @@ function ProjectGroup({
       >
         <div className="min-h-0 overflow-hidden">
       <ul className="ml-[15px] flex flex-col gap-px pl-1.5">
-        {shown.map(({ key, branch, sessions }) =>
-          sessions.length === 1 || asTabs ? (
-            <ConversationRow
-              key={key}
-              // The branch's row opens the session that is open on it, else its latest.
-              session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
-              peers={sessions}
-              selected={sessions.some((session) => session.id === selectedId)}
-              branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}
-              named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
-              merged={!sessions[0].worktreeRemoved && merged.has(branch)}
-              onNewSession={newSessionOn(branch, sessions)}
-              label={labels[branch]}
-              onRenameBranch={renameBranch(branch)}
-              linkTo={null}
-            />
-          ) : (
-            <BranchRow
-              key={key}
-              path={group.path}
-              branch={branch}
-              label={labels[branch]}
-              sessions={sessions}
-              selectedId={selectedId}
-              opened={filtered}
-              merged={!sessions[0].worktreeRemoved && merged.has(branch)}
-              onNewSession={newSessionOn(branch, sessions)}
-              onRename={renameBranch(branch)}
-            />
-          ),
-        )}
+        {shown.map(row)}
         {branches.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
         {more && (
           <li>
@@ -599,6 +603,15 @@ function ProjectGroup({
               {all ? "Show less" : "View all"}
             </button>
           </li>
+        )}
+        {removed.length > 0 && (
+          <RemovedWorkspaces
+            id={canon(group.path)}
+            count={removed.length}
+            opened={filtered || removed.some((entry) => entry.sessions.some((session) => session.id === selectedId))}
+          >
+            {removed.map(row)}
+          </RemovedWorkspaces>
         )}
       </ul>
         </div>
@@ -614,6 +627,31 @@ function ProjectGroup({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * The conversations of workspaces that were removed (#696): kept, and read and resumed from here (a message resumes
+ * one in its project's folder), but out of the live list. Folded until opened, and open while it holds the open
+ * conversation or a filter is on. `children` are list items.
+ */
+export function RemovedWorkspaces({ id, count, opened, children }: { id: string; count: number; opened: boolean; children: ReactNode }) {
+  const [open, toggle] = useFold(`removed-workspaces:${id}`, false);
+  const expanded = open || opened;
+  return (
+    <li data-testid="removed-workspaces">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={expanded}
+        title="Their workspaces were removed. The conversations are kept, and a message resumes one in its project's folder."
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        <span className="min-w-0 truncate">Removed workspaces ({count})</span>
+        <ChevronDown className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")} />
+      </button>
+      {expanded && <ul className="flex flex-col gap-px">{children}</ul>}
+    </li>
   );
 }
 

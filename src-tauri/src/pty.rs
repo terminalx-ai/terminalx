@@ -22,10 +22,10 @@ use serde::Serialize;
 
 use crate::sink::EventSink;
 const COALESCE: Duration = Duration::from_millis(8);
-const MAX_CHUNK: usize = 32 * 1024;
+pub(crate) const MAX_CHUNK: usize = 32 * 1024;
 /// Enough raw output to reconstruct a useful terminal tail on a newly attached
 /// mobile reader without retaining an unbounded command history in memory.
-const SCROLLBACK_BYTES: usize = 512 * 1024;
+pub(crate) const SCROLLBACK_BYTES: usize = 512 * 1024;
 /// How long a pane gets to exit on its own before it is killed outright.
 const TERM_GRACE: Duration = Duration::from_millis(400);
 /// How long a write waits for the program in a pane to take any of its input.
@@ -304,7 +304,7 @@ type TapSlot = Arc<(Mutex<Views>, std::sync::Condvar)>;
 /// A pane this far ahead of its view is not read until the view catches up.
 /// xterm.js throws output away past 50 MB of backlog; this keeps it near none,
 /// and it is what makes Ctrl+C take effect at once during a flood.
-const FLOW_HIGH: usize = 1024 * 1024;
+pub(crate) const FLOW_HIGH: usize = 1024 * 1024;
 /// A view that says nothing for this long while its pane is held (a frozen
 /// window, a page that was reloaded) stops being waited for: a program must
 /// never hang on a window that is not drawing.

@@ -300,6 +300,41 @@ describe("a new live connection", () => {
     terminal.disposeInstance("cloud:pane");
   });
 
+  it("catches up only the view that fell behind, and only while it is still that attachment (#716)", async () => {
+    const handlers = new Map<string, (event: { payload: { id: string; token: string } }) => void>();
+    listen.mockImplementation(async (event: string, handler: (event: { payload: { id: string; token: string } }) => void) => {
+      handlers.set(event, handler);
+      return () => {};
+    });
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    const lagged = (id: string, token: string) => handlers.get("pty_view_lagged")!({ payload: { id, token } });
+    const named = (token: string) => ({ ...fake(vi.fn()), attachedAs: (given: string) => given === token });
+    const behind = named("current");
+    const beside = named("beside");
+    const hidden = named("hidden");
+    terminal.getInstance("s1:behind", () => behind, document.body);
+    terminal.getInstance("s1:beside", () => beside, document.body);
+    terminal.getInstance("s1:hidden", () => hidden);
+
+    // Word of an attachment since replaced changes nothing.
+    lagged("s1:behind", "replaced");
+    expect(behind.reattach).not.toHaveBeenCalled();
+    // The view that fell behind is redrawn in place; the one beside it is left alone.
+    lagged("s1:behind", "current");
+    expect(behind.reattach).toHaveBeenCalledOnce();
+    expect(beside.reattach).not.toHaveBeenCalled();
+    expect(terminal.peekInstance("s1:beside")).toBe(beside);
+    // Off screen, it is let go: the next view rebuilds it from the scrollback.
+    lagged("s1:hidden", "hidden");
+    expect(hidden.reattach).not.toHaveBeenCalled();
+    expect(terminal.peekInstance("s1:hidden")).toBeUndefined();
+    // A pane this window has no terminal for.
+    lagged("s1:unknown", "current");
+    terminal.disposeInstance("s1:behind");
+    terminal.disposeInstance("s1:beside");
+  });
+
   it("lists what changed in the gap: opened, ended and closed shells, and their agents, but not one still opening", async () => {
     const handlers = new Map<string, () => void>();
     listen.mockImplementation(async (event: string, handler: () => void) => {

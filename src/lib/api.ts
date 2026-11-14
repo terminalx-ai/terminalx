@@ -1710,7 +1710,8 @@ export interface ProcSample {
   cpuPercent: number | null;
   rssBytes: number | null;
   childCount: number | null;
-  killRule: "none" | "idle" | "confirm";
+  /** `stop`: a tab's idle agent, stopped (its conversation kept) once confirmed. */
+  killRule: "none" | "idle" | "confirm" | "stop";
 }
 
 export interface AppSample {
@@ -1862,6 +1863,11 @@ export const agent = {
   tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
+  /**
+   * The tab was shown: its CLI starts as `ensureStarted` starts it, unless nobody is about to use it — its session is
+   * archived or its workspace was removed, or its agent was stopped for sitting idle. Its next message starts it then (#696).
+   */
+  startOnOpen: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId, opened: true }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
   tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
   /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
@@ -2295,6 +2301,20 @@ export interface WorkCloudSession {
   archived: boolean;
   modified: string;
 }
+
+/** When an agent nobody is using is stopped (#696). */
+export interface AgentSettings {
+  /** Minutes an agent may sit idle before it is stopped; 0 is never. */
+  idleStopMinutes: number;
+}
+
+/** The idle limits Settings → Agents offers, as the Rust side accepts them; 0 is never. */
+export const IDLE_STOP_MINUTES = [0, 30, 60, 120, 240, 480, 1440] as const;
+
+export const agentSettings = {
+  get: () => invoke<AgentSettings>("agent_settings"),
+  setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
+};
 
 export interface WorkStatusSettings {
   /** Teammates in an organization that connected the repository see what this person works on. */

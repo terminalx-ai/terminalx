@@ -328,7 +328,14 @@ pub struct Host<'a> {
     pub confine: Option<&'a Path>,
     pub live: &'a dyn Fn(&[SessionEntry]) -> Live,
     pub fetch: Fetch,
+    /// Stops a session's agents and waits for them to be gone, for a removal
+    /// finished after its worktree went ([`reconcile`]). `None` where this
+    /// host runs no agents.
+    pub stop_agents: Option<StopAgents<'a>>,
 }
+
+/// Stops a session's agents, waiting for them to be gone; why not, if not.
+pub type StopAgents<'a> = &'a dyn Fn(&SessionEntry) -> Result<(), String>;
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -917,8 +924,8 @@ fn result(item: &RemoveItem, outcome: Outcome, reason: impl Into<Option<String>>
 /// A worktree that is not on disk. Nothing can be read of it, so nothing is
 /// removed and git's records are left as they are. The one thing done here
 /// finishes a removal that was cut short: when git no longer lists the
-/// worktree but sessions that ran in it still point there, they are filed
-/// under the project (never deleted).
+/// worktree but sessions that ran in it still point there, their agents are
+/// stopped and they are filed under the project (never deleted).
 fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>, item: &RemoveItem, target: &Path) -> ItemResult {
     let Some(parent) = target.parent().filter(|parent| parent.is_dir()) else {
         return result(item, Outcome::Skipped, "Its folder cannot be reached, so nothing about it could be checked.".to_string());
@@ -950,6 +957,15 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
         .collect();
     if left.is_empty() {
         return result(item, Outcome::Skipped, "Nothing is at that path. If an earlier clean-up removed it, there is nothing left to do.".to_string());
+    }
+    // An agent still running there works in a folder that is gone, and filed
+    // under the project its session would go on from the project's own
+    // checkout (#696). Stopped first, or nothing is filed.
+    if let Some(stop) = host.stop_agents {
+        let failed: Vec<String> = left.iter().filter_map(|session| stop(session).err().map(|error| format!("\"{}\": {error}", session.title))).collect();
+        if !failed.is_empty() {
+            return result(item, Outcome::Failed, format!("It was already removed, but its sessions' agents could not be stopped, so its sessions were left as they were. {}", failed.join("; ")));
+        }
     }
     match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
         Ok(moved) => {

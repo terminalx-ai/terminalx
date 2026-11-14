@@ -21,9 +21,11 @@ import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput, type Issue } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
-import { clearNewSessionPreset, createQuickChat, linkSessionIssue, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { clearNewSessionPreset, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
+import { readinessBlock, useAgentReadiness } from "@/lib/agentReadiness";
+import { AgentSetup } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
 import { BranchPicker, type BranchTarget } from "./BranchPicker";
 import { IssuePicker } from "./IssuePicker";
@@ -122,6 +124,7 @@ export function NewSessionView({
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort, mode } = agentSelection;
+  const readiness = useAgentReadiness(cloud ? null : harness?.id ?? null);
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
     quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
@@ -305,6 +308,9 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     try {
+      const checked = await readiness.refresh();
+      const blocked = checked && readinessBlock(harness.name, checked);
+      if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
       const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
@@ -328,6 +334,9 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     try {
+      const checked = await readiness.refresh();
+      const blocked = checked && readinessBlock(harness.name, checked);
+      if (blocked) { setError(blocked); return; }
       // The backend names an untitled session itself, so an image-only prompt
       // sends an empty title rather than inventing one here.
       const title = (text.trim().split("\n")[0] || issue?.title || "").slice(0, 60);
@@ -401,6 +410,9 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
+          {!cloud && harness && <div className="mb-3"><AgentSetup harness={harness} value={readiness.value} checking={readiness.checking || busy} onRefresh={() => {
+            void refreshHarnesses().then(() => readiness.refresh()).catch(() => setError("Could not re-check installed agents. Try again."));
+          }} /></div>}
           {cloud && confirm && (
             <CloudCreateConfirm prepared={confirm} orgName={cloud.orgName} busy={busy} onConfirm={() => void confirmCreate()} onCancel={() => setConfirm(null)} />
           )}

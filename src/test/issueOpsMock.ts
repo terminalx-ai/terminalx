@@ -147,6 +147,7 @@ const MESSAGES: Record<IssueOpErrorKind, string> = {
   network: "Couldn't reach the provider. Check your connection, then try again.",
   unsupported: "This provider's issues don't have that.",
   invalid: "That change isn't one the issue can take.",
+  moved: "GitHub has moved this elsewhere, so nothing was changed. The issue may now be in another repository: open it in your browser to see where.",
   not_implemented: "TerminalX can't do this yet. Open the issue in your browser to make this change.",
   other: "The provider couldn't do that. Try again, or open the issue in your browser.",
 };

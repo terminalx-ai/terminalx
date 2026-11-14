@@ -86,6 +86,7 @@ mod pr_associations;
 mod github_identity;
 mod harness;
 pub mod hooks;
+mod idle_agents;
 #[cfg(feature = "desktop")]
 mod issue_control;
 #[cfg(feature = "desktop")]
@@ -203,10 +204,19 @@ fn let_go_of_unresponsive_runtime(state: &AppState) {
     }
 }
 
+/// The desktop's log file, `desktop.log` beside the runtime's (#716), kept
+/// from setup on: the app's stderr goes nowhere once it is opened normally.
+#[cfg(all(feature = "desktop", unix))]
+static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    #[cfg(unix)]
+    logger.target(env_logger::Target::Pipe(Box::new(local_runtime::log_file::Tee::new(&DESKTOP_LOG))))
+        .write_style(env_logger::WriteStyle::Never);
+    logger.init();
     let host = Arc::new(harness::host::Host::new());
     let codex_models = Arc::new(harness::codex::models::Cache::default());
     let terminals = Arc::new(pty::Terminals::new());
@@ -284,6 +294,13 @@ pub fn run() {
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .setup(move |app| {
+            #[cfg(unix)]
+            match app.path().app_log_dir() {
+                Ok(dir) => if let Err(error) = local_runtime::log_file::keep(&DESKTOP_LOG, &dir.join("desktop.log")) {
+                    log::warn!("the desktop log is not kept in a file: {error}");
+                },
+                Err(error) => log::warn!("the desktop log is not kept in a file: {error}"),
+            }
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
             std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
@@ -558,6 +575,7 @@ pub fn run() {
             commands::set_active_tab,
             commands::delete_session,
             commands::list_harnesses,
+            commands::check_agent_readiness,
             commands::list_skills,
             commands::skill_detail,
             commands::work_status,
@@ -694,6 +712,8 @@ pub fn run() {
             commands::work_claims_set_cloud,
             commands::work_status_settings,
             commands::set_work_status_settings,
+            commands::agent_settings,
+            commands::set_agent_idle_stop_minutes,
             commands::experimental_settings,
             commands::set_experimental_settings,
             commands::organization_work_status,

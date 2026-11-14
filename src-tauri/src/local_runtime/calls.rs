@@ -111,6 +111,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let tab = string(&params, "tabId")?;
     let value = match method {
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
+        // `opened`: only shown, which does not start an agent nobody is about to use.
+        "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
         "ensureStarted" => { manager.ensure_started(session, tab)?; Value::Null }
         "events" => serde_json::to_value(manager.load_events(session, tab)?)?,
         "eventsOpen" => serde_json::to_value(manager.history_downloads.open(session, tab, || manager.load_events(session, tab))?)?,

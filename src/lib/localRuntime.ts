@@ -12,6 +12,8 @@ import { reattachLocalTerminals } from "@/lib/terminal";
  * connection this window's terminals were attached over is replaced, they
  * attach again in place, and the stores re-read what they show on
  * `local_runtime_reattached`. Nothing reloads, and nothing sent is sent again.
+ * That event also comes when the connection stayed up but some events could
+ * not be delivered over it (#716, `missedEvents`): the same re-read covers it.
  */
 export interface LocalRuntimeView {
   state: LocalRuntimeState | null;

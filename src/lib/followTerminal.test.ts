@@ -468,6 +468,33 @@ describe("terminal view metadata lifetime", () => {
     window.hook.unmount();
   });
 
+  /** #696: a tab only shown leaves the backend to decide; a start asked for meanwhile is not answered by the showing. */
+  it("starts an agent only shown as the backend decides, and still starts one the terminal view asks for meanwhile", async () => {
+    const window = await populated();
+    const calls: unknown[] = [];
+    let showing!: () => void;
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "ensure_tab_started") {
+        calls.push(args);
+        if (args?.opened) return new Promise<null>((resolve) => { showing = () => resolve(null); });
+        return null;
+      }
+      if (command === "tab_pane") return window.info;
+      return backend(command, args);
+    });
+    const shown = window.tabViews.startTabAgent(session, session.tabs[0], { opened: true });
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    // Shown again while that is under way: the one call answers both.
+    const again = window.tabViews.startTabAgent(session, session.tabs[0], { opened: true });
+    // The terminal view needs its CLI: its start goes once the showing is done, not in its place.
+    const asked = window.tabViews.startTabAgent(session, session.tabs[0]);
+    expect(calls).toHaveLength(1);
+    showing();
+    await Promise.all([shown, again, asked]);
+    expect(calls).toEqual([{ sessionId: session.id, tabId: "first", opened: true }, { sessionId: session.id, tabId: "first" }]);
+    window.hook.unmount();
+  });
+
   it("moves an experimental Codex tab to Codex's terminal when its terminal view is opened, and not when it is shown", async () => {
     const window = await populated();
     const calls: string[] = [];

@@ -15,6 +15,7 @@ pub mod claude;
 pub mod codex;
 pub mod host;
 pub mod opencode;
+pub mod readiness;
 pub mod settings;
 pub mod tui;
 

@@ -4,11 +4,13 @@ Workspace removal defaults to **Remove workspace, keep conversations**, through
 the existing settle transition. The dialog names the destination project folder
 before confirmation. It stops agents, removes the checkout, and retains session
 entries, TerminalX logs/attachments, provider-native resume files, and original
-workspace name/path/branch. These entries remain grouped as removed workspaces;
-they are not silently relabeled as conversations originally started on main.
-Opening a kept tab starts/resumes it in the named project folder. Cancel cleanup
-if that is not the desired destination. The original checkout and its uncommitted
-files are not restored by resuming a conversation.
+workspace name/path/branch. These entries remain grouped as removed workspaces,
+folded under "Removed workspaces" apart from live work (#696); they are not
+silently relabeled as conversations originally started on main. Opening a kept
+tab shows its conversation without starting its agent; its next message resumes
+it in the named project folder. Cancel cleanup if that is not the desired
+destination. The original checkout and its uncommitted files are not restored
+by resuming a conversation.
 
 Claude Code resolves the conversation by identity across its project transcript
 folders. Codex resumes the same identity from its managed rollout history.

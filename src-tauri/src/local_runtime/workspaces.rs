@@ -22,7 +22,8 @@ fn host<R>(manager: &SessionManager, f: impl FnOnce(&cleanup::Host<'_>) -> Resul
             .map(|tab| (session.id.clone(), tab.id.clone()))).collect();
         live
     };
-    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh })
+    let stop_agents = |entry: &SessionEntry| manager.stop_agents_confirmed(entry).map_err(|error| format!("{error:#}"));
+    f(&cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh, stop_agents: Some(&stop_agents) })
 }
 
 #[derive(Deserialize)]

@@ -290,7 +290,7 @@ mod tests {
             modified: index::now(),
             context_used: None,
             context_max: None,
-            fork_from: None, continuation: None,
+            fork_from: None, continuation: None, parked: false,
             follow: Default::default(),
             unknown: BTreeMap::new(),
         }

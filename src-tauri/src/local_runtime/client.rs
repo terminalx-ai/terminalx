@@ -92,11 +92,50 @@ pub struct Client {
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
+    /// The owner's `streamVersion`: 1 from one too old to say.
+    streams: u64,
     ping: Duration,
     liveness: Duration,
-    local_vm_protocol: Option<u64>,
-    local_vm_reconciliation: Option<u64>,
-    local_vm_onboarding: Option<u64>,
+    local_vm: LocalVmCapability,
+}
+
+/// The Local VM protocols the pinned owner serves: `localVm` in its liveness
+/// answer, fixed for the owner's life. `None` where it serves none, or is
+/// too old to say.
+#[derive(Clone, Copy, Debug, Default)]
+struct LocalVmCapability {
+    protocol: Option<u64>,
+    reconciliation: Option<u64>,
+    onboarding: Option<u64>,
+}
+
+impl LocalVmCapability {
+    fn of(pinned: &Value) -> Self {
+        let local_vm = &pinned["localVm"];
+        Self {
+            protocol: local_vm["protocol"].as_u64(),
+            reconciliation: local_vm["reconciliationProtocol"].as_u64(),
+            onboarding: local_vm["onboardingProtocol"].as_u64(),
+        }
+    }
+}
+
+/// What one connection to the event socket carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stream {
+    /// The app's events.
+    Events,
+    /// The output of the terminals one window shows.
+    Terminals { window: String },
+}
+
+impl std::fmt::Display for Stream {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Events => write!(out, "the background runtime's event connection"),
+            Self::Terminals { window } => write!(out, "terminal output of window {window:?}"),
+        }
+    }
 }
 
 fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -157,29 +196,28 @@ impl Client {
             bail!("runtime endpoints are outside the selected home");
         }
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
+        let streams = local["streamVersion"].as_u64().unwrap_or(1);
         // Pin discovery to this owner. A publisher change between reading the
         // token and status cannot authorize commands to the replacement.
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self {
-            socket,
-            event_socket,
-            token,
-            epoch,
-            ping: PING_INTERVAL,
-            liveness: LIVENESS_TIMEOUT,
-            local_vm_protocol: pinned["localVm"]["protocol"].as_u64(),
-            local_vm_reconciliation: pinned["localVm"]["reconciliationProtocol"].as_u64(),
-            local_vm_onboarding: pinned["localVm"]["onboardingProtocol"].as_u64(),
-        }))
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, streams, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+            local_vm: LocalVmCapability::of(&pinned) }))
+    }
+
+    /// A client of the event socket at `event_socket` alone, as discovery
+    /// would have found it: for tests that serve a stream in process.
+    #[cfg(test)]
+    pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
+        Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
+            epoch: epoch.into(), streams: super::STREAM_VERSION, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT, local_vm: LocalVmCapability::default() })
     }
 
     /// The same owner, pinged every `ping` and given up on after `liveness`
     /// of silence: a test hangs an owner without waiting the full deadline.
     pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
         Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
-            event_socket: self.event_socket.clone(), ping, liveness, local_vm_protocol: self.local_vm_protocol,
-            local_vm_reconciliation: self.local_vm_reconciliation, local_vm_onboarding: self.local_vm_onboarding })
+            event_socket: self.event_socket.clone(), streams: self.streams, ping, liveness, local_vm: self.local_vm })
     }
 
     pub(crate) fn ping_interval(&self) -> Duration { self.ping }
@@ -194,7 +232,7 @@ impl Client {
     }
 
     pub(crate) fn require_local_vm(&self) -> Result<()> {
-        if self.local_vm_protocol != Some(crate::local_vm::journal::PROTOCOL as u64) {
+        if self.local_vm.protocol != Some(crate::local_vm::journal::PROTOCOL as u64) {
             bail!("This running local owner does not support Local VM tasks. Its existing work remains running; no operation was sent. Update/reconnect deliberately after resolving that work.");
         }
         Ok(())
@@ -217,26 +255,32 @@ impl Client {
     }
 
     pub(crate) fn require_vm_reconciliation(&self) -> Result<()> {
-        if self.local_vm_reconciliation != Some(crate::local_vm::provisioning::PROTOCOL) {
+        if self.local_vm.reconciliation != Some(crate::local_vm::provisioning::PROTOCOL) {
             bail!("This running local owner does not support verified provisioning reconciliation and deletion. Its existing work remains running; no operation was sent. Update/reconnect deliberately; no owner restart or fallback was attempted.");
         }
         Ok(())
     }
     pub(crate) fn require_vm_onboarding(&self) -> Result<()> {
-        if self.local_vm_onboarding != Some(crate::local_vm::setup::PROTOCOL) {
+        if self.local_vm.onboarding != Some(crate::local_vm::setup::PROTOCOL) {
             bail!("This pinned owner does not support guided VM setup. Existing work was left running; no setup/installer was sent. Update the owner deliberately after inspecting retained work.");
         }
         Ok(())
     }
 
-    pub fn stream(&self) -> Result<Connection> {
+    /// Whether the owner takes a connection for one stream, and says when a
+    /// view or events fall behind instead of closing it (#716).
+    pub fn names_streams(&self) -> bool { self.streams >= 2 }
+
+    /// A connection that carries `stream`. An owner too old to take one
+    /// stream at a time sends both, and the bridge drops what it was not after.
+    pub fn stream(&self, stream: &Stream) -> Result<Connection> {
         let mut socket = UnixStream::connect(&self.event_socket)?;
         socket.set_read_timeout(Some(Duration::from_secs(10)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-        serde_json::to_writer(&mut socket, &json!({"protocol":super::PROTOCOL,"token":self.token.as_str()}))?;
+        serde_json::to_writer(&mut socket, &hello(self.token.as_str(), self.names_streams().then_some(stream)))?;
         socket.write_all(b"\n")?;
         let mut read = BufReader::new(socket.try_clone()?);
-        let hello = receive(&mut read)?;
+        let hello = receive(&mut read, Duration::from_secs(10))?;
         if hello["type"] != "ready" || hello["attachment"]["epoch"] != self.epoch {
             bail!("runtime changed before event attachment");
         }
@@ -245,8 +289,23 @@ impl Client {
         // The bridge pings every `ping` interval, so a live owner always has
         // something to say well within this deadline.
         read.get_ref().set_read_timeout(Some(self.liveness))?;
-        Ok(Connection { read, write: socket, attachment })
+        Ok(Connection { read, write: socket, attachment, silence: self.liveness })
     }
+}
+
+/// The first frame on the event socket. `stream` is left out for an owner
+/// that does not know it, which refuses a hello with fields it does not know.
+fn hello(token: &str, stream: Option<&Stream>) -> Value {
+    let mut hello = json!({"protocol":super::PROTOCOL, "token":token});
+    match stream {
+        Some(Stream::Events) => { hello["stream"] = json!("events"); }
+        Some(Stream::Terminals { window }) => {
+            hello["stream"] = json!("terminals");
+            hello["window"] = json!(window);
+        }
+        None => {}
+    }
+    hello
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -260,6 +319,8 @@ pub struct Connection {
     attachment: AttachmentIdentity,
     read: BufReader<UnixStream>,
     write: UnixStream,
+    /// How long the owner may say nothing before it is taken for hung.
+    silence: Duration,
 }
 
 impl Connection {
@@ -267,13 +328,19 @@ impl Connection {
 
     pub fn writer(&self) -> Result<UnixStream> { Ok(self.write.try_clone()?) }
 
-    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read) }
+    pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read, self.silence) }
 }
 
-fn receive(read: &mut BufReader<UnixStream>) -> Result<Value> {
+/// One frame. Its errors say what happened, for the log of a lost connection.
+fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value> {
     let mut line = String::new();
-    let count = read.take(1024 * 1024 + 1).read_line(&mut line)?;
-    if count == 0 { bail!("local event stream disconnected"); }
+    let count = match read.take(1024 * 1024 + 1).read_line(&mut line) {
+        Ok(count) => count,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            bail!("the background runtime sent nothing, not even a pong, for {}", super::log_file::span(silence)),
+        Err(error) => return Err(anyhow::Error::new(error).context("reading from the background runtime failed")),
+    };
+    if count == 0 { bail!("the background runtime closed the connection"); }
     if count > 1024 * 1024 { bail!("local event frame exceeded its size limit"); }
     Ok(serde_json::from_str(&line)?)
 }
@@ -284,7 +351,7 @@ mod local_vm_tests {
     #[test]
     fn older_owner_cannot_receive_guided_create_setup_or_actions() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),local_vm_onboarding:capability});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
             let sessions=super::super::sessions::Sessions::new(client);
             for method in ["environment.create","environment.setup","environment.setupReadiness","environment.setupAction","environment.setupAuth"] {
                 let error=sessions.local_vm(method,json!({"confirm":true})).unwrap_err().to_string();
@@ -296,7 +363,7 @@ mod local_vm_tests {
     #[test]
     fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
         for protocol in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:protocol,local_vm_reconciliation:None,local_vm_onboarding:None});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
             let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
             assert!(error.contains("no operation was sent"),"{error}");
             assert!(!error.contains("connect to the local runtime"));
@@ -305,7 +372,7 @@ mod local_vm_tests {
     #[test]
     fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:capability,local_vm_onboarding:None});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
             let sessions=super::super::sessions::Sessions::new(client);
             for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
                 let error=sessions.local_vm(method,params).unwrap_err().to_string();
@@ -348,6 +415,14 @@ mod tests {
 
     fn refusal(request: &ControlRequest, code: &str) -> Option<ControlResponse> {
         Some(ControlResponse::failure(request.id.clone(), ControlError::new(code, "refused", None::<String>)))
+    }
+
+    #[test]
+    fn a_hello_names_its_stream_only_to_an_owner_that_knows_them() {
+        let main = Stream::Terminals { window: "main".into() };
+        assert_eq!(hello("t", Some(&main)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "terminals", "window": "main"}));
+        assert_eq!(hello("t", Some(&Stream::Events)), json!({"protocol": super::super::PROTOCOL, "token": "t", "stream": "events"}));
+        assert_eq!(hello("t", None), json!({"protocol": super::super::PROTOCOL, "token": "t"}), "what an owner from before #716 accepts");
     }
 
     #[test]

@@ -170,6 +170,9 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
     session("kept", "/repos/web", at(1), { worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } }),
   ]);
   mount();
+  // Set apart from the live chats under its fold (#696).
+  expect(screen.queryByRole("button", { name: "Talk kept" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
   const kept = screen.getByRole("button", { name: "Talk kept" });
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");

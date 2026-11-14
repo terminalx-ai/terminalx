@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, SquareTerminal, Trash2, TriangleAlert } from "@/icons";
+import { ChevronRight, Cpu, History, Loader2, RefreshCw, RotateCcw, Square, SquareTerminal, Trash2, TriangleAlert } from "@/icons";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
@@ -180,7 +180,9 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
     }
   };
 
-  const requestKill = (process: ProcSample) => kill(process, false, resourceGeneration, process.killRule === "confirm");
+  // Both are asked about before anything ends: a kill loses work, and a stop is the agent's whole process.
+  const requestKill = (process: ProcSample) => kill(process, false, resourceGeneration, process.killRule === "confirm" || process.killRule === "stop");
+  const stopping = pending?.process.killRule === "stop";
 
   return (
     <>
@@ -270,7 +272,8 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                           {process.killRule !== "none" ? (
                             <button
                               type="button"
-                              aria-label={`Kill ${process.tabTitle}`}
+                              aria-label={`${process.killRule === "stop" ? "Stop" : "Kill"} ${process.tabTitle}`}
+                              title={process.killRule === "stop" ? "Stop this idle agent; its next message starts it again" : undefined}
                               disabled={killing === process.paneId}
                               onClick={(event) => {
                                 event.stopPropagation();
@@ -278,7 +281,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                               }}
                               className="rounded p-1 text-faint opacity-0 hover:bg-destructive/15 hover:text-destructive focus:opacity-100 group-hover/process:opacity-100"
                             >
-                              <Trash2 className="size-3" />
+                              {process.killRule === "stop" ? <Square className="size-3" /> : <Trash2 className="size-3" />}
                             </button>
                           ) : <span />}
                         </div>
@@ -315,7 +318,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
       <Dialog open={pending != null && pending.generation === resourceGeneration} onOpenChange={(next) => !next && setPending(null)}>
         <DialogContent width="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Kill process?</DialogTitle>
+            <DialogTitle>{stopping ? "Stop agent?" : "Kill process?"}</DialogTitle>
             <DialogDescription>{pending?.message}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -327,7 +330,7 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
                 void kill(pending.process, true, pending.generation);
               }}
             >
-              Kill process
+              {stopping ? "Stop agent" : "Kill process"}
             </Button>
           </DialogFooter>
         </DialogContent>
