@@ -363,10 +363,15 @@ jobs:
             ci-v3-desktop-platforms-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build frontend and verify off-macOS helper build is a no-op
         run: pnpm build:computer-macos && pnpm build
+      # On Linux, linux-rust already checks every target (clippy) and runs
+      # these tests in its full suite, and frontend runs every script test:
+      # the three steps marked "not Linux" are for the other platforms.
       - name: Platform build
+        if: runner.os != 'Linux'
         working-directory: src-tauri
         run: cargo check --all-targets
       - name: Computer contract tests
+        if: runner.os != 'Linux'
         working-directory: src-tauri
         run: "cargo test --lib computer::"
       # The local owner path needs no macOS APIs; reuse Linux's build setup.
@@ -387,6 +392,7 @@ jobs:
         working-directory: src-tauri
         run: cargo test --lib named_pipe_serves_authenticated_control_and_hook_frames
       - name: Desktop script input safety tests
+        if: runner.os != 'Linux'
         run: pnpm vitest run scripts/computer-use-modifier-safety.test.mjs scripts/computer-use-mouse-button-routing.test.mjs scripts/computer-use-windows-horizontal-scroll.test.mjs
       - name: Linux render tests
         if: runner.os == 'Linux'
