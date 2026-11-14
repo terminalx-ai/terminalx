@@ -192,7 +192,7 @@ export function useOrganizationRoster(orgId?: string | null, enabled = true): Ro
     const entry = entryFor(key);
     entry.listeners.add(listener);
     if (!entry.timer) entry.timer = setInterval(() => {
-      if (rosterCacheEnabled(key) && entry.snapshot.roster) void readOrganizationRoster(key, entry.options).catch(() => {});
+      if (rosterCacheEnabled(key)) void readOrganizationRoster(key, entry.options).catch(() => {});
     }, ROSTER_MAX_AGE_MS);
     return () => {
       entry.listeners.delete(listener);

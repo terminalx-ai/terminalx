@@ -39,6 +39,42 @@ describe("organization roster cache", () => {
     act(() => invalidateOrganizationRoster("org-a"));
     await waitFor(() => expect(result.current.roster?.members[0].userId).toBe("bob"));
   });
+  it.each(["active", "org-a"])("recovers from initial read failures while %s stays subscribed", async (orgId) => {
+    vi.useFakeTimers();
+    const error = new Error("temporarily unavailable");
+    const pending = deferred<OrganizationRoster>();
+    const list = orgId === "active" ? mocks.list : mocks.listIn;
+    list.mockRejectedValueOnce(error).mockRejectedValueOnce(error).mockReturnValueOnce(pending.promise);
+    const { result, unmount } = renderHook(() => useOrganizationRoster(orgId));
+    await act(async () => {
+      await expect(readOrganizationRoster(orgId)).rejects.toBe(error);
+    });
+    expect(result.current).toMatchObject({ roster: null, loading: false, error });
+
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(result.current).toMatchObject({ roster: null, loading: false, error });
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(result.current).toMatchObject({ roster: null, loading: true, error: null });
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(list).toHaveBeenCalledTimes(3);
+
+    const recovered = roster("bob");
+    await act(async () => { pending.resolve(recovered); });
+    expect(result.current).toEqual({ roster: recovered, loading: false, error: null });
+    unmount();
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(list).toHaveBeenCalledTimes(3);
+  });
+  it("loads an empty subscribed roster on the next poll", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useOrganizationRoster("org-a"));
+    expect(result.current.roster).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(ROSTER_MAX_AGE_MS));
+    expect(mocks.listIn).toHaveBeenCalledTimes(1);
+    expect(result.current).toEqual({ roster: roster(), loading: false, error: null });
+  });
   it("does not let a late refresh overwrite a mutation", async () => {
     const pending = deferred<OrganizationRoster>();
     mocks.listIn.mockReturnValueOnce(pending.promise);
