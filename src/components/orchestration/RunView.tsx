@@ -17,7 +17,7 @@ import {
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
 import { PLAN_A_RUN_PROMPT } from "@/lib/orchestrateStart";
-import { selectSession, useSessionStore } from "@/lib/sessions";
+import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { showPanelTab } from "@/lib/panelTab";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { familyNeeds, modelTier, pieceSpend, runSpend, type Need } from "@/lib/runFamily";
@@ -787,8 +787,9 @@ function ReviewCard({ agent, review, check }: { agent: string; review: RunReview
   const status = check.outcome === "passed" ? { text: review.voters === 1 ? "passed" : `passed · ${passes} of ${review.voters}`, tone: "text-add" }
     : check.outcome === "failed" ? { text: review.voters === 1 ? "failed" : `failed · ${passes} of ${review.voters} passed`, tone: "text-destructive" }
     : check.outcome === "inconclusive" ? { text: "no verdict", tone: "text-warning" }
+    : review.verifiers.some((verifier) => verifier.waiting) ? { text: "needs you", tone: "text-warning" }
     : { text: "reading", tone: "text-info" };
-  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : "Reading");
+  const said = (verifier: RunVerifier) => (verifier.verdict === "pass" ? "Pass" : verifier.verdict === "fail" ? "Fail" : verifier.problem ? "No verdict" : verifier.waiting ? "Needs you" : "Reading");
   return (
     <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="piece-review" data-review={check.outcome ?? "open"}>
       <div className="flex items-center gap-2 text-xs">
@@ -799,13 +800,17 @@ function ReviewCard({ agent, review, check }: { agent: string; review: RunReview
       <ul className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{review.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
       <ul className="mt-2 flex flex-col gap-2">
         {review.verifiers.map((verifier, index) => (
-          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : "open")}>
+          <li key={index} className="text-xs" data-verdict={verifier.verdict ?? (verifier.problem ? "none" : verifier.waiting ? "waiting" : "open")}>
             <div className="flex items-center gap-2">
               <span className="min-w-0 truncate"><ModelName piece={{ agent, model: verifier.model, effort: verifier.effort }} /></span>
-              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem ? "text-warning" : "text-info")}>{said(verifier)}</span>
-              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => selectSession(verifier.session!.sessionId)}>Open</button>}
+              <span className={cn("shrink-0", verifier.verdict === "pass" ? "text-add" : verifier.verdict === "fail" ? "text-destructive" : verifier.problem || verifier.waiting ? "text-warning" : "text-info")}>{said(verifier)}</span>
+              {verifier.session && <button type="button" className="ml-auto shrink-0 text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:underline" onClick={() => {
+                selectSession(verifier.session!.sessionId);
+                if (verifier.session!.tabId) void setActiveTab(verifier.session!.sessionId, verifier.session!.tabId).catch(console.error);
+              }}>Open</button>}
             </div>
             {(verifier.evidence?.length ?? 0) > 0 && <ul className="mt-1 list-disc break-words pl-4 font-mono text-[11.5px] leading-[17px] text-muted-foreground">{verifier.evidence!.map((line) => <li key={line}>{line}</li>)}</ul>}
+            {verifier.waiting && <p className="mt-1 text-[11.5px] leading-[17px] text-warning">{verifier.waiting}</p>}
             {verifier.problem && <p className="mt-1 text-[11.5px] leading-[17px] text-faint">{verifier.problem}</p>}
           </li>
         ))}

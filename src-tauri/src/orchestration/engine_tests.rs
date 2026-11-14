@@ -1957,6 +1957,12 @@ fn a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts() {
     host.verifier_replies("migrate", 2, &verdict_block(r#"{"verdict": "fail", "evidence": ["src/store/migrate.rs:31: drops keys it does not know"]}"#), 4_000);
     engine::worker_turn_ended(&host, "w1-migrate");
     assert_eq!(store::get(id).unwrap().piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Waiting("Question.".into()));
+    let waiting = engine::refreshed(&host, id).unwrap();
+    assert!(waiting.piece("migrate").unwrap().tries[0].verification.as_ref().unwrap().review_open());
+    assert_eq!(waiting.piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Working);
+    engine::refreshed(&host, id).unwrap();
     // The second pass makes two of three.
     host.verifier_replies("migrate", 3, &verdict_block(PASS), 3_500);
     engine::worker_turn_ended(&host, "w1-migrate");
@@ -2954,4 +2960,99 @@ fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
     host.world().running.insert("w1-cli".into());
     engine::stop(&host, &id, By::Cli).unwrap();
     assert_eq!(host.world().stopped, ["w1-cli", "w1-cli"]);
+}
+
+#[test]
+fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_consumed() {
+    let _home = crate::store::temp_home();
+    for pass in [true, false] {
+        let (host, id) = run_of(&format!("lead-{pass}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        let began = engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Permission needed.".into()));
+        assert!(engine::watch(&host), "a waiting verifier remains watched");
+        let waiting = store::get(&id).unwrap();
+        let piece = waiting.piece("guide").unwrap();
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert_eq!(piece.state, PieceState::Verifying);
+        assert!(check.review_open() && !verifier.settled() && verifier.problem.is_none());
+        assert_eq!(verifier.waiting.as_deref(), Some("Permission needed."));
+        assert!(piece.note.as_deref().unwrap().contains("verifier needs you"));
+        assert!(engine::wake(&began, &waiting, false).unwrap()["why"][0].as_str().unwrap().contains("verifier that needs you"));
+        assert!(engine::wake(&began, &waiting, true).is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), waiting, "repeated reads preserve the resumable wait");
+        let restored: Run = serde_json::from_value(serde_json::to_value(&waiting).unwrap()).unwrap();
+        assert_eq!(restored, waiting);
+        host.world().verifier_now.insert(session, VerifierNow::Working);
+        let working = engine::refreshed(&host, &id).unwrap();
+        assert_eq!(working.piece("guide").unwrap().note.as_deref(), Some("Written."));
+        assert!(working.piece("guide").unwrap().tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0].waiting.is_none());
+        assert!(engine::wake(&waiting, &working, false).is_none());
+        let reply = if pass { PASS } else { r#"{"verdict":"fail","evidence":["docs/guide.md:1: missing settings"]}"# };
+        host.verifier_replies("guide", 1, &verdict_block(reply), 42);
+        engine::watch(&host);
+        let ended = store::get(&id).unwrap();
+        let check = ended.piece("guide").unwrap().tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(if pass { verify::Outcome::Passed } else { verify::Outcome::Failed }));
+        assert_eq!(check.review.as_ref().unwrap().verifiers[0].tokens.unwrap().total(), 42);
+        engine::refreshed(&host, &id).unwrap();
+        assert_eq!(host.world().verifiers.len(), 1, "no duplicate verifier launch");
+    }
+}
+
+#[test]
+fn capacity_queues_are_not_actionable_ready_work_or_wait_wakeups() {
+    let _home = crate::store::temp_home();
+    let (_, id) = one_piece();
+    let began = store::get(&id).unwrap();
+    for hold in [Hold::RunLimit, Hold::AppLimit] {
+        let mut now = began.clone();
+        let queued = &mut now.pieces[1];
+        queued.depends_on.clear();
+        queued.queued_for = Some(hold);
+        assert_eq!(engine::shown(&now)["ready"], json!([]));
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        // An app limit can be held by another run, with no local worker.
+        now.pieces.remove(0);
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        now.pieces[0].queued_for = None;
+        assert_eq!(engine::shown(&now)["ready"], json!(["docs"]));
+        assert_eq!(engine::wake(&now, &now, false).unwrap()["ready"], json!(["docs"]));
+        // An accepted result or failure still wakes even with a capacity queue.
+        let mut finished = began.clone();
+        finished.pieces[1].queued_for = Some(hold);
+        for state in [PieceState::Done, PieceState::Blocked, PieceState::Failed] {
+            finished.pieces[0].state = state;
+            let woken = engine::wake(&began, &finished, false).unwrap();
+            assert_eq!(woken["ready"], json!([]));
+            assert!(woken["why"][0].as_str().unwrap().starts_with("cli is"));
+        }
+    }
+}
+
+#[test]
+fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invalidly() {
+    let _home = crate::store::temp_home();
+    for (number, terminal) in [VerifierNow::Gone, VerifierNow::Stuck("The agent terminated.".into()), VerifierNow::Replied("No verdict.".into())].into_iter().enumerate() {
+        let (host, id) = run_of(&format!("lead-terminal-{number}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Question.".into()));
+        engine::refreshed(&host, &id).unwrap();
+        host.world().verifier_now.insert(session, terminal);
+        let ended = engine::refreshed(&host, &id).unwrap();
+        let piece = ended.piece("guide").unwrap();
+        assert_eq!(piece.state, PieceState::Blocked);
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(verify::Outcome::Inconclusive));
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert!(verifier.settled() && verifier.problem.is_some() && verifier.waiting.is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), ended);
+        assert_eq!(host.world().verifiers.len(), 1);
+    }
 }

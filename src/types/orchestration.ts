@@ -119,6 +119,8 @@ export interface RunVerifier {
   evidence?: string[];
   /** Why it gave no verdict. */
   problem?: string;
+  /** A resumable permission request or question needs attention. */
+  waiting?: string;
   tokens?: VerifierTokens;
 }
 
