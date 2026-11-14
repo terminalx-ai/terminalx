@@ -10,6 +10,7 @@ import { loadSubmission, submissionStorageKey } from "./submission";
 import { acknowledgeLocalVmTask, reconcileLocalVmState, useLocalVmState } from "./useLocalVmState";
 import { EnvironmentPicker, useComputerInventory } from "@/components/computer/EnvironmentPicker";
 import { computerKey, environmentComputer, taskComputerMatches, type ComputerTarget } from "@/types/computer";
+import { pickerMode } from "@/lib/models";
 
 /** Journal-backed cards stay with the originating tab and its exact conversation. */
 export function LocalVmTasks({ session, tab, conversation, active, readOnly, selectedPrompt }: {
@@ -62,7 +63,9 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
   const environments = Object.values(state?.environments ?? {}).filter((environment) => !environment.deletedAt);
   const environment = selectedTarget && selectedTarget.kind !== "linuxContainer" ? environments.find((candidate) => computerKey(environmentComputer(candidate)) === computerKey(selectedTarget)) : undefined;
   const currentDescription = environment && description?.environmentId === environment.id && description.generation === environment.generation ? description.value : null;
-  const unavailable = submissionUnavailable(currentDescription, { harness: tab.harness, model: tab.model, effort: tab.effort ?? null, permissionMode: tab.permissionMode }, selectedTarget?.kind === "linuxGuest" ? "shellFiles" : "desktop");
+  // An older tab's spelling of a mode (ask, accept_edits, none at all) is that mode (review 2).
+  const permissionMode = pickerMode(tab.permissionMode)?.id ?? tab.permissionMode;
+  const unavailable = submissionUnavailable(currentDescription, { harness: tab.harness, model: tab.model, effort: tab.effort ?? null, permissionMode }, selectedTarget?.kind === "linuxGuest" ? "shellFiles" : "desktop");
   const acknowledged = pending ? Object.values(state?.tasks ?? {}).find((task) => task.idempotencyKey === pending.idempotencyKey && task.input.parentMessageId === pending.input.parentMessageId && (!pending.target || taskComputerMatches(pending.target, task))) : undefined;
 
   useEffect(() => {
@@ -92,7 +95,7 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
           target: selectedTarget,
           input: { parentSessionId: session.id, parentTabId: tab.id, parentMessageId: `${taskMessagePrefix(conversation)}${crypto.randomUUID()}`,
             environmentId: environment.id, prompt, harness: tab.harness, model: tab.model, effort: tab.effort ?? null,
-            permissionMode: tab.permissionMode, files: manifest, desktop: selectedTarget.kind !== "linuxGuest" },
+            permissionMode, files: manifest, desktop: selectedTarget.kind !== "linuxGuest" },
         };
         // Saving must succeed before the mutation; a timeout/reload keeps exactly the same key and input.
         localStorage.setItem(storageKey, JSON.stringify(submission));
