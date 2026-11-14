@@ -39,6 +39,29 @@ fn name(value: &str) -> Result<CString> {
     }
     Ok(CString::new(value)?)
 }
+
+/// Renames `from` to `to`, both single names in `directory`, failing if `to`
+/// exists in any form: RENAME_EXCL on macOS, RENAME_NOREPLACE on Linux, and
+/// elsewhere a hard link (which fails on any existing name) and an unlink.
+fn rename_exclusive(directory: std::os::fd::RawFd, from: &std::ffi::CStr, to: &std::ffi::CStr) -> std::io::Result<()> {
+    // SAFETY: both names are NUL-terminated single components under the open
+    // directory descriptor, which outlives the call.
+    #[cfg(target_os = "macos")]
+    let code = unsafe { libc::renameatx_np(directory, from.as_ptr(), directory, to.as_ptr(), libc::RENAME_EXCL) };
+    // SAFETY: as above.
+    #[cfg(target_os = "linux")]
+    let code = unsafe { libc::renameat2(directory, from.as_ptr(), directory, to.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // SAFETY: as above; the unlink removes only the staged name once linked.
+    let code = unsafe {
+        match libc::linkat(directory, from.as_ptr(), directory, to.as_ptr(), 0) {
+            0 => libc::unlinkat(directory, from.as_ptr(), 0),
+            failed => failed,
+        }
+    };
+    if code == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
 impl Directory {
     pub fn open(path: &Path, uid: u32, private: bool) -> Result<Self> {
         if !path.is_absolute() || path.canonicalize()? != path {
@@ -171,13 +194,8 @@ impl Directory {
         let temporary = format!(".{value}.{}.partial", uuid::Uuid::new_v4());
         let staged = name(&temporary)?;
         let mut file = self.open_file(&temporary, true, true, true)?;
-        let published = file.write_all(bytes).and_then(|_| file.sync_all()).and_then(|_| {
-            // SAFETY: both names are single components under this directory descriptor.
-            let code = unsafe {
-                libc::renameatx_np(self.file.as_raw_fd(), staged.as_ptr(), self.file.as_raw_fd(), target.as_ptr(), libc::RENAME_EXCL)
-            };
-            if code == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
-        });
+        let published = file.write_all(bytes).and_then(|_| file.sync_all())
+            .and_then(|_| rename_exclusive(self.file.as_raw_fd(), &staged, &target));
         if published.is_err() {
             // SAFETY: removes only the temporary name this call created.
             unsafe { libc::unlinkat(self.file.as_raw_fd(), staged.as_ptr(), 0) };

@@ -81,6 +81,7 @@ pub(super) fn check_legacy_user() -> Result<()> {
     let user = current_user()?;
     if user.short_name != "lume"
         || user.uid < 501
+        || user.gid == 0
         || user.home != "/Users/lume"
         || dirs::home_dir().as_deref() != Some(Path::new("/Users/lume"))
     {
