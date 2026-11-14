@@ -627,6 +627,13 @@ fn attach(target: &Target) -> Result<crate::local_vm::admission::Guard> {
 /// The attached MCP proxy holds admission for its entire lifetime. A crash or
 /// transport failure retains an unknown-operation record instead of releasing
 /// the container to a queued task merely because a host process disappeared.
+///
+/// Its agent's ordinary end releases it (review 2): when the agent closes the
+/// proxy's input, or its tab is stopped and the agent's process group is sent
+/// SIGTERM, the driver's input is closed, and `docker exec` returns only once
+/// the driver it ran has exited, so its exit status confirms the release. The
+/// exec runs in a process group of its own, so the signal reaches this proxy
+/// rather than killing it first.
 #[cfg(unix)]
 pub fn run_stdio_cli() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -634,17 +641,72 @@ pub fn run_stdio_cli() -> Option<i32> {
     let result = (|| -> Result<()> {
         if args.len() != 3 || !Path::new(&args[2]).is_absolute() { bail!("An exact container target and owner home are required"); }
         std::env::set_var("TERMINALX_HOME", &args[2]);
+        // Before any other thread, so that none is the one a stop signal kills.
+        let signals = crate::local_vm::stdio_exit::watch()?;
         let target: Target = serde_json::from_str(&args[1])?;
         let path = selected_runtime(&target)?;
         let Target::LinuxContainer { id, .. } = &target else { bail!("An exact Linux desktop container is required; no OS fallback") };
         let admission = attach(&target)?;
-        let status = Command::new(path).args(["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"])
-            .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;
-        if !status.success() { bail!("Attached desktop transport exited without a successful guest exit receipt; route remains reserved"); }
-        admission.completed()
+        let mut command = Command::new(path);
+        command.args(["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"]);
+        proxy(command, &signals, std::io::stdin(), admission)
     })();
     if let Err(error) = &result { eprintln!("Container desktop: {error:#}"); }
     Some(if result.is_ok() { 0 } else { 1 })
+}
+
+/// Runs the driver `command` with the agent's `input` until the agent closes
+/// it or a stop signal arrives, then closes the driver's input: its exit status
+/// releases `admission`, and only a driver not seen to exit keeps it.
+#[cfg(unix)]
+fn proxy(mut command: Command, signals: &crate::local_vm::stdio_exit::Signals, input: impl Read + Send + 'static,
+    admission: crate::local_vm::admission::Guard) -> Result<()> {
+    command.stdin(Stdio::piped()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    crate::local_vm::stdio_exit::unblock_in_child(&mut command);
+    let mut child = command.spawn()?;
+    let driver = std::sync::Arc::new(std::sync::Mutex::new(child.stdin.take()));
+    let pump = driver.clone();
+    std::thread::Builder::new().name("proxy-input".into()).spawn(move || {
+        use std::io::Write;
+        let mut input = input;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = match input.read(&mut buffer) { Ok(0) | Err(_) => break, Ok(count) => count };
+            let mut driver = pump.lock().unwrap();
+            let Some(stdin) = driver.as_mut() else { return };
+            if stdin.write_all(&buffer[..count]).and_then(|_| stdin.flush()).is_err() { break; }
+        }
+        // The agent closed its end: the driver's input ends with it.
+        pump.lock().unwrap().take();
+    })?;
+    let exited = loop {
+        if let Some(status) = child.try_wait()? { break Some(status); }
+        if signals.try_recv() {
+            driver.lock().unwrap().take();
+            break wait_within(&mut child, Duration::from_secs(10))?;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    match exited {
+        Some(status) if status.code().is_some() => admission.completed(),
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Attached desktop transport ended without its driver's exit being confirmed; the container stays reserved until the Local VM is stopped");
+        }
+    }
+}
+
+/// The child's exit status once it has exited, or `None` after `budget`.
+#[cfg(unix)]
+fn wait_within(child: &mut std::process::Child, budget: Duration) -> Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait()? { return Ok(Some(status)); }
+        if Instant::now() >= deadline { return Ok(None); }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -690,6 +752,40 @@ mod tests {
         assert!(!joined.contains("SYS_CHROOT"));
         assert!(run_args("podman", "x").contains(&"SYS_CHROOT".to_string()));
         assert_eq!(args.last().map(String::as_str), Some(IMAGE));
+    }
+
+    /// Review 2: the attached proxy kept the container reserved after its
+    /// agent's ordinary end, a closed input or a tab stop's SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn the_proxy_releases_the_container_when_its_agent_goes_or_its_tab_stops() {
+        use std::os::unix::thread::JoinHandleExt;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = crate::local_vm::journal::Journal::open(&dir.path().join("journal")).unwrap();
+        let target = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
+        let marker = dir.path().join(format!("computer-admission/docker-{}.json", "a".repeat(64)));
+        let signals = crate::local_vm::stdio_exit::watch().unwrap();
+        // A driver that, like `cua-driver mcp`, reads until its input ends.
+        let driver = || { let mut command = Command::new("/bin/sh"); command.args(["-c", "cat >/dev/null"]); command };
+        // The agent closes its end.
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        proxy(driver(), &signals, std::io::Cursor::new(b"{}\n".to_vec()), admission).unwrap();
+        assert!(!marker.exists());
+        // The tab is stopped while the agent's end stays open.
+        let (agent, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        // SAFETY: the watcher thread is alive and blocks SIGTERM.
+        assert_eq!(unsafe { libc::pthread_kill(signals.watcher().as_pthread_t(), libc::SIGTERM) }, 0);
+        proxy(driver(), &signals, agent, admission).unwrap();
+        assert!(!marker.exists());
+        // A driver that ignores the end of its input is not seen to exit.
+        let mut stubborn = Command::new("/bin/sh");
+        stubborn.args(["-c", "trap '' TERM; while :; do sleep 1; done"]);
+        let (agent, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        unsafe { libc::pthread_kill(signals.watcher().as_pthread_t(), libc::SIGTERM) };
+        assert!(proxy(stubborn, &signals, agent, admission).is_err());
+        assert!(marker.exists(), "the container stays reserved");
     }
 
     /// A command that exits, however it exits, has ended; one given up on

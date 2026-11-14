@@ -2823,6 +2823,24 @@ mod tests {
         assert_eq!(replies.len(),3);assert_eq!(replies[0]["result"]["protocolVersion"],"2025-06-18");
         assert_eq!(replies[1]["result"]["tools"],json!([catalog["tool"]]));assert!(replies[2]["result"]["content"].is_array());
         assert_eq!(effects.get(),3);
+        // Review 2: malformed input and other notifications are answered or
+        // ignored rather than ending the adapter, and however serving ends,
+        // here a parent check failing mid-session, its lease is closed.
+        let mut third=binding.clone();third.lease_id=new_id();
+        let input=["not json".to_string(),json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}).to_string(),
+            json!({"jsonrpc":"1.0","id":4,"method":"ping"}).to_string(),json!({"jsonrpc":"2.0","id":5,"method":"ping"}).to_string(),
+            json!({"jsonrpc":"2.0","id":6,"method":"ping"}).to_string()].join("\n")+"\n";
+        let mut output=Vec::new();let checks=std::cell::Cell::new(0);
+        let error=super::super::attachment::serve_using(&root,&journal,third.clone(),&mut std::io::Cursor::new(input),&mut output,&mut rpc,
+            &mut |_|{checks.set(checks.get()+1);if checks.get()>5 {bail!("parent tab changed")}Ok(())}).unwrap_err();
+        assert!(error.to_string().contains("parent tab changed"),"{error:#}");
+        let replies:Vec<Value>=String::from_utf8(output).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(),3);
+        assert_eq!((replies[0]["id"].clone(),replies[0]["error"]["code"].clone()),(Value::Null,json!(-32700)));
+        assert_eq!(replies[1]["id"],4);assert!(replies[1]["error"].is_object());
+        assert_eq!(replies[2]["id"],5);assert!(replies[2]["result"].is_object());
+        let retained:Value=serde_json::from_slice(&fs::read(root.join("macos-attachments").join(format!("{}.json",third.lease_id))).unwrap()).unwrap();
+        assert_eq!(retained["status"],"released");
         journal.submit("after-release",task.input).unwrap();
     }
 
