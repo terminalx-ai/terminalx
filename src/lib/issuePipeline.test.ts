@@ -170,6 +170,15 @@ describe("where a pipeline stands", () => {
     expect(pipelineActions(pipeline({ stage: "review" })).secondary.map((button) => button.action)).toEqual(["stop"]);
   });
 
+  it("offers restart while resolving, including after failure or stop, but never after merge", async () => {
+    const { pipelineActions } = await load();
+    for (const state of ["working", "needsYou", "stopped"] as const) {
+      expect(pipelineActions(pipeline({ stage: "resolve", state })).primary).toEqual({ action: "restartResolve", label: "Restart resolver" });
+    }
+    expect(pipelineActions(pipeline({ stage: "resolve", state: "merged" })).primary).toBeNull();
+    expect(pipelineActions(pipeline({ stage: "review", state: "needsYou" })).primary?.action).not.toBe("restartResolve");
+  });
+
   it("says what the reviewer's own checks came to, as the pull request does", async () => {
     const { reviewChecksLine } = await load();
     const verdict = { commit: C1, decision: "merge" as const, securityPass: "notNeeded" as const, findings: [], round: 1, at: "2026-10-12T10:05:00.000Z" };

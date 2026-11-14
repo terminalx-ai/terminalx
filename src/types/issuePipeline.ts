@@ -145,7 +145,7 @@ export type CloudMerge =
   | { outcome: "notMerged"; reason: string };
 
 /** What a person can do to a pipeline from the issue page. */
-export type PipelineAction = "stop" | "resume" | "advance" | "review" | "merge" | "refresh";
+export type PipelineAction = "stop" | "resume" | "advance" | "review" | "merge" | "refresh" | "restartResolve";
 
 export interface StartedIssuePipeline {
   pipeline: IssuePipeline;

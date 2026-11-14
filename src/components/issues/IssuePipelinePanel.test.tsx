@@ -67,6 +67,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("an issue's pipeline on its page", () => {
+  it("delivers restart, disables actions while pending, and permits retry after an error", async () => {
+    let reject!: (error: Error) => void;
+    invoke.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    render(<IssuePipelinePanel pipeline={pipeline({ stage: "resolve", state: "needsYou", reason: { kind: "resolverFailed" } })} />);
+    const restart = screen.getByRole("button", { name: "Restart resolver" });
+    fireEvent.click(restart);
+    expect(acts()).toEqual([["issue_pipeline_act", { id: "p1", action: "restartResolve" }]]);
+    expect(restart.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => reject(new Error("Resolver could not start")));
+    expect(await screen.findByText("Resolver could not start")).toBeTruthy();
+    expect(restart.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(restart);
+    await waitFor(() => expect(acts()).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText("Resolver could not start")).toBeNull());
+  });
   it("says where it stands, with the stages, the pull request and both sessions", () => {
     render(<IssuePipelinePanel pipeline={pipeline()} />);
     const panel = within(screen.getByTestId("issue-pipeline"));
