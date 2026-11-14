@@ -302,3 +302,25 @@ it("shows a failure's own heading, its body apart, and its actions beside Copy e
   expect(retry).toHaveBeenCalledTimes(1);
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+it("shows why dropped files were not all attached (PRO-290): the limit as a warning, a reserved name as refused, each dismissable", async () => {
+  const { announceAdmission, resetAttachmentNotices, TIMEOUT_MS } = await import("@/lib/attachmentNotices");
+  const { admit } = await import("@/lib/attachmentRules");
+  resetAttachmentNotices();
+  const offered = [...Array.from({ length: 9 }, (_, i) => ({ name: `trace-${i}.log` })), { name: "terminalx.json" }, ...Array.from({ length: 5 }, (_, i) => ({ name: `extra-${i}.log` }))];
+  render(<Toasts />);
+  act(() => announceAdmission(offered.length, admit(0, offered), "dropped"));
+  const limit = document.querySelector<HTMLElement>('[data-attachment-notice="limit"]')!;
+  const refused = document.querySelector<HTMLElement>('[data-attachment-notice="refused"]')!;
+  expect(within(limit).getByText("Only the first 10 files were attached")).toBeTruthy();
+  expect(within(limit).getByText("You dropped 15 files. 4 weren’t added; send them in another message.")).toBeTruthy();
+  expect(limit.querySelector("svg")!.getAttribute("class")).toContain("text-warning");
+  expect(within(refused).getByText("terminalx.json is a name TerminalX uses for session files")).toBeTruthy();
+  expect(within(refused).getByText("Rename it, for example to terminalx.copy.json, and attach it again.")).toBeTruthy();
+  expect(refused.querySelector("svg")!.getAttribute("class")).toContain("text-destructive");
+  fireEvent.click(within(refused).getByRole("button", { name: "Dismiss" }));
+  expect(document.querySelector('[data-attachment-notice="refused"]')).toBeNull();
+  // The other closes by itself; the composer's summary line keeps the count meanwhile.
+  act(() => vi.advanceTimersByTime(TIMEOUT_MS));
+  expect(document.querySelector("[data-attachment-notice]")).toBeNull();
+});

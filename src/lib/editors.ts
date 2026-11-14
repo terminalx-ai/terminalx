@@ -45,7 +45,22 @@ interface EditorBase {
   jump?: { line: number; col?: number; nonce: number };
 }
 
-export interface FileEditorEntry extends EditorBase { kind: FileKind }
+export interface FileEditorEntry extends EditorBase {
+  kind: FileKind;
+  /**
+   * A file attached to a sent message (PRO-290, screen 03.22): read-only,
+   * with Copy and Download in place of Save. `root` is the session's
+   * attachments folder, `rel` is `<folder>/<name>`.
+   */
+  attachment?: AttachmentInfo;
+}
+
+export interface AttachmentInfo {
+  /** The absolute stored path (`FileRef.path`). */
+  path: string;
+  /** When the message carrying it was sent (its `messageTs`), for "on your message · HH:MM". */
+  sentAt?: string;
+}
 export type DiffMode = "diff" | "entire" | "preview" | "edit";
 export interface DiffEditorEntry extends EditorBase {
   kind: "diff";
@@ -73,10 +88,26 @@ export interface ConflictEditorEntry extends EditorBase {
     conflicts: number;
   };
 }
-export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry;
-export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry;
+/**
+ * A file attached to a sent message (PRO-290, screen 03.22), open in a centre
+ * tab of its session beside the agent tabs, like a diff or a pull request.
+ * `media` is how its content is drawn (text in the editor, or a media surface).
+ */
+export interface AttachmentEditorEntry extends EditorBase {
+  kind: "attachment";
+  media: FileKind;
+  attachment: AttachmentInfo;
+}
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
 export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
-  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict";
+  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
+}
+
+/** An attachment tab as the file surfaces draw it: a read-only file with the attachment toolbar. */
+export function attachmentFile(entry: AttachmentEditorEntry): FileEditorEntry {
+  const { media, ...rest } = entry;
+  return { ...rest, kind: media };
 }
 
 const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
@@ -111,6 +142,10 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined });
+      } else if (e.kind === "attachment" && ["text", "image", "audio", "video"].includes(e.media) && typeof e.attachment?.path === "string"
+        && reviewPath(e.root, e.rel) && e.attachment.path === `${e.root}/${e.rel}` && (e.attachment.sentAt === undefined || typeof e.attachment.sentAt === "string")) {
+        editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
+          dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: "attachment", media: e.media, attachment: { path: e.attachment.path, ...(e.attachment.sentAt ? { sentAt: e.attachment.sentAt } : {}) } });
       } else if (e.kind === "conflict" && reviewPath(e.root, e.rel) && e.conflict && isCommit(e.conflict.head) && isCommit(e.conflict.mergeHead)
         && Number.isSafeInteger(e.conflict.conflicts) && e.conflict.conflicts >= 0) {
         const { head, mergeHead, conflicts } = e.conflict;
@@ -180,7 +215,7 @@ let nonce = 0;
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   recordRecentFile(source ?? `local:${root}`, rel);
-  const existing = state.editors.find((e) => !isReviewEditor(e) && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const selected = getTerminalState().selected[sessionId];
   if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   const kind = fileKind(rel);
@@ -210,6 +245,35 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
   return id;
+}
+
+/**
+ * Open (or focus) a file attached to a sent message (PRO-290) in a centre
+ * tab of its session. Stored at `…/attachments/<session>/<folder>/<name>`:
+ * the tab hangs off the session's attachments folder with `<folder>/<name>`
+ * as its path, so two files of one name sent in different messages are two
+ * tabs. Images, audio and video open in the media surfaces; markdown in
+ * Preview. Opening it again focuses the tab it already has.
+ */
+export function openAttachment(sessionId: string, file: { path: string; name: string }, sentAt?: string, workspaceRoot?: string) {
+  const parts = file.path.split("/");
+  if (parts.length < 4 || !file.path.startsWith("/") || parts.includes("..")) throw new Error("This attachment's path is not a stored file.");
+  const root = parts.slice(0, -2).join("/");
+  const rel = parts.slice(-2).join("/");
+  const entry: AttachmentEditorEntry = {
+    id: JSON.stringify([sessionId, "attachment", file.path]),
+    sessionId,
+    workspaceRoot: workspaceRoot ?? root,
+    root,
+    rel,
+    name: file.name || fileName(rel),
+    dirty: false,
+    kind: "attachment",
+    media: fileKind(rel),
+    viewMode: isMarkdown(rel) ? "preview" : "source",
+    attachment: { path: file.path, ...(sentAt ? { sentAt } : {}) },
+  };
+  return openReview(entry);
 }
 
 export function openReview(entry: ReviewEditorEntry) {
@@ -367,18 +431,18 @@ export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved
 
 export function setEditorDirty(id: string, dirty: boolean) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty) return;
+  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty || (e.kind === "text" && e.attachment && dirty)) return;
   set({ editors: state.editors.map((x) => (x.id === id ? { ...x, dirty } : x)) });
 }
 
 export function setViewMode(id: string, viewMode: ViewMode) {
-  set({ editors: state.editors.map((x) => (x.id === id && x.kind === "text" ? { ...x, viewMode } : x)) });
+  set({ editors: state.editors.map((x) => (x.id === id && (x.kind === "text" || (x.kind === "attachment" && x.media === "text")) ? { ...x, viewMode } : x)) });
 }
 
 /** Flip preview and source for a markdown editor; other files stay as source. */
 export function toggleViewMode(id: string) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || e.kind !== "text" || !isMarkdown(e.rel)) return;
+  if (!e || (e.kind !== "text" && !(e.kind === "attachment" && e.media === "text")) || !isMarkdown(e.rel)) return;
   setViewMode(id, e.viewMode === "preview" ? "source" : "preview");
 }
 

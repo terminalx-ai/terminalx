@@ -329,7 +329,7 @@ export function peerLabel(tab: PeerTab, layout: TabLayout, harnessName: (id: str
 }
 
 /** How a full-width review tab is named, by its editor kind. */
-const REVIEW_KINDS: Record<string, string> = { diff: "File diff", pr: "Pull request", conflict: "Merge conflict" };
+const REVIEW_KINDS: Record<string, string> = { diff: "File diff", pr: "Pull request", conflict: "Merge conflict", attachment: "Attached file" };
 
 /** What kind of tab it is now: its agent's name, "Terminal" (with the agent running in it, if one is) or "Browser page". */
 export function peerKind(tab: PeerTab, harnessName: (id: string) => string | undefined): string {

@@ -318,7 +318,7 @@ impl SessionManager {
                 "Codex's connection ended. Stop the session before sending again; this message was not queued.");
             if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
             let event = self.publish(rt, Payload::UserMessage {
-                author: prompt.author, text: prompt.display, images, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
+                author: prompt.author, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
             }, None);
             let privacy = crate::data_privacy::remote_ticket();
             if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() {
@@ -347,7 +347,7 @@ impl SessionManager {
         let events = if manual { Vec::new() } else {
             let baseline = rt.baseline_for(&entry.cwd);
             vec![self.publish(rt, Payload::UserMessage {
-                author: prompt.author, text: prompt.display, images, baseline, queued: true, cwd: Some(entry.cwd.clone()),
+                author: prompt.author, text: prompt.display, images, files: prompt.files, baseline, queued: true, cwd: Some(entry.cwd.clone()),
             }, None)]
         };
         // Even a send just after completion is pending until Codex's RPC

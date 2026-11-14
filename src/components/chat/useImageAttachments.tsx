@@ -1,68 +1,149 @@
-import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObject } from "react";
-import { Paperclip, X } from "@/icons";
+import { Paperclip } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { files as filesApi, type ImageInput } from "@/lib/api";
+import { attachments as attachmentsApi, files as filesApi, type FileFacts, type FileInput, type ImageInput } from "@/lib/api";
+import { admit, type Offered, type Refusal } from "@/lib/attachmentRules";
+import { announceAdmission } from "@/lib/attachmentNotices";
+import { showError } from "@/lib/errorToasts";
 import { registerWindowDraft } from "@/lib/windowDrafts";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 
+/**
+ * One file on the draft, drawn as a chip (PRO-290). Exactly one of `image`,
+ * `file` and `refused` is set: an image goes to the agent as an image block,
+ * any other file is stored in the session's attachments folder on send, and
+ * a refused one stays above the draft, never sent, until it is removed.
+ */
 export interface Attachment {
   id: string;
   name: string;
-  mediaType: string;
-  data: string; // base64
-  previewUrl: string;
+  /** An image of a type an agent takes, up to 5 MB: sent with `agent.send`'s images, as before PRO-290. */
+  image?: ImageInput;
+  /** The image's thumbnail, for the message drawn as sending. */
+  previewUrl?: string;
+  /** Stored with `attachments.store` on send; its `FileRef` goes with the message. */
+  file?: FileInput;
+  /** Why it was not attached. It takes no place in the 10. */
+  refused?: Refusal;
 }
 
-/** Images taken out of the composer for a send, until it is known whether it went (`ImageAttachments.setAside`). */
+/** Files taken out of the composer for a send, until it is known whether it went (`Attachments.setAside`). */
 export interface SetAside {
   images: ImageInput[];
-  /** Their thumbnails, for the message drawn as sending. */
+  /** Every other file, for `attachments.store` once the session is known. */
+  files: FileInput[];
+  /** The images' thumbnails, for the message drawn as sending. */
   previews: { url: string; name?: string }[];
   settle: (sent: boolean) => void;
 }
 
-/** Images larger than this are skipped rather than sent as one huge block. */
+/** Larger images go as files rather than as one huge image block. */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** The image types every agent takes as an image block; any other image is attached as a file. */
+const AGENT_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
-export interface ImageAttachments {
+export type OfferVerb = "dropped" | "pasted" | "picked";
+
+export interface Attachments {
+  /** Every chip above the draft, refused ones included, in the order offered. */
   attachments: Attachment[];
+  /** How many files the last offer left out because the message was full; cleared by a removal or a send. */
+  notAdded: number;
+  /** A cloud tab: images only, nothing is stored, and no file is mentioned by its path. */
+  imagesOnly: boolean;
   /** A file is being dragged over the window or the composer frame. */
   dragging: boolean;
   fileRef: RefObject<HTMLInputElement | null>;
   /** Queue browser `File`s (from paste, the DOM drop path, or the hidden picker). */
-  addFiles: (list: File[]) => Promise<void>;
+  addFiles: (list: File[], verb?: OfferVerb) => Promise<void>;
   /** Open the native picker, or the hidden browser picker outside Tauri. */
   chooseFiles: () => Promise<void>;
   remove: (id: string) => void;
-  /** Release every queued image and its preview, after a successful send. */
+  /** Release every chip and its preview, after the new-session screen has handed them on. */
   clear: () => void;
   /**
-   * Take the queued images out of the composer for a send that is on its
-   * way (#727), keeping them: `settle(true)` lets them go once it is sent,
-   * `settle(false)` puts the very same images back when it was not.
+   * Take what will be sent out of the composer for a send that is on its
+   * way (#727), keeping it: `settle(true)` lets it go once it is sent,
+   * `settle(false)` puts the very same images and files back when it was not.
    */
   setAside: () => SetAside;
-  /** The queue in the shape `agent.send` takes. */
+  /** The queued images in the shape `agent.send` takes. */
   images: ImageInput[];
+  /** The queued files, for `attachments.store`. */
+  files: FileInput[];
   /** Why the last file offered was not attached (a cloud tab only), until the queue changes again. */
   notice: string | null;
   /** Spread onto the composer frame so it accepts pasted and dropped files. */
   dropZoneProps: Pick<HTMLAttributes<HTMLElement>, "onPaste" | "onDragEnter" | "onDragOver" | "onDragLeave" | "onDrop">;
 }
 
+/** A file offered to the draft: its name and size for the rules, and how to read it once it is admitted. */
+interface Candidate extends Offered {
+  size: number;
+  read: () => Promise<Omit<Attachment, "id" | "name"> | null>;
+}
+
+let lastId = 0;
+const nextId = () => `attachment-${++lastId}`;
+
+function readBase64(file: File): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error ?? new Error(`${file.name} could not be read`));
+    reader.readAsDataURL(file);
+  });
+}
+
+const takenAsImage = (mediaType: string | undefined, size: number) => !!mediaType && AGENT_IMAGE_TYPES.has(mediaType) && size <= MAX_IMAGE_BYTES;
+
+/** A pasted or DOM-dropped `File`: its bytes go with it, as an image or as a file. */
+function browserCandidate(f: File): Candidate {
+  return {
+    name: f.name,
+    size: f.size,
+    read: async () => {
+      const data = await readBase64(f);
+      if (takenAsImage(f.type, f.size)) return { image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) };
+      return { file: { name: f.name, data, ...(f.type ? { mediaType: f.type } : {}) } };
+    },
+  };
+}
+
+/** A picked or window-dropped path, as `attachments.inspect` found it: an image is read here, any other file is copied by the store. */
+function pathCandidate(facts: FileFacts): Candidate {
+  return {
+    name: facts.name,
+    size: facts.size,
+    read: async () => {
+      if (takenAsImage(facts.mediaType, facts.size)) {
+        const img = await filesApi.readImage(facts.path);
+        if (img) return { image: { mediaType: img.mediaType, data: img.data, name: img.name }, previewUrl: `data:${img.mediaType};base64,${img.data}` };
+      }
+      return { file: { name: facts.name, path: facts.path } };
+    },
+  };
+}
+
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
+
 /**
- * Everything a composer needs to carry images with a prompt: the queue, the
- * native and browser pickers, paste, and both drop paths. Dropped paths reach
- * the app through the Tauri window, not the DOM: images attach, any other
- * file becomes an `@path` mention appended to the draft.
+ * Everything a composer needs to carry files with a prompt (PRO-290): the
+ * chips, the native and browser pickers, paste, and both drop paths. Any
+ * file attaches, up to 10 a message (`attachmentRules.admit`); a reserved
+ * name or an oversized file is refused and shown red; what did not fit is
+ * counted and said in a toast. Dropped paths reach the app through the Tauri
+ * window, not the DOM; a folder dropped there becomes an `@path` mention.
+ *
+ * A cloud tab (`mentionFiles` false) takes images only, as before: nothing
+ * is stored for it, and its own limit of 8 is checked on upload.
  *
  * Shared by the in-session composer and the new-session screen so the first
- * prompt of a session can carry a screenshot like every one after it.
+ * prompt of a session can carry files like every one after it.
  */
-export function useImageAttachments({
+export function useAttachments({
   textareaRef,
   draft,
   onDraftChange,
@@ -72,16 +153,17 @@ export function useImageAttachments({
   draft: string;
   onDraftChange: (v: string) => void;
   /**
-   * False when the agent does not run on this computer (a cloud tab): a
-   * dropped file that is not an image is then left alone, since its path
-   * here names nothing there.
+   * False when the agent does not run on this computer (a cloud tab): only
+   * images attach, and a dropped file that is not one is left alone, since
+   * its path here names nothing there.
    */
   mentionFiles?: boolean;
-}): ImageAttachments {
+}): Attachments {
+  const imagesOnly = !mentionFiles;
   const [attachments, setAttachmentState] = useState<Attachment[]>([]);
   const current = useRef(attachments);
-  // Keep the preservation check current even between an async file read and
-  // React's next render. Every queue edit goes through this one operation.
+  // Keep the preservation check and the count current even between an async
+  // file read and React's next render. Every queue edit goes through this.
   const setAttachments = useCallback((change: (items: Attachment[]) => Attachment[]) => {
     current.current = change(current.current);
     setAttachmentState(current.current);
@@ -91,13 +173,11 @@ export function useImageAttachments({
     pendingInput.current++;
     try { await read(); } finally { pendingInput.current--; }
   }, []);
+  // Places taken by files admitted but still being read, so two offers close together cannot both fill the last places.
+  const reading = useRef(0);
+  const [notAdded, setNotAdded] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  // A local tab mentions what is not an image; a cloud tab can only say why it was left out.
-  const refuse = useCallback(
-    (names: string[]) => setNotice(mentionFiles || !names.length ? null : notAttached(names)),
-    [mentionFiles],
-  );
   const fileRef = useRef<HTMLInputElement>(null);
   // The drop target is registered once, so it reads the draft through a ref
   // rather than taking it as a dependency — otherwise every keystroke tore
@@ -105,149 +185,188 @@ export function useImageAttachments({
   const latest = useRef({ draft, onDraftChange });
   latest.current = { draft, onDraftChange };
 
-  const addFiles = useCallback((list: File[]) => readInput(async () => {
-    const out: Attachment[] = [];
+  const mention = useCallback((paths: string[]) => {
+    if (!paths.length) return;
+    const { draft: now, onDraftChange: change } = latest.current;
+    const sep = now && !/\s$/.test(now) ? " " : "";
+    change(now + sep + paths.map((p) => `@${p}`).join(" ") + " ");
+  }, []);
+
+  /** Admit an offer by the rules, read what was admitted, and put every chip up in the order offered. */
+  const offer = useCallback(async (items: Candidate[], verb: OfferVerb) => {
+    if (!items.length) return;
+    const queued = current.current.filter((a) => !a.refused).length + reading.current;
+    const admission = admit(queued, items);
+    setNotAdded(admission.notAdded.length);
+    announceAdmission(items.length, admission, verb);
+    reading.current += admission.attached.length;
+    let read: (Omit<Attachment, "id" | "name"> | null)[];
+    try {
+      read = await Promise.all(admission.attached.map((item) => item.read().catch((error) => {
+        showError(`Couldn't attach ${item.name}`, error);
+        return null;
+      })));
+    } finally {
+      reading.current -= admission.attached.length;
+    }
+    const readOf = new Map(admission.attached.map((item, index) => [item, read[index]]));
+    const refusedOf = new Map(admission.refused.map(({ item, reason }) => [item, reason]));
+    const added: Attachment[] = [];
+    for (const item of items) {
+      const reason = refusedOf.get(item);
+      const body = readOf.get(item);
+      if (reason) added.push({ id: nextId(), name: item.name, refused: reason });
+      else if (body) added.push({ id: nextId(), name: item.name, ...body });
+    }
+    if (added.length) setAttachments((list) => [...list, ...added]);
+  }, [setAttachments]);
+
+  // A cloud tab takes images and nothing else, and says why it left a file out.
+  const addCloudImages = useCallback(async (images: (Omit<Attachment, "id"> | null)[], skipped: string[]) => {
+    const kept = images.filter((a): a is Omit<Attachment, "id"> => !!a);
+    if (kept.length) setAttachments((list) => [...list, ...kept.map((a) => ({ ...a, id: nextId() }))]);
+    setNotice(skipped.length ? notAttached(skipped) : null);
+  }, [setAttachments]);
+
+  const addFiles = useCallback((list: File[], verb: OfferVerb = "dropped") => readInput(async () => {
+    if (!imagesOnly) return offer(list.map(browserCandidate), verb);
     const skipped: string[] = [];
+    const images: Omit<Attachment, "id">[] = [];
     for (const f of list) {
       if (!f.type.startsWith("image/") || f.size > MAX_IMAGE_BYTES) {
         skipped.push(f.name);
         continue;
       }
-      const data = await new Promise<string>((res) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1] ?? "");
-        r.readAsDataURL(f);
-      });
-      out.push({ id: crypto.randomUUID(), name: f.name, mediaType: f.type, data, previewUrl: URL.createObjectURL(f) });
+      const data = await readBase64(f);
+      images.push({ name: f.name, image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) });
     }
-    if (out.length) setAttachments((a) => [...a, ...out]);
-    refuse(skipped);
-  }), [refuse, readInput, setAttachments]);
+    await addCloudImages(images, skipped);
+  }), [imagesOnly, offer, addCloudImages, readInput]);
 
   const addPaths = useCallback(
-    (paths: string[]) => readInput(async () => {
-      const mentions: string[] = [];
-      const skipped: string[] = [];
-      for (const path of paths) {
-        const img = await filesApi.readImage(path).catch(() => null);
-        if (img) {
-          setAttachments((current) => [
-            ...current,
-            { id: crypto.randomUUID(), name: img.name, mediaType: img.mediaType, data: img.data, previewUrl: `data:${img.mediaType};base64,${img.data}` },
-          ]);
-        } else if (mentionFiles) {
-          mentions.push(`@${path}`);
-        } else {
-          skipped.push(path.split(/[\\/]/).pop() || path);
+    (paths: string[], verb: OfferVerb = "dropped") => readInput(async () => {
+      if (imagesOnly) {
+        const skipped: string[] = [];
+        const images: Omit<Attachment, "id">[] = [];
+        for (const path of paths) {
+          const img = await filesApi.readImage(path).catch(() => null);
+          if (img) images.push({ name: img.name, image: { mediaType: img.mediaType, data: img.data, name: img.name }, previewUrl: `data:${img.mediaType};base64,${img.data}` });
+          else skipped.push(baseName(path));
         }
+        await addCloudImages(images, skipped);
+      } else {
+        let facts: FileFacts[];
+        try {
+          facts = await attachmentsApi.inspect(paths);
+        } catch (error) {
+          showError(paths.length === 1 ? `Couldn't attach ${baseName(paths[0])}` : `Couldn't attach ${paths.length} files`, error);
+          return;
+        }
+        // A folder (or anything else that is not a regular file) is not attached: the agent is pointed at it, as before.
+        mention(facts.filter((f) => f.unreadable).map((f) => f.path));
+        await offer(facts.filter((f) => !f.unreadable).map(pathCandidate), verb);
       }
-      if (mentions.length) {
-        const { draft: current, onDraftChange: change } = latest.current;
-        const sep = current && !/\s$/.test(current) ? " " : "";
-        change(current + sep + mentions.join(" ") + " ");
-      }
-      refuse(skipped);
       textareaRef.current?.focus();
     }),
-    [textareaRef, mentionFiles, refuse, readInput, setAttachments],
+    [textareaRef, imagesOnly, mention, offer, addCloudImages, readInput],
   );
 
   const chooseFiles = useCallback(() => readInput(async () => {
+    let selected: string | string[] | null;
     try {
-      const selected = await openDialog({ multiple: true, title: "Attach files" });
-      if (!selected) return;
-      await addPaths(Array.isArray(selected) ? selected : [selected]);
+      selected = await openDialog({ multiple: true, title: "Attach files" });
     } catch {
       // The hidden browser picker keeps the composer usable outside Tauri.
       fileRef.current?.click();
+      return;
     }
+    if (!selected) return;
+    await addPaths(Array.isArray(selected) ? selected : [selected], "picked");
   }), [addPaths, readInput]);
 
+  const release = (item: Attachment) => {
+    if (item.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
+  };
+
   const remove = useCallback((id: string) => {
+    setNotAdded(0);
     setAttachments((list) => {
       const removed = list.find((item) => item.id === id);
-      if (removed?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) release(removed);
       return list.filter((item) => item.id !== id);
     });
-  }, []);
+  }, [setAttachments]);
 
   const clear = useCallback(() => {
     setNotice(null);
+    setNotAdded(0);
     setAttachments((list) => {
-      for (const item of list) {
-        if (item.previewUrl.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
-      }
+      list.forEach(release);
       return [];
     });
     if (fileRef.current) fileRef.current.value = "";
-  }, []);
+  }, [setAttachments]);
 
   // Dropped paths arrive from the window, not the DOM, through the one
-  // router every drop target shares (`fileDrop.ts`): images attach, the rest
-  // become mentions the harness reads itself. A composer takes what lands on
-  // it and what lands on nothing else, never what lands on a terminal.
+  // router every drop target shares (`fileDrop.ts`). A composer takes what
+  // lands on it and what lands on nothing else, never what lands on a terminal.
   useEffect(
     () =>
       registerFileDropTarget({
         element: () => textareaRef.current?.parentElement ?? null,
         anywhere: true,
         onDragChange: setDragging,
-        onDrop: addPaths,
+        onDrop: (paths) => addPaths(paths, "dropped"),
       }),
     [addPaths, textareaRef],
   );
 
-  // One object per attachment for as long as it is queued: a send tried again hands over the very
-  // same images, which is how a cloud tab knows not to upload them as new ones. Those set aside for
-  // a send on its way keep theirs, for when they come back.
-  const inputs = useRef(new Map<string, ImageInput>());
-  const aside = useRef(new Map<string, ImageInput>());
-  const images = useMemo(() => {
-    const kept = new Map<string, ImageInput>();
-    for (const a of attachments) {
-      kept.set(a.id, inputs.current.get(a.id) ?? aside.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
-      aside.current.delete(a.id);
-    }
-    inputs.current = kept;
-    return [...kept.values()];
-  }, [attachments]);
+  // Each image is one object for as long as it is queued, set aside and put
+  // back included: a send tried again hands over the very same images, which
+  // is how a cloud tab knows not to upload them as new ones.
+  const sendable = useMemo(() => attachments.filter((a) => !a.refused), [attachments]);
+  const images = useMemo(() => sendable.flatMap((a) => (a.image ? [a.image] : [])), [sendable]);
+  const files = useMemo(() => sendable.flatMap((a) => (a.file ? [a.file] : [])), [sendable]);
 
+  const aside = useRef(0);
   useLayoutEffect(() => registerWindowDraft(() =>
-    current.current.length > 0 || aside.current.size > 0 || pendingInput.current > 0,
+    current.current.some((a) => !a.refused) || aside.current > 0 || pendingInput.current > 0,
   ), []);
   const setAside = useCallback((): SetAside => {
-    const taken = current.current;
-    const images = taken.map((a) => inputs.current.get(a.id) ?? { mediaType: a.mediaType, data: a.data, name: a.name });
-    taken.forEach((a, index) => aside.current.set(a.id, images[index]));
+    const taken = current.current.filter((a) => !a.refused);
+    // A refused chip was about this message: it goes once the message has.
+    const refusedThen = new Set(current.current.filter((a) => a.refused).map((a) => a.id));
     const ids = new Set(taken.map((a) => a.id));
+    setNotAdded(0);
     if (taken.length) setAttachments((list) => list.filter((item) => !ids.has(item.id)));
     if (fileRef.current) fileRef.current.value = "";
+    aside.current++;
     let settled = false;
     return {
-      images,
-      previews: taken.map((a) => ({ url: a.previewUrl, name: a.name })),
+      images: taken.flatMap((a) => (a.image ? [a.image] : [])),
+      files: taken.flatMap((a) => (a.file ? [a.file] : [])),
+      previews: taken.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : [])),
       settle: (sent) => {
         if (settled) return;
         settled = true;
+        aside.current--;
         if (sent) {
-          for (const a of taken) {
-            aside.current.delete(a.id);
-            if (a.previewUrl.startsWith("blob:")) URL.revokeObjectURL(a.previewUrl);
-          }
+          taken.forEach(release);
+          if (refusedThen.size) setAttachments((list) => list.filter((item) => !refusedThen.has(item.id)));
         } else if (taken.length) {
           setAttachments((list) => [...taken, ...list.filter((item) => !ids.has(item.id))]);
         }
       },
     };
-  }, []);
+  }, [setAttachments]);
 
-  const dropZoneProps = useMemo<ImageAttachments["dropZoneProps"]>(
+  const dropZoneProps = useMemo<Attachments["dropZoneProps"]>(
     () => ({
       onPaste: (e) => {
         const list = [...e.clipboardData.files];
         if (list.length) {
           e.preventDefault();
-          void addFiles(list);
+          void addFiles(list, "pasted");
         }
       },
       onDragEnter: (e) => {
@@ -270,7 +389,7 @@ export function useImageAttachments({
         if (!list.length) return;
         e.preventDefault();
         setDragging(false);
-        void addFiles(list);
+        void addFiles(list, "dropped");
       },
     }),
     [addFiles],
@@ -279,8 +398,8 @@ export function useImageAttachments({
   // One stable object per change, so a composer's send callback can list it
   // as a dependency without being rebuilt on every render.
   return useMemo(
-    () => ({ attachments, dragging, fileRef, addFiles, chooseFiles, remove, clear, setAside, images, notice, dropZoneProps }),
-    [attachments, dragging, addFiles, chooseFiles, remove, clear, setAside, images, notice, dropZoneProps],
+    () => ({ attachments, notAdded, imagesOnly, dragging, fileRef, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps }),
+    [attachments, notAdded, imagesOnly, dragging, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps],
   );
 }
 
@@ -295,41 +414,20 @@ export function DropHint({ dragging, mentionFiles = true }: { dragging: boolean;
   if (!dragging) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-composer text-sm text-muted-foreground">
-      {mentionFiles ? "Drop images to attach, other files to mention" : "Drop images to attach"}
-    </div>
-  );
-}
-
-/** Thumbnails of the queued images, each with a remove control on hover. */
-export function AttachmentThumbs({ attach }: { attach: ImageAttachments }) {
-  if (!attach.attachments.length) return null;
-  return (
-    <div className="mb-2 flex flex-wrap gap-2 px-1">
-      {attach.attachments.map((a) => (
-        <div key={a.id} className="group relative size-14 overflow-hidden rounded-md hairline">
-          <PrivacyImage src={a.previewUrl} alt={a.name} className="size-full object-cover" />
-          <button
-            type="button"
-            aria-label={`Remove ${a.name}`}
-            onClick={() => attach.remove(a.id)}
-            className="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
-          >
-            <X className="size-3" />
-          </button>
-        </div>
-      ))}
+      {mentionFiles ? "Drop files to attach" : "Drop images to attach"}
     </div>
   );
 }
 
 /** The attach button and the hidden browser picker behind it. */
-export function AttachButton({ attach, disabled = false }: { attach: ImageAttachments; disabled?: boolean }) {
+export function AttachButton({ attach, disabled = false }: { attach: Attachments; disabled?: boolean }) {
   return (
     <>
       <input
         ref={attach.fileRef}
         type="file"
-        accept="image/*"
+        // Any file attaches; a cloud tab still takes images only.
+        accept={attach.imagesOnly ? "image/*" : undefined}
         multiple
         hidden
         onChange={(e) => {
@@ -337,7 +435,7 @@ export function AttachButton({ attach, disabled = false }: { attach: ImageAttach
           // A cleared input lets the same file be selected again after a
           // send or removal; browsers do not emit change otherwise.
           e.target.value = "";
-          if (list.length) void attach.addFiles(list);
+          if (list.length) void attach.addFiles(list, "picked");
         }}
       />
       <WithTooltip label="Attach files">

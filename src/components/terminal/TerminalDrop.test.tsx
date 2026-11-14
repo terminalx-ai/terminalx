@@ -2,7 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dragDropListener, write, readImage, droppedText } = vi.hoisted(() => ({
+const { dragDropListener, write, readImage, droppedText, inspect } = vi.hoisted(() => ({
+  // What the runtime finds at a dropped path: here, every one is a small PNG.
+  inspect: vi.fn(async (paths: string[]) => paths.map((path) => ({ path, name: path.split("/").pop()!, size: 3, mediaType: "image/png" }))),
   droppedText: vi.fn(async (): Promise<string | null> => "echo dragged"),
   dragDropListener: vi.fn(),
   write: vi.fn(async (_id: string, _data: string) => {}),
@@ -16,13 +18,15 @@ vi.mock("@/lib/api", () => {
   return {
     pty: { write, resize: quiet(), attach: quiet(), detach: quiet(), detachAll: quiet(), ack: quiet() },
     files: { readImage, droppedText },
+    attachments: { inspect },
   };
 });
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import { useRef, useState } from "react";
-import { AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
+import { DropHint, useAttachments } from "@/components/chat/useImageAttachments";
+import { AttachmentChips } from "@/components/chat/ComposerAttachments";
 import { TerminalView } from "./TerminalView";
 import { disposeInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 
@@ -72,12 +76,12 @@ afterEach(() => {
 function ComposerBesideTerminal() {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange: setDraft });
+  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange: setDraft });
   return (
     <>
       <div data-testid="composer" {...attach.dropZoneProps}>
         <DropHint dragging={attach.dragging} />
-        <AttachmentThumbs attach={attach} />
+        <AttachmentChips attach={attach} />
         <textarea ref={ref} value={draft} onChange={(e) => setDraft(e.target.value)} />
       </div>
       <TerminalView id="p1" visible />
@@ -104,11 +108,12 @@ describe("a window with a composer and a terminal", () => {
     over("terminal-drop-target");
     await drag({ type: "enter", paths: ["/tmp/shot.png"] });
     expect(screen.getByText("Drop to type the file's path")).toBeTruthy();
-    expect(screen.queryByText("Drop images to attach, other files to mention")).toBeNull();
+    expect(screen.queryByText("Drop files to attach")).toBeNull();
     await drag({ type: "drop", paths: ["/tmp/shot.png"] });
     expect(write).toHaveBeenCalledExactlyOnceWith("p1", "/tmp/shot.png ");
+    expect(inspect).not.toHaveBeenCalled();
     expect(readImage).not.toHaveBeenCalled();
-    expect(screen.queryByAltText("shot.png")).toBeNull();
+    expect(screen.queryByTitle("shot.png")).toBeNull();
     expect(screen.getByTestId("composer").querySelector("textarea")!.value).toBe("");
   });
 
@@ -116,14 +121,14 @@ describe("a window with a composer and a terminal", () => {
     const { over, drag } = await mountBoth();
     over("composer");
     await drag({ type: "enter", paths: ["/tmp/shot.png"] });
-    expect(screen.getByText("Drop images to attach, other files to mention")).toBeTruthy();
+    expect(screen.getByText("Drop files to attach")).toBeTruthy();
     expect(screen.queryByText("Drop to type the file's path")).toBeNull();
     await drag({ type: "drop", paths: ["/tmp/shot.png"] });
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
 
     over(null);
     await drag({ type: "drop", paths: ["/tmp/other.png"] });
-    expect(await screen.findByAltText("other.png")).toBeTruthy();
+    expect(await screen.findByTitle("other.png")).toBeTruthy();
     expect(write).not.toHaveBeenCalled();
   });
 });

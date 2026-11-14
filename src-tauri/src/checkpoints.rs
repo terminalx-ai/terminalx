@@ -1071,6 +1071,7 @@ mod tests {
             author: None,
             text: "Change it".into(),
             images: vec![],
+            files: Vec::new(),
             baseline: None,
             queued,
             cwd: None,

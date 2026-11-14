@@ -1994,13 +1994,51 @@ export const statusBar = {
 };
 
 // ---- agent tabs
-import type { AgentEvent } from "@/types/events";
+import type { AgentEvent, FileRef } from "@/types/events";
 
 export interface ImageInput {
   mediaType: string;
   data: string;
   name?: string;
 }
+
+/**
+ * A file for a message before it is stored (PRO-290): a path on this computer
+ * (picked, or dropped on the window), or the base64 bytes of a browser `File`
+ * (pasted, or dropped on the DOM). Exactly one of `path` and `data` is set.
+ */
+export interface FileInput {
+  name: string;
+  path?: string;
+  data?: string;
+  mediaType?: string;
+}
+
+/** What `attachments.inspect` learns about a path before it is attached. */
+export interface FileFacts {
+  path: string;
+  name: string;
+  size: number;
+  mediaType?: string;
+  /** Not a regular file (a folder, a socket) or unreadable: never attached. */
+  unreadable?: boolean;
+}
+
+/**
+ * Files attached to a message (PRO-290). They are copied into the session's
+ * attachments folder (`$TERMINALX_HOME/attachments/<session>/<folder>/<name>`,
+ * removed with the session) before the message is sent, and the message
+ * carries the stored `FileRef`s. The rules (10 files, reserved names, size)
+ * are in `@/lib/attachmentRules`; the store enforces them again.
+ */
+export const attachments = {
+  /** Size and media type of dropped or picked paths, in the order given. */
+  inspect: (paths: string[]) => invoke<FileFacts[]>("inspect_attachments", { paths }),
+  /** Copy the files into one new folder of the session's attachments folder. Refuses reserved names, files over the size limit, and more than 10. */
+  store: (sessionId: string, files: FileInput[]) => invoke<FileRef[]>("store_attachments", { sessionId, files }),
+  /** Write a copy of a stored attachment to `to` (the file tab's Download). `path` must be inside an attachments folder. */
+  saveCopy: (path: string, to: string) => invoke<void>("save_attachment_copy", { path, to }),
+};
 
 export interface QueuedMessage {
   id: string;
@@ -2064,8 +2102,9 @@ export const agent = {
   prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }) }),
+  /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[]) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
   reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
     invoke<void>("report_terminal_view", { sessionId, tabId, report }),
