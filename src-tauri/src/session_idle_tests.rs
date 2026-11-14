@@ -416,3 +416,64 @@ fn orchestration_cleanup_stop_settles_a_dead_workers_stale_turn() {
     assert!(!rig.running());
     assert!(!matches!(rig.manager.status_for_test(SESSION, TAB), TabStatus::InProgress | TabStatus::Waiting));
 }
+
+#[test]
+fn retirement_failure_backs_off_without_stopping_a_live_worker_and_respects_new_turns() {
+    use crate::orchestration::{Run, SessionRef};
+    let rig = Rig::new(json!({}));
+    let git = |args: &[&str]| crate::git::run(&rig.checkout, args).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Initial"]);
+    let worker_path = rig._dir.path().join("worker");
+    git(&["worktree", "add", "-q", "-b", "worker", worker_path.to_str().unwrap()]);
+    let mut session = index::get(SESSION).unwrap();
+    session.cwd = worker_path.to_string_lossy().into_owned();
+    index::save(&[session]).unwrap();
+    let worker = SessionRef { session_id: SESSION.into(), tab_id: Some(TAB.into()) };
+    let run: Run = serde_json::from_value(json!({
+        "id":"retry-retirement", "lead":{"sessionId":"gone"}, "projectPath":rig.checkout,
+        "goal":"cleanup", "state":"failed", "workerMode":"bypassPermissions",
+        "created":index::now(), "modified":index::now(),
+        "pieces":[{"id":"piece", "title":"piece", "brief":{"goal":"cleanup"}, "doneChecks":[],
+            "state":"failed", "agent":"claude", "tries":[{"step":"first", "worker":worker, "outcome":"failed"}]}]
+    })).unwrap();
+    crate::orchestration::store::insert(&run).unwrap();
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    rig.idle_for_the_limit();
+    let host = crate::orchestration::host::ManagerHost::new(rig.manager.sink().clone(), rig.manager.clone());
+    host.retire_automatically(&run, false); // no remote
+    assert!(rig.running(), "preservation failure must precede Stop");
+    let failed = crate::orchestration::store::get(&run.id).unwrap();
+    let failure = failed.pieces[0].tries[0].archive_failure.as_ref().unwrap();
+    assert!(!failure.reason.is_empty());
+    assert!(!crate::orchestration::retirement::retry_allowed(&failed, &worker, &failure.head));
+    host.retire_automatically(&run, false);
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap(), failed, "unchanged failure makes no further attempt");
+    assert!(rig.running());
+    crate::git::run(&worker_path, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "New work"]).unwrap();
+    let new_head = crate::git::head_commit(&worker_path);
+    assert!(crate::orchestration::retirement::retry_allowed(&failed, &worker, &new_head));
+    rig.rt().lock().unwrap().turn_open = true;
+    assert!(host.stop_worker_for_cleanup(&worker).is_err(), "explicit bulk cleanup must also leave a new turn running");
+    host.retire_automatically(&run, false);
+    assert!(rig.running());
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap(), failed, "a person's turn must not even start preservation");
+    rig.rt().lock().unwrap().turn_open = false;
+    host.retire_automatically(&run, false);
+    let retried = crate::orchestration::store::get(&run.id).unwrap();
+    assert_eq!(retried.pieces[0].tries[0].archive_failure.as_ref().unwrap().head, new_head);
+    assert!(rig.running());
+    let remote = rig._dir.path().join("remote.git");
+    git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+    git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    host.retire_automatically(&run, false);
+    assert!(rig.running(), "fixing remote configuration alone does not lift backoff");
+    use crate::orchestration::engine::Host as _;
+    host.preserve_worker(&run, &worker).unwrap(); // manual retry bypasses backoff
+    assert!(crate::orchestration::store::get(&run.id).unwrap().pieces[0].tries[0].archive_failure.is_none());
+    host.retire_automatically(&run, false);
+    assert!(!rig.running());
+    assert!(index::get(SESSION).unwrap().archived);
+}

@@ -1175,12 +1175,15 @@ A run that is `needsYou` when its last piece is accepted, with no merge to resol
 A piece whose merge failed the integration check is not checked again until its commit or
 your branch has changed; `--recheck` runs the check again all the same (a flaky test).
 
-When a run ends, TerminalX stops its finished workers through normal agent stop handling,
-including stale turn indicators. Successful runs archive superseded tries and retain the
+When a run ends, TerminalX queues retirement outside run-start admission. It preserves
+eligible workers before stopping idle agents through normal stop handling, including stale
+turn indicators. A new turn is left running. Successful runs archive superseded tries and retain the
 lead and final tries in the sidebar. Failed or stopped runs archive their workers but keep
 their worktrees for inspection. Before archiving, unpublished commits pass the secret scan
-and are pushed to `refs/heads/raccoon/archive/<run>/<piece>-tryN`. A failed scan or backup
-keeps the conversation visible; cleanup can be retried.
+and are pushed to `refs/heads/raccoon/archive/<run>/<piece>-tryN`. Every archived try gets its own
+archive ref, even if another remote branch already contains its commits. A failed scan or
+backup keeps the conversation visible and records the reason on the try. Automatic attempts
+back off until HEAD changes; `runs cleanup --yes` retries manually.
 
 `terminalx runs cleanup --yes --json` retries preservation and archival. For a successful
 run whose PR is verified merged, it removes clean superseded worktrees while retaining
@@ -1190,8 +1193,10 @@ active agents and other normal deletion guards still prevent removal. A failed r
 worktrees remain recoverable. Cleanup works from the saved project and run information
 even when the lead session or checkout is gone. Without `--yes`, it reports what would
 be removed without pushing, archiving or removing anything. It returns `removed` and
-`refused`, with a reason for each refusal. Branches are always kept by `runs cleanup`.
-Explicitly deleting the lead's worktree also cleans its merged final workers first.
+`refused`, with a reason for each refusal. Recovered (unarchived) conversations are excluded
+from bulk cleanup; remove their workspace explicitly if desired. Branches are always kept by
+`runs cleanup`. Explicitly deleting the lead's worktree also cleans its merged final workers
+first; those final workers keep the local-only cleanup path without archive scripts or fetches.
 
 #### What a worker may not do
 

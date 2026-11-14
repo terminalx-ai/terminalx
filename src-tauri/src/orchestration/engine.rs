@@ -44,6 +44,15 @@ use crate::worker_report::Status;
 /// One start at a time: two callers must not both find the same piece ready.
 static STARTING: Mutex<()> = Mutex::new(());
 
+/// Wait for the state transition which queued retirement, then release admission
+/// before any network or scanner work. Other runs can start during retirement.
+pub(super) fn after_starting(work: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        drop(STARTING.lock().unwrap_or_else(|error| error.into_inner()));
+        work();
+    })
+}
+
 /// The session a run is created for.
 pub struct Lead {
     pub project_path: String,
@@ -139,6 +148,11 @@ pub fn stop_worker_agents(
 }
 
 pub trait Host: Send + Sync {
+    /// Production queues this snapshot; network and scanning never run under STARTING.
+    fn retire_workers_later(&self, run: &Run) {
+        super::end_workers(run, &|w| self.stop_worker_for_cleanup(w), &|w| self.preserve_worker(run, w), &|w| self.archive_worker(run, w));
+    }
+
     /// Stop for ended-run cleanup, including stale turn state on idle tabs.
     /// Production hosts should use `stop_worker_agents` with their session manager.
     /// The legacy stop hook alone does not guarantee idle UI state is cleared, so
@@ -1240,7 +1254,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
 /// on every path that ends it; workers still under way are left running.
 fn changed(host: &dyn Host, run: &Run) {
     host.changed(run);
-    super::end_workers(run, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(run, worker), &|worker| host.archive_worker(run, worker));
+    host.retire_workers_later(run);
 }
 
 /// Say that a run changed, and ask for the next try of a piece that now waits for one.
@@ -2161,7 +2175,7 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
         }
     } else {
         // Stopped already: a finished worker started again since is stopped once more, as any.
-        super::end_workers(&after, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(&after, worker), &|worker| host.archive_worker(&after, worker));
+        host.retire_workers_later(&after);
     }
     // Its workers' slots are free for other runs, which start under the same lock.
     drop(starting);
@@ -2520,4 +2534,28 @@ pub fn shown(run: &Run) -> Value {
 
 fn state_name(state: RunState) -> String {
     serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod retirement_admission_tests {
+    use super::*;
+
+    #[test]
+    fn retirement_waits_for_starting_but_does_not_hold_it_during_io() {
+        let _home = crate::store::temp_home();
+        let starting = STARTING.lock().unwrap();
+        let (begun, began) = std::sync::mpsc::channel();
+        let (finish, finished) = std::sync::mpsc::channel();
+        let task = after_starting(move || {
+            begun.send(()).unwrap();
+            finished.recv().unwrap(); // stand in for a blocked scan or remote
+        });
+        assert!(began.try_recv().is_err());
+        drop(starting);
+        began.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let other_run = STARTING.try_lock().expect("network retirement must not hold run admission");
+        drop(other_run);
+        finish.send(()).unwrap();
+        task.join().unwrap();
+    }
 }

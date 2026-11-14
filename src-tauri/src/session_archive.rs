@@ -428,15 +428,9 @@ pub fn sweep_owned(manager: &crate::session::SessionManager, sink: &dyn EventSin
     // Retry failed preservation after restart, without repeatedly stopping final workers
     // or re-archiving a conversation the person deliberately recovered.
     let host = crate::orchestration::host::ManagerHost::new(manager.sink().clone(), manager.clone());
-    use crate::orchestration::engine::Host as _;
-    if let (Ok(runs), Ok(sessions)) = (crate::orchestration::store::list(), index::load()) {
+    if let Ok(runs) = crate::orchestration::store::list() {
         for run in runs.iter().filter(|run| run.state.ended()) {
-            for worker in run.archival_workers().into_iter().filter(|worker| sessions.iter().any(|s| s.id == worker.session_id && !s.archived && !s.worktree_removed && s.archive.unarchived_at.is_none())) {
-                let result = host.stop_worker_for_cleanup(worker)
-                    .and_then(|_| host.preserve_worker(run, worker))
-                    .and_then(|_| host.archive_worker(run, worker));
-                if let Err(error) = result { log::warn!("Archive run {} worker {}: {error:#}", run.id, worker.session_id); }
-            }
+            host.retire_automatically(run, false);
         }
     }
     let Some(limit) = crate::store::settings::load().conversations.archive_after() else {

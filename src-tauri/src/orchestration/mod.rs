@@ -530,6 +530,9 @@ pub struct Try {
     /// Absent while it runs, and before it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
+    /// Automatic retirement backs off at this HEAD until it changes or cleanup is requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_failure: Option<retirement::ArchiveFailure>,
     /// The worker's result line, or the failure text the next try is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -565,7 +568,7 @@ pub struct Try {
 impl Try {
     /// A try that has no worker yet.
     pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
-        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, archive_failure: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
     }
 }
 

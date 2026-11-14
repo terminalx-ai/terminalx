@@ -39,6 +39,13 @@ pub(crate) fn preserve_try(
     // the enclosing repository, producing a receipt for the wrong HEAD.
     ensure!(git::is_worktree_of(repository, checkout), "Try checkout is not an intact worktree of the run repository; keep it and repair its Git metadata or correct its repository path.");
     ensure!(git::run(checkout, &["rev-parse", "--is-shallow-repository"])?.trim() == "false", "Cannot prove preservation from a shallow repository; fetch its full history and retry. Keep the checkout.");
+    // Serialize probes across worktrees/processes. A crashed owner releases the
+    // OS lock, so every remaining probe ref is stale when the next owner enters.
+    let common = git::run(checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let probe_lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(Path::new(common.trim()).join("terminalx-archive-probe.lock"))?;
+    probe_lock.lock()?;
+    clear_probe_refs(checkout)?;
     let head = head(checkout)?;
     let branch = git::current_branch(checkout);
     let remote = branch
@@ -123,7 +130,7 @@ pub(crate) fn preserve_try(
         );
         if let Ok(commit) = commit {
             let commit = commit.trim().to_owned();
-            if name.starts_with("refs/heads/") && ancestor(checkout, &head, &commit)? {
+            if name == &backup && ancestor(checkout, &head, &commit)? {
                 check_head(checkout, &head)?;
                 return Ok(Preservation {
                     head,
@@ -171,16 +178,23 @@ pub(crate) fn verify_preservation(checkout: &Path, receipt: &Preservation) -> Re
 }
 
 fn backup_ref(run: &str, piece: &str, attempt: u32) -> Result<String> {
-    let safe = |s: &str| {
-        !s.is_empty()
-            && s.len() <= 128
-            && s.bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-    };
-    ensure!(safe(run) && safe(piece) && attempt > 0, "Archive requires nonempty alphanumeric, dash or underscore run/piece IDs and a positive try number.");
+    ensure!(!run.is_empty() && !piece.is_empty() && attempt > 0,
+        "Archive requires nonempty run/piece IDs and a positive try number.");
     Ok(format!(
-        "refs/heads/raccoon/archive/{run}/{piece}-try{attempt}"
+        "refs/heads/raccoon/archive/{}/{}-try{attempt}",
+        ref_component(run), ref_component(piece)
     ))
+}
+
+fn ref_component(id: &str) -> String {
+    // Retain existing readable refs. Reserve a namespace for hashed IDs so a
+    // literal ID cannot alias an encoded one; bound even arbitrarily long IDs.
+    if id.len() <= 128 && !id.starts_with("id-")
+        && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')) {
+        return id.to_owned();
+    }
+    use sha2::{Digest, Sha256};
+    format!("id-{:x}", Sha256::digest(id.as_bytes()))
 }
 
 fn head(checkout: &Path) -> Result<String> {
@@ -290,6 +304,13 @@ fn remote_refs(checkout: &Path, remote: &ArchiveRemote) -> Result<BTreeMap<Strin
     Ok(refs)
 }
 
+fn clear_probe_refs(checkout: &Path) -> Result<()> {
+    for name in git::run(checkout, &["for-each-ref", "--format=%(refname)", "refs/raccoon/archive-probe/"])?.lines() {
+        git::run(checkout, &["update-ref", "-d", name])?;
+    }
+    Ok(())
+}
+
 struct ProbeRefs<'a> {
     checkout: &'a Path,
     prefix: String,
@@ -322,6 +343,7 @@ fn scan_unpublished(checkout: &Path, head: &str, covered: &[String]) -> Result<(
     std::fs::create_dir(&package)?;
     for (name, source) in [
         ("__init__.py", ""),
+        ("credentials.py", include_str!("../../scripts/release/txrelease/credentials.py")),
         (
             "config.py",
             include_str!("../../scripts/release/txrelease/config.py"),
@@ -390,7 +412,16 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from txrelease.secrets_scan import Scanner, home_needles
 root = Path(sys.argv[1])
-scanner = Scanner({})
+from txrelease.credentials import local_secrets
+from txrelease.proc import Runner
+try:
+    # Read values inside this process: never put credentials in argv, temporary
+    # files, or output. Missing release setup is normal; unreadable setup is not.
+    needles = local_secrets(Runner(), require_signing=False)
+except (Exception, SystemExit):
+    print('Could not load local secret scan credentials', file=sys.stderr)
+    sys.exit(1)
+scanner = Scanner({label: value.encode() for label, value in needles.items()})
 for oid in json.loads((root / 'objects.json').read_text()):
     scanner.scan('git object ' + oid, (root / oid).read_bytes(), home_needles(Path.home()))
 if scanner.findings:
@@ -486,20 +517,84 @@ mod tests {
             backup_ref("abc-123", "worker_1", 2).unwrap(),
             "refs/heads/raccoon/archive/abc-123/worker_1-try2"
         );
-        for bad in [
-            "",
-            "../other",
-            "a/b",
-            "a..b",
-            "a.lock",
-            "a\nb",
-            "a:b",
-            "$(command)",
-        ] {
-            assert!(backup_ref(bad, "piece", 1).is_err());
-            assert!(backup_ref("run", bad, 1).is_err());
+        let ids = ["../other", "a/b", "a..b", "a.lock", "a b", "作業", "a\nb", "a:b", "$(command)"];
+        let mut refs = std::collections::HashSet::new();
+        for id in ids.into_iter().chain(["x".repeat(1000).as_str()]) {
+            let encoded = backup_ref("existing/run", id, 1).unwrap();
+            assert!(git::run(Path::new("."), &["check-ref-format", &encoded]).is_ok());
+            assert_eq!(encoded, backup_ref("existing/run", id, 1).unwrap());
+            assert!(refs.insert(encoded));
+            assert_ne!(ref_component(id), ref_component(&ref_component(id)));
         }
+        assert!(backup_ref("", "piece", 1).is_err());
+        assert!(backup_ref("run", "", 1).is_err());
         assert!(backup_ref("run", "piece", 0).is_err());
+    }
+
+    #[test]
+    fn existing_runs_with_non_ref_piece_ids_can_preserve_and_retry() {
+        for piece in ["piece.one", "piece/one", "piece one", "作業", "id-existing"] {
+            let f = Fixture::new();
+            let expected = f.commit("file.txt", "superseded work\n");
+            let first = preserve_try(f.local.path(), f.local.path(), "existing/run", piece, 3).unwrap();
+            assert!(first.pushed);
+            assert_eq!(first.remote_ref, backup_ref("existing/run", piece, 3).unwrap());
+            assert_eq!(first.head, expected);
+            verify_preservation(f.local.path(), &first).unwrap();
+            let again = preserve_try(f.local.path(), f.local.path(), "existing/run", piece, 3).unwrap();
+            assert!(!again.pushed);
+            assert_eq!(again.remote_ref, first.remote_ref);
+        }
+    }
+
+    #[test]
+    fn local_credentials_outside_patterns_block_archive_push() {
+        use base64::Engine;
+        let temp = tempfile::tempdir().unwrap();
+        let key = base64::engine::general_purpose::STANDARD.encode("fixture-signing-material-".repeat(4));
+        let key_path = temp.path().join("updater.key");
+        std::fs::write(&key_path, &key).unwrap();
+        for mode in ["key", "password"] {
+            // Isolate credential environment in a child test process, never
+            // mutate the shared test runner's environment or pass secrets in argv.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "orchestration_archive::tests::local_credentials_scan_child", "--nocapture"])
+                .env("ARCHIVE_SCAN_TEST_MODE", mode)
+                .env("TERMINALX_UPDATER_KEY", &key_path)
+                .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "fixture-password-outside-patterns")
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        }
+    }
+
+    #[test]
+    fn local_credentials_scan_child() {
+        let Ok(mode) = std::env::var("ARCHIVE_SCAN_TEST_MODE") else { return };
+        let (secret, label) = if mode == "key" {
+            (std::fs::read_to_string(std::env::var("TERMINALX_UPDATER_KEY").unwrap()).unwrap(), "updater signing key (file)")
+        } else {
+            (std::env::var("TAURI_SIGNING_PRIVATE_KEY_PASSWORD").unwrap(), "updater key password")
+        };
+        let f = Fixture::new();
+        f.commit("file.txt", &secret);
+        f.commit("file.txt", "secret removed from final version\n");
+        let error = format!("{:#}", f.preserve().unwrap_err());
+        assert!(error.contains(label), "missing credential finding");
+        assert!(!error.contains(&secret), "credential leaked in scanner diagnostic");
+        assert!(f.backup().is_none());
+        f.assert_no_probe_refs();
+    }
+
+    #[test]
+    fn preservation_sweeps_crash_leftovers_but_keeps_unrelated_refs() {
+        let f = Fixture::new();
+        let tip = head(f.local.path()).unwrap();
+        for name in ["refs/raccoon/archive-probe/abandoned/heads/main", "refs/raccoon/keep"] {
+            git::run(f.local.path(), &["update-ref", name, &tip]).unwrap();
+        }
+        f.preserve().unwrap();
+        f.assert_no_probe_refs();
+        assert_eq!(git::run(f.local.path(), &["rev-parse", "refs/raccoon/keep"]).unwrap().trim(), tip);
     }
 
     #[test]
@@ -524,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn live_remote_descendant_covers_head_without_creating_backup() {
+    fn live_remote_descendant_still_gets_an_independent_archive_ref() {
         let f = Fixture::new();
         let original = head(f.local.path()).unwrap();
         let descendant = f.commit("file.txt", "remote descendant\n");
@@ -540,11 +635,12 @@ mod tests {
         )
         .unwrap();
         let receipt = f.preserve().unwrap();
-        assert!(!receipt.pushed);
+        assert!(receipt.pushed);
         assert_eq!(receipt.head, original);
-        assert_eq!(receipt.remote_commit, descendant);
-        assert_eq!(receipt.remote_ref, "refs/heads/published");
-        assert!(f.backup().is_none());
+        assert_eq!(receipt.remote_commit, original);
+        assert_eq!(f.backup(), Some(original));
+        git::run(f.remote.path(), &["update-ref", "-d", "refs/heads/published", &descendant]).unwrap();
+        verify_preservation(f.local.path(), &receipt).unwrap();
     }
 
     #[test]
@@ -650,7 +746,7 @@ mod tests {
         .unwrap();
         // The fetch URL has no coverage. Only the push destination counts.
         let result = f.preserve().unwrap();
-        assert!(!result.pushed);
+        assert!(result.pushed);
         assert_eq!(result.remote, push_repo.path().to_str().unwrap());
         assert!(f.backup().is_none());
         git::run(

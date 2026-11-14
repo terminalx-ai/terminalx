@@ -1271,3 +1271,85 @@ fn production_retirement_proof_rejects_failed_runs_new_commits_and_missing_backu
     git(&repo.root.path().join("origin.git"), &["update-ref", "-d", &format!("refs/heads/raccoon/archive/{id}/final-try1")]);
     assert!(!crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
 }
+
+fn production_cleanup_host(repo: &Repo, names: &[&str]) -> (super::host::ManagerHost, crate::session::SessionManager) {
+    use crate::store::index;
+    use std::sync::Arc;
+    let entries = names.iter().map(|name| serde_json::from_value(json!({
+        "id": name, "projectPath": repo.lead(), "cwd": repo.worker(name), "title": name,
+        "created": index::now(), "modified": index::now(), "tabs": []
+    })).unwrap()).collect::<Vec<_>>();
+    index::save(&entries).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(1024));
+    let manager = crate::session::SessionManager::new(sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()), Arc::default(), Arc::default(), crate::hooks::prepare_control().unwrap());
+    (super::host::ManagerHost::new(sink, manager.clone()), manager)
+}
+
+#[test]
+fn bulk_cleanup_keeps_a_recovered_try_and_its_ignored_files() {
+    use crate::store::index;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let run = store::get(&id).unwrap();
+    let (host, manager) = production_cleanup_host(&repo, &["first", "second", "final"]);
+    let mut entries = index::load().unwrap();
+    entries.iter_mut().find(|s| s.id == "first").unwrap().archive.unarchived_at = Some(index::now());
+    index::save(&entries).unwrap();
+    let exclude = git(&repo.worker("first"), &["rev-parse", "--git-path", "info/exclude"]);
+    std::fs::write(exclude, ".env\n").unwrap();
+    std::fs::write(repo.worker("first").join(".env"), "PERSONS_LOCAL_DATA=keep\n").unwrap();
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+        number: 962, state: "MERGED".into(), head: run.merge.as_ref().unwrap().final_head.clone().unwrap(), base: "main".into(), ..Default::default()
+    })].into()));
+    let cleanup = merge::cleanup(&host, &id, true).unwrap();
+    assert!(cleanup.refused.iter().any(|f| f.session == "first" && f.reason.as_deref().unwrap().contains("Recovered")));
+    assert!(!index::get("first").unwrap().archived);
+    assert_eq!(std::fs::read_to_string(repo.worker("first").join(".env")).unwrap(), "PERSONS_LOCAL_DATA=keep\n");
+    assert_eq!(cleanup.removed.len(), 1, "the other superseded try still goes");
+    manager.closing();
+}
+
+#[test]
+fn cleanup_reports_an_unverifiable_rebased_or_unfetched_pr_head() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let (host, manager) = production_cleanup_host(&repo, &["first", "second", "final"]);
+    for head in ["a".repeat(40), git(&repo.lead(), &["rev-parse", "main"])] {
+        crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+            number: 962, state: "MERGED".into(), head, base: "main".into(), ..Default::default()
+        })].into()));
+        let result = merge::cleanup(&host, &id, false).unwrap_err();
+        assert!(result.message.contains("Cannot confirm the merge"), "{}", result.message);
+        assert!(repo.worker("first").exists());
+    }
+    manager.closing();
+}
+
+#[test]
+fn removing_the_lead_can_clean_final_workers_offline_without_an_archive_script() {
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    repo.merge(&[], false);
+    let (host, manager) = production_cleanup_host(&repo, &["final"]);
+    // No transport can succeed. The final worker is already in the intact lead.
+    git(&repo.lead(), &["remote", "set-url", "origin", "/nonexistent-terminalx-test-remote"]);
+    // The lead need not itself have a session for the other tests, but this one
+    // deliberately measures its local integrated branch while offline.
+    let mut entries = crate::store::index::load().unwrap();
+    entries.push(serde_json::from_value(json!({"id":"lead", "projectPath":repo.lead(), "cwd":repo.lead(), "title":"lead", "created":crate::store::index::now(), "modified":crate::store::index::now(), "tabs":[]})).unwrap());
+    crate::store::index::save(&entries).unwrap();
+    let cleanup = merge::cleanup_before_lead_removal(&host, &id, true).unwrap();
+    assert_eq!(cleanup.removed.len(), 1, "{:?}", cleanup.refused);
+    assert!(!repo.worker("final").exists());
+    manager.closing();
+}

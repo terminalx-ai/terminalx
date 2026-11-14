@@ -33,7 +33,8 @@ pub fn preserve(run: &Run, worker: &SessionRef) -> Result<()> {
     let receipt = Receipt { run: run.id.clone(), session: worker.session_id.clone(), path: session.cwd.clone(), branch: git::current_branch(checkout), preservation };
     let path = receipt_path(&worker.session_id)?;
     crate::store::ensure_dir(path.parent().unwrap().to_path_buf())?;
-    crate::store::write_json(&path, &receipt)
+    crate::store::write_json(&path, &receipt)?;
+    record_failure(run, worker, None)
 }
 
 /// Uses the recorded integration branch and final commit, so the lead's checkout
@@ -45,8 +46,10 @@ pub fn merged_pr(run: &Run) -> Result<Option<crate::github::BranchPr>> {
     if merge.into.is_empty() { return Ok(None); }
     let project = Path::new(&run.project_path);
     let prs = crate::github::branch_prs(project, std::slice::from_ref(&merge.into))?;
-    Ok(prs.get(&merge.into).filter(|pr| pr.state == "MERGED" && pr.base != merge.into &&
-        (pr.head == head || git::run(project, &["--no-replace-objects", "merge-base", "--is-ancestor", head, &pr.head]).is_ok())).cloned())
+    let Some(pr) = prs.get(&merge.into).filter(|pr| pr.state == "MERGED" && pr.base != merge.into) else { return Ok(None) };
+    ensure!(pr.head == head || git::run(project, &["--no-replace-objects", "merge-base", "--is-ancestor", head, &pr.head]).is_ok(),
+        "Cannot confirm the merge: the recorded run tip is not known to be in the merged PR head (rebased, force-pushed, or not fetched). Nothing removed; fetch the PR history and retry, or inspect and remove the workspace explicitly");
+    Ok(Some(pr.clone()))
 }
 
 pub fn owner(project: &Path, checkout: &Path) -> Option<(Run, SessionRef)> {
@@ -71,4 +74,48 @@ pub fn preserved(project: &Path, checkout: &Path, head: &str) -> bool {
 pub fn landed(project: &Path, checkout: &Path, head: &str) -> bool {
     let Some((run, _)) = owner(project, checkout) else { return false };
     merged_pr(&run).ok().flatten().is_some() && preserved(project, checkout, head)
+}
+
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveFailure {
+    pub head: Option<String>,
+    pub reason: String,
+}
+
+pub fn recovered(worker: &SessionRef) -> bool {
+    crate::store::index::get(&worker.session_id).is_ok_and(|s| s.archive.unarchived_at.is_some())
+}
+
+/// No network on an unchanged failed try. Manual cleanup calls preserve directly.
+pub fn retry_allowed(run: &Run, worker: &SessionRef, head: &Option<String>) -> bool {
+    !run.pieces.iter().flat_map(|p| &p.tries).any(|attempt|
+        attempt.worker.as_ref().is_some_and(|w| w.session_id == worker.session_id)
+        && attempt.archive_failure.as_ref().is_some_and(|failure| &failure.head == head))
+}
+
+pub fn record_failure(run: &Run, worker: &SessionRef, failure: Option<ArchiveFailure>) -> Result<()> {
+    store::update(&run.id, |run| {
+        for attempt in run.pieces.iter_mut().flat_map(|p| &mut p.tries) {
+            if attempt.worker.as_ref().is_some_and(|w| w.session_id == worker.session_id) {
+                attempt.archive_failure = failure.clone();
+            }
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Validate an existing receipt without fetching all remote objects again.
+pub fn verify_saved(run: &Run, worker: &SessionRef) -> Result<()> {
+    let session = crate::store::index::get(&worker.session_id)?;
+    let receipt = crate::store::read_json::<Receipt>(&receipt_path(&worker.session_id)?)?
+        .context("No preservation receipt; retry cleanup")?;
+    let checkout = Path::new(&session.cwd);
+    ensure!(receipt.run == run.id && receipt.session == worker.session_id
+        && crate::worktree_control::same_folder(&receipt.path, &session.cwd)
+        && git::is_worktree_of(Path::new(&run.project_path), checkout)
+        && receipt.branch == git::current_branch(checkout), "Worker checkout changed; retry cleanup");
+    orchestration_archive::verify_preservation(checkout, &receipt.preservation)
 }

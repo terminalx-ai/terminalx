@@ -73,6 +73,13 @@ pub struct Worktree {
 /// workers' worktrees. The app's sessions give it ([`super::host::ManagerHost`]);
 /// the tests give it temporary repositories.
 pub trait Checkouts: Send + Sync {
+    fn retire_workers_later(&self, run: &Run) {
+        super::end_workers(run, &|w| self.stop_agents_for_cleanup(w), &|w| self.preserve_worker(run, w), &|w| self.archive_worker(run, w));
+    }
+
+    /// Recovered conversations belong to the person again, not bulk run cleanup.
+    fn worker_recovered(&self, _worker: &SessionRef) -> bool { false }
+
     /// Normal stop handling for ended-run cleanup, including idle tabs' stale
     /// turn state. Wire to the same implementation as Host::stop_worker_for_cleanup.
     /// Legacy process stopping alone cannot authorize archival or deletion.
@@ -870,7 +877,7 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     .map_err(EngineError::internal)?;
     host.changed(&after);
     // Done: the agents of its finished workers are stopped, so none holds its worktree from `cleanup`.
-    super::end_workers(&after, &|worker| host.stop_agents_for_cleanup(worker), &|worker| host.preserve_worker(&after, worker), &|worker| host.archive_worker(&after, worker));
+    host.retire_workers_later(&after);
     Ok(after)
 }
 
@@ -1152,6 +1159,9 @@ fn not_on_base(worktree: &Worktree, project: &Path, fetched: &Cell<bool>) -> Opt
 /// Superseded commits need not be integrated, so ancestry cannot establish safety.
 /// A verified run PR merge and durable preservation of the current exact tip can.
 fn superseded_keeps(host: &dyn Checkouts, run: &Run, worker: &SessionRef, worktree: &Worktree, preserve: bool) -> Option<String> {
+    if host.worker_recovered(worker) {
+        return Some("Recovered worker is excluded from bulk cleanup; remove its workspace explicitly.".into());
+    }
     if run.state != RunState::Done {
         return Some("Its run has not completed successfully.".into());
     }
@@ -1241,7 +1251,7 @@ fn cleanup_workers(host: &dyn Checkouts, id: &str, yes: bool, include_final: boo
     let _no_merge = Hold::take(id, Holder::Cleanup).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
     let run = stored(id)?;
     let failures = if yes {
-        super::end_workers(&run, &|worker| host.stop_agents_for_cleanup(worker), &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker))
+        super::end_workers(&run, &|worker| { anyhow::ensure!(!host.worker_recovered(worker), "Recovered worker is excluded from bulk cleanup; remove its workspace explicitly"); host.stop_agents_for_cleanup(worker) }, &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker))
     } else {
         Default::default()
     };
@@ -1279,7 +1289,9 @@ fn cleanup_workers(host: &dyn Checkouts, id: &str, yes: bool, include_final: boo
             let Some(worktree) = host.worktree(worker) else { continue };
             let at_work = !finished.iter().any(|candidate| candidate.session_id == worker.session_id);
             let replaced = superseded.iter().any(|candidate| candidate.session_id == worker.session_id);
-            let reason = if let Some(reason) = failures.get(&worker.session_id) {
+            let reason = if host.worker_recovered(worker) {
+                Some("Recovered worker is excluded from bulk cleanup; remove its workspace explicitly.".into())
+            } else if let Some(reason) = failures.get(&worker.session_id) {
                 Some(format!("Worker lifecycle cleanup failed: {reason}. Retry cleanup."))
             } else if matches!(run.state, RunState::Failed | RunState::Stopped) {
                 Some("The run did not succeed; its worktrees are kept for recovery.".to_string())
