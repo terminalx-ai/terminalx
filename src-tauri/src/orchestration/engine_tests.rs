@@ -3090,6 +3090,7 @@ fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_c
         assert_eq!(verifier.waiting.as_deref(), Some("Permission needed."));
         assert!(piece.note.as_deref().unwrap().contains("verifier needs you"));
         assert!(engine::wake(&began, &waiting, false).unwrap()["why"][0].as_str().unwrap().contains("verifier that needs you"));
+        assert!(engine::wake(&waiting, &waiting, false).is_none(), "an existing verifier prompt must not wake each new wait");
         assert!(engine::wake(&began, &waiting, true).is_none());
         assert_eq!(engine::refreshed(&host, &id).unwrap(), waiting, "repeated reads preserve the resumable wait");
         let restored: Run = serde_json::from_value(serde_json::to_value(&waiting).unwrap()).unwrap();

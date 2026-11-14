@@ -2431,7 +2431,8 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     // Every result accepted: the lead is woken to merge them.
     let to_merge = now.state == RunState::Merging;
     let ended = now.state != RunState::Running;
-    let attention: Vec<&Piece> = now.pieces.iter().filter(|piece| verifier_waiting(piece)).collect();
+    // A prompt already present when this wait began is not a new reason to wake the lead.
+    let attention: Vec<&Piece> = now.pieces.iter().filter(|piece| verifier_waiting(piece) && began.piece(&piece.id).is_none_or(|before| !verifier_waiting(before))).collect();
     let woken = match all {
         true => ended || !under_way,
         // Nothing under way and nothing to start: whatever holds the run up (a blocked piece,
