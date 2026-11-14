@@ -42,6 +42,8 @@ struct World {
     no_worker: BTreeSet<String>,
     no_brief: BTreeSet<String>,
     no_stop: BTreeSet<String>,
+    no_preserve: BTreeSet<String>,
+    archived: BTreeSet<String>,
     /// Pieces whose new session cannot be made safe to brief, and how often that was tried.
     no_secure: BTreeSet<String>,
     secured: Vec<String>,
@@ -132,6 +134,10 @@ impl Fake {
 }
 
 impl Host for Fake {
+    fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        self.stop_worker(worker)
+    }
+
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
@@ -193,6 +199,18 @@ impl Host for Fake {
 
     fn worker(&self, worker: &SessionRef) -> WorkerNow {
         self.world().now.get(&worker.session_id).cloned().unwrap_or(WorkerNow::Gone)
+    }
+
+    fn preserve_worker(&self, _run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.world().no_preserve.contains(&worker.session_id), "preservation failed");
+        Ok(())
+    }
+
+    fn archive_worker(&self, _run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        let mut world = self.world();
+        assert!(!world.running.contains(&worker.session_id));
+        world.archived.insert(worker.session_id.clone());
+        Ok(())
     }
 
     fn stop_worker(&self, worker: &SessionRef) -> anyhow::Result<bool> {
@@ -3063,4 +3081,92 @@ fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
     host.world().running.insert("w1-cli".into());
     engine::stop(&host, &id, By::Cli).unwrap();
     assert_eq!(host.world().stopped, ["w1-cli", "w1-cli"]);
+}
+
+
+#[test]
+fn superseded_classification_includes_all_earlier_tries_without_outcomes_and_protects_final_sessions() {
+    let _home = crate::store::temp_home();
+    let run = stored_run("done", json!([
+        {"id": "three", "state": "done", "worker": {"sessionId": "final"}, "tries": [
+            attempt("first", "interrupted", None), attempt("effort", "failed", Some("failed")), attempt("tier", "final", Some("done"))
+        ]},
+        {"id": "reused", "state": "done", "tries": [attempt("first", "final", None), attempt("effort", "other-final", Some("done"))]},
+        {"id": "lead", "state": "done", "tries": [attempt("first", "lead", None), attempt("effort", "last", Some("done"))]},
+        {"id": "duplicate", "state": "done", "tries": [attempt("first", "interrupted", None), attempt("effort", "last", Some("done"))]},
+        {"id": "legacy", "state": "done", "worker": {"sessionId": "legacy-final"}},
+        {"id": "reused-legacy", "state": "done", "tries": [attempt("first", "legacy-final", None), attempt("effort", "last", Some("done"))]}
+    ]));
+    assert_eq!(run.superseded_workers().iter().map(|worker| worker.session_id.as_str()).collect::<Vec<_>>(), ["interrupted", "failed"]);
+    assert!(run.finished_workers().iter().any(|worker| worker.session_id == "interrupted"));
+    assert_eq!(run.archival_workers(), run.superseded_workers());
+}
+
+#[test]
+fn ended_worker_archival_requires_stop_and_preservation_and_is_retryable() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let run = stored_run("done", json!([
+        {"id": "three", "state": "done", "tries": [attempt("first", "one", None), attempt("effort", "two", Some("failed")), attempt("tier", "final", Some("done"))]}
+    ]));
+    host.world().running.extend(["one".into(), "two".into(), "final".into(), "lead".into()]);
+    host.world().no_stop.insert("one".into());
+    host.world().no_preserve.insert("two".into());
+    let end = || super::end_workers(&run, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker));
+    let failures = end();
+    assert_eq!(failures.keys().map(String::as_str).collect::<Vec<_>>(), ["one", "two"]);
+    assert!(failures["one"].contains("stopped"));
+    assert!(failures["two"].contains("preserved"));
+    assert!(host.world().archived.is_empty());
+    assert_eq!(host.world().stopped, ["two", "final"]);
+    host.world().no_stop.clear();
+    host.world().no_preserve.clear();
+    assert!(end().is_empty());
+    assert!(end().is_empty());
+    assert_eq!(host.world().archived.iter().map(String::as_str).collect::<Vec<_>>(), ["one", "two"]);
+    assert!(host.world().running.contains("lead"));
+}
+
+#[test]
+fn unsuccessful_runs_archive_finished_tries_including_interrupted_final_tries() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let mut run = stored_run("failed", json!([
+        {"id": "interrupted", "state": "failed", "tries": [attempt("first", "one", None)]},
+        {"id": "still-working", "state": "running", "tries": [attempt("first", "working", None)]}
+    ]));
+    host.world().running.extend(["one".into(), "working".into(), "lead".into()]);
+    for state in [RunState::Failed, RunState::Stopped] {
+        run.state = state;
+        super::end_workers(&run, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker));
+    }
+    assert_eq!(host.world().archived.iter().map(String::as_str).collect::<Vec<_>>(), ["one"]);
+    assert!(host.world().running.contains("working"));
+    assert!(host.world().running.contains("lead"));
+}
+
+#[test]
+fn cleanup_stop_runs_normal_handling_for_idle_tabs_and_keeps_manual_tabs() {
+    use std::cell::RefCell;
+    use crate::store::index::{Front, TabEntry};
+
+    let mut tabs: Vec<TabEntry> = ["running", "idle-stale", "terminal", "manual"].iter().map(|id| {
+        serde_json::from_value(json!({"id": id, "harness": "codex", "created": "now"})).unwrap()
+    }).collect();
+    tabs[2].follow.front = Front::Terminal;
+    tabs[3].follow.front = Front::ByHand;
+    let in_turn = RefCell::new(BTreeSet::from(["running".to_string(), "idle-stale".to_string()]));
+    let calls = RefCell::new(Vec::new());
+    let normal_stop = |tab: &str| {
+        calls.borrow_mut().push(tab.to_string());
+        in_turn.borrow_mut().remove(tab);
+        Ok(())
+    };
+    assert!(engine::stop_worker_agents(&tabs, &|tab| tab == "running", &normal_stop).unwrap());
+    assert!(in_turn.borrow().is_empty(), "idle stale state receives normal stop handling too");
+    assert_eq!(*calls.borrow(), ["running", "idle-stale"]);
+    calls.borrow_mut().clear();
+    assert!(!engine::stop_worker_agents(&tabs, &|_| false, &normal_stop).unwrap());
+    assert_eq!(*calls.borrow(), ["running", "idle-stale"], "retries still clear idle state");
+    assert!(engine::stop_worker_agents(&tabs, &|_| false, &|_| anyhow::bail!("transport stop failed")).is_err());
 }
