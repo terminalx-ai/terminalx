@@ -685,6 +685,26 @@ describe("creating a session", () => {
     expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ created: "session" });
   });
 
+  it.each([false, true])("starts a session in a recovered attention-required workspace (issue: %s)", async (withIssue) => {
+    const failed = item("ws-recovered", ORG, { state: "attention-required",
+      launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } },
+    });
+    await list(ORG, [failed]);
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 1, pendingApprovals: 0, reportedAt: 20 },
+    } }]);
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 0, pendingApprovals: 0, reportedAt: 30 },
+    } }]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", ...(withIssue ? { issue } : {}) })).toMatchObject({
+      created: "session", workspace: `cloud:${ORG}:ws-recovered`, resumed: false,
+    });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[0][0]).toMatchObject({ kind: "reuse" });
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+  });
+
   it("preserves ambiguous workspace selection when one needs attention", async () => {
     await list(ORG, [item("ws-failed", ORG, { state: "attention-required" }), item("ws-healthy", ORG)]);
     const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };

@@ -23,7 +23,7 @@ import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdent
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
-import { launchFailureStands } from "@/lib/cloudRowState";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { providerLabel } from "@/lib/organizationCompute";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
@@ -84,8 +84,7 @@ function usable(node: CloudWorkspaceNode): boolean {
   if (item.workspace.preparation) return false;
   // A failed first prompt stops being in the way once an agent has run there (#499): like a local checkout, the
   // workspace then takes the next session. The same rule decides whether it can be opened (`workspaceOpenable`).
-  const launchFailed = phaseOf(item) === "failed" && (!item.workspace.launch || launchFailureStands(item, { agentRan: cloudAgentRan(item) }));
-  return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && !launchFailed;
+  return !deletion(item) && !archiving(item) && !resolveCloudAttention(item, { agentRan: cloudAgentRan(item) });
 }
 
 /**
@@ -111,10 +110,13 @@ export function planCloudStart(project: CloudProject): CloudStartPlan {
     const advertised = project.selected ? node.item.workspace.repositories?.find((repository) => repository.fullName != null && normalizeRepositoryIdentity(repository.identity) === project.identity) : undefined;
     return { kind, node, repository: project.blank ? null : { identity: project.identity, directory: advertised?.targetDirectory ?? null } };
   };
-  const running = candidates.find((node) => node.item.workspace.state === "ready" && !isChanging(node.item));
+  // A reconciled launch can be recovered before the server leaves attention-required.
+  // `usable` has already ruled out any attention that still needs recovery.
+  const runningState = (node: CloudWorkspaceNode) => ["ready", "attention-required"].includes(node.item.workspace.state);
+  const running = candidates.find((node) => runningState(node) && !isChanging(node.item));
   if (running) return target("reuse", running);
   // Starting or resuming: waiting on it costs nothing more than it already does.
-  const coming = candidates.find((node) => node.item.workspace.state === "provisioning" || (node.item.workspace.state === "ready" && isChanging(node.item)) || (node.item.workspace.state === "suspended" && isOpen(node.item.latestOperation)));
+  const coming = candidates.find((node) => node.item.workspace.state === "provisioning" || (runningState(node) && isChanging(node.item)) || (node.item.workspace.state === "suspended" && isOpen(node.item.latestOperation)));
   if (coming) return target("wake", coming);
   const stopped = candidates.find((node) => node.item.workspace.state === "suspended");
   if (stopped) return target("wake", stopped);
