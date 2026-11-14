@@ -119,6 +119,8 @@ export async function launchContinuation(
 export interface ProjectDestination {
   projectPath: string;
   worktree: boolean;
+  /** Keep the source checkout/worktree when it belongs to this project. */
+  cwd?: string;
 }
 
 /**
@@ -143,7 +145,7 @@ export async function moveChatToProject(
   try {
     await ensureAvailable(settings.harness);
     if (!launched) {
-      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, tab: settings });
+      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings });
       upsertSession(session);
       selectSession(session.id);
       const tab = session.tabs[0];
@@ -169,4 +171,33 @@ export async function moveChatToProject(
   return result.stage === "delivered"
     ? { stage: "archive", launched, error: `The new session started and has the chat's context. ${unarchived}` }
     : { ...result, error: `${result.error} ${unarchived}` };
+}
+
+/** Continue in a different destination without changing or archiving the source. */
+export async function launchContinuationInDestination(
+  context: ContinuationContext, to: ProjectDestination | null, settings: LaunchSettings, prompt: string,
+  onCreated: (launched: Launched) => void, existing?: Launched, onDelivering?: () => void,
+): Promise<ContinuationResult> {
+  let launched = existing;
+  try {
+    await ensureAvailable(settings.harness);
+    if (!launched) {
+      const session = to
+        ? await api.createSession({ projectPath: to.projectPath, title: context.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings })
+        : await api.createQuickChat({ title: context.title, tab: settings });
+      upsertSession(session);
+      selectSession(session.id);
+      const tab = session.tabs[0];
+      if (!tab) throw new Error("The new session has no agent conversation.");
+      launched = { sessionId: session.id, tab };
+      seedDraft(launched, prompt);
+      onCreated(launched);
+    }
+    // This destination owns its own automation; never transfer the source's authority.
+    prompt = await preparePipelineLaunch(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
+    await agent.ensureStarted(launched.sessionId, launched.tab.id);
+  } catch (e) {
+    return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
+  }
+  return deliver(launched, prompt, onDelivering);
 }

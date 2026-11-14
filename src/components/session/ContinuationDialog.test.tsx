@@ -4,11 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@/lib/api";
 import type { Project, SessionEntry, TabEntry } from "@/types/session";
 import type { ContinuationContext } from "@/lib/continuation";
-const mocks = vi.hoisted(() => ({ prepare: vi.fn(), providers: vi.fn(), launch: vi.fn(), move: vi.fn(), submit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prepare: vi.fn(), providers: vi.fn(), launch: vi.fn(), move: vi.fn(), submit: vi.fn(), workspaces: vi.fn(), launchDestination: vi.fn(), projects: [] as Project[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@/lib/api", async (original) => ({ ...await original<typeof import("@/lib/api")>(), agent: { prepareContinuation: mocks.prepare, submitWaiting: mocks.submit }, api: { listHarnesses: mocks.providers }, errorMessage: String }));
-vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof import("@/lib/continuation")>(), launchContinuation: mocks.launch, moveChatToProject: mocks.move }));
+vi.mock("@/lib/api", async (original) => ({ ...await original<typeof import("@/lib/api")>(), agent: { prepareContinuation: mocks.prepare, submitWaiting: mocks.submit }, api: { listHarnesses: mocks.providers, listWorkspaces: mocks.workspaces }, errorMessage: String }));
+vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof import("@/lib/continuation")>(), launchContinuation: mocks.launch, launchContinuationInDestination: mocks.launchDestination, moveChatToProject: mocks.move }));
+vi.mock("@/lib/sessions", async (original) => ({ ...await original<typeof import("@/lib/sessions")>(), useSessionStore: () => ({ projects: mocks.projects }) }));
 const model = (harness: string, id: string, label: string, efforts: string[], isDefault = false): ModelInfo =>
   ({ id, label, harness, efforts, defaultEffort: efforts[1] ?? null, acceptsImages: true, isDefault, upgrade: null, description: null });
 const catalog = [
@@ -43,7 +44,9 @@ const providers = [{ id: "claude", name: "Claude Code", available: true }, { id:
 const sourceSettings = { harness: "claude", model: "sonnet", effort: "low", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } };
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.projects = [];
   mocks.prepare.mockResolvedValue(context);
+  mocks.workspaces.mockResolvedValue([]);
   mocks.providers.mockResolvedValue(providers);
   setPrefs({ lastAgent: "codex", lastModel: { claude: "opus", codex: "gpt-6-mini" }, lastEffort: { claude: "high", codex: "medium" }, lastMode: "auto", bypassConfirmed: false });
 });
@@ -69,6 +72,7 @@ it("automatically asks once for a second opinion, without exporting history or c
   await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
   expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session.id, cwd: session.cwd }), { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan" }, "Review this recorded diff", expect.any(Function), undefined, expect.any(Function), "review");
   expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.workspaces).not.toHaveBeenCalled();
   expect(screen.queryByRole("group", { name: "New session settings" })).toBeNull();
   expect(screen.getByTestId("review-settings").textContent).toContain("Codex · GPT-6 Mini · Plan (read-only)");
   expect(screen.getByText(/Share the selected turn's prompt, answer and recorded file diffs with Codex/)).toBeTruthy();
@@ -420,4 +424,240 @@ it("turns a delivery it could not confirm into success when the agent takes the 
   expect((await screen.findByRole("alert")).textContent).toContain("could not be confirmed");
   tell("delivered");
   expect(view.onClose).toHaveBeenCalledTimes(1);
+});
+
+
+describe("continuation project selection", () => {
+  const repo = { path: "/repo", name: "Repository", kind: "git" } as Project;
+  const other = { path: "/other", name: "Other", kind: "git" } as Project;
+  const quick = { ...session, kind: "quick", projectPath: "/scratch", cwd: "/external/work/sub" } as SessionEntry;
+  const show = (from: SessionEntry) => {
+    mocks.prepare.mockResolvedValue({ ...context, cwd: from.cwd });
+    return render(<ContinuationDialog session={from} source={source} onClose={vi.fn()} />);
+  };
+  beforeEach(() => {
+    mocks.projects = [repo, other];
+    mocks.workspaces.mockImplementation(async (path) => path === repo.path ? [{ path: "/external/work" }] : []);
+    mocks.launchDestination.mockResolvedValue({ stage: "delivered" });
+    mocks.launch.mockResolvedValue({ stage: "delivered" });
+  });
+  it("defaults to the source project and continues in the same session", async () => {
+    mocks.workspaces.mockRejectedValue(new Error("unrelated project unavailable"));
+    show({ ...session, projectPath: repo.path }); await loaded();
+    expect(mocks.workspaces).not.toHaveBeenCalled();
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe(repo.path);
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+  });
+  it("infers an external worktree for a quick chat and preserves its cwd", async () => {
+    show(quick); await loaded();
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe(repo.path);
+    expect(screen.queryByRole("switch", { name: "Start on a new branch in a worktree" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalled());
+    expect(mocks.launchDestination.mock.calls[0][1]).toEqual({ projectPath: repo.path, worktree: false, cwd: quick.cwd });
+    expect(mocks.move).not.toHaveBeenCalled();
+  });
+  it("keeps a user's choice while asynchronous inference resolves and blocks premature starts", async () => {
+    let resolve!: (value: unknown[]) => void;
+    const pending = new Promise((done) => { resolve = done; });
+    mocks.workspaces.mockReturnValue(pending);
+    show(quick);
+    await screen.findByRole("group", { name: "New session settings" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => resolve([{ path: "/external/work" }]));
+    await loaded();
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe(other.path);
+  });
+  it("blocks launch when workspace discovery fails and recovers on retry", async () => {
+    mocks.workspaces.mockRejectedValueOnce(new Error("worktrees unavailable"));
+    show(quick);
+    expect((await screen.findByRole("alert")).textContent).toContain("worktrees unavailable");
+    expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await loaded();
+    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe(repo.path);
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+  });
+  it("preserves matching worktrees for explicit Link to a Project", async () => {
+    mocks.move.mockResolvedValue({ stage: "delivered" });
+    mocks.prepare.mockResolvedValue({ ...context, cwd: quick.cwd });
+    render(<ContinuationDialog session={quick} source={source} into={{ project: repo, worktree: true }} onClose={vi.fn()} />);
+    await loaded("Link and Start");
+    expect(screen.queryByRole("switch", { name: "Start on a new branch in a worktree" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Link and Start" }));
+    await waitFor(() => expect(mocks.move).toHaveBeenCalled());
+    expect(mocks.move.mock.calls[0][1]).toEqual({ projectPath: repo.path, worktree: false, cwd: quick.cwd });
+    expect(mocks.move.mock.calls[0][3]).toContain("This is the same shared workspace");
+  });
+  it("routes a different project through its selected new-worktree option", async () => {
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    await loaded();
+    fireEvent.click(screen.getByRole("switch", { name: "Start on a new branch in a worktree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalled());
+    expect(mocks.launchDestination.mock.calls[0][1]).toEqual({ projectPath: other.path, worktree: true });
+    expect(mocks.launchDestination.mock.calls[0][3]).not.toContain("This is the same shared workspace");
+    expect(mocks.launch).not.toHaveBeenCalled();
+  });
+  it.each(["quick", "project"])("handles explicit No project from a %s session", async (kind) => {
+    show({ ...session, kind: kind as "quick" | "project", projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(kind === "quick" ? mocks.launch : mocks.launchDestination).toHaveBeenCalled());
+    if (kind === "project") expect(mocks.launchDestination.mock.calls[0][1]).toBeNull();
+  });
+
+  it("defaults an unmatched quick chat to No project and keeps its current session", async () => {
+    show({ ...quick, cwd: "/scratch" }); await loaded();
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+  });
+
+  it("queries only the selected destination and ignores unrelated project failures", async () => {
+    mocks.workspaces.mockImplementation(async (path) => {
+      if (path !== other.path) throw new Error("source project unavailable");
+      return [];
+    });
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    await loaded();
+    expect(mocks.workspaces).toHaveBeenCalledExactlyOnceWith(other.path);
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination.mock.calls[0][1]).toEqual({ projectPath: other.path, worktree: false });
+  });
+
+  it("lets a quick chat explicitly choose No project during inference, ignoring its late result", async () => {
+    let resolve!: (value: unknown[]) => void;
+    mocks.workspaces.mockReturnValue(new Promise((done) => { resolve = done; }));
+    show(quick);
+    await screen.findByRole("group", { name: "New session settings" });
+    expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: "" } });
+    await loaded();
+    await act(async () => resolve([{ path: "/external/work", isMain: false }]));
+    expect((screen.getByRole("combobox", { name: "Project" }) as HTMLSelectElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+  });
+
+  it("lets No project bypass failed quick-chat inference", async () => {
+    mocks.workspaces.mockRejectedValue(new Error("unavailable"));
+    show(quick);
+    await screen.findByRole("alert");
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: "" } });
+    await loaded();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+  });
+
+  it("discards stale destination discovery when switching back to the source project", async () => {
+    let reject!: (error: Error) => void;
+    mocks.workspaces.mockReturnValue(new Promise((_done, fail) => { reject = fail; }));
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    expect(screen.getByRole("button", { name: "Start New Session" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: repo.path } });
+    await loaded();
+    await act(async () => reject(new Error("old destination unavailable")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+  });
+
+  it("blocks a newly selected project until its own discovery completes", async () => {
+    let finishOther!: (value: unknown[]) => void;
+    mocks.workspaces.mockImplementation((path) => path === repo.path
+      ? Promise.resolve([{ path: "/external/work", isMain: false }])
+      : new Promise((done) => { finishOther = done; }));
+    show(quick);
+    await screen.findByRole("group", { name: "New session settings" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: repo.path } });
+    await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+    await act(async () => finishOther([]));
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination.mock.calls[0][1]).toEqual({ projectPath: other.path, worktree: false });
+  });
+
+  it("preserves a matching worktree when another project's session continues there", async () => {
+    const from = { ...session, projectPath: other.path, cwd: quick.cwd };
+    const before = structuredClone(from);
+    show(from); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: repo.path } });
+    await loaded();
+    expect(screen.queryByRole("switch", { name: "Start on a new branch in a worktree" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalledTimes(1));
+    expect(mocks.launchDestination.mock.calls[0][1]).toEqual({ projectPath: repo.path, cwd: quick.cwd, worktree: false });
+    expect(mocks.launchDestination.mock.calls[0][3]).toContain("Keep this transcript unchanged.");
+    expect(from).toEqual(before);
+    expect(mocks.move).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a reselected destination rather than starting with its old workspace result", async () => {
+    let finish!: (value: unknown[]) => void;
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: repo.path } });
+    await loaded();
+    mocks.workspaces.mockReturnValueOnce(new Promise((done) => { finish = done; }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    const button = screen.getByRole("button", { name: "Start New Session" });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(button);
+    expect(mocks.launchDestination).not.toHaveBeenCalled();
+    await act(async () => finish([]));
+    await loaded();
+  });
+
+  it("keeps an uncertain cross-project delivery reachable without a second launch", async () => {
+    const made = { sessionId: "other-session", tab: { id: "other-tab" } };
+    mocks.launchDestination.mockImplementationOnce(async (_context, _to, _settings, _prompt, onCreated) => {
+      onCreated(made);
+      return { stage: "delivery", launched: made, error: "Delivery could not be confirmed" };
+    });
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: /Retry Start|Start New Session/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open New Session" }).hasAttribute("disabled")).toBe(false);
+    expect(mocks.launchDestination).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries the same destination after startup fails and locks the chosen project", async () => {
+    const made = { sessionId: "other-session", tab: { id: "other-tab" } };
+    mocks.launchDestination.mockImplementationOnce(async (_context, _to, _settings, _prompt, onCreated) => {
+      onCreated(made);
+      return { stage: "launch", launched: made, error: "Startup failed" };
+    });
+    show({ ...session, projectPath: repo.path }); await loaded();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: other.path } });
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("combobox", { name: "Project" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Retry Start" }));
+    await waitFor(() => expect(mocks.launchDestination).toHaveBeenCalledTimes(2));
+    expect(mocks.launchDestination.mock.calls[1][5]).toEqual(made);
+    expect(mocks.launchDestination.mock.calls[1][3]).toBe(mocks.launchDestination.mock.calls[0][3]);
+    expect(mocks.launch).not.toHaveBeenCalled();
+  });
 });
