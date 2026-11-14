@@ -220,6 +220,10 @@ struct Record {
     boot_identity: Option<String>,
     #[serde(default)]
     prior_external_outcome_unknown: bool,
+    /// Its worker was stopped and seen gone since its last execution began,
+    /// so a cancellation needs no reboot to prove it (review 2).
+    #[serde(default)]
+    worker_exit_confirmed: bool,
 }
 
 struct RecoveryReceipt {
@@ -797,6 +801,7 @@ impl Guest {
                 artifacts_pending: false,
                 boot_identity: self.boot_identity.clone(),
                 prior_external_outcome_unknown: false,
+                worker_exit_confirmed: false,
             },
         );
         self.save(&state)?; // Before directories, files, sessions or prompts.
@@ -861,6 +866,7 @@ impl Guest {
             let record = state.records.get_mut(&id).unwrap();
             record.task.status = TaskStatus::Starting;
             record.boot_identity = self.boot_identity.clone();
+            record.worker_exit_confirmed = false;
             event(&mut record.task, json!({"type":"starting"}));
             self.save(&state)?; // Whole-workflow lease before any effect.
             let result = self.launch(state.records.get_mut(&id).unwrap());
@@ -1060,7 +1066,9 @@ impl Guest {
             // No task releases the desktop while an autonomous CLI remains
             // alive. A later explicit follow-up resumes this conversation.
             if self.manager.is_running(&session, &tab) {
+                // Seen gone here and now: a later cancel needs no reboot.
                 self.stop_worker(&session, &tab)?;
+                record.worker_exit_confirmed = true;
             }
             record.task.status = if auth_failed {
                 TaskStatus::Waiting
@@ -1134,7 +1142,12 @@ impl Guest {
                 .as_ref()
                 .is_some_and(|(session, tab)| self.manager.is_running(session, tab))
             {
-                if let Err(error) = cancel_after_boot_change(record, self.boot_identity.as_deref())
+                if record.worker_exit_confirmed {
+                    // Stopped and seen gone already, waiting for guest login, say.
+                    record.task.status = TaskStatus::Canceled;
+                    record.artifacts_pending = true;
+                    event(&mut record.task, json!({"type":"canceled","workerExitConfirmed":true}));
+                } else if let Err(error) = cancel_after_boot_change(record, self.boot_identity.as_deref())
                 {
                     unknown(record, &format!("Cannot confirm worker exit: {error:#}"));
                 }
@@ -1571,6 +1584,7 @@ impl Guest {
         record.task.outcome = None;
         if text.is_some() {
             record.boot_identity = self.boot_identity.clone();
+            record.worker_exit_confirmed = false;
         }
         self.save(&state)?;
         let result = if let Some(text) = text {
@@ -3551,6 +3565,7 @@ mod tests {
             artifacts_pending: false,
             boot_identity: None,
             prior_external_outcome_unknown: false,
+            worker_exit_confirmed: false,
         }
     }
 
@@ -4608,6 +4623,36 @@ mod tests {
             .task
             .status
             .holds_desktop());
+    }
+
+    /// Review 2: cancelling a task that waits for guest login, whose worker
+    /// this runtime already stopped, left it outcomeUnknown until a reboot.
+    #[test]
+    fn a_task_whose_worker_was_seen_stopped_cancels_without_a_reboot() {
+        {
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        task.detail = Some("Guest provider login is required; explicit follow-up after login".into());
+        let mut stopped = record(task.clone());
+        stopped.boot_identity = guest.boot_identity.clone();
+        stopped.worker_exit_confirmed = true;
+        seed(&guest, stopped);
+        let canceled: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
+        assert_eq!(canceled.status, TaskStatus::Canceled);
+        assert!(canceled.events.iter().any(|e| e.payload["type"] == "canceled" && e.payload["workerExitConfirmed"] == true));
+        }
+        // Without that confirmation, the same boot still cannot prove it.
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        let mut unconfirmed = record(task.clone());
+        unconfirmed.boot_identity = guest.boot_identity.clone();
+        seed(&guest, unconfirmed);
+        let unknown: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
+        assert_eq!(unknown.status, TaskStatus::OutcomeUnknown);
     }
 
     #[test]
