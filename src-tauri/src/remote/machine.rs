@@ -81,12 +81,9 @@ pub fn describe(identity: &Identity) -> Value {
     })
 }
 
+/// `macos` or `linux`, as Rust names them.
 fn os_family() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "linux" => "linux",
-        other => other,
-    }
+    std::env::consts::OS
 }
 
 /// The operating system's own version: `15.3` on macOS, `24.04` on Ubuntu.
