@@ -68,6 +68,9 @@ impl AgentWorld {
             .env("PATH", path)
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
             .env_remove("TERMINALX_HOME")
+            // A runtime the desktop started says it has a window; these have none.
+            .env_remove("TERMINALX_LOCAL_DESKTOP")
+            .env_remove("TERMINALX_LOCAL_APPLICATION")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
             .env("RUST_LOG", "info")
