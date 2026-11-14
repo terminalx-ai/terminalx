@@ -910,6 +910,8 @@ pub fn run() {
             media::open_media_file,
             media::close_media_file,
             commands::read_text_file,
+            commands::read_whole_text_file,
+            commands::export_file,
             commands::write_text_file,
             commands::file_mtime,
             commands::inspect_local_path,

@@ -30,6 +30,7 @@ export const GLYPHS: Record<string, Glyph> = {
   ArrowLeft: [["path", { d: "M13 8H3M7.5 3.5 3 8l4.5 4.5" }]],
   ArrowRight: [["path", { d: "M3 8h10M8.5 3.5 13 8l-4.5 4.5" }]],
   Ellipsis: [dot(3.5, 8), dot(8, 8), dot(12.5, 8)],
+  EllipsisVertical: [dot(8, 3.5), dot(8, 8), dot(8, 12.5)],
   PanelLeft: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M6 3v10" }]],
   PanelRight: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M10 3v10" }]],
   // A gear: six rounded teeth around a hole, in the set's stroke. (Settings2 keeps the sliders, for options.)
