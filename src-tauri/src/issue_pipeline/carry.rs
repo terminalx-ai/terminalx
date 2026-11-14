@@ -26,6 +26,17 @@
 //! Merges with no resolution and an unchanged change set carry the verdict
 //! as it is. Anything else that only merges the base gets the light check of
 //! just what the merges changed, which does not use up a review round.
+//!
+//! The author's conversation works in this same checkout, so nothing here
+//! takes the history from anything it could rewrite. Commits are named by
+//! their hash: the head is the pull request's, the base was fetched by its
+//! hash, and a parent is part of the commit it belongs to. Only replacement
+//! refs (`git replace`), a grafts file and a shallow clone can make Git show
+//! other parents than those, so every command runs with replacements off,
+//! and a checkout with grafts or a shallow history carries nothing. The diff
+//! options the checkout's config could use to hide a change (submodules,
+//! `diff.relative`, external diff and textconv drivers) are pinned on the
+//! command line, which config does not override.
 
 use std::path::Path;
 
@@ -72,12 +83,32 @@ fn short(commit: &str) -> &str {
     &commit[..commit.len().min(10)]
 }
 
+/// `git` with replacement refs ignored: the history as the commits record it.
+fn run(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut all = vec!["--no-replace-objects"];
+    all.extend_from_slice(args);
+    git::run(cwd, &all)
+}
+
+/// Why this checkout's history cannot be read as the commits record it, if
+/// it cannot: a grafts file or a shallow clone rewrites parents.
+fn rewritten_history(cwd: &Path) -> Result<Option<String>> {
+    let grafts = run(cwd, &["rev-parse", "--path-format=absolute", "--git-path", "info/grafts"])?;
+    if Path::new(grafts.trim()).exists() {
+        return Ok(Some("this checkout has a grafts file, which changes commits' parents".into()));
+    }
+    if run(cwd, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
+        return Ok(Some("this checkout is a shallow clone, so its history is cut short".into()));
+    }
+    Ok(None)
+}
+
 fn full(cwd: &Path, rev: &str) -> Result<String> {
-    Ok(git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).with_context(|| format!("{} is not a commit in this checkout", short(rev)))?.trim().to_string())
+    Ok(run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).with_context(|| format!("{} is not a commit in this checkout", short(rev)))?.trim().to_string())
 }
 
 fn is_ancestor(cwd: &Path, ancestor: &str, of: &str) -> Result<bool> {
-    let output = git::inspect_output(cwd, &["merge-base", "--is-ancestor", ancestor, of])?;
+    let output = git::inspect_output(cwd, &["--no-replace-objects", "merge-base", "--is-ancestor", ancestor, of])?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -92,7 +123,7 @@ fn is_ancestor(cwd: &Path, ancestor: &str, of: &str) -> Result<bool> {
 /// is pinned.
 fn change_set(cwd: &Path, base: &str, commit: &str) -> Result<String> {
     let range = format!("{base}...{commit}");
-    let patch = git::run(cwd, &["-c", "core.quotepath=off", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--binary", "--src-prefix=a/", "--dst-prefix=b/", &range, "--"])?;
+    let patch = run(cwd, &["-c", "core.quotepath=off", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--ignore-submodules=none", "--binary", "--src-prefix=a/", "--dst-prefix=b/", &range, "--"])?;
     Ok(patch.lines().filter(|line| !line.starts_with("@@") && !line.starts_with("index ")).collect::<Vec<_>>().join("\n"))
 }
 
@@ -100,6 +131,9 @@ fn change_set(cwd: &Path, base: &str, commit: &str) -> Result<String> {
 /// branch at `base_commit`. Reads objects only: nothing is written to the
 /// checkout, its index or its refs.
 pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Result<Carry> {
+    if let Some(why) = rewritten_history(cwd)? {
+        return Ok(Carry::NewWork(why));
+    }
     let base_commit = full(cwd, base_commit)?;
     let reviewed = full(cwd, reviewed)?;
     let head = full(cwd, head)?;
@@ -111,7 +145,7 @@ pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Re
     }
     // Newest first, each with its parents: the line from the head back to
     // the reviewed commit, following first parents only.
-    let line = git::run(cwd, &["rev-list", "--first-parent", "--parents", &format!("{reviewed}..{head}")])?;
+    let line = run(cwd, &["rev-list", "--first-parent", "--parents", &format!("{reviewed}..{head}")])?;
     let mut merges = Vec::new();
     let mut expected = head.clone();
     for entry in line.lines() {
@@ -142,7 +176,7 @@ pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Re
     // remerge is made in a temporary object store Git removes afterwards.
     let mut resolution = String::new();
     for merge in &merges {
-        let shown = git::run(cwd, &["-c", "core.quotepath=off", "show", "--remerge-diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "--format=", merge, "--"])?;
+        let shown = run(cwd, &["-c", "core.quotepath=off", "show", "--remerge-diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--ignore-submodules=none", "--src-prefix=a/", "--dst-prefix=b/", "--format=", merge, "--"])?;
         let shown = shown.trim_matches('\n');
         if !shown.is_empty() {
             resolution.push_str(&format!("Merge {merge}:\n{shown}\n"));
@@ -334,6 +368,28 @@ mod tests {
         assert!(!merges.clean());
         assert!(merges.resolution.contains("+feature, slipped in"), "{}", merges.resolution);
         assert!(merges.change_set_moved);
+    }
+
+    #[test]
+    fn a_commit_dressed_up_as_a_merge_of_the_base_is_still_a_commit_of_its_own() {
+        let repo = Repo::new();
+        let reviewed = branch_reviewed(&repo);
+        repo.git(&["checkout", "-q", "main"]);
+        let base = repo.commit("other.txt", "other\n", "other");
+        repo.git(&["checkout", "-q", "feature"]);
+        let head = repo.commit("feature.txt", "feature, changed\n", "a real change");
+        // The checkout is told the commit merges main, with its own change as
+        // the merge's result: as a clean merge it would carry the verdict.
+        repo.git(&["replace", "--graft", &head, &reviewed, &base]);
+        assert_eq!(repo.git(&["rev-list", "--parents", "-1", &head]).split_whitespace().count(), 3, "git believes the replacement");
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains("commit of its own")));
+
+        // A grafts file says the same, and a checkout with one carries nothing.
+        repo.git(&["replace", "-d", &head]);
+        let grafts = repo.path().join(".git/info/grafts");
+        std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+        std::fs::write(&grafts, format!("{head} {reviewed} {base}\n")).unwrap();
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains("grafts")));
     }
 
     #[test]
