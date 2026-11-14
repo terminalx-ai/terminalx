@@ -247,8 +247,8 @@ pub struct ControlService {
     guest: Option<Arc<crate::local_vm::guest::Guest>>,
     #[cfg(unix)]
     local_vm_available: bool,
-    /// Asks the person before an agent's write to an issue. Only the desktop
-    /// app has a window to ask in; without one such a write is refused.
+    /// Asks the person before edits to an existing issue. Creation never asks.
+    /// Only the desktop app has a window for edits that require confirmation.
     #[cfg(feature = "desktop")]
     questions: Option<crate::issue_control::Ask>,
     /// Computer use and the built-in browser; the headless runtime has neither.
@@ -341,7 +341,7 @@ impl WindowControl {
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
         }
         match command {
-            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => issue_operation(self.questions.as_ref(), command, params),
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" => issue_operation(self.questions.as_ref(), command, params),
             "floating.show" | "floating.hide" | "floating.toggle" => {
                 let action = command.trim_start_matches("floating.");
                 self.sink.emit(crate::session_ops::FLOATING_REQUEST_EVENT, &json!({"action":action,"session":optional_string(&params,"session")}));
@@ -750,8 +750,11 @@ impl ControlService {
             }
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
+            // Creation uses the local owner's credentials and never needs a
+            // desktop attachment. Cloud workspace capabilities stay unchanged.
+            "issues.create" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => issue_operation(None, command, params),
             #[cfg(feature = "desktop")]
-            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => self.issue_op(command, params),
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" => self.issue_op(command, params),
             #[cfg(not(feature = "desktop"))]
             "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => Err(ControlError::new(
                 "unsupported",
@@ -1310,15 +1313,12 @@ impl ControlService {
     }
 
     #[cfg(feature = "desktop")]
-    /// `issues.view|comment|status|assign|label|create` (PRO-100): one issue,
-    /// through the contract's operations, with every write put to the
-    /// person first (see `issue_control`).
+    /// Existing issue operations, with their confirmation policy in `issue_control`.
     fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         issue_operation(self.questions.as_ref(), command, params)
     }
 }
 
-#[cfg(feature = "desktop")]
 fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_control::{authorize, in_project, run, Caller, Live, Subject, Write};
         use crate::issue_ops::{Provider, Target};
@@ -1360,7 +1360,6 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
         run(action, &params, id.as_deref(), &Live(target), &gate)
 }
 
-#[cfg(feature = "desktop")]
 /// The project an issue command is for: the one named, else the one of the
 /// session it runs in, else the one holding its working directory. A new
 /// issue's project is always named.
@@ -1394,7 +1393,6 @@ fn issue_project(params: &Value, caller: &crate::issue_control::Caller) -> Resul
     Err(ControlError::invalid("Could not tell which project the issue belongs to. Pass --project."))
 }
 
-#[cfg(feature = "desktop")]
 /// A GitHub URL names its repository; the issue is read from the project's
 /// own, so a URL into another one would act on this repository's issue of
 /// the same number.

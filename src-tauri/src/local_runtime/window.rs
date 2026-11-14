@@ -46,7 +46,7 @@ pub(crate) fn supported(command: &str) -> bool {
          | "share.list" | "share.edit" | "share.revoke" | "share.remove"
          | "share.approve" | "share.note" | "share.takeover" | "issues.view"
          | "issues.comment" | "issues.status" | "issues.assign" | "issues.label"
-         | "issues.create" | "floating.show" | "floating.hide" | "floating.toggle"
+         | "floating.show" | "floating.hide" | "floating.toggle"
          | "perf.terminal.start" | "perf.terminal.poll" | "window.terminalCounters"
          | "window.open" | "window.quit" | "window.stopAllAndQuit"
     )
