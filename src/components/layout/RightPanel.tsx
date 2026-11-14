@@ -13,7 +13,7 @@ import { TerminalDock } from "@/components/terminal/TerminalDock";
 import { ComputerPanel } from "@/components/computer/ComputerPanel";
 import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
-import { api } from "@/lib/api";
+import { api, type PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
@@ -55,6 +55,8 @@ export function RightPanel({
   sessionId,
   mentionTabId,
   conversation = null,
+  onFixErrors,
+  fixBusy,
   statusKey = "",
   rootName,
   labelMode,
@@ -85,6 +87,8 @@ export function RightPanel({
   sessionId?: string;
   mentionTabId?: string | null;
   conversation?: string | null;
+  onFixErrors?: (pr: PullRequest) => Promise<unknown>;
+  fixBusy?: boolean;
   statusKey?: string;
   rootName?: string;
   labelMode?: "base" | "branch";
@@ -303,6 +307,8 @@ export function RightPanel({
                 branch={branchPicture ? { cwd, active: tab === "branch", version, sessionId, from } : null}
                 pr={{
                   sessionId,
+                  onFixErrors,
+                  fixBusy,
                   cwd,
                   source: gitSource,
                   branch: resolvedBranch,

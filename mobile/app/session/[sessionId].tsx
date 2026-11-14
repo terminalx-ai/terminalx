@@ -1,11 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActionSheetIOS, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-native";
+import { ArrowUp, CornerDownLeft, FileText, Keyboard as KeyboardIcon, Mic, Plus, TextCursorInput, ShieldAlert, ShieldCheck, Square, StickyNote, X } from "lucide-react-native";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
@@ -14,20 +15,28 @@ import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@
 import { useApp } from "@mobile/state/AppProvider";
 import type { ConnectionStage } from "@mobile/transport/connection";
 import { canRetry, connectionProblem, mayHaveArrived, problemText } from "@mobile/transport/connection-errors";
-import { Button, Card, EmptyState } from "@mobile/ui/primitives";
+import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
-import { conversationKey } from "@mobile/data/conversations";
+import { Glass } from "@mobile/ui/glass";
+import { EdgeFade } from "@mobile/ui/EdgeFade";
+import { useDictation } from "@mobile/ui/useDictation";
+import { Waveform } from "@mobile/ui/Waveform";
+import { conversationKey, providerName } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
-import { ConversationPicker } from "@mobile/ui/ConversationPicker";
+import { rowName } from "@mobile/data/session-list";
+import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome";
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { CompactingLine, PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { addPasteImageListener } from "../../modules/paste-image";
+import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
 import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
 import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
+import { ScreenHistory } from "@mobile/terminal/history";
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 8;
@@ -55,29 +64,52 @@ export default function SessionScreen() {
   // An older Mac, or one whose runtime is older than its app (#730), neither
   // sizes its terminal output nor opens a tab's terminal: it gets no Terminal
   // view. One that gains it while this is open offers it then.
-  const terminalOffered = useHostFeatures(app.api, app.activeHost?.id)?.terminal === 1;
+  const features = useHostFeatures(app.api, app.activeHost?.id);
+  const terminalOffered = features?.terminal === 1;
   const terminal = terminalOffered && view === "terminal";
+  // Another chat in this branch, through the Mac's "continue in a new tab", where it takes that.
+  const canAdd = features?.sessionControls === 1 && app.connectionStage === "connected";
+  const canClose = features?.closeTab === 1 && app.connectionStage === "connected";
+  const [adding, setAdding] = useState(false);
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
   const conversation = summary ? agentConversations(summary).find((item) => item.id === tabId) : undefined;
   const available = !summary || !!conversation;
+  const label = conversation?.label ?? params.title ?? "Session";
+  // Named as the session list names it: its branch, else its title; its project beneath.
+  const named = summary ? rowName(summary, summary.title?.trim() || label).name : label;
+  const hostId = app.activeHost.id;
+  const select = (next: string) => router.setParams({ sessionId, tabId: next, hostId, title: label });
+  // Closing stops that chat's agent, as on the Mac; its history stays there. The neighbour opens in its place.
+  const close = (closing: string) => {
+    const tabs = summary?.tabs ?? [];
+    const at = tabs.findIndex((tab) => tab.id === closing);
+    const next = tabs[at + 1] ?? tabs[at - 1];
+    const name = tabs[at]?.title?.trim() || "this chat";
+    Alert.alert(`Close ${name}?`, "Its agent stops. The conversation stays on your Mac.", [{ text: "Cancel", style: "cancel" }, { text: "Close", style: "destructive", onPress: () => void app.api.closeTab(sessionId, closing).then(async (result) => {
+      if (!result.done) return Alert.alert("Could not close the chat", result.message);
+      if (next) select(next.id);
+      await app.refreshSessions();
+    }).catch((cause: unknown) => Alert.alert("Could not close the chat", cause instanceof Error ? cause.message : String(cause))) }]);
+  };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
-    <Stack.Screen options={{ title: conversation?.label ?? params.title ?? "Session" }} />
-    {summary ? <>
-      <Text numberOfLines={1} style={[styles.sessionContext, { color: palette.muted }]}>{summary.title}</Text>
-      {summary.tabs.length > 1 ? <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} /> : null}
-    </> : null}
+    <Stack.Screen options={{ title: label, headerShown: false }} />
+    <SessionHeader title={named} subtitle={summary && summary.kind !== "quick" ? summary.project : undefined} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} />
+    {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} /> : null}
+    <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
-    {terminalOffered ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
     {!terminal ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
-function Segment({ label, selected, onPress }: { label: string; selected: boolean; onPress(): void }) {
+
+/** A round button in the composer, on a quiet disc as the best chat apps draw theirs. */
+function RoundButton({ label, icon, disabled, tint, onPress }: { label: string; icon: React.ReactNode; disabled?: boolean; tint?: string; onPress(): void }) {
   const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityState={{ selected }} onPress={onPress} style={[styles.segmentItem, selected && { backgroundColor: palette.card }]}><Text style={{ color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "500" }}>{label}</Text></Pressable>;
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: !!disabled }} disabled={disabled} hitSlop={4} onPress={onPress} style={({ pressed }) => [styles.round, { backgroundColor: tint ?? palette.raised, opacity: disabled ? 0.4 : pressed ? 0.7 : 1 }]}>{icon}</Pressable>;
 }
+
 
 function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { hostId: string; sessionId: string; tabId: string; available: boolean; connected: boolean; epoch: number }) {
   const app = useApp();
@@ -218,6 +250,8 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const send = async () => {
     const text = draft.trim();
     if ((!text && !attachments.length) || !connected || sending) return;
+    // What was heard is in the draft already: a result still on its way would come after the send.
+    if (dictation.listening) dictation.cancel();
     draftEdited.current = true;
     setSending(true);
     setSendFeedback(null);
@@ -274,6 +308,33 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
     }
   };
 
+  /** Adds picked files within the limits: at most eight, 5 MB together. */
+  const addPicked = async (assets: { uri: string; name: string; mimeType?: string | null; size?: number | null; base64?: string | null; id: string }[]) => {
+    const picked: MobileAttachment[] = [];
+    let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+    for (const asset of assets) {
+      if (attachments.length + picked.length >= MAX_ATTACHMENT_COUNT) {
+        setAttachmentError(`You can attach up to ${MAX_ATTACHMENT_COUNT} files.`);
+        break;
+      }
+      const mediaType = asset.mimeType?.toLowerCase() || "application/octet-stream";
+      const size = asset.size ?? 0;
+      if (size && totalBytes + size > MAX_ATTACHMENT_BYTES) {
+        setAttachmentError("Attachments may total up to 5 MB.");
+        continue;
+      }
+      const data = asset.base64 ?? await new ExpoFile(asset.uri).base64();
+      const actualSize = base64Size(data) || size;
+      if (totalBytes + actualSize > MAX_ATTACHMENT_BYTES) {
+        setAttachmentError("Attachments may total up to 5 MB.");
+        continue;
+      }
+      totalBytes += actualSize;
+      picked.push({ id: asset.id, uri: asset.uri, name: asset.name, mediaType, data, size: actualSize });
+    }
+    if (picked.length) setAttachments((current) => [...current, ...picked]);
+  };
+
   const pickAttachments = async () => {
     setAttachmentError(null);
     try {
@@ -284,39 +345,95 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
         base64: true,
       });
       if (result.canceled) return;
-      const picked: MobileAttachment[] = [];
-      let totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
-      for (const [index, asset] of result.assets.entries()) {
-        if (attachments.length + picked.length >= MAX_ATTACHMENT_COUNT) {
-          setAttachmentError(`You can attach up to ${MAX_ATTACHMENT_COUNT} files.`);
-          break;
-        }
-        const mediaType = asset.mimeType?.toLowerCase() || "application/octet-stream";
-        const size = asset.size ?? 0;
-        if (size && totalBytes + size > MAX_ATTACHMENT_BYTES) {
-          setAttachmentError("Attachments may total up to 5 MB.");
-          continue;
-        }
-        const data = asset.base64 ?? await new ExpoFile(asset.uri).base64();
-        const actualSize = size || base64Size(data);
-        if (totalBytes + actualSize > MAX_ATTACHMENT_BYTES) {
-          setAttachmentError("Attachments may total up to 5 MB.");
-          continue;
-        }
-        totalBytes += actualSize;
-        picked.push({
-          id: `${asset.uri}:${asset.lastModified}:${index}`,
-          uri: asset.uri,
-          name: asset.name,
-          mediaType,
-          data,
-          size: actualSize,
-        });
-      }
-      if (picked.length) setAttachments((current) => [...current, ...picked]);
+      await addPicked(result.assets.map((asset, index) => ({ ...asset, id: `${asset.uri}:${asset.lastModified}:${index}` })));
     } catch {
       setAttachmentError("This file could not be attached. Please try another file.");
     }
+  };
+
+  /** Photos from the library, through the system's picker: it asks for no access to the whole library. */
+  const pickPhotos = async () => {
+    setAttachmentError(null);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: Math.max(1, MAX_ATTACHMENT_COUNT - attachments.length),
+        // Sent as JPEG, compressed, so a few photos fit in a message.
+        quality: 0.7,
+        base64: true,
+      });
+      if (result.canceled) return;
+      await addPicked(result.assets.map((asset, index) => ({
+        id: `${asset.assetId ?? asset.uri}:${index}`,
+        uri: asset.uri,
+        name: asset.fileName?.replace(/\.(heic|heif|png)$/i, ".jpg") ?? `Photo ${index + 1}.jpg`,
+        // With `base64` the picker hands back JPEG data, whatever the original was.
+        mimeType: asset.base64 ? "image/jpeg" : asset.mimeType,
+        size: null,
+        base64: asset.base64,
+      })));
+    } catch {
+      setAttachmentError("This photo could not be attached. Please try another one.");
+    }
+  };
+
+  // An image pasted into the message field becomes an attachment, as a chat app's does.
+  const composerFocused = useRef(false);
+  const onPastedImage = useRef<(data: string) => void>(() => undefined);
+  onPastedImage.current = (data) => {
+    if (!sendToAgent) return setAttachmentError("Images go to the agent: switch back from the worktree note to attach one.");
+    setAttachmentError(null);
+    const id = `paste:${Date.now()}`;
+    void addPicked([{ id, uri: `data:image/jpeg;base64,${data}`, name: "Pasted image.jpg", mimeType: "image/jpeg", size: null, base64: data }]);
+  };
+  useEffect(() => addPasteImageListener((image) => { if (composerFocused.current) onPastedImage.current(image.data); }), []);
+
+  // A prompt's images live on the Mac: it hands each over, where it can (`promptImages`).
+  const imagesServed = useHostFeatures(app.api, hostId)?.promptImages === 1;
+  const imageSource = useMemo(() => imagesServed ? { scope: `${hostId}:${sessionId}`, load: (url: string) => app.api.promptImage(sessionId, tabId, url) } : null, [app.api, hostId, imagesServed, sessionId, tabId]);
+
+  // The composer opens out while in use: typed in, holding a draft or attachments, a note, or dictation.
+  const [focused, setFocused] = useState(false);
+  const harness = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.harness;
+  const placeholder = harness ? `Message ${providerName(harness)}` : "Message this session";
+
+  // Over the keyboard the composer needs no room for the home indicator.
+  const [keyboardShown, setKeyboardShown] = useState(false);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
+    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
+
+  // Speaking into the composer: what is said goes after what was already typed.
+  const [composerHeight, setComposerHeight] = useState(0);
+  const typedBefore = useRef("");
+  const dictation = useDictation((said) => {
+    draftEdited.current = true;
+    const next = typedBefore.current ? `${typedBefore.current} ${said}` : said;
+    setDraft(next);
+    setSendFeedback(null);
+    void AsyncStorage.setItem(cacheKey, next);
+  });
+  const beginDictation = async () => { typedBefore.current = draft.trimEnd(); await dictation.start(); };
+  // Cancelled, what was said goes: the draft is what it was before.
+  const cancelDictation = () => {
+    dictation.cancel();
+    setDraft(typedBefore.current);
+    void AsyncStorage.setItem(cacheKey, typedBefore.current);
+  };
+
+  /** The + button: photos or files, from the system's own sheet. */
+  const chooseAttachment = () => {
+    // A note takes no attachments: offered only while there are none.
+    const options = ["Photo Library", "Choose File", ...(attachments.length ? [] : ["Worktree note"]), "Cancel"];
+    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: options.length - 1 }, (index) => {
+      const choice = options[index];
+      if (choice === "Photo Library") void pickPhotos();
+      else if (choice === "Choose File") void pickAttachments();
+      else if (choice === "Worktree note") { setSendToAgent(false); setSendFeedback(null); }
+    });
   };
 
   const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
@@ -364,7 +481,62 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
       : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />);
 
   const sendDisabled = !connected || (!draft.trim() && !attachments.length) || sending;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  const expanded = focused || !!draft || attachments.length > 0 || !sendToAgent || dictation.listening;
+  // The bar is drawn in this screen, so the view starts where the screen does: no offset.
+  // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
+  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}><TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
+    // While the agent works, an empty composer's button stops the turn, as a chat app's does.
+    const interrupting = !!controls?.busy && !draft.trim() && !attachments.length;
+    const mic = <RoundButton label="Dictate" icon={<Mic size={19} color={palette.ink} />} onPress={() => void beginDictation()} />;
+    // Send is the bright button once there is something to send; while the agent works and the box is empty, it stops the turn.
+    const action = interrupting
+      ? <Pressable accessibilityRole="button" accessibilityLabel="Interrupt" accessibilityHint="Long press to stop the session" onPress={controls!.interrupt} onLongPress={() => Alert.alert("Stop this session?", "The agent stops, and its conversation stays.", [{ text: "Cancel", style: "cancel" }, { text: "Stop", style: "destructive", onPress: controls!.stop }])} disabled={controls!.working} style={[styles.send, { backgroundColor: palette.ink, opacity: controls!.working ? 0.38 : 1 }]}><Square size={13} color={palette.page} fill={palette.page} /></Pressable>
+      : <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: sendDisabled ? palette.raised : palette.ink }]}><ArrowUp size={20} color={sendDisabled ? palette.faint : palette.page} strokeWidth={2.6} /></Pressable>;
+    // Floating over the conversation, which fades and blurs away under it.
+    return <View onLayout={({ nativeEvent }) => setComposerHeight(nativeEvent.layout.height)} style={[styles.composer, styles.dock, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
+      <EdgeFade edge="bottom" height={composerHeight + 32} />
+      {controls?.panel}
+      {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
+      {attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}
+      {dictation.error ? <Text accessibilityLiveRegion="polite" style={[styles.attachmentError, { color: palette.danger }]}>{dictation.error}</Text> : null}
+      {sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.faint }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}
+      {/* After the best chat apps: a slim pill until it is in use, then the message on top and what to send it with beneath. */}
+      <Glass style={[styles.inputGlass, expanded ? styles.inputOpen : styles.inputPill]}>
+        {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFeedback(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
+        <View style={expanded ? styles.inputColumn : styles.inputRow}>
+          {!expanded && sendToAgent ? <RoundButton label="Add attachment" icon={<Plus size={21} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
+          <TextInput value={draft} onFocus={() => { composerFocused.current = true; setFocused(true); }} onBlur={() => { composerFocused.current = false; setFocused(false); }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, expanded ? styles.composeOpen : styles.composePill, { color: palette.ink }]} />
+          {!expanded ? mic : null}
+          {!expanded ? action : null}
+          {expanded && dictation.listening ? <View style={styles.toolbar}>
+            {/* Listening, as the best chat apps show it: cancel, the voice as it is heard, stop and keep, or send. */}
+            <RoundButton label="Cancel dictation" icon={<X size={20} color={palette.ink} strokeWidth={2.2} />} onPress={cancelDictation} />
+            <Waveform levels={dictation.levels} />
+            <RoundButton label="Stop dictation" icon={<Square size={14} color={palette.ink} fill={palette.ink} />} onPress={dictation.stop} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!connected || !draft.trim() || sending} onPress={() => void send()} style={[styles.send, { backgroundColor: connected && draft.trim() ? palette.ink : palette.raised }]}><ArrowUp size={20} color={connected && draft.trim() ? palette.page : palette.faint} strokeWidth={2.6} /></Pressable>
+          </View> : null}
+          {expanded && !dictation.listening ? <View style={styles.toolbar}>
+            {sendToAgent ? <RoundButton label="Add attachment" icon={<Plus size={21} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={styles.chips}>
+              {controls ? <>
+                {/* The model and its effort in one pill, as the best chat apps show them; each opens its own picker. */}
+                <View style={[styles.modelPill, { backgroundColor: palette.raised }]}>
+                  <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.model.label} disabled={controls.settings.model.disabled} hitSlop={6} onPress={controls.settings.model.open}><Text numberOfLines={1} style={[styles.modelText, { color: palette.ink }]}>{controls.settings.model.label}</Text></Pressable>
+                  {controls.settings.effort ? <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.effort.label} disabled={controls.settings.effort.disabled} hitSlop={6} onPress={controls.settings.effort.open}><Text numberOfLines={1} style={[styles.effortText, { color: palette.muted }]}>{controls.settings.effort.label}</Text></Pressable> : null}
+                </View>
+                {/* The permission mode as a mark alone, named for assistive technology; Bypass by its own shape, not a colour. */}
+                <Pressable accessibilityRole="button" accessibilityLabel={`Permission mode: ${controls.settings.mode.label}`} disabled={controls.settings.mode.disabled} onPress={controls.settings.mode.open} style={[styles.round, { backgroundColor: palette.raised }]}>
+                  {controls.settings.mode.bypass ? <ShieldAlert size={19} color={palette.ink} /> : <ShieldCheck size={19} color={palette.ink} />}
+                </Pressable>
+              </> : null}
+            </ScrollView>
+            {mic}
+            {action}
+          </View> : null}
+        </View>
+      </Glass>
+    </View>;
+  }}</SessionControls></View></KeyboardAvoidingView></PromptImageContext.Provider>;
 }
 
 /**
@@ -400,6 +572,12 @@ function NoteCard({ note, first }: { note: ChatNote; first: boolean }) {
   return <Card style={styles.note}>{first ? <Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text> : null}<LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
 }
 
+/** How much of the retained output is replayed at a time, so the history in it is seen as it scrolls by. */
+const REPLAY_PIECE = 2048;
+
+/** What a shell is typed with that a phone keyboard hides a page away. */
+const TERMINAL_SYMBOLS = ["/", "-", "|", "~", ":", "*", "$"];
+
 /** The keys a phone keyboard lacks, in the order a terminal user reaches for them. */
 const TERMINAL_KEYS: { key: TerminalKey; label: string; name: string }[] = [
   { key: "escape", label: "esc", name: "Escape" }, { key: "tab", label: "tab", name: "Tab" },
@@ -421,6 +599,13 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
   const [mode, setMode] = useConversationState<"direct" | "buffered">(`${stateKey}:mode`, "direct");
   const [input, setInput] = useConversationState(`${stateKey}:input`, "");
   const [rows, setRows] = useState<ScreenRow[]>([]);
+  const insets = useSafeAreaInsets();
+  const [keyboardShown, setKeyboardShown] = useState(false);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
+    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
   const [opening, setOpening] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -435,7 +620,12 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
     let frame: ReturnType<typeof setTimeout> | null = null;
     // Output is parsed in order, and drawn at most every 50 ms however fast it comes.
     let parsed = Promise.resolve();
-    const draw = () => { if (!frame) frame = setTimeout(() => { frame = null; if (active && screen.current) setRows(screen.current.lines()); }, 50); };
+    // A program that redraws its screen in place (Claude Code) leaves the terminal no history: the phone keeps it.
+    let history = new ScreenHistory();
+    const draw = () => { if (!frame) frame = setTimeout(() => { frame = null; const current = screen.current; if (active && current) setRows([...history.rows, ...(current.hasHistory() ? current.lines() : current.viewport())]); }, 50); };
+    /** Output parsed, then the screen looked at, so what moved off its top is kept. */
+    // Only a normal screen with no history of its own: a terminal's own scrollback, or a full-screen program's moves, are not kept twice.
+    const feed = (text: string) => apply(async (current) => { await current.write(text); if (!current.hasHistory() && !current.modes().alternate) history.observe(current.viewport()); });
     const apply = (step: (current: TerminalScreen) => void | Promise<void>) => {
       parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
     };
@@ -455,10 +645,13 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
           // A new subscription (also after a reconnect) starts from the retained output.
           screen.current?.dispose();
           screen.current = new TerminalScreen(packet.cols ?? 80, packet.rows ?? 24);
+          history = new ScreenHistory();
           setProblem(null);
-          apply((current) => current.write(packet.serialized ?? ""));
+          // The retained output, a piece at a time, so the history it held is kept as it is replayed.
+          const retained = packet.serialized ?? "";
+          for (let at = 0; at < retained.length; at += REPLAY_PIECE) feed(retained.slice(at, at + REPLAY_PIECE));
         } else if (packet.type === "resized" && packet.cols && packet.rows) apply((current) => current.resize(packet.cols!, packet.rows!));
-        else if (packet.type === "data" && packet.chunk) apply((current) => current.write(packet.chunk!));
+        else if (packet.type === "data" && packet.chunk) feed(packet.chunk);
       });
     }, (cause: unknown) => { if (active) { setOpening(false); setProblem(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { active = false; if (frame) clearTimeout(frame); ended(); unsubscribe(); screen.current?.dispose(); screen.current = null; };
@@ -466,7 +659,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
 
   useEffect(() => () => { void app.api.releaseInput(sessionId, tabId); }, [app.api, sessionId, tabId]);
 
-  const modes = () => screen.current?.modes() ?? { bracketedPaste: false, applicationCursorKeys: false };
+  const modes = () => screen.current?.modes() ?? { bracketedPaste: false, applicationCursorKeys: false, mouse: false, alternate: false };
   const live = connected && !opening && !problem;
   const write = async (text: string) => {
     if (!live || !text) return false;
@@ -484,20 +677,54 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
     void write(text);
   };
 
-  const status = !connected ? "Offline · input kept" : opening ? "Opening the terminal…" : problem ? "Unavailable" : refusal ? "Input refused" : "Live · typing here pauses desktop typing";
-  return <View style={styles.flex}>
-    <View style={[styles.terminalHeader, { borderColor: palette.border }]}><View style={styles.flex}><Text style={[styles.cardTitle, { color: palette.ink }]}>Terminal</Text><Text style={[styles.detail, { color: live && !refusal ? palette.success : palette.warning }]}>{status}</Text></View><View style={[styles.segment, { backgroundColor: palette.raised, marginHorizontal: 0, marginTop: 0 }]}><Segment label="Direct" selected={mode === "direct"} onPress={() => setMode("direct")} /><Segment label="Buffered" selected={mode === "buffered"} onPress={() => setMode("buffered")} /></View></View>
-    {problem ? <Card style={styles.notice}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn't available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
-    {refusal ? <Text style={[styles.sendFeedback, { color: palette.danger, flex: 0, paddingHorizontal: 16, paddingVertical: 6 }]}>{refusal}</Text> : null}
-    <ScrollView horizontal style={{ flex: 1, backgroundColor: palette.terminal }} contentContainerStyle={{ flexGrow: 1 }}>
+  const status = !connected ? "Offline" : opening ? "Opening…" : problem ? "Unavailable" : refusal ? "Refused" : "Live";
+  const statusDetail = !connected ? "Offline · what you type is kept" : opening ? "Opening the terminal…" : problem ? "The terminal isn't available" : refusal ? "Input refused" : "Live · typing here pauses typing on the Mac";
+  // Enter is the key most pressed: the big button at the thumb. Writing first, it sends the text and then Enter.
+  const enter = () => {
+    if (mode === "buffered" && input) return void write(pasteSequence(input, modes()) + keySequence("enter", modes())).then((accepted) => { if (accepted) setInput(""); });
+    void write(keySequence("enter", modes()));
+  };
+  const sendsText = mode === "buffered" && input.length > 0;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    {/* The agent's screen, edge to edge on the terminal's own black, with how the link is doing in a corner. */}
+    <View style={[styles.flex, { backgroundColor: palette.terminal }]}>
+      {/* The screen and its history, scrolled as any list; a line wider than the screen wraps onto the next. */}
       <FlatList inverted data={[...rows].reverse()} keyExtractor={(row) => row.key} renderItem={({ item }) => <TerminalLine row={item} />} contentContainerStyle={styles.terminalOutput} />
-    </ScrollView>
-    <View style={[styles.terminalKeys, { backgroundColor: palette.card, borderColor: palette.border }]}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Control" accessibilityState={{ selected: control }} disabled={!live} onPress={() => setControl((held) => !held)} style={[styles.terminalKey, { backgroundColor: control ? palette.accent : palette.raised }]}><Text style={[styles.terminalKeyText, { color: control ? palette.accentInk : palette.ink }]}>ctrl</Text></Pressable>
-      {TERMINAL_KEYS.map(({ key, label, name }) => <Pressable key={key} accessibilityRole="button" accessibilityLabel={name} disabled={!live} onPress={() => void write(keySequence(key, modes()))} style={[styles.terminalKey, { backgroundColor: palette.raised }]}><Text style={[styles.terminalKeyText, { color: palette.ink }]}>{label}</Text></Pressable>)}
+      <View accessibilityLabel={statusDetail} style={[styles.terminalStatus, { backgroundColor: `${palette.page}cc`, borderColor: palette.border }]}>
+        <StatusDot color={live && !refusal ? palette.success : palette.warning} />
+        <Text style={[styles.terminalStatusText, { color: palette.muted }]}>{status}</Text>
+      </View>
+      {problem ? <Card style={[styles.notice, styles.terminalProblem]}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn't available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
     </View>
-    <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && live) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); typed(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && live && nativeEvent.key === "Backspace" && input.length === 0) void write(keySequence("backspace", modes())); }} onSubmitEditing={() => { if (mode === "direct") void write(keySequence("enter", modes())); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} spellCheck={false} smartInsertDelete={false} autoComplete="off" placeholder={mode === "direct" ? "Tap to type directly" : "Text to send, then ⏎"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!live || !input} onPress={() => void write(pasteSequence(input, modes())).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !live || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
-  </View>;
+    {refusal ? <Text style={[styles.terminalRefusal, { color: palette.danger }]}>{refusal}</Text> : null}
+    {/* The keys a phone keyboard lacks, and the symbols a shell wants most, a thumb's reach above the keyboard. */}
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always" style={styles.terminalKeysBar} contentContainerStyle={styles.terminalKeys}>
+      <KeyCap label="ctrl" name="Control" live={live} selected={control} onPress={() => setControl((held) => !held)} />
+      {TERMINAL_KEYS.filter(({ key: id }) => id !== "enter").map(({ key: id, label, name }) => <KeyCap key={name} label={label} name={name} live={live} onPress={() => void write(keySequence(id, modes()))} />)}
+      {TERMINAL_SYMBOLS.map((symbol) => <KeyCap key={symbol} label={symbol} name={`Type ${symbol}`} live={live} onPress={() => typed(symbol)} />)}
+    </ScrollView>
+    {/* Clear of the home indicator, until the keyboard covers it. */}
+    <View style={[styles.terminalInputBar, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
+      <Glass style={styles.terminalInputGlass}>
+        <TextInput value={input} onChangeText={(value) => { if (mode === "direct" && live) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); typed(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && live && nativeEvent.key === "Backspace" && input.length === 0) void write(keySequence("backspace", modes())); }} onSubmitEditing={() => { if (mode === "direct") void write(keySequence("enter", modes())); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} spellCheck={false} smartInsertDelete={false} autoComplete="off" placeholder={mode === "direct" ? "Type to the terminal" : "Write, then send"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink }]} />
+        {/* Typing straight in, or writing first and sending it whole: one tap between them. */}
+        <Pressable accessibilityRole="button" accessibilityLabel={mode === "direct" ? "Buffered" : "Direct"} accessibilityHint={mode === "direct" ? "Write first, then send it whole" : "Type straight into the terminal"} hitSlop={6} onPress={() => setMode(mode === "direct" ? "buffered" : "direct")} style={[styles.terminalMode, { backgroundColor: mode === "buffered" ? palette.selected : "transparent" }]}>
+          {mode === "direct" ? <KeyboardIcon size={19} color={palette.muted} /> : <TextCursorInput size={19} color={palette.ink} />}
+        </Pressable>
+      </Glass>
+      <Pressable accessibilityRole="button" accessibilityLabel={sendsText ? "Send terminal input" : "Enter"} disabled={!live} onPress={enter} style={({ pressed }) => [styles.terminalEnter, { backgroundColor: palette.ink, opacity: !live ? 0.35 : pressed ? 0.8 : 1 }]}>
+        {sendsText ? <ArrowUp size={22} color={palette.page} strokeWidth={2.6} /> : <CornerDownLeft size={22} color={palette.page} strokeWidth={2.4} />}
+      </Pressable>
+    </View>
+  </KeyboardAvoidingView>;
+}
+
+/** A key the phone keyboard lacks, in the row above it; `selected` for one held, as ctrl is. */
+function KeyCap({ label, name, live, selected = false, onPress }: { label: string; name: string; live: boolean; selected?: boolean; onPress(): void }) {
+  const { palette } = useTheme();
+  return <Pressable accessibilityRole="button" accessibilityLabel={name} accessibilityState={selected ? { selected } : undefined} disabled={!live} onPress={onPress} style={({ pressed }) => [styles.terminalKey, { backgroundColor: selected ? palette.ink : pressed ? palette.selected : palette.raised, opacity: live ? 1 : 0.4 }]}>
+    <Text style={[styles.terminalKeyText, { color: selected ? palette.page : palette.ink }]}>{label}</Text>
+  </Pressable>;
 }
 
 function TerminalLine({ row }: { row: ScreenRow }) {
@@ -511,11 +738,8 @@ function TerminalLine({ row }: { row: ScreenRow }) {
 const styles = StyleSheet.create({
   transcriptRows: { gap: 0 },
   page: { flex: 1 },
-  sessionContext: { fontSize: 13, marginHorizontal: 16, marginTop: 4 },
   flex: { flex: 1 },
   center: { flex: 1, justifyContent: "center" },
-  segment: { flexDirection: "row", padding: 3, borderRadius: 10, marginHorizontal: 16, marginTop: 8 },
-  segmentItem: { minHeight: 36, minWidth: 76, flex: 1, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   turn: { gap: 11 },
   promptBubble: { alignSelf: "flex-end", maxWidth: "88%", borderRadius: 17, borderBottomRightRadius: 5, paddingHorizontal: 14, paddingVertical: 11 },
   work: { gap: 10, paddingHorizontal: 3 },
@@ -532,34 +756,53 @@ const styles = StyleSheet.create({
   permissionHint: { fontSize: 12, lineHeight: 17 },
   cardTitle: { fontSize: 16, fontWeight: "700" },
   monoSmall: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
-  composer: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 12, gap: 10 },
-  modeLine: { flexDirection: "row", gap: 6 },
-  modeChoice: { minHeight: 30, paddingHorizontal: 9, borderRadius: 8, flexDirection: "row", gap: 5, alignItems: "center" },
-  sendFeedback: { flex: 1, fontSize: 12, lineHeight: 17, paddingHorizontal: 3 },
+  composer: { paddingHorizontal: 10, paddingTop: 10, gap: 8 },
+  dock: { position: "absolute", left: 0, right: 0, bottom: 0 },
+  inputGlass: { paddingHorizontal: 6, gap: 2 },
+  inputPill: { borderRadius: 30, paddingVertical: 6 },
+  inputOpen: { borderRadius: 26, paddingTop: 6, paddingBottom: 6 },
+  inputRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  inputColumn: { gap: 4 },
+  round: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
+  modelPill: { flexDirection: "row", alignItems: "center", gap: 7, height: 42, borderRadius: 21, paddingHorizontal: 16 },
+  modelText: { fontSize: 15, fontWeight: "600", letterSpacing: -0.2 },
+  effortText: { fontSize: 15, letterSpacing: -0.2 },
+  composePill: { flex: 1, minHeight: 42, maxHeight: 42, paddingTop: 11, paddingBottom: 9 },
+  composeOpen: { minHeight: 44, maxHeight: 150, paddingTop: 10, paddingBottom: 4 },
+  noteBanner: { flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, paddingTop: 8 },
+  noteBannerText: { flex: 1, fontSize: 12 },
+  toolbar: { flexDirection: "row", alignItems: "center", gap: 2 },
+  chips: { alignItems: "center", gap: 6, paddingHorizontal: 6 },
+  sendFeedback: { flex: 1, fontSize: 12, lineHeight: 17, paddingHorizontal: 6 },
   feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
   resend: { minHeight: 36, paddingHorizontal: 12 },
   notice: { padding: 15, gap: 8 },
   noticeTitle: { fontSize: 15, fontWeight: "700" },
   noticeDetail: { fontSize: 13, lineHeight: 19 },
-  composeLine: { flexDirection: "row", alignItems: "flex-end", gap: 9 },
-  attachments: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  attachments: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: 6 },
   attachment: { width: 58, height: 58 },
-  attachmentImage: { width: 58, height: 58, borderRadius: 9 },
+  attachmentImage: { width: 58, height: 58, borderRadius: 12 },
   fileAttachment: { alignItems: "center", justifyContent: "center", padding: 5, gap: 2 },
   fileAttachmentName: { width: 48, fontSize: 8, textAlign: "center" },
   removeAttachment: { position: "absolute", right: -4, top: -4, width: 22, height: 22, borderRadius: 11, backgroundColor: "#252525dd", alignItems: "center", justifyContent: "center" },
-  attachmentError: { fontSize: 12, lineHeight: 17 },
-  attach: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  attachmentError: { fontSize: 12, lineHeight: 17, paddingHorizontal: 6 },
   disabled: { opacity: 0.4 },
-  composeInput: { flex: 1, maxHeight: 120, minHeight: 42, paddingHorizontal: 10, paddingVertical: 9, fontSize: 16 },
-  send: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  terminalHeader: { padding: 12, paddingHorizontal: 16, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  composeInput: { paddingHorizontal: 10, fontSize: 17, letterSpacing: -0.2 },
+  send: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
   detail: { fontSize: 12, marginTop: 2 },
   terminalOutput: { paddingHorizontal: 11, paddingVertical: 13 },
   terminalText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
-  terminalInputBar: { borderTopWidth: StyleSheet.hairlineWidth, padding: 10, flexDirection: "row", gap: 8, alignItems: "flex-end" },
-  terminalKeys: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingTop: 8, flexDirection: "row", gap: 6 },
-  terminalKey: { minHeight: 34, minWidth: 34, flexGrow: 1, borderRadius: 8, alignItems: "center", justifyContent: "center", paddingHorizontal: 6 },
-  terminalKeyText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 13 },
-  terminalInput: { flex: 1, minHeight: 42, maxHeight: 100, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9, fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) },
+  terminalStatus: { position: "absolute", top: 10, right: 12, flexDirection: "row", alignItems: "center", gap: 6, height: 26, borderRadius: 13, paddingHorizontal: 10, borderWidth: StyleSheet.hairlineWidth },
+  terminalStatusText: { fontSize: 12, fontWeight: "500" },
+  terminalProblem: { position: "absolute", left: 16, right: 16, top: 48 },
+  terminalRefusal: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
+  terminalKeysBar: { flexGrow: 0 },
+  terminalKeys: { gap: 6, paddingHorizontal: 10, paddingTop: 8 },
+  terminalKey: { minWidth: 40, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
+  terminalKeyText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 14 },
+  terminalInputBar: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: 10, paddingTop: 8 },
+  terminalInputGlass: { flex: 1, flexDirection: "row", alignItems: "flex-end", gap: 4, minHeight: 52, borderRadius: 26, paddingLeft: 6, paddingRight: 5, paddingVertical: 5 },
+  terminalMode: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
+  terminalEnter: { width: 52, height: 52, borderRadius: 26, alignItems: "center", justifyContent: "center" },
+  terminalInput: { flex: 1, minHeight: 42, maxHeight: 110, paddingHorizontal: 10, paddingTop: 11, paddingBottom: 9, fontSize: 15, fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) },
 });

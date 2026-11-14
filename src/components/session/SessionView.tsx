@@ -60,6 +60,7 @@ import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
+import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
@@ -90,7 +91,7 @@ function managedWorkspaceFor(session: SessionEntry) {
 }
 
 /** The right panel reads the active tab's log for the changes range. */
-function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
+function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: TabEntry; checkFix: ReturnType<typeof useFixCheckErrors> }) {
   const isGit = useSessionIsGit(session);
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
@@ -109,6 +110,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       sessionId={session.id}
       mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
       conversation={tab.conversation ?? null}
+      onFixErrors={!isTerminalTab(tab) ? checkFix.fix : undefined}
+      fixBusy={checkFix.busy}
       statusKey={session.tabs.map((item) => item.status).join(",")}
       settleSessionId={workspace ? session.id : undefined}
       workspace={workspace}
@@ -463,6 +466,7 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: activeTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!activeTab && !isTerminalTab(activeTab) });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -791,6 +795,10 @@ export function SessionView({
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+        {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
+          <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
+          {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
+        </div>}
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
@@ -913,7 +921,7 @@ export function SessionView({
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
       {!compact && prefs.panelOpen && !cloud &&
         (activeTab ? (
-          <PanelHost session={session} tab={activeTab} />
+          <PanelHost session={session} tab={activeTab} checkFix={checkFix} />
         ) : (
           <RightPanel
             cwd={session.cwd}

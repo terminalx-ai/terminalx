@@ -35,6 +35,7 @@ const BUSY = "Codex is still working on this turn, so this message was not sent.
 let session: SessionEntry;
 let seq: number;
 let refuse: string | null;
+let queueSends: boolean;
 let stopping: { resolve: () => void } | null;
 let reports: UiReport[];
 
@@ -63,6 +64,7 @@ beforeEach(() => {
     tabs: [{ id: `${id}-tab`, harness: "codex", transport: "experimentalCodexStdio", model: "gpt-6-astra", permissionMode: "default", status: "in_progress", created: "", modified: "" }] };
   seq = 0;
   refuse = null;
+  queueSends = false;
   stopping = null;
   reports = [];
   mocks.invoke.mockReset();
@@ -85,7 +87,7 @@ beforeEach(() => {
       if (refuse) throw refuse;
       // As the runtime does for a prompt that starts a turn.
       setTabStatus(session.id, tab(), "in_progress");
-      return { queued: false, events: [event({ type: "user_message", text: String(args!.text), queued: false })] };
+      return { queued: queueSends, events: [event({ type: "user_message", text: String(args!.text), queued: queueSends })] };
     }
     return command.startsWith("list_") ? [] : null;
   });
@@ -99,7 +101,50 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("native Codex follow-ups (#866)", () => {
+  it("shows a follow-up as queued until acknowledgement moves it into its own turn", async () => {
+    render(<Tab />);
+    queueSends = true;
+    send("Please also check the remaining tasks");
+    await waitFor(() => expect(screen.getByTestId("queued-message").textContent).toContain("Queued"));
+    expect(field().value).toBe("");
+    expect(banner()).toBeNull();
+    const promptSeq = seq;
+    emit({ type: "turn_completed", status: "ok", authFailed: false });
+    expect(screen.getByTestId("queued-message")).toBeTruthy();
+    emit({ type: "prompt_absorbed", promptSeq });
+    emit({ type: "turn_started", promptSeq });
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(screen.getAllByText("Please also check the remaining tasks")).toHaveLength(1);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "send_message")).toHaveLength(1);
+  });
+
+  it("preserves an unacknowledged follow-up without offering a blind resend", async () => {
+    render(<Tab />);
+    queueSends = true;
+    send("Keep this follow-up");
+    await waitFor(() => expect(screen.getByTestId("queued-message")).toBeTruthy());
+    emit({ type: "prompt_withdrawn", promptSeq: seq, unconfirmed: true });
+    await waitFor(() => expect(screen.getByTestId("prompt-withdrawn").textContent).toContain("Delivery was not confirmed"));
+    expect(screen.getByText("Keep this follow-up")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    expect(screen.queryByText("Queued")).toBeNull();
+  });
+});
+
 describe("a send native Codex refuses while it works (#815)", () => {
+  it("keeps an overflowed message in the composer without changing the running turn", async () => {
+    render(<Tab />);
+    refuse = "Codex's follow-up queue is full. Wait for a message to be delivered before sending again.";
+    send("The thirty-third follow-up");
+    await waitFor(() => expect(field().value).toBe("The thirty-third follow-up"));
+    expect(banner()).toBeNull();
+    expect(status()).toBe("in_progress");
+    expect(screen.getByText(/follow-up queue is full/)).toBeTruthy();
+    expect(of("banner")).toEqual([]);
+  });
+
   it("keeps the message and leaves the running turn as it was", async () => {
     render(<Tab />);
     refuse = BUSY;

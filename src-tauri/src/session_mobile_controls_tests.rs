@@ -367,7 +367,7 @@ impl Codex {
         let events = store::read_lines::<AgentEvent>(&store::log_path("phone-controls", "tab").unwrap()).unwrap();
         let after: Vec<_> = events.iter().skip_while(|event| event.seq != seq).map(|event| &event.payload).collect();
         assert!(after.iter().any(|payload| matches!(payload, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })), "{after:?}");
-        assert!(after.iter().any(|payload| matches!(payload, Payload::PromptWithdrawn { prompt_seq } if *prompt_seq == seq)), "{after:?}");
+        assert!(after.iter().any(|payload| matches!(payload, Payload::PromptWithdrawn { prompt_seq, .. } if *prompt_seq == seq)), "{after:?}");
     }
 }
 
