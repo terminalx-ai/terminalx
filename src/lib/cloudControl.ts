@@ -84,7 +84,7 @@ export const CLOUD_CONTROL_VERSION = 1;
  *   cloud command is refused until the person turns on "Let agents in local
  *   sessions control cloud workspaces" in Settings (off by default), AND
  *   with it on, routine compute is authorized without another dialog.
- *   Stopping a workspace still asks the person in the window first.
+ *   This includes stopping and resuming existing workspaces.
  * - `"setting"`: the setting alone. Once on, the commands run as asked.
  * - `"confirm"`: the question in the window alone, with no setting.
  *
@@ -193,8 +193,8 @@ function assertAllowed(granted = allowed()) {
 }
 
 /**
- * Confirm a disruptive stop, or a request under the legacy confirm-only
- * policy. Routine compute under the shipped policy uses the Settings grant.
+ * Confirm a request under the legacy confirm-only policy. Routine compute
+ * and lifecycle operations under the shipped policy use the Settings grant.
  * Only under `"setting"` alone is nothing asked.
  *
  * The question is a native dialog (`cloud_control_confirm`): only its agree
@@ -220,7 +220,7 @@ async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   throw new CloudControlError("declined", message, recovery);
 }
 
-/** The Settings grant authorizes routine compute, including billed wake/create. */
+/** The Settings grant authorizes lifecycle operations and routine compute, including billed wake/create. */
 async function authorizeRoutineCompute(what: string, okLabel: string): Promise<void> {
   assertAllowed();
   if (policy === "confirm") {
@@ -996,9 +996,9 @@ async function stop(params: Params, sleep: Sleep = pause, now: () => number = Da
     const activity = deriveCloudActivity(item);
     throw new CloudControlError("cloud_workspace_not_running", `This workspace is ${activity.label.toLowerCase()}; only a running one can be stopped.`, activity.tone === "changing" ? "Run the command again once it is running." : null);
   }
-  // The app asks before stopping: running agent turns end with the machine.
+  // The caller must acknowledge that running agent turns end with the machine.
   if (params.confirmed !== true) throw new CloudControlError("confirmation_required", `Stopping ${item.workspace.name} ends any agent turn running in it. Everything is kept, and it can be resumed.`, "Pass --yes to stop it.");
-  await confirmInWindow(`stop the cloud workspace ${item.workspace.name}. Any agent turn running in it ends.`, "Stop workspace");
+  await authorizeRoutineCompute(`stop the cloud workspace ${item.workspace.name}. Any agent turn running in it ends.`, "Stop workspace");
   const requestedAt = Date.now();
   const snapshot = await api.cloudWorkspaceSuspend(target.workspaceId, cloudOrgArg(target.orgId));
   if (snapshot?.workspace) applyCloudSnapshot(snapshot, requestedAt);

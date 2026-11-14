@@ -3795,7 +3795,7 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
         let answer = cloud_control_question(
             app,
             "Let agents in local sessions control cloud workspaces?".to_string(),
-            "Agents in local sessions will be able to list your organizations' cloud workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. Stopping a workspace will still ask you each time.".to_string(),
+            "Agents in local sessions will be able to list your organizations' cloud workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. Agents can stop and resume workspaces without asking again. Stopping still requires the caller to acknowledge that running agent turns end.".to_string(),
             "Turn on".to_string(),
         )
         .await;
