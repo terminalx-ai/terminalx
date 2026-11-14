@@ -1043,7 +1043,7 @@ impl Step<'_> {
         self.doing = "Starting the conflict resolver";
         let prompt = if continuing { prompts::continue_resolution(&resolution) } else { prompts::resolve(&resolution) };
         if let Err(error) = self.host.send(&resolver, &prompt) {
-            self.p.resolution = None;
+            self.p.interrupted_resolution = self.p.resolution.take();
             self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
             self.save()?;
             return Ok(true);

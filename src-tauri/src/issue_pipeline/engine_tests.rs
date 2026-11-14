@@ -4253,3 +4253,28 @@ fn remote_advance_and_recovery_keep_reservations_without_resolver_identity() {
         assert!(run.merges().is_empty());
     }
 }
+
+#[test]
+fn restart_can_retry_delivery_without_losing_the_preserved_merge() {
+    let run = Run::start(&github_issue(), false);
+    let before = resolving(&run);
+    run.host.world().sessions.remove("resolver");
+    run.poll();
+    run.host.world().workspace.dirty.push("manual-resolution.rs".into());
+    let dirty = run.host.world().workspace.dirty.clone();
+    run.host.world().send_error = Some("The agent could not be started".into());
+    let failed = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!(failed.state, State::NeedsYou);
+    assert!(failed.resolution.is_none());
+    let pinned = failed.interrupted_resolution.as_ref().unwrap();
+    assert_eq!(pinned.head, before.resolution.as_ref().unwrap().head);
+    assert_eq!(pinned.base_commit, before.resolution.as_ref().unwrap().base_commit);
+    let restarted = act(&run.host, &run.id, Action::RestartResolve).unwrap();
+    assert_eq!((restarted.stage, restarted.state), (Stage::Resolve, State::Working));
+    assert!(restarted.resolution.is_some());
+    assert_ne!(restarted.resolver, failed.resolver);
+    let fresh = restarted.resolver.unwrap();
+    assert!(run.host.prompts_to(&fresh.session_id)[0].contains("Continue the existing merge"));
+    assert_eq!(run.host.world().workspace.dirty, dirty);
+    assert!(run.host.aborts().is_empty());
+}
