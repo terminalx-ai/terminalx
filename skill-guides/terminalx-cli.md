@@ -873,6 +873,11 @@ the worker's transcript or report. It runs on the routing table's `verify` row (
 medium, unless the person changed it), not on the worker's model, and ends with a verdict:
 pass, or fail with `file:line` evidence.
 
+A verifier waiting for a permission decision or question remains in verification. The run
+shows that the verifier needs you and links to its conversation. Answer there; the same
+verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
+invalid final reply still leaves the review inconclusive.
+
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not
 re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
