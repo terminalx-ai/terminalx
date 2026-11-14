@@ -65,7 +65,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         _ => {}
     }
     if !journal.read()?.enabled {
-        bail!("Enable Local Cua in Settings → Environments first");
+        bail!("Enable Local Cua in Settings → Local VMs first");
     }
     let _attachment_admission = if matches!(method,"environment.start"|"environment.stop"|"environment.delete"|"environment.install"|"environment.awake"|"environment.desktop"|"environment.releaseDesktop"|"environment.reconcileProvision") {
         let current=environment(&journal,&params)?;

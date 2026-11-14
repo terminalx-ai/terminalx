@@ -9,6 +9,7 @@ import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { EnvironmentSettings } from "./EnvironmentSettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 
@@ -27,7 +28,8 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
-  environments: () => <RegisteredSetting setting="environments.localVm"><section><EnvironmentsTab /></section></RegisteredSetting>,
+  environment: () => <EnvironmentSettings />,
+  localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   repositories: ({ projectPath }) => projectPath ? <MergedCleanupSettings projectPath={projectPath} /> : <p className="text-sm text-muted-foreground">Choose a repository to view its settings.</p>,

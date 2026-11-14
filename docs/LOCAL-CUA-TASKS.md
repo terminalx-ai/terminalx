@@ -60,7 +60,7 @@ onboarding acceptance and have not been activated in the held pilot runtime.
 
 ## Execution and retained identity
 
-Settings → Environments enables Local Cua. Fresh macOS guest creation is
+Settings → Local VMs enables Local Cua. Fresh macOS guest creation is
 currently unavailable: the pinned profile cannot securely personalize the
 first account and bind its transport to that account. The owner refuses new
 creation before reserving or downloading anything. Older queued intents are
@@ -325,7 +325,7 @@ reconcile it explicitly.
 Provisioning is persisted before starting Cua. A supervisor interruption or
 uncertain cancellation retains `outcomeUnknown` and does not recreate the VM.
 Partial VM/image storage is retained for inspection and deliberate cleanup.
-Settings → Environments → **Resolve interrupted provisioning** offers one
+Settings → Local VMs → **Resolve interrupted provisioning** offers one
 disposition: explicitly adopt the existing ready VM. Read-only preview and
 confirmation independently probe the exact pinned local VM and installed guest
 environment/generation, without provider, model or Driver readiness probes.

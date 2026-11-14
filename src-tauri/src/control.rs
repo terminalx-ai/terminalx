@@ -313,6 +313,12 @@ impl WindowControl {
 
     #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if command == "environment.snapshot" {
+            let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Environment revision required."))?;
+            return crate::store::environment::desktop_snapshot(key, revision)
+                .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
+        }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
             let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;

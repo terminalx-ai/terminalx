@@ -40,7 +40,7 @@ export function LocalVmTasks({ session, tab, conversation, active, readOnly, sel
           {tasks.map((task) => <LocalVmTaskCard key={`${task.target.environmentId}:${task.target.generation}:${task.target.workspaceId}:${task.target.taskId}`} task={task} destinationRoot={session.cwd} readOnly={readOnly} manualControl={state?.environments[task.target.environmentId]?.generation === task.target.generation && state.environments[task.target.environmentId].manualControl === true} />)}
           {saved.error ? <p role="alert" className="text-destructive">Saved submission unavailable: {saved.error}. Check retained task history before submitting again.</p> : null}
           {!saved.error && (state?.enabled || saved.pending) ? <TaskSubmission session={session} tab={tab} conversation={conversation} selectedPrompt={selectedPrompt} state={state} initialPending={saved.pending} storageKey={storageKey} readOnly={readOnly} /> : null}
-          {!state?.enabled ? <p className="text-muted-foreground">Local VM task submission is disabled in Settings → Environments. Retained task history remains here.</p> : null}
+          {!state?.enabled ? <p className="text-muted-foreground">Local VM task submission is disabled in Settings → Local VMs. Retained task history remains here.</p> : null}
         </div>
       </details>
     </section>
