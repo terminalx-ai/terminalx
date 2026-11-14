@@ -149,6 +149,13 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
+[profile.test]
+# The tests wait on processes, terminals and files far more than they compute:
+# unoptimised, the suite runs as fast, and this crate's test build takes a
+# fifth of the processor time and under half the memory (19.7 GB to 8.6 GB at
+# its peak, on a Mac with 16 cores). Dependencies keep the level above.
+opt-level = 0
+
 [profile.release]
 codegen-units = 1
 lto = true

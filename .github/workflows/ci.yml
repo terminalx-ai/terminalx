@@ -271,6 +271,10 @@ jobs:
   headless-serve:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The tests build unoptimised ([profile.test]). Build the binary the
+      # same way, so they reuse its library instead of compiling it twice.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
