@@ -628,6 +628,11 @@ impl CloudAgents {
         data_dir.join("cloud-agent")
     }
 
+    /// Where this state lives (created 0700), for stores kept beside it.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Stop taking new work: leave commands in the mailbox and follow-ups
     /// queued. The running turn is not interrupted.
     pub fn quiesce(&self) {
