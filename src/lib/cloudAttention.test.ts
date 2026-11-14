@@ -168,4 +168,24 @@ describe("shared attention and recovery", () => {
     }
   });
 
+
+  it("uses a stable observation boundary when failure time is unknown, respecting launch milestones", () => {
+    const row = failed("runtime-interrupted");
+    row.workspace.launch!.timings = { requestedAt: 50, startingAgentAt: 150 } as NonNullable<typeof row.workspace.launch>["timings"];
+    const observed = reconcileCloudAttention(row, undefined, [], 100);
+    expect(observed).toHaveProperty("launchFailureObservation.at", 150);
+    const unchanged = reconcileCloudAttention(row, observed, [], 300);
+    expect(unchanged).toHaveProperty("launchFailureObservation.at", 150);
+    for (const at of [149, 150]) {
+      expect(resolveCloudAttention(unchanged, { tabs: [{ status: "idle", live: true, created: new Date(at).toISOString() }] })?.code).toBe("runtime-interrupted");
+    }
+    expect(resolveCloudAttention(unchanged, { tabs: [{ status: "completed", lastMessageAt: new Date(151).toISOString() }] })).toBeNull();
+    // Authoritative failedAt, when supplied, supersedes local observation time.
+    row.workspace.launch!.timings.failedAt = 400;
+    const dated = reconcileCloudAttention(row, unchanged, [], 500);
+    expect(dated).not.toHaveProperty("launchFailureObservation");
+    expect(resolveCloudAttention(dated, { agentActivityAt: 399 })?.code).toBe("runtime-interrupted");
+    expect(resolveCloudAttention(dated, { agentActivityAt: 401 })).toBeNull();
+  });
+
 });

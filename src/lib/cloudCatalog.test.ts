@@ -1443,8 +1443,8 @@ describe("attention across catalog refreshes (#934)", () => {
     const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity })] });
     await refreshCloudCatalog(ORG, () => 100);
-    // Even a dated cached session cannot order itself after an undated failure.
-    cacheCloudSessions(ORG, "w", [{ id: "old", created: new Date(101).toISOString(), tabs: [{ id: "t", status: "idle" }] }] as never, null);
+    // A cached session older than the observation boundary is not recovery.
+    cacheCloudSessions(ORG, "w", [{ id: "old", created: new Date(99).toISOString(), tabs: [{ id: "t", status: "idle" }] }] as never, null);
     expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
     expect(read()).not.toHaveProperty("resolvedLaunchFailure");
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 2, activeTurns: 1 } })] });
@@ -1464,6 +1464,53 @@ describe("attention across catalog refreshes (#934)", () => {
     await refreshCloudCatalog(ORG, () => 500);
     expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
     expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+  });
+
+
+  it.each(["session", "tab", "message"])("recovers an undated failure from later %s activity completed between refreshes", async (evidence) => {
+    signIn();
+    const iso = (at: number) => new Date(at).toISOString();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted", timings: { requestedAt: 10, startingAgentAt: 20 } };
+    const runtimeActivity = { online: true, reportedAt: 50, activeTurns: 0, pendingApprovals: 0 };
+    const row = () => item("w", { launch, runtimeActivity });
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    await ingestCloudList({ workspaces: [item("w")] }, ORG, 50);
+    // Existing activity can predate discovery even when its clock is ahead.
+    const old = [{ id: "s", title: "Old", created: iso(60), lastMessageAt: iso(500), tabs: [{ id: "t", created: iso(60), lastMessageAt: iso(500), status: "completed" }] }] as Parameters<typeof cacheCloudSessions>[2];
+    cacheCloudSessions(ORG, "w", old, null, 60);
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [row()] });
+    await refreshCloudCatalog(ORG, () => 100);
+    expect(read()).toHaveProperty("launchFailureObservation.at", 500);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    // Neither unrelated workspace changes nor unchanged snapshots move the boundary.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { ...row().workspace, updatedAt: 600 })] });
+    await refreshCloudCatalog(ORG, () => 600);
+    applyCloudSnapshot({ workspace: row().workspace, operation: null } as never, 650);
+    expect(read()).toHaveProperty("launchFailureObservation.at", 500);
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(saved.orgs[ORG].workspaces[0]).toHaveProperty("launchFailureObservation.at", 500);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    // An agent ran and finished at 550; every catalog runtime report stays idle.
+    // The late session read must be compared with 500, not its fetch time 700.
+    const completed = structuredClone(old);
+    if (evidence === "session") completed[0].created = iso(550);
+    else if (evidence === "tab") completed[0].tabs.push({ ...completed[0].tabs[0], id: "new", created: iso(550) });
+    else completed[0].tabs[0].lastMessageAt = iso(550);
+    cacheCloudSessions(ORG, "w", completed, null, 700);
+    expect(resolveCloudAttention(read())).toBeNull();
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [row()] });
+    await refreshCloudCatalog(ORG, () => 800);
+    expect(resolveCloudAttention(read())).toBeNull();
+    cacheCloudSessions(ORG, "w", [], null, 850);
+    await refreshCloudCatalog(ORG, () => 900);
+    expect(resolveCloudAttention(read())).toBeNull();
+    // Distinct failure identity gets a fresh boundary, never the old recovery.
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch: { ...launch, launchId: "next", timings: { requestedAt: 950 } }, runtimeActivity })] });
+    await refreshCloudCatalog(ORG, () => 1000);
+    cacheCloudSessions(ORG, "w", completed, null, 1100);
+    expect(read()).toHaveProperty("launchFailureObservation.at", 1000);
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
   });
 
 });

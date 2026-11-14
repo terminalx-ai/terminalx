@@ -38,7 +38,26 @@ export interface CloudAttention {
 }
 
 /** Local catalog evidence; saved with the row, never sent as authority to a runtime. */
-type ObservedItem = CloudWorkspaceListItem & { resolvedLaunchFailure?: string };
+type ObservedItem = CloudWorkspaceListItem & {
+  resolvedLaunchFailure?: string;
+  launchFailureObservation?: { key: string; at: number };
+};
+
+function finiteTime(at: unknown): at is number {
+  return typeof at === "number" && Number.isFinite(at);
+}
+
+function observation(item: CloudWorkspaceListItem | undefined, key: string) {
+  const known = (item as ObservedItem | undefined)?.launchFailureObservation;
+  return known?.key === key && finiteTime(known.at) ? known : undefined;
+}
+
+function sessionActivityTimes(sessions: readonly RuntimeSession[]): number[] {
+  return sessions.filter((session) => session.tabs?.length > 0).flatMap((session) => [
+    Date.parse(session.created), Date.parse(session.lastMessageAt ?? ""),
+    ...session.tabs.flatMap((tab) => [Date.parse(tab.created), Date.parse(tab.lastMessageAt ?? "")]),
+  ]).filter(finiteTime);
+}
 
 function launchFailureKey(item: CloudWorkspaceListItem): string {
   const launch = item.workspace.launch;
@@ -58,28 +77,39 @@ function runtimeAgentRan(item: CloudWorkspaceListItem): boolean {
  * Carry it across list/snapshot replacement so going idle/offline cannot revive
  * the historical failure. A different launch/failure starts with no such evidence.
  * Current runtime activity also counts when older launch reports omit failedAt.
- * Cached sessions always require dated ordering. Credential installation and
- * an online idle runtime deliberately do not count.
+ * Without failedAt, earlier launch milestones are only lower bounds, not proof
+ * of failure time. Record the first observation time, at least as late as those
+ * milestones and all initially cached activity (including clock skew). Keep that
+ * boundary for the exact failure across unchanged snapshots; never advance it
+ * on later refreshes. Cached sessions must have activity after this boundary.
+ * Credential installation and an online idle runtime deliberately do not count.
  */
-export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?: CloudWorkspaceListItem, sessions: readonly RuntimeSession[] = []): CloudWorkspaceListItem {
+export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?: CloudWorkspaceListItem, sessions: readonly RuntimeSession[] = [], observedAt = Date.now()): CloudWorkspaceListItem {
   const key = launchFailureKey(item);
+  const { resolvedLaunchFailure: _old, launchFailureObservation: _observation, ...clean } = item as ObservedItem;
+  if (!launchFailed(item)) return clean;
+  const boundary = finiteTime(item.workspace.launch?.timings?.failedAt) ? undefined
+    : observation(item, key) ?? observation(previous, key) ?? {
+      key,
+      at: Math.max(observedAt, ...Object.values(item.workspace.launch?.timings ?? {}).filter(finiteTime), ...sessionActivityTimes(sessions)),
+    };
+  const candidate: ObservedItem = boundary ? { ...clean, launchFailureObservation: boundary } : clean;
   const laterSession = sessions.some((session) => session.tabs?.length > 0 && (
-    afterFailure(item, Date.parse(session.created))
-    || afterFailure(item, Date.parse(session.lastMessageAt ?? ""))
-    || session.tabs.some((tab) => tabAfterFailure(item, tab))
+    afterFailure(candidate, Date.parse(session.created))
+    || afterFailure(candidate, Date.parse(session.lastMessageAt ?? ""))
+    || session.tabs.some((tab) => tabAfterFailure(candidate, tab))
   ));
-  const resolved = launchFailed(item) && (laterSession || runtimeAgentRan(item)
+  const resolved = laterSession || runtimeAgentRan(item)
     || (item as ObservedItem).resolvedLaunchFailure === key
-    || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key);
-  const { resolvedLaunchFailure: _old, ...clean } = item as ObservedItem;
-  return resolved ? { ...clean, resolvedLaunchFailure: key } as ObservedItem : clean;
+    || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key;
+  return resolved ? { ...candidate, resolvedLaunchFailure: key } as ObservedItem : candidate;
 }
 
-/** Only dated agent evidence strictly after this failure proves recovery. */
+/** Dated activity must follow the authoritative failure or its stable observation boundary. */
 function afterFailure(item: CloudWorkspaceListItem, at: number | undefined): boolean {
   const failedAt = item.workspace.launch?.timings?.failedAt;
-  return typeof failedAt === "number" && Number.isFinite(failedAt)
-    && typeof at === "number" && Number.isFinite(at) && at > failedAt;
+  const boundary = finiteTime(failedAt) ? failedAt : observation(item, launchFailureKey(item))?.at;
+  return finiteTime(boundary) && finiteTime(at) && at > boundary;
 }
 
 function tabAfterFailure(item: CloudWorkspaceListItem, tab: { created?: string; lastMessageAt?: string | null }): boolean {

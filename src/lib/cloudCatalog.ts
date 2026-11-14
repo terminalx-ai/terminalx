@@ -365,7 +365,7 @@ export async function ingestCloudList(
     listedAt.set(org, requestedAt);
     const current = state.orgs[org] ?? emptyOrg(org);
     const previous = new Map(current.workspaces.map((item) => [item.workspace.id, item]));
-    workspaces = workspaces.map((item) => reconcileCloudAttention(item, previous.get(item.workspace.id), current.sessions[item.workspace.id]?.sessions));
+    workspaces = workspaces.map((item) => reconcileCloudAttention(item, previous.get(item.workspace.id), current.sessions[item.workspace.id]?.sessions, now));
     const createMemory = { ...state.createMemory };
     for (const tombstone of tombstones) delete createMemory[memoryKey(tombstone.orgId, tombstone.id)];
     // The server now says where these workspaces belong (S1 `repositories`), so what this desktop remembered of them is never read again.
@@ -449,7 +449,7 @@ export function cacheCloudSessions(orgId: string, workspaceId: string, sessions:
   if (!current) return;
   const previous = current.sessions[workspaceId];
   if (previous && JSON.stringify(previous.sessions) === JSON.stringify(sessions) && JSON.stringify(previous.capabilities) === JSON.stringify(capabilities)) return;
-  const workspaces = current.workspaces.map((item) => item.workspace.id === workspaceId ? reconcileCloudAttention(item, undefined, sessions) : item);
+  const workspaces = current.workspaces.map((item) => item.workspace.id === workspaceId ? reconcileCloudAttention(item, undefined, sessions, now) : item);
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, workspaces, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
 }
 
