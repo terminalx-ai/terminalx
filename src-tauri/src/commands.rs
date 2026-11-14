@@ -5563,6 +5563,15 @@ pub async fn orchestration_approve(app: AppHandle, id: String) -> CmdResult<serd
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("approve", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
 }
 
+/// A person starts a `planned` run, of a project that asks for no approval,
+/// from the Run view (PRO-365): its ready pieces start as `runs start` starts
+/// them, and the lead is told.
+#[tauri::command]
+pub async fn orchestration_start(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("startPlanned", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
 /// Stop a run, or discard a plan nobody approved.
 #[tauri::command]
 pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {

@@ -661,6 +661,94 @@ describe("checking a result before it is accepted (PRO-278)", () => {
   });
 });
 
+describe("a planned run in a project that asks for no approval (PRO-365)", () => {
+  const warning = "The Claude 7d window is at 65%. This run may use up to 25 points, but it stops at 85%, about 20 points from now. It resets at 16:10.";
+  const planned = (extra: Partial<Run> = {}): Run => ({
+    ...waiting(),
+    state: "planned",
+    ready: ["map"],
+    limits: { workers: 4, dollars: 15, points: 25, ceiling: 85 },
+    usage: { dollars: 0, subscription: true, windows: [{ agent: "claude", key: "seven_day", label: "7d", percent: 65, points: 0 }] },
+    inTurn: 0,
+    fit: [warning],
+    ...extra,
+  });
+  const startedBy = (run: Run): Run => ({ ...run, state: "running", fit: [], startedByPerson: { at: new Date().toISOString() }, pieces: run.pieces.map((p, index) => (index ? p : { ...p, state: "running", attempts: 1, worker: { sessionId: "w1", tabId: "t1" } })) });
+
+  it("offers Start run beside Edit plan and Stop run, and says both ways it starts", async () => {
+    await open(planned());
+    expect(screen.getByTestId("run-state").textContent).toBe("Ready to start");
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("The lead split this into 3 pieces. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.");
+    const buttons = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(buttons).toEqual(expect.arrayContaining(["Edit plan", "Stop run", "Start run"]));
+    expect(screen.queryByRole("button", { name: "Approve and start" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+  });
+
+  it("starts the run while the window warning shows, and then says the person started it", async () => {
+    const run = planned();
+    answers.orchestration_start = () => ({ run: startedBy(run), started: ["map"], waiting: [], failed: [] });
+    await open(run);
+    // The warning stays a warning: it does not hold the start.
+    expect(within(screen.getByRole("region", { name: "Plan summary" })).getByRole("alert").textContent).toBe(warning);
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }));
+    await waitFor(() => expect(screen.getByTestId("run-view").getAttribute("data-run-state")).toBe("running"));
+    expect(calls("orchestration_start")).toEqual([{ id: "run-1" }]);
+    expect(calls("orchestration_approve")).toEqual([]);
+    expect(row("map").dataset.pieceState).toBe("running");
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("3 pieces · started by you just now");
+    expect(screen.queryByRole("button", { name: "Start run" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit plan" })).toBeNull();
+  });
+
+  it("is disabled while a change to the limits is being saved, and starts with what was saved", async () => {
+    const run = planned();
+    let saved!: (run: Run) => void;
+    answers.orchestration_set_limits = ({ limits }: { limits: Run["limits"] }) => new Promise<Run>((resolve) => { saved = resolve; }).then(() => ({ ...run, limitsEdited: true, limits }));
+    answers.orchestration_start = () => ({ run: startedBy({ ...run, limits: { workers: 4, dollars: 15, points: 10, ceiling: 95 } }), started: ["map"], waiting: [], failed: [] });
+    await open(run);
+    const start = screen.getByRole("button", { name: "Start run" }) as HTMLButtonElement;
+    const points = screen.getByRole("spinbutton", { name: "Points of a window this run may use" });
+    fireEvent.change(points, { target: { value: "10" } });
+    fireEvent.blur(points);
+    await waitFor(() => expect(start.disabled).toBe(true));
+    expect(start.title).toBe("Saving your change first");
+    fireEvent.click(start);
+    expect(calls("orchestration_start")).toEqual([]);
+    await act(async () => saved(run));
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(calls("orchestration_set_limits")).toEqual([{ id: "run-1", limits: { workers: 4, dollars: 15, points: 10, ceiling: 85 } }]);
+    fireEvent.click(start);
+    await waitFor(() => expect(calls("orchestration_start")).toEqual([{ id: "run-1" }]));
+    await waitFor(() => expect(screen.getByTestId("run-view").getAttribute("data-run-state")).toBe("running"));
+  });
+
+  it("is disabled while an edited piece is being saved", async () => {
+    const run = planned();
+    let saved!: () => void;
+    answers.orchestration_update_plan = ({ plan }: { plan: RunPlan }) => new Promise<void>((resolve) => { saved = resolve; }).then(() => ({ ...run, planEdited: true, pieces: run.pieces.map((p) => ({ ...p, model: plan.pieces.find((q) => q.id === p.id)!.model })) }));
+    await open(run);
+    choose("map", "Map every settings read", "model", "Sonnet 5.5");
+    const start = screen.getByRole("button", { name: "Start run" }) as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(true));
+    await act(async () => saved());
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(calls("orchestration_update_plan")[0]).toMatchObject({ id: "run-1" });
+  });
+
+  it("shows why a start was refused", async () => {
+    answers.orchestration_start = () => { throw '{"code":"not_planned","message":"Run run-1 has already started (running)."}'; };
+    await open(planned());
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }));
+    await waitFor(() => expect(screen.getAllByRole("alert").map((alert) => alert.textContent)).toContain("Run run-1 has already started (running).Dismiss"));
+  });
+
+  it("says a run the lead started was started without approval", async () => {
+    await open(planned({ state: "running", fit: [] }));
+    expect(screen.getByTestId("run-subtitle").textContent).toBe("3 pieces · started without approval, as this repository is set");
+  });
+});
+
 describe("a session with no run (PRO-274)", () => {
   it("says what a run is, what this project allows, and asks the lead to plan one", async () => {
     answers.orchestrator_limits = { requireApproval: false, pieceLimit: 12, workerMode: "acceptEdits" };
@@ -674,7 +762,9 @@ describe("a session with no run (PRO-274)", () => {
     expect(calls("send_message")).toHaveLength(1);
     expect(calls("send_message")[0]).toMatchObject({ sessionId: "lead", tabId: "lead-tab", text: PLAN_A_RUN_PROMPT });
     expect(PLAN_A_RUN_PROMPT).toContain("terminalx runs create --from");
-    expect(PLAN_A_RUN_PROMPT).toContain("I approve it in the Run view before any worker starts");
+    // True in a project that asks for approval and in one that does not (PRO-365).
+    expect(PLAN_A_RUN_PROMPT).toContain("no worker starts until I start it from the Run view, or ask you to start it with `terminalx runs start` where this project asks for no approval");
+    expect(PLAN_A_RUN_PROMPT).not.toContain("I approve it");
   });
 
   it("says a session started with Orchestrate waits for approval though the project asks for none (PRO-337)", async () => {

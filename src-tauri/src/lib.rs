@@ -986,6 +986,7 @@ pub fn run() {
             commands::orchestration_create,
             commands::orchestrator_limits,
             commands::orchestration_approve,
+            commands::orchestration_start,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
             commands::orchestration_merge,

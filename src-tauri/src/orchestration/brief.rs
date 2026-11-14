@@ -215,6 +215,8 @@ mod tests {
             max_tries: 3,
             effort_ceiling: "high".into(),
             plan_edited: false,
+            limits_edited: false,
+            started_by_person: None,
             approval: None,
             reason: None,
             integration_check: None,
