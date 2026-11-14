@@ -459,10 +459,13 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
     let parts = content.as_array().cloned().unwrap_or_default();
     let results: Vec<&Value> = parts.iter().filter(|p| p["type"] == "tool_result").collect();
     if !results.is_empty() {
+        // The CLI records how the call was let through, or not, on the
+        // record that carries its result: one record, one call's decision.
+        let safety_check = if results.len() == 1 { super::mapper::safety_check_note(&v["permissionDecision"]) } else { None };
         for r in results {
             out.push(Payload::ToolCallCompleted {
                 call_id: r["tool_use_id"].as_str().unwrap_or("").to_string(),
-                result: ToolResult { text: text_of(&r["content"]), is_error: r["is_error"].as_bool().unwrap_or(false), ..Default::default() },
+                result: ToolResult { text: text_of(&r["content"]), is_error: r["is_error"].as_bool().unwrap_or(false), safety_check: safety_check.clone(), ..Default::default() },
             });
         }
         return;
@@ -1420,5 +1423,38 @@ mod tests {
     fn encodes_the_project_folder_like_the_cli() {
         let p = transcript_in(Path::new("/h/.claude/projects"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");
         assert_eq!(p, Path::new("/h/.claude/projects/-Users-dev-code-ai-raccoon-e2e--raccoon-worktrees-sly-ochre-hare/abc.jsonl"));
+    }
+
+    /// #775: the CLI records on a result how the call was let through. Its
+    /// own safety check, approved through TerminalX's card (2.1.309 and
+    /// 2.1.319 write it so), is said on the call's row; a call its mode let
+    /// through says nothing.
+    #[test]
+    fn a_result_says_which_of_claudes_checks_held_the_call() {
+        let result = |decision: serde_json::Value| {
+            let record = serde_json::json!({
+                "type": "user", "uuid": "r1", "sourceToolAssistantUUID": "a1",
+                "message": {"role": "user", "content": [{"tool_use_id": "toolu_1", "type": "tool_result", "content": "2", "is_error": false}]},
+                "toolUseResult": {"stdout": "2", "stderr": "", "interrupted": false},
+                "permissionDecision": decision,
+            });
+            let mut out = Vec::new();
+            decode_line(&record.to_string(), &HashSet::new(), &mut out);
+            match out.as_slice() {
+                [Payload::ToolCallCompleted { call_id, result }] if call_id == "toolu_1" => result.safety_check.clone(),
+                other => panic!("one result: {other:?}"),
+            }
+        };
+        let passed = serde_json::json!({"decision": "accept", "source": "hook", "reasonType": "hook", "reasonCode": "safetyCheck", "circuitBreaker": "dangerousRemoval"});
+        assert_eq!(result(passed).as_deref(), Some("Approved past Claude's dangerous-removal check"));
+        // As the issue's run recorded it: no decision word at all.
+        assert_eq!(result(serde_json::json!({"circuitBreaker": "dangerousRemoval", "reasonCode": "safetyCheck"})).as_deref(), Some("Held by Claude's dangerous-removal check"));
+        let stopped = serde_json::json!({"decision": "reject", "source": "config", "reasonType": "safetyCheck", "reasonCode": "subcommands:bashMiss:no-rule-match+safetyCheck", "circuitBreaker": "dangerousRemoval"});
+        assert_eq!(result(stopped).as_deref(), Some("Stopped at Claude's dangerous-removal check"));
+        assert_eq!(result(serde_json::json!({"decision": "reject", "source": "config", "reasonType": "safetyCheck"})).as_deref(), Some("Stopped at Claude's safety check"), "2.1.301 names no check");
+        assert_eq!(result(serde_json::json!({"decision": "accept", "source": "config", "reasonType": "mode"})), None, "bypass let it through");
+        assert_eq!(result(serde_json::json!({"decision": "accept", "source": "user_temporary"})), None, "the reader allowed it in a mode that asks");
+        assert_eq!(result(serde_json::Value::Null), None, "an older CLI records nothing");
+        assert_eq!(result(serde_json::json!({"decision": "accept", "circuitBreaker": "some_newer_guard"})).as_deref(), Some("Approved past Claude's some-newer-guard check"));
     }
 }

@@ -5,6 +5,7 @@ import {
   chatLinkCanOpenInternally,
   chatLinkCopyValue,
   inspectChatFile,
+  isCitedFileHref,
   openChatLink,
   openChatLinkExternally,
   openChatLinkInBrowser,
@@ -18,17 +19,21 @@ import type { LocalPathInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 import { copyText } from "@/lib/clipboard";
+import { citedFileKind, type CitedFileKind } from "@/lib/codexCitations";
+import { File, FileImage, FilePdf, FileSpreadsheet, FileText, Presentation } from "@/icons";
 
-type Props = AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps & { context?: ChatLinkContext };
+/** `file`: drawn as the chip of a file the agent handed over (#776), not as an inline link. */
+type Props = AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps & { context?: ChatLinkContext; file?: boolean };
 const EXTERNAL_CONTEXT: ChatLinkContext = { sessionId: "", cwd: "" };
 
 const BROWSER_NAMES = { system: "System Browser", terminalx: "TerminalX Browser" };
+const FILE_ICONS: Record<CitedFileKind, typeof File> = { spreadsheet: FileSpreadsheet, presentation: Presentation, pdf: FilePdf, image: FileImage, document: FileText, file: File };
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, className, node: _node, ...props }: Props) {
+export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, className, file, node: _node, ...props }: Props) {
   const prefs = usePrefs();
   const hasWorkspace = !!context.cwd && !!context.sessionId;
   const browserPreference = hasWorkspace ? prefs.linkBrowser : "system";
@@ -124,9 +129,13 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
       href={href}
       target={undefined}
       rel={undefined}
-      className={`wrap-anywhere font-medium text-primary underline ${className ?? ""}`}
+      className={file
+        ? `inline-flex h-7 max-w-full items-center gap-1.5 rounded-md px-2 align-middle text-[12.5px] font-medium text-foreground ring-1 ring-hairline-strong transition-colors hover:bg-veil-raised ${className ?? ""}`
+        : `wrap-anywhere font-medium text-primary underline ${className ?? ""}`}
       data-streamdown="link"
-      title={destination.kind === "web" ? `${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}${hasWorkspace ? `; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : ""}` : undefined}
+      data-file-chip={file || undefined}
+      // A link's own title (a cited file's full path) comes first; a website link adds how to choose a browser.
+      title={destination.kind === "web" ? `${props.title ? `${props.title}\n` : ""}${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}${hasWorkspace ? `; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : ""}` : props.title}
       aria-haspopup={asksForBrowser ? "dialog" : undefined}
       aria-expanded={asksForBrowser ? chooserOpen : undefined}
       tabIndex={props.tabIndex ?? (asksForBrowser ? 0 : undefined)}
@@ -143,7 +152,10 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
         activate();
       }}
     >
-      {children}
+      {file ? <>
+        <FileIcon kind={citedFileKind(originalHref)} />
+        <span className="min-w-0 truncate">{children}</span>
+      </> : children}
     </a>
   );
 
@@ -212,8 +224,13 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
   );
 }
 
+function FileIcon({ kind }: { kind: CitedFileKind }) {
+  const Icon = FILE_ICONS[kind];
+  return <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />;
+}
+
 export function chatLinkComponent(context?: ChatLinkContext) {
   return function RoutedChatLink(props: AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps) {
-    return <ChatLink {...props} context={context} />;
+    return <ChatLink {...props} context={context} file={isCitedFileHref(props.href)} />;
   };
 }

@@ -404,37 +404,78 @@ fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
     assert!(reply.output.is_none(), "a stale launch must still fail closed at the owner bridge");
 }
 
+/// The card a permission hook frame draws in a tab in `mode`, as its log
+/// records it, and what the hook was told. The reader answers `answer`.
+fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer: Decision) -> (Value, HookReply) {
+    let rig = Rig::in_mode(kind, mode);
+    let manager = rig.manager.clone();
+    let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(), payload };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    let event = rig.events().into_iter().find(|e| matches!(e.payload, Payload::PermissionRequested { .. })).unwrap();
+    {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &rt.engine else { unreachable!() };
+        p.decisions[&request].sender.send(answer).unwrap();
+    }
+    let reply = worker.join().unwrap();
+    (serde_json::to_value(event.payload).unwrap(), reply)
+}
+
 #[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
-    for (gate, input, reason) in [
-        ("PreToolUse", json!({"command":"git status --short --branch"}), "Approval is required because this session is set to Ask every time."),
-        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), "Inspect the selected checkout"),
+    // The app's own gate is said apart from the agent's words (#775).
+    for (gate, input, description, reason) in [
+        ("PreToolUse", json!({"command":"git status --short --branch"}), Value::Null, json!("Approval is required because this session is set to Ask every time.")),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), json!("Inspect the selected checkout"), Value::Null),
     ] {
-        let rig = Rig::in_mode(CliKind::Codex, "manual");
-        let manager = rig.manager.clone();
-        let frame = HookFrame {
-            session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
-            payload: json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}),
-        };
-        let worker = std::thread::spawn(move || manager.on_hook(frame));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let request = loop {
-            if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
-            assert!(Instant::now() < deadline, "the hook must publish a permission request");
-            std::thread::sleep(MOMENT);
-        };
-        let event = rig.events().into_iter().find(|e| matches!(e.payload, Payload::PermissionRequested { .. })).unwrap();
-        {
-            let rt = rig.rt.lock().unwrap();
-            let Engine::Cli(p) = &rt.engine else { unreachable!() };
-            p.decisions[&request].sender.send(Decision::Deny).unwrap();
-        }
-        worker.join().unwrap();
-        let payload = serde_json::to_value(event.payload).unwrap();
+        let (payload, _) = permission_card(CliKind::Codex, "manual", gate, json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}), Decision::Deny);
         assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
-        assert_eq!(payload["description"], reason);
+        assert_eq!(payload["description"], description, "{gate}: the description is the agent's own words, never the app's");
+        assert_eq!(payload["reason"], reason, "{gate}: why the card is up");
         assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
     }
+}
+
+/// #775: TerminalX's Claude hooks only ever deny, so in bypass mode a card
+/// is Claude Code's own safety check asking. It says so, apart from the
+/// agent's description of the command; a card in a mode that asks says
+/// nothing of the kind. The hook's mode is the one Claude asks in, and the
+/// tab's stands in for a frame without it.
+#[test]
+fn a_claude_card_in_bypass_mode_says_claudes_safety_check_asked() {
+    let command = r#"a=("${(@f)$(printf "x\ny")}"); echo ${#a}"#;
+    let input = json!({"command": command, "description": "Split printf output into lines"});
+    let safety = claude::mapper::safety_check_reason("Bash");
+    assert!(safety.contains("Claude Code's safety check") && safety.contains("Bypass permissions"), "{safety}");
+    for (tab_mode, hook_mode, reason) in [
+        ("bypassPermissions", Some("bypassPermissions"), Some(safety)),
+        ("bypassPermissions", None, Some(safety)),
+        ("default", Some("bypassPermissions"), Some(safety)),
+        ("default", Some("default"), None),
+        ("default", None, None),
+        ("bypassPermissions", Some("default"), None),
+        ("acceptEdits", Some("acceptEdits"), None),
+    ] {
+        let mut payload = json!({"tool_name": "Bash", "tool_input": input, "permission_suggestions": []});
+        if let Some(mode) = hook_mode { payload["permission_mode"] = json!(mode); }
+        let (card, reply) = permission_card(CliKind::Claude, tab_mode, "PermissionRequest", payload, Decision::Allow);
+        let case = format!("tab {tab_mode}, hook {hook_mode:?}");
+        assert_eq!(card["reason"].as_str(), reason, "{case}");
+        assert_eq!(card["description"], "Split printf output into lines", "{case}: the agent's description stays its own");
+        assert_eq!(card["input"], input, "{case}");
+        // Still a card, answered by the reader: nothing approves it unasked.
+        assert_eq!(reply.output.as_ref().map(|o| &o["hookSpecificOutput"]["decision"]["behavior"]), Some(&json!("allow")), "{case}: {reply:?}");
+    }
+    let (card, _) = permission_card(CliKind::Claude, "bypassPermissions", "PermissionRequest",
+        json!({"permission_mode": "bypassPermissions", "tool_name": "Write", "tool_input": {"file_path": "/x/.git/config"}}), Decision::Deny);
+    assert_eq!(card["reason"].as_str(), Some(claude::mapper::safety_check_reason("Write")));
+    assert!(card.get("description").is_none(), "no agent words are made up: {card}");
 }
 
 /// A send opens the turn before the input thread types anything. Silence
@@ -974,7 +1015,7 @@ fn a_silent_turn_waiting_for_approval_is_counted_separately() {
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
             cwd: None,
             request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(),
-            input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
+            input: json!({ "command": "ls" }), title: None, description: None, reason: None, options: vec![],
         }, None);
     }
     assert_eq!(rig.counts(), (0, 1));
@@ -1717,7 +1758,7 @@ fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
     rig.append(&failed_command(CliKind::Claude, "call-1"));
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::PermissionRequested { cwd: None, request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
+        rig.manager.apply(&mut rt, Payload::PermissionRequested { cwd: None, request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, reason: None, options: vec![] }, None);
     }
     assert_eq!(rig.status(), TabStatus::Waiting);
     assert_eq!(rig.recovery(), None);
@@ -2136,7 +2177,7 @@ fn the_readers_enter_goes_only_where_a_nudge_would() {
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
             cwd: None,
             request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
-            input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
+            input: json!({ "command": "rm -rf build" }), title: None, description: None, reason: None, options: vec![],
         }, None);
     }
     let asking = rig.manager.submit_waiting(SESSION, TAB, 6).unwrap_err().to_string();
@@ -2153,7 +2194,7 @@ fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer()
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
             cwd: None,
             request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
-            input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
+            input: json!({ "command": "rm -rf build" }), title: None, description: None, reason: None, options: vec![],
         }, None);
         assert!(!rt.pending.is_empty());
     }

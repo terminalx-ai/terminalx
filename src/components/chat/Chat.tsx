@@ -50,8 +50,10 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
   if (viewport <= 0) return { start: Math.max(0, count - FIRST_MOUNT), end: count };
   const from = tail ? Math.max(0, tops[count] - viewport) : top;
   // The first turn whose bottom is below the band's top, through the last whose top is above its bottom.
+  // The turn holding an edge is the one before `firstAfter` the edge: the start takes it, and so does the
+  // end, which is exclusive. A turn taller than the overscan holds the lower edge while it is on screen (#771).
   const start = Math.min(Math.max(0, firstAfter(tops, from - OVERSCAN_PX) - 1), Math.max(0, count - 1));
-  const end = tail ? count : Math.min(count, Math.max(start + 1, firstAfter(tops, from + viewport + OVERSCAN_PX) - 1));
+  const end = tail ? count : Math.min(count, Math.max(start + 1, firstAfter(tops, from + viewport + OVERSCAN_PX)));
   return { start, end: Math.max(start, end) };
 }
 
@@ -131,7 +133,10 @@ export function Chat({
   /** The turns drawn while the reader is off the bottom, and the scroller's height. */
   const [band, setBand] = useState({ start: 0, end: 0, height: 0 });
   const topSpacer = useRef<HTMLDivElement>(null);
+  /** Each turn's top and the list's end, on the heights in `heights`: worked out again whenever one changes. */
   const tops = useRef<number[]>([0]);
+  /** The turns this render drew from, for working `tops` out again between renders. */
+  const turnList = useRef(turns);
   const [disclosures] = useState<Disclosures>(() => new Map());
   /** The id a link asked for that no drawn turn holds: every turn is drawn until it has been looked for. */
   const [seeking, setSeeking] = useState<string | null>(null);
@@ -157,6 +162,7 @@ export function Chat({
   // while the view stays where it is.
   const turnTops = topsOf(turns, heights.current);
   tops.current = turnTops;
+  turnList.current = turns;
   // A new prompt is followed from the render it arrives in, not one later;
   // so is the reader's own message while it is being sent.
   const lastPrompt = `${turns[turns.length - 1]?.prompt?.seq ?? ""}:${sending?.pressedAt ?? ""}`;
@@ -182,7 +188,11 @@ export function Chat({
    * Measure the turns drawn. One wholly above the view that is taller or
    * shorter than was taken for it (a turn drawn for the first time, or one
    * still settling) moved the turn the reader is on by the difference, so
-   * scrollTop takes that back. Says whether any height changed.
+   * scrollTop takes that back. A height that changed changes the turns'
+   * tops, so they are worked out again here, before anything picks a band
+   * from them: a band picked on the estimate a turn was drawn at can leave
+   * the view over a spacer, and nothing picks again while the reader holds
+   * still (#771). Says whether any height changed.
    */
   const measure = useCallback((): boolean => {
     const el = scroller.current;
@@ -200,6 +210,7 @@ export function Chat({
       changed = true;
       if (rect.bottom <= box.top) shift += rect.height - (was ?? ESTIMATED_TURN_PX);
     }
+    if (changed) tops.current = topsOf(turnList.current, heights.current);
     if (shift && !pinned.current) {
       el.scrollTop += shift;
       lastTop.current = el.scrollTop;
@@ -297,9 +308,10 @@ export function Chat({
     pinToBottom();
   }, [lastPrompt, follow, pinToBottom]);
 
-  // Every turn is drawn and measured now (the effects above ran first): the
-  // place a link asked for is brought to the top if a turn holds it, and the
-  // band is worked out around it on heights that are all real.
+  // Every turn is drawn and measured now (the effects above ran first, and
+  // measuring worked the tops out again): the place a link asked for is
+  // brought to the top if a turn holds it, and the band is worked out around
+  // it on heights that are all real.
   useLayoutEffect(() => {
     if (seeking == null) return;
     const el = scroller.current;
@@ -307,11 +319,10 @@ export function Chat({
     if (el && target) {
       scrollToInOwnScroller(target);
       lastTop.current = el.scrollTop;
-      tops.current = topsOf(turns, heights.current);
       readView();
     }
     setSeeking(null);
-  }, [seeking, turns, readView]);
+  }, [seeking, readView]);
 
   const working = progressing && !!transcript.workingSince && (transcript.modelRequestOpen || !stream.length);
   const streamingTool = stream.find((s) => s.kind === "tool_use" && !s.done);

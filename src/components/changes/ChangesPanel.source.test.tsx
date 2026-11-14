@@ -141,13 +141,20 @@ it("reads a rename's original path and surfaces file errors", async () => {
 });
 
 it("refreshes after terminal edits, commits and branch changes on window focus", async () => {
-  const source = fakeSource("refresh");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
-  await screen.findByRole("button", { name: /turn.ts/ });
-  source.changesBetween.mockResolvedValue([{ path: "terminal-edit", status: "added", additions: 1, deletions: 0 }]);
-  fireEvent(window, new Event("focus"));
-  await screen.findByRole("button", { name: /terminal-edit/ });
-  expect(source.reviewRange).toHaveBeenCalledTimes(2);
+  // The panel starts listening for focus in an effect that runs a task after
+  // the file list is drawn; on a loaded CI runner a focus sent as soon as the
+  // list shows can arrive before it, and nothing refreshes.
+  const listens = vi.spyOn(window, "addEventListener");
+  try {
+    const source = fakeSource("refresh");
+    render(<ChangesPanel source={source} events={[]} version={0} active live={false} onViewUncommitted={() => {}} />);
+    await screen.findByRole("button", { name: /turn.ts/ });
+    await waitFor(() => expect(listens).toHaveBeenCalledWith("focus", expect.any(Function)));
+    source.changesBetween.mockResolvedValue([{ path: "terminal-edit", status: "added", additions: 1, deletions: 0 }]);
+    fireEvent(window, new Event("focus"));
+    await screen.findByRole("button", { name: /terminal-edit/ });
+    expect(source.reviewRange).toHaveBeenCalledTimes(2);
+  } finally { listens.mockRestore(); }
 });
 
 it("does not reuse a previous turn when the latest prompt has no snapshot", async () => {

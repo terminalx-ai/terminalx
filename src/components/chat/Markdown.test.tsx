@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { openFile } from "@/lib/editors";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./Markdown";
 import { setPrefs } from "@/lib/prefs";
 
@@ -174,5 +174,103 @@ describe("rendered chat links", () => {
     expect(screen.queryByRole("link", { name: "raw unsafe" })).toBeNull();
     expect(document.body.textContent).toContain("raw unsafe");
     expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+});
+
+describe("Codex file citations (#776)", () => {
+  const output = ':codex-file-citation{path="/abs/path/report.xlsx" artifact_kind="workbook" purpose="output"}';
+  const workbook: LocalPathInfo = { path: "/abs/path/report.xlsx", root: "/abs/path", rel: "report.xlsx", kind: "file", text: false };
+
+  it("renders an output citation on its own line as one file chip that opens and reveals the file", async () => {
+    vi.mocked(fs.inspectPath).mockResolvedValue(workbook);
+    const { container } = render(<Markdown text={`Here is the summary workbook.\n\n${output}`} linkContext={context} />);
+    const link = await screen.findByRole("link", { name: "report.xlsx" });
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(link.dataset.fileChip).toBe("true");
+    expect(link.getAttribute("title")).toBe("/abs/path/report.xlsx");
+    expect(link.closest("p")?.textContent).toBe("report.xlsx");
+    expect(container.textContent?.replace(/\s+/g, " ")).toBe("Here is the summary workbook. report.xlsx");
+    expect(container.textContent).not.toContain("codex-file-citation");
+
+    fireEvent.click(link);
+    await waitFor(() => expect(fs.openPath).toHaveBeenCalledWith("/abs/path/report.xlsx"));
+    expect(fs.inspectPath).toHaveBeenCalledWith("/workspace", "/abs/path/report.xlsx");
+    expect(openFile).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(link);
+    expect(await screen.findByRole("menuitem", { name: "Open with default application" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Reveal in file manager" }));
+    await waitFor(() => expect(revealItemInDir).toHaveBeenCalledWith("/abs/path/report.xlsx"));
+  });
+
+  it("renders a source citation inside its sentence with its locator, leaving the prose around it alone", async () => {
+    render(<Markdown text={'The review of :codex-file-citation{path="/abs/report.xlsx" sheet="Revenue Model" range="C27" purpose="source"} is due *Friday*; see also :codex-file-citation{path="/abs/review.pdf" page_number="3" purpose="source"}.'} linkContext={context} />);
+    const cell = await screen.findByRole("link", { name: "report.xlsx · Revenue Model!C27" });
+    expect(cell.dataset.fileChip).toBeUndefined();
+    expect(screen.getByRole("link", { name: "review.pdf · p. 3" })).toBeTruthy();
+    expect(cell.closest("p")?.textContent).toBe("The review of report.xlsx · Revenue Model!C27 is due Friday; see also review.pdf · p. 3.");
+    expect(cell.closest("p")?.querySelector("em")?.textContent).toBe("Friday");
+  });
+
+  it("renders a Google Drive citation as one web link with a short label, not an autolink of its URL", async () => {
+    const url = "https://docs.google.com/spreadsheets/d/1AbC_d-Ef/edit#gid=0";
+    render(<Markdown text={`:codex-file-citation{path="${url}" purpose="output"}`} linkContext={context} />);
+    const link = await screen.findByRole("link", { name: "Google Sheets file" });
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(link.getAttribute("title")?.split("\n")[0]).toBe(url);
+    fireEvent.click(link);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(url);
+  });
+
+  it("gives a path with spaces, _, *, # or non-ASCII characters the destination of the same Markdown link", async () => {
+    const path = "/abs/my *draft* _final_ #2 Отчёт.xlsx";
+    render(<Markdown text={`:codex-file-citation{path="${path}" purpose="source"} or [same](<${path}>)`} linkContext={context} />);
+    fireEvent.click(await screen.findByRole("link", { name: "my *draft* _final_ #2 Отчёт.xlsx" }));
+    fireEvent.click(screen.getByRole("link", { name: "same" }));
+    await waitFor(() => expect(fs.inspectPath).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(fs.inspectPath).mock.calls).toEqual([["/workspace", path], ["/workspace", path]]);
+  });
+
+  it("links a citation on a transcript without a workspace", async () => {
+    render(<Markdown text={output} />);
+    expect((await screen.findByRole("link", { name: "report.xlsx" })).getAttribute("title")).toBe("/abs/path/report.xlsx");
+  });
+
+  it("keeps the marker literal in code, in a link's text, and when it is malformed", async () => {
+    const text = [
+      "`" + output + "`",
+      "```\n" + output + "\n```",
+      ':codex-file-citation{purpose="output"} and :codex-file-citation{path="/abs/a.xlsx" and \\:codex-file-citation{path="/abs/b.xlsx"}',
+      `[see ${output}](README.md)`,
+    ].join("\n\n");
+    const { container } = render(<Markdown text={text} linkContext={context} />);
+    expect(container.querySelector("p code")?.textContent).toBe(output);
+    expect(container.querySelector("pre code")?.textContent).toBe(output);
+    expect(container.textContent).toContain(':codex-file-citation{purpose="output"} and :codex-file-citation{path="/abs/a.xlsx" and :codex-file-citation{path="/abs/b.xlsx"}');
+    expect(screen.getAllByRole("link").map((link) => link.textContent)).toEqual([`see ${output}`]);
+  });
+
+  it("still completes unfinished Markdown while streaming without reading into a citation's path", async () => {
+    const cited = ':codex-file-citation{path="/abs/*draft_ [v2] `final`.xlsx" purpose="source"}';
+    const { container, rerender } = render(<Markdown text={`See ${cited} and **bold`} streaming linkContext={context} />);
+    expect(screen.getByRole("link", { name: "*draft_ [v2] `final`.xlsx" })).toBeTruthy();
+    expect(container.querySelector('[data-streamdown="strong"]')?.textContent).toBe("bold");
+    expect(container.textContent).toBe("See *draft_ [v2] `final`.xlsx and bold");
+    // remend returns early once it closes an unfinished link; the citation still comes back whole.
+    rerender(<Markdown text={`See ${cited} and [docs](README`} streaming linkContext={context} />);
+    expect(screen.getAllByRole("link").map((link) => link.textContent)).toEqual(["*draft_ [v2] `final`.xlsx", "docs"]);
+    expect(container.textContent).toBe("See *draft_ [v2] `final`.xlsx and docs");
+  });
+
+  it("holds back a citation while it streams, then shows it whole", async () => {
+    const { container, rerender } = render(<Markdown text={'Here it is.\n\n:codex-file-citation{path="https://docs.google.com/spreadsheets/d/1Ab'} streaming linkContext={context} />);
+    expect(container.textContent).toBe("Here it is.");
+    expect(screen.queryByRole("link")).toBeNull();
+    rerender(<Markdown text={'Here it is.\n\n:codex-file-ci'} streaming linkContext={context} />);
+    expect(container.textContent).toBe("Here it is.");
+    rerender(<Markdown text={`Here it is.\n\n${output}`} streaming linkContext={context} />);
+    expect((await screen.findByRole("link", { name: "report.xlsx" })).dataset.fileChip).toBe("true");
+    rerender(<Markdown text={`Here it is.\n\n${output}`} linkContext={context} />);
+    expect(screen.getAllByRole("link")).toHaveLength(1);
   });
 });

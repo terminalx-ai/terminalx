@@ -144,6 +144,56 @@ pub fn build_options(suggestions: &[Value]) -> Vec<PermissionOption> {
     out
 }
 
+/// Why Claude Code asks about a call in bypass mode, as the card, the phone
+/// and the notification say it (#775). Its built-in safety check runs in
+/// every mode, and asks about a command it cannot verify (2.1.318 and
+/// 2.1.319 ask about zsh's `"${(@f)$(…)}"` as a possible dangerous removal).
+pub fn safety_check_reason(tool_name: &str) -> &'static str {
+    if tool_name == "Bash" {
+        "Claude Code's safety check wants approval for this command. Bypass permissions doesn't cover commands it can't verify."
+    } else {
+        "Claude Code's safety check wants approval for this. Bypass permissions doesn't cover what it guards."
+    }
+}
+
+/// Which of Claude Code's own checks held a call for a person, and what
+/// became of it, from the `permissionDecision` its transcript records with
+/// the call's result (#775). `circuitBreaker` names the check
+/// (`dangerousRemoval`), and a `safetyCheck` reason says one asked without
+/// naming it. A call its mode decided records `reasonType: "mode"`, and has
+/// no such note.
+pub fn safety_check_note(decision: &Value) -> Option<String> {
+    let named = decision["circuitBreaker"].as_str().map(str::trim).filter(|name| !name.is_empty());
+    if named.is_none() && decision["reasonType"] != "safetyCheck" && decision["reasonCode"] != "safetyCheck" {
+        return None;
+    }
+    let check = match named {
+        Some(name) => format!("Claude's {} check", check_words(name)),
+        None => "Claude's safety check".into(),
+    };
+    Some(match decision["decision"].as_str() {
+        Some("accept") => format!("Approved past {check}"),
+        Some("reject") => format!("Stopped at {check}"),
+        _ => format!("Held by {check}"),
+    })
+}
+
+/// `dangerousRemoval` as "dangerous-removal".
+fn check_words(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c == '_' || c == '-' || c.is_whitespace() {
+            if !out.is_empty() && !out.ends_with('-') { out.push('-'); }
+        } else if c.is_uppercase() {
+            if !out.is_empty() && !out.ends_with('-') { out.push('-'); }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn mode_label(mode: &str) -> &'static str {
     match mode {
         "plan" => "Plan",

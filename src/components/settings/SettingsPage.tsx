@@ -5,10 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
-import { AgentMark } from "@/components/AgentMark";
-import { AgentSetup } from "@/components/session/AgentSetup";
-import { useAgentReadiness } from "@/lib/agentReadiness";
-import type { HarnessInfo } from "@/types/session";
+import { AgentSetupCard } from "./AgentSetupCard";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
@@ -508,13 +505,6 @@ function BrowserRuntimeRow() {
   );
 }
 
-function AgentSetupRow({ harness }: { harness: HarnessInfo }) {
-  const readiness = useAgentReadiness(harness.id);
-  return <AgentSetup harness={harness} value={readiness.value} checking={readiness.checking} onRefresh={() => {
-    void refreshHarnesses().then(() => readiness.refresh()).catch(() => readiness.refresh());
-  }} />;
-}
-
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
 function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   const store = useSessionStore();
@@ -586,37 +576,7 @@ function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
       </div>
       <ul className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
         {store.harnesses.map((h) => (
-          <li key={h.id} className="flex items-start gap-3 px-3 py-2.5">
-            <AgentMark id={h.id} className="mt-0.5 size-4" decorative />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium">{h.name}</span>
-                {h.available ? (
-                  <span className="flex items-center gap-1 text-[11px] text-add">
-                    <Check className="size-3" /> installed
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[11px] text-faint">
-                    <CircleAlert className="size-3" /> not found
-                  </span>
-                )}
-              </div>
-              <div className="mt-2"><AgentSetupRow key={`${h.id}:${checkRun}`} harness={h} /></div>
-              <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
-                {h.caps.images && <span>images</span>}
-                {h.caps.permissionModes && <span>permission modes</span>}
-                {h.caps.effort && <span>effort</span>}
-                {h.caps.slashCommands && <span>slash commands</span>}
-                {h.caps.resume && <span>resume</span>}
-                {h.caps.fork && <span>fork</span>}
-              </div>
-            </div>
-            {!h.available && (
-              <Button size="xs" variant="ghost" onClick={() => void openUrl(h.installUrl)}>
-                Get it <ExternalLink />
-              </Button>
-            )}
-          </li>
+          <AgentSetupCard key={`${h.id}:${checkRun}`} harness={h} />
         ))}
         {!store.harnesses.length && <li className="px-3 py-3 text-xs text-faint">Looking for agents…</li>}
       </ul>

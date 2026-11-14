@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
-import { applyEvent, getTabLog, lastSeq, useTabLog } from "@/lib/agentEvents";
+import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
@@ -153,6 +153,7 @@ export function TabView({
   const [resuming, setResuming] = useState(false);
   const readOnly = terminalTab || !!viewing;
   const [answering, setAnswering] = useState(false);
+  const [permissionNotice, setPermissionNotice] = useState<string | null>(null);
   const [recovering, setRecovering] = useState(false);
   const recoveryLock = useRef(false);
   const [stopped, setStopped] = useState(false);
@@ -243,7 +244,10 @@ export function TabView({
 
   // Nothing is running in a conversation that is only being read.
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
-  const transcript = view.transcript(live);
+  const projected = view.transcript(live);
+  const transcript = useMemo(() => log.permissionResponses?.size
+    ? { ...projected, pendingAsks: projected.pendingAsks.filter(ask => log.permissionResponses?.get(ask.requestId) !== "answered") }
+    : projected, [projected, log.permissionResponses]);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(events, session.baseRef), [events, session.baseRef]);
@@ -433,13 +437,13 @@ export function TabView({
 
   const answerPermission = useCallback(
     async (requestId: string, optionId: string) => {
-      setAnswering(true);
+      setPermissionNotice(null);
       try {
-        await backend.respondPermission(tab.id, requestId, optionId);
+        const outcome = await respondPermissionOnce(backend.logSessionId, tab.id, requestId,
+          () => backend.respondPermission(tab.id, requestId, optionId), local);
+        if (outcome === "already_answered") setPermissionNotice("This request was already answered or is no longer open.");
       } catch (e) {
         setError(local ? safeError(e) : commandError(e));
-      } finally {
-        setAnswering(false);
       }
     },
     [backend, local, tab.id],
@@ -489,7 +493,7 @@ export function TabView({
     () => sentMessages(transcript, outbox && { entries: outbox.entries(tab.id), followUps: outbox.followUps(tab.id) }),
     [transcript, outbox, tab.id],
   );
-  const deciding = !!outbox && transcript.pendingAsks.some((ask) => outbox.deciding(ask.requestId));
+  const deciding = transcript.pendingAsks.some(ask => log.permissionResponses?.get(ask.requestId) === "sending" || outbox?.deciding(ask.requestId));
 
   // Signed out of the agent itself (not TerminalX's account): Claude Code signs in
   // from its own prompt, so its terminal is shown with `/login` typed; Codex signs
@@ -784,6 +788,7 @@ export function TabView({
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
       <Button size="sm" variant="outline" disabled={recovering} title={'Send "continue" to the agent in this conversation'} onClick={() => void sendContinue()}>Continue here</Button>
     </div>}
+    {permissionNotice && <p role="status" className="shrink-0 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">{permissionNotice}</p>}
     {terminalMode && banner("top")}
     {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}
     {collabLive && notesOpen && shared?.client ? (

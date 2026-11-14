@@ -84,10 +84,10 @@ pub(crate) fn install(manager: &SessionManager, lifetime: &Arc<Lifetime>, sink: 
     // This is the same notification backend and application identity used by
     // the desktop plugin. macOS remains responsible for notification permission.
     if let Err(error) = notify_rust::set_application(&shared.application) { log::warn!("background notification identity: {error}"); }
-    let (sender,receiver) = std::sync::mpsc::sync_channel::<(String,String,&'static str)>(64);
+    let (sender,receiver) = std::sync::mpsc::sync_channel::<(String,String,&'static str,Option<String>)>(64);
     let notification_lifetime = lifetime.clone();
     std::thread::spawn(move || {
-        for (session_id,tab_id,title) in receiver {
+        for (session_id,tab_id,title,reason) in receiver {
             if notification_lifetime.window.available() || !crate::store::settings::load().notifications { continue; }
             let Ok(session) = crate::store::index::get(&session_id) else { continue };
             let Some(tab) = session.tab(&tab_id) else { continue };
@@ -95,7 +95,8 @@ pub(crate) fn install(manager: &SessionManager, lifetime: &Arc<Lifetime>, sink: 
             let key = format!("agent:{tab_id}");
             let followed = tab.follow.pane.as_ref().map(|pane|format!("terminal:{pane}"));
             if layouts.workspaces.values().any(|layout|layout.muted.contains(&key) || followed.as_ref().is_some_and(|key|layout.muted.contains(key))) { continue; }
-            let body = format!("{} — {}",session.title,tab.title.as_deref().unwrap_or("Agent"));
+            let mut body = format!("{} — {}",session.title,tab.title.as_deref().unwrap_or("Agent"));
+            if let Some(reason) = reason { body = format!("{body}\n{reason}"); }
             if let Err(error) = notify_rust::Notification::new().summary(title).body(&body).show() {
                 log::warn!("background notification delivery: {error}");
             }
@@ -105,12 +106,8 @@ pub(crate) fn install(manager: &SessionManager, lifetime: &Arc<Lifetime>, sink: 
         // Event emitters may hold provider, sharing and attachment locks. Never
         // inspect the window or stores synchronously inside their callback.
         let Ok(event) = serde_json::from_str::<crate::events::AgentEvent>(payload) else { return };
-        let title = match event.payload {
-            crate::events::Payload::TurnCompleted { .. } => "Agent finished",
-            crate::events::Payload::PermissionRequested { .. } | crate::events::Payload::QuestionsAsked { .. } => "Agent needs you",
-            _ => return,
-        };
-        if sender.try_send((event.session_id,event.tab_id,title)).is_err() { log::warn!("background notification queue is full or unavailable"); }
+        let Some((title,reason)) = super::background_notice(&event.payload) else { return };
+        if sender.try_send((event.session_id,event.tab_id,title,reason)).is_err() { log::warn!("background notification queue is full or unavailable"); }
     }));
 }
 

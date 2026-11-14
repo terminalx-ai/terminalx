@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./agentSettings": "./src/agentSettings.ts",
+    "./codexCitations": "./src/codexCitations.ts",
     "./continuation": "./src/continuation.ts",
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",

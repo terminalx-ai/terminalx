@@ -82,7 +82,15 @@ pub struct CodexUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
+    /// Counts the snapshots of one store, so of one runtime process: it is
+    /// kept in memory and starts again at 1 in the next.
     pub revision: u64,
+    /// The store `revision` counts in, drawn when it was made (#772). Two
+    /// snapshots' revisions say which is newer only when this is the same:
+    /// a runtime that replaced a long-running one counts from 1 again. None
+    /// from a runtime older than #772.
+    #[serde(default)]
+    pub runtime: Option<String>,
     pub claude: ClaudeRefresh,
     pub codex_refresh: CodexRefresh,
     pub claude_account: Option<String>,
@@ -296,9 +304,17 @@ struct Inner {
     codex_reset_in_flight: bool,
 }
 
-#[derive(Default)]
 pub struct UsageStore {
     inner: Mutex<Inner>,
+    /// Sent as each snapshot's `runtime`: whoever compares revisions compares
+    /// them only within one store (#772).
+    runtime: String,
+}
+
+impl Default for UsageStore {
+    fn default() -> Self {
+        Self { inner: Mutex::default(), runtime: uuid::Uuid::new_v4().simple().to_string() }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -998,14 +1014,16 @@ impl UsageStore {
         inner.windows.retain(|_, window| window.agent == "claude" || now.saturating_sub(window.updated_at) < STALE_MS || running_agents.contains(&window.agent));
         let mut windows: Vec<_> = inner.windows.values().map(|window| {
             let mut window = window.clone();
-            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS
-                || (window.agent == "claude" && expired(&window, now));
+            // A window past its reset no longer counts, whichever provider
+            // reported it (#772): Codex's reads as expired too, never "Resets in now".
+            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS || expired(&window, now);
             window
         }).collect();
         windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
         inner.revision += 1;
         UsageSnapshot {
             revision: inner.revision,
+            runtime: Some(self.runtime.clone()),
             claude_account: inner.claude_account.clone(),
             windows,
             codex: inner.codex_usage.clone(),
@@ -1182,6 +1200,43 @@ mod tests {
         assert!(!store.ingest_claude_at(&session_sample(100, 10), 30_000));
         assert_eq!(store.snapshot_at(&HashSet::new(), 30_000).windows[0].updated_at, 9_000);
         assert!(after.revision > before.revision);
+    }
+
+    /// #772: a runtime that replaced a long-running one counts from 1 again.
+    /// Each snapshot names the store it counts in, so a window compares
+    /// revisions only within one.
+    #[test]
+    fn each_store_counts_its_own_revisions_and_names_itself_on_every_snapshot() {
+        let none = HashSet::new();
+        let old = UsageStore::default();
+        for _ in 0..4_999 { old.snapshot_at(&none, 1_000); }
+        let held = old.snapshot_at(&none, 1_000);
+        assert_eq!(held.revision, 5_000);
+        let new = UsageStore::default();
+        let first = new.snapshot_at(&none, 2_000);
+        assert_eq!(first.revision, 1);
+        assert!(first.runtime.is_some());
+        assert_ne!(first.runtime, held.runtime);
+        let next = new.snapshot_at(&none, 3_000);
+        assert_eq!((next.revision, &next.runtime), (2, &first.runtime));
+        // Through the app as the window gets it; a runtime before #772 names none.
+        assert_eq!(UsageSnapshot::from_runtime(serde_json::to_value(&next).unwrap()).unwrap().runtime, first.runtime);
+        let before_772 = json!({"revision": 9_000, "claudeAccount": null, "windows": [], "claude": {}, "codexRefresh": {}});
+        assert_eq!(UsageSnapshot::from_runtime(before_772).unwrap().runtime, None);
+    }
+
+    /// #772: a Codex window past its reset is expired as Claude's is, at its
+    /// last percentage, however recently it arrived.
+    #[test]
+    fn a_codex_window_past_its_reset_is_stale_without_inventing_zero() {
+        let store = UsageStore::default();
+        let running = HashSet::from(["codex".to_string()]);
+        let reset = 1_788_757_220_000;
+        finish_codex_refresh(&mut store.inner.lock().unwrap(), Ok(codex_sample(100)), reset - MINUTE).unwrap();
+        let before = store.snapshot_at(&running, reset - 1);
+        assert_eq!((before.windows[0].used_percent, before.windows[0].stale), (100.0, false));
+        let after = store.snapshot_at(&running, reset);
+        assert_eq!((after.windows[0].used_percent, after.windows[0].stale), (100.0, true));
     }
 
     #[test]

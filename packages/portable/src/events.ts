@@ -53,6 +53,8 @@ export interface ToolResult {
   structured?: unknown;
   exitCode?: number;
   images?: ImageRef[];
+  /** The agent's own safety check that held the call for a person, and what became of it: "Approved past Claude's dangerous-removal check" (#775). */
+  safetyCheck?: string;
 }
 
 export interface Usage {
@@ -179,7 +181,10 @@ export type Payload =
       /** Provider session directory; a tool's explicit workdir may differ. */
       cwd?: string;
       title?: string;
+      /** The agent's own words about the call. Never why the card is up. */
       description?: string;
+      /** Why the card is up, in TerminalX's words: in bypass mode, Claude Code's own safety check (#775). */
+      reason?: string;
       options: PermissionOption[];
     }
   | { type: "questions_asked"; requestId: string; toolUseId: string; questions: Question[] }
