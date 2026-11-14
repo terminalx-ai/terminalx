@@ -1,6 +1,6 @@
 //! Running audio through a local model. Loading takes seconds and hundreds of
 //! megabytes, so the loaded model is kept between dictations and only let go
-//! when the selection changes or the weights are deleted.
+//! when the selection changes, the weights are deleted, or the app exits.
 //!
 //! A dictation holds its own handle to the model while it runs, so letting go
 //! here never pulls the weights out from under one. `transcribe-cpp`

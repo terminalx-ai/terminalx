@@ -1154,6 +1154,7 @@ pub fn run() {
                 #[cfg(feature = "desktop")]
                 commands::shutdown_codex_sign_in();
                 let state = app.state::<AppState>();
+                state.dictation.shutdown(&state.transcription.engine);
                 state.stats_usage.shutdown();
                 // Cmd+Q/relaunch need not destroy a window first. Close the
                 // agent PTYs here too so their MCP pipes receive EOF, just as
