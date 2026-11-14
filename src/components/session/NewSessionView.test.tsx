@@ -430,6 +430,20 @@ it("opening the main window preserves an unsent initial prompt in the source vie
 });
 
 describe("one new-chat composer (PRO-173)", () => {
+  it.each([false, true])("hides ready agent diagnostics and paths while retaining signed-in feedback (quick=%s)", async (quick) => {
+    const path = "/Users/example/.local/bin/claude";
+    store.harnesses = [{ ...harness, path }];
+    render(<NewSessionView quick={quick} />);
+    // The executable path is also absent while the initial check is pending.
+    expect(screen.queryByText(path)).toBeNull();
+    await screen.findByText("Claude signed in");
+    expect(screen.queryByRole("region", { name: "Claude setup" })).toBeNull();
+    expect(screen.queryByText("Ready · local login found")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+    expect(screen.queryByText(path)).toBeNull();
+    expect(screen.getByRole("textbox")).toBeTruthy();
+  });
+
   it("updates setup and enables the installed agent after returning from Terminal without Check again (PRO-170)", async () => {
     store.harnesses = [{ ...harness, id: "codex", name: "Codex", available: false }];
     let readiness = "missing";
@@ -448,7 +462,8 @@ describe("one new-chat composer (PRO-173)", () => {
 
     readiness = "ready";
     act(() => window.dispatchEvent(new Event("focus")));
-    await screen.findByText("Ready · local login found");
+    await screen.findByText("Codex signed in");
+    expect(screen.queryByRole("region", { name: "Codex setup" })).toBeNull();
     expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass");
     expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this draft");
@@ -474,7 +489,7 @@ describe("one new-chat composer (PRO-173)", () => {
     store.newSessionPreset = { projectPath: "/repos/removed", cwd: "/repos/removed/worktrees/task" };
     renderView();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue the task" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(false));
+    await screen.findByText("Claude signed in");
     expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
     expect(screen.queryByRole("button", { name: project.name })).toBeNull();
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", metaKey: true });
@@ -548,7 +563,7 @@ describe("one new-chat composer (PRO-173)", () => {
     const original = invoke.getMockImplementation()!;
     invoke.mockImplementation((command, args) => command === "preview_workspace_name" ? Promise.resolve("login-work") : original(command, args));
     const { onCreated } = renderView();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Check again" }).hasAttribute("disabled")).toBe(false));
+    await screen.findByText("Claude signed in");
     expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix login" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
