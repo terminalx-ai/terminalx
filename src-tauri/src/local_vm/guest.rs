@@ -2059,14 +2059,22 @@ fn worker(task: &Task) -> Result<(String, String)> {
     ))
 }
 
+/// Records an event, within the per-task budget the host keeps too
+/// (`journal::MAX_TASK_EVENTS`): past it the event is counted, not kept, so a
+/// task's history cannot grow this state, written on every tick, without
+/// bound (review 2). The sequence still moves, so the host sees the gap.
 fn event(task: &mut Task, payload: Value) {
     task.last_event_seq += 1;
     task.updated_at = now();
-    task.events.push(TaskEvent {
-        seq: task.last_event_seq,
-        timestamp: task.updated_at.clone(),
-        payload,
-    });
+    let event = TaskEvent { seq: task.last_event_seq, timestamp: task.updated_at.clone(), payload };
+    let size = serde_json::to_vec(&event).map_or(u64::MAX, |bytes| bytes.len() as u64);
+    if task.events_dropped == 0 && task.events.len() < super::journal::MAX_TASK_EVENTS
+        && task.event_bytes.saturating_add(size) <= super::journal::MAX_TASK_EVENT_BYTES {
+        task.event_bytes += size;
+        task.events.push(event);
+    } else {
+        task.events_dropped += 1;
+    }
 }
 
 fn unknown(record: &mut Record, detail: &str) {
@@ -2223,7 +2231,8 @@ fn page(task: &Task, after: u64) -> Result<Task> {
         }
         expected += 1;
     }
-    if task.last_event_seq != expected - 1 {
+    let retained_last = expected - 1;
+    if task.last_event_seq != retained_last + task.events_dropped {
         bail!("Guest event cursor differs from retained history");
     }
     let mut result = task.clone();
@@ -2238,6 +2247,10 @@ fn page(task: &Task, after: u64) -> Result<Task> {
         result.events.push(ev.clone());
     }
     result.last_event_seq = result.events.last().map_or(after, |e| e.seq);
+    // Every kept event is sent: those the budget did not keep are passed over.
+    if task.events_dropped > 0 && result.last_event_seq >= retained_last {
+        result.last_event_seq = task.last_event_seq;
+    }
     if result.last_event_seq < task.last_event_seq {
         result.status = if task.status == TaskStatus::OutcomeUnknown {
             TaskStatus::OutcomeUnknown
@@ -4691,6 +4704,29 @@ mod tests {
         seed(&guest, unconfirmed);
         let unknown: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
         assert_eq!(unknown.status, TaskStatus::OutcomeUnknown);
+    }
+
+    /// Review 2: the guest kept every event forever, until its state grew past
+    /// its bound and the runtime would not start.
+    #[test]
+    fn guest_history_keeps_the_budget_and_pages_past_what_it_did_not_keep() {
+        let (_home, _guest, mut task) = setup();
+        task.events.clear();
+        task.last_event_seq = 0;
+        let max = super::super::journal::MAX_TASK_EVENTS as u64;
+        for _ in 0..max + 5 {
+            event(&mut task, json!({"progress":"x"}));
+        }
+        assert_eq!((task.events.len() as u64, task.events_dropped, task.last_event_seq), (max, 5, max + 5));
+        let first = page(&task, 0).unwrap();
+        assert_eq!(first.events.len(), 256);
+        assert_eq!(first.last_event_seq, 256);
+        let last_kept = page(&task, max - 1).unwrap();
+        assert_eq!(last_kept.events.len(), 1);
+        assert_eq!(last_kept.last_event_seq, max + 5, "past the last kept event to the cursor");
+        let past = page(&task, max).unwrap();
+        assert!(past.events.is_empty());
+        assert_eq!((past.last_event_seq, past.events_dropped), (max + 5, 5));
     }
 
     /// Review 2: a retention that failed was retried on every tick, forever,

@@ -464,12 +464,14 @@ impl Journal {
     }
 
     pub fn append(&self, target: &TaskTarget, event: TaskEvent) -> Result<Task> {
-        self.append_all(target, std::slice::from_ref(&event)).map(|(task, _)| task)
+        self.append_all(target, std::slice::from_ref(&event), None).map(|(task, _)| task)
     }
 
     /// A page of guest events, in one transaction rather than one per event.
+    /// `skipped_through` is the guest's cursor when it reports events it did
+    /// not keep itself: those up to it are counted as not kept here as well.
     /// Returns the task, and whether this page first went past the budget.
-    pub fn append_all(&self, target: &TaskTarget, events: &[TaskEvent]) -> Result<(Task, bool)> {
+    pub fn append_all(&self, target: &TaskTarget, events: &[TaskEvent], skipped_through: Option<u64>) -> Result<(Task, bool)> {
         self.transaction(|state| {
             let task = bound(state, target)?;
             let within = task.events_dropped == 0;
@@ -494,6 +496,11 @@ impl Journal {
                 } else {
                     task.events_dropped += 1;
                 }
+                task.updated_at = now();
+            }
+            if let Some(through) = skipped_through.filter(|through| *through > task.last_event_seq) {
+                task.events_dropped += through - task.last_event_seq;
+                task.last_event_seq = through;
                 task.updated_at = now();
             }
             Ok((task.clone(), within && task.events_dropped > 0))
@@ -860,21 +867,31 @@ mod tests {
         let task = journal.submit("bounded", input.clone()).unwrap();
         let event = |seq: u64, bytes: usize| TaskEvent { seq, timestamp: now(), payload: serde_json::json!({"text":"x".repeat(bytes)}) };
         let page: Vec<_> = (1..=MAX_TASK_EVENTS as u64).map(|seq| event(seq, 8)).collect();
-        let (kept, over) = journal.append_all(&task.target, &page).unwrap();
+        let (kept, over) = journal.append_all(&task.target, &page, None).unwrap();
         assert!(!over);
         assert_eq!(kept.events.len(), MAX_TASK_EVENTS);
         let next = MAX_TASK_EVENTS as u64 + 1;
-        let (kept, over) = journal.append_all(&task.target, &[event(next, 8), event(next + 1, 8)]).unwrap();
+        let (kept, over) = journal.append_all(&task.target, &[event(next, 8), event(next + 1, 8)], None).unwrap();
         assert!(over, "the first page past the budget says so");
         assert_eq!((kept.events.len(), kept.events_dropped, kept.last_event_seq), (MAX_TASK_EVENTS, 2, next + 1));
-        let (kept, over) = journal.append_all(&task.target, &[event(next + 1, 8), event(next + 2, 8)]).unwrap();
+        let (kept, over) = journal.append_all(&task.target, &[event(next + 1, 8), event(next + 2, 8)], None).unwrap();
         assert!(!over, "only once");
         assert_eq!((kept.events_dropped, kept.last_event_seq), (3, next + 2), "a resent dropped event is not compared");
+        // Events the guest itself did not keep are counted here too, and stop the task.
+        let fresh = {
+            journal.transaction(|state| { state.tasks.values_mut().for_each(|t| t.status = TaskStatus::Completed); Ok(()) }).unwrap();
+            journal.submit("guest-gap", input.clone()).unwrap()
+        };
+        journal.append_all(&fresh.target, &[event(1, 8)], None).unwrap();
+        let (kept, over) = journal.append_all(&fresh.target, &[], Some(9)).unwrap();
+        assert!(over);
+        assert_eq!((kept.events.len(), kept.events_dropped, kept.last_event_seq), (1, 8, 9));
+        assert!(journal.append_all(&fresh.target, &[event(11, 8)], None).is_err(), "a gap the guest does not report is refused");
         // The byte budget holds as well as the count.
         journal.transaction(|state| { state.tasks.values_mut().for_each(|t| t.status = TaskStatus::Completed); Ok(()) }).unwrap();
         let other = journal.submit("bytes", input).unwrap();
         let big = (MAX_TASK_EVENT_BYTES / 4) as usize;
-        let (kept, over) = journal.append_all(&other.target, &(1..=5).map(|seq| event(seq, big)).collect::<Vec<_>>()).unwrap();
+        let (kept, over) = journal.append_all(&other.target, &(1..=5).map(|seq| event(seq, big)).collect::<Vec<_>>(), None).unwrap();
         assert!(over);
         assert_eq!((kept.events.len(), kept.events_dropped), (3, 2));
         assert!(kept.event_bytes <= MAX_TASK_EVENT_BYTES);

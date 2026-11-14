@@ -612,7 +612,8 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     {
         bail!("Guest task identity changed; possible snapshot rollback. No prompt was replayed");
     }
-    let (_, over_budget) = journal.append_all(&task.target, &guest.events)?;
+    let skipped = (guest.events_dropped > 0).then_some(guest.last_event_seq);
+    let (_, over_budget) = journal.append_all(&task.target, &guest.events, skipped)?;
     if over_budget {
         // Past what the host keeps of a task: its worker is stopped, and its
         // history stays as kept. Later events still bring its status.
