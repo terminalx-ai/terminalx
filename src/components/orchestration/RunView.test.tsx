@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   selectSession: vi.fn(),
+  setActiveTab: vi.fn(async () => {}),
   openFile: vi.fn(),
   /** The sessions the store holds: a run's workers, with what they have cost. */
   sessions: [] as SessionEntry[],
@@ -23,6 +24,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openFile }));
 vi.mock("@/lib/sessions", () => ({
   selectSession: mocks.selectSession,
+  setActiveTab: mocks.setActiveTab,
   useSessionStore: () => ({ sessions: mocks.sessions }),
   conversationTitle: (entry: SessionEntry) => entry.title,
 }));
@@ -64,6 +66,7 @@ beforeEach(() => {
   resetRunsForTests();
   mocks.listeners.clear();
   mocks.selectSession.mockReset();
+  mocks.setActiveTab.mockClear();
   mocks.openFile.mockReset();
   mocks.sessions = [];
   answers = { list_models: models, orchestrator_limits: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions" } };
@@ -605,6 +608,23 @@ describe("checking a result before it is accepted (PRO-278)", () => {
     expect(within(detail()).queryByTestId("piece-review")).toBeNull();
   });
 
+  it("shows a resumable verifier wait as needing attention and keeps its conversation accessible", async () => {
+    const run = checked();
+    const verifier = run.pieces.find((piece) => piece.id === "pipeline")!.tries![0].verification!.review!.verifiers[0];
+    verifier.waiting = "Open its conversation to answer the permission request.";
+    await open(run);
+    expect(within(row("pipeline")).getByTestId("piece-report").textContent).toBe("Verifier needs you: open its conversation");
+    fireEvent.click(within(row("pipeline")).getByRole("button", { name: "Move pipeline code" }));
+    const review = within(detail()).getByTestId("piece-review");
+    expect(review.textContent).toContain("Verifierneeds you");
+    expect(review.textContent).toContain(verifier.waiting);
+    expect(review.querySelector("[data-verdict]")?.getAttribute("data-verdict")).toBe("waiting");
+    expect(gates().review).toBe("running");
+    fireEvent.click(within(review).getByRole("button", { name: "Open" }));
+    expect(mocks.selectSession).toHaveBeenCalledWith("w-pipeline");
+    expect(mocks.setActiveTab).toHaveBeenCalledWith("w-pipeline", "v1");
+  });
+
   it("shows a verifier at work and a verifier's pass, with why it was asked and what it used", async () => {
     await open(checked());
     fireEvent.click(within(row("pipeline")).getByRole("button", { name: "Move pipeline code" }));
@@ -616,6 +636,7 @@ describe("checking a result before it is accepted (PRO-278)", () => {
     // Its conversation is a tab of the worker's session.
     fireEvent.click(within(review).getByRole("button", { name: "Open" }));
     expect(mocks.selectSession).toHaveBeenCalledWith("w-pipeline");
+    expect(mocks.setActiveTab).toHaveBeenCalledWith("w-pipeline", "v1");
 
     fireEvent.click(within(row("guide")).getByRole("button", { name: "Write the guide" }));
     review = within(detail()).getByTestId("piece-review");

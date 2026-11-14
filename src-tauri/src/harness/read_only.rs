@@ -159,7 +159,13 @@ pub fn execution_input(input: &Value) -> Value {
 /// xtrace prompt or DEBUG trap (PRO-330). TerminalX runs the vetted programs
 /// itself instead (`Approved::run`) and answers the hook with the result.
 pub fn approved(tool: &str, input: &Value, cwd: Option<&str>) -> Option<Approved> {
-    approved_in(tool, input, cwd, &Execution::owner())
+    vetted(tool, input, cwd).ok()
+}
+
+/// A refusal is policy/context validation, never a command's exit status.
+/// Keep the reason through the verifier hook so the model can choose a file tool.
+pub fn vetted(tool: &str, input: &Value, cwd: Option<&str>) -> Result<Approved, String> {
+    vetted_in(tool, input, cwd, &Execution::owner())
 }
 
 /// Git propagates -c settings to its own subprocesses. In addition to
@@ -180,16 +186,26 @@ const GIT_OPTIONS: [&str; 12] = [
     "log.showSignature=false",
 ];
 
+#[cfg(test)]
 fn approved_in(
     tool: &str,
     input: &Value,
     cwd: Option<&str>,
     execution: &Execution,
 ) -> Option<Approved> {
+    vetted_in(tool, input, cwd, execution).ok()
+}
+
+fn vetted_in(
+    tool: &str,
+    input: &Value,
+    cwd: Option<&str>,
+    execution: &Execution,
+) -> Result<Approved, String> {
     // The executor uses Unix process groups and signals. Other platforms
     // continue to ask until they have an equivalent controlled executor.
     if !cfg!(unix) {
-        return None;
+        return Err("controlled read-only execution is available only on Unix".into());
     }
     if !input.as_object().is_some_and(|input| {
         input.keys().all(|key| {
@@ -210,29 +226,30 @@ fn approved_in(
             )
         })
     }) {
-        return None;
+        return Err("unsupported execution arguments; use a plain command with an absolute workdir, without a custom shell, environment or permission override".into());
     }
-    let cwd = cwd.filter(|cwd| Path::new(cwd).is_absolute())?;
-    let commands = parse(command(tool, input)?)?;
+    let cwd = cwd.filter(|cwd| Path::new(cwd).is_absolute()).ok_or("no verifiable absolute execution directory; supply an absolute workdir")?;
+    let source = command(tool, input).ok_or("unsupported shell tool or execution override; use Read, Grep or Glob")?;
+    let commands = parse(source).ok_or("unsupported shell syntax: redirects, substitutions, expansions and unsafe compounds are not permitted; use literal paths and quote search patterns, or use Read/Grep/Glob")?;
     // Inspect and run in this one directory, even if its path is replaced.
-    let handle = exec::open_directory(Path::new(cwd))?;
+    let handle = exec::open_directory(Path::new(cwd)).ok_or("the execution directory cannot be opened; use an existing absolute workdir or Read/Grep/Glob")?;
     let mut lists = Vec::new();
     let mut pipeline = Vec::new();
     let mut join = Join::Then;
     for command in commands {
         if !safe_command(&command.words) {
-            return None;
+            return Err(format!("unsupported program or options for `{}`; supported examples: `grep -rnE 'PATTERN' src`, `grep -n 'PATTERN' file | head -n 20`, `sed -n '41,60p' file`. sed accepts only -n with a numeric print address; use Read with offset/limit for other slices, or Grep/Glob", command.words[0]));
         }
         let name = &command.words[0];
         // Use the same trusted directories as agent launches, including known
         // developer install directories when Finder supplied a minimal PATH,
         // but never the shell fallback: it would run the user's startup files.
-        let binary = crate::binpath::find(name)?;
+        let binary = crate::binpath::find(name).ok_or_else(|| format!("read-only executable `{name}` was not found in trusted executable directories; use Read/Grep/Glob"))?;
         if !binary.is_absolute() {
-            return None;
+            return Err(format!("`{name}` did not resolve to an absolute executable; use Read/Grep/Glob"));
         }
         if name == "git" && !git_config_is_read_only(&binary, &handle, execution) {
-            return None;
+            return Err("Git repository/configuration could not be verified read-only (helpers, submodules, fetch or unreadable configuration); use Read/Grep/Glob or the supplied diff".into());
         }
         let mut argv = vec![std::ffi::OsString::from(binary)];
         if name == "rg" {
@@ -253,9 +270,9 @@ fn approved_in(
         }
     }
     if !pipeline.is_empty() {
-        return None;
+        return Err("unfinished pipeline; use complete read-only commands or Read/Grep/Glob".into());
     }
-    Some(Approved::new(cwd.into(), handle, lists, execution.env.clone(), input))
+    Ok(Approved::new(cwd.into(), handle, lists, execution.env.clone(), input))
 }
 
 /// A path to `name` in `dir` that a startup file cannot have predefined as a
@@ -526,6 +543,28 @@ fn safe_command(words: &[String]) -> bool {
                 "--binary-files",
             ],
         ),
+        "head" => OptionSpec {
+            flags: "qv",
+            numeric_values: "nc",
+            ..Default::default()
+        }
+        .accepts(args),
+        // No general sed scripts, -e/-f, in-place editing, read/write/execute
+        // commands or option-like filenames. Only numeric line printing.
+        "sed" => {
+            args.len() >= 3
+                && args[0] == "-n"
+                && args[1].strip_suffix('p').is_some_and(|address| {
+                    let parts: Vec<_> = address.split(',').collect();
+                    (1..=2).contains(&parts.len())
+                        && parts.iter().all(|part| {
+                            !part.is_empty()
+                                && part.bytes().all(|c| c.is_ascii_digit())
+                                && part.parse::<u64>().is_ok_and(|n| n > 0)
+                        })
+                })
+                && args[2..].iter().all(|file| !file.starts_with('-'))
+        }
         "git" => git_args(args),
         _ => false,
     }
@@ -844,6 +883,57 @@ mod tests {
             "env cat file",
             "/tmp/ls",
             "LS=x ls",
+        ] {
+            assert!(!syntax_allows(source), "{source}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn vetting_refusals_name_the_failed_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str();
+        let reason = |input: Value, cwd| vetted("Bash", &input, cwd).unwrap_err();
+        assert!(reason(serde_json::json!({"command":"cat file"}), None).contains("absolute execution directory"));
+        assert!(reason(serde_json::json!({"command":"cat file", "shell":"/bin/sh"}), cwd).contains("unsupported execution arguments"));
+        assert!(reason(serde_json::json!({"command":"cat file", "sandbox_permissions":"require_escalated"}), cwd).contains("execution override"));
+        assert!(reason(serde_json::json!({"command":"cat file > out"}), cwd).contains("unsupported shell syntax"));
+        assert!(reason(serde_json::json!({"command":"sed -n '1w out' file"}), cwd).contains("numeric print address"));
+        assert!(reason(serde_json::json!({"command":"cat file"}), Some("/nonexistent/terminalx-vetting-directory")).contains("directory cannot be opened"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ripgrep_lookup_uses_trusted_directories_or_returns_an_alternative() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = vetted("Bash", &serde_json::json!({"command":"rg --files"}), dir.path().to_str());
+        if crate::binpath::find("rg").is_some() {
+            assert!(result.is_ok());
+        } else {
+            let reason = result.unwrap_err();
+            assert!(reason.contains("`rg`") && reason.contains("trusted executable directories") && reason.contains("Read/Grep/Glob"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn verifier_line_lookups_accept_only_reading_stages() {
+        for source in [
+            "grep -n PATTERN file | head",
+            "grep -rnE 'PATTERN' src",
+            "sed -n 60p file",
+            "sed -n 41p file; sed -n 60p file",
+            "sed -n '41,60p' file",
+            "head -n 20 file",
+        ] {
+            assert!(syntax_allows(source), "{source}");
+        }
+        for source in [
+            "sed -i s/a/b/ file", "sed -n '1w out' file",
+            "sed -n '1e touch out' file", "sed -n '1p;w out' file",
+            "sed -n 1p --file=script", "sed -n 1p -i",
+            "sed -n 1p file; touch out", "grep a file | tee out | head",
+            "head -n 1 file > out", "head -n $(touch out) file",
+            "head -n 1 file && rm file", "head --output=out file",
         ] {
             assert!(!syntax_allows(source), "{source}");
         }

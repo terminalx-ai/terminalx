@@ -7331,10 +7331,27 @@ impl SessionManager {
             );
             self.apply(&mut rt, payload, None);
         }
+        let verifier_permission = gate == "PermissionRequest" && {
+            let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
+            crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
+        };
         let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner };
         // Teardown or a settings restart may replace this CLI while the hook
         // waits. An answer for that old launch cannot start the new one's work.
-        self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
+        let mut reply = self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)));
+        // A provider permission refusal is separate from verifier policy and
+        // from an executed command's nonzero exit. Preserve that distinction
+        // in the hook answer the model receives, not just the chat's error row.
+        if verifier_permission {
+            if let Some(output) = reply.output.as_mut() {
+                let decision = &mut output["hookSpecificOutput"]["decision"];
+                if decision["behavior"] == "deny" {
+                    let reason = decision["message"].as_str().unwrap_or("Permission denied.");
+                    decision["message"] = serde_json::json!(format!("{reason} Provider permission was not granted for this verifier call; it did not run. Use Read, Grep or Glob on permitted worktree files, or judge the supplied diff. An allowance for one outside-worktree Read does not grant other tools or commands access."));
+                }
+            }
+        }
+        reply
     }
 
     /// TerminalX runs an approved discovery command's programs itself,
@@ -7383,7 +7400,11 @@ impl SessionManager {
             }
         }
         let Some(ran) = ran else { return unanswered() };
-        let report = ran.report();
+        let mut report = ran.report();
+        if ran.status != 0 {
+            let at = report.find("\n\nOutput").unwrap_or(report.len());
+            report.insert_str(at, "\nThis is the vetted executor's result, rather than a verifier policy refusal or provider permission denial. Search exit status 1 can mean no matches. Review the output; use Read, Grep or Glob on permitted files for another lookup.");
+        }
         let output = match (kind, answering) {
             // The same `PreToolUse` denial carries the result for both agents. Claude Code
             // ignores an answer in another hook's form ("Hook returned incorrect event name").
