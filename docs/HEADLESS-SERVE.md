@@ -5,6 +5,11 @@ replaces it with the current Rust backend, built without Tauri. It runs the same
 harnesses (Claude/Codex PTY-first), hooks socket, control socket, transcript store and
 git/worktree code as the desktop app, with no WebView, GTK or audio libraries (PRO-42).
 
+The same runtime is also the host when another TerminalX desktop operates this computer
+(a Mac mini, a headless server). [MACHINES.md](MACHINES.md) records how: one connection per
+machine through the additive `machine/1` namespace, the host endpoint in the runtime, and
+which workspace methods a machine connection is served.
+
 ## How it is built
 
 - `src-tauri` has a default `desktop` feature. It enables Tauri, its plugins,
