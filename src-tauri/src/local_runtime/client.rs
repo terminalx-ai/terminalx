@@ -211,7 +211,7 @@ mod local_vm_tests {
     #[test]
     fn older_owner_cannot_receive_guided_create_setup_or_actions() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),local_vm_onboarding:capability});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),local_vm_onboarding:capability});
             let sessions=super::super::sessions::Sessions::new(client);
             for method in ["environment.create","environment.setup","environment.setupReadiness","environment.setupAction","environment.setupAuth"] {
                 let error=sessions.local_vm(method,json!({"confirm":true})).unwrap_err().to_string();
@@ -223,7 +223,7 @@ mod local_vm_tests {
     #[test]
     fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
         for protocol in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:protocol,local_vm_reconciliation:None,local_vm_onboarding:None});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:protocol,local_vm_reconciliation:None,local_vm_onboarding:None});
             let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
             assert!(error.contains("no operation was sent"),"{error}");
             assert!(!error.contains("connect to the local runtime"));
@@ -232,7 +232,7 @@ mod local_vm_tests {
     #[test]
     fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:capability,local_vm_onboarding:None});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:capability,local_vm_onboarding:None});
             let sessions=super::super::sessions::Sessions::new(client);
             for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
                 let error=sessions.local_vm(method,params).unwrap_err().to_string();
