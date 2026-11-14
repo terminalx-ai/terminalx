@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+## 0.2.32
+
+- Attach any file to a message (up to 10), and open attached files from the
+  chat in their own tab with preview, source and copy. (PRO-290, #946)
+- Stage and unstage changes by file and hunk in the Repository view, and
+  generate commit messages from the staged diff. (PRO-266, #927)
+- Resolve merge conflicts in the app, one conflict at a time or with the
+  agent. (PRO-293, #922)
+- Link an open pull request to a session, even one on another branch, so its
+  checks and review show in the Branch tab. (PRO-294, #919)
+- Show GitHub review threads inline in the diff, list them in the Checks
+  panel, and send one or all of them to the agent. (PRO-234, #943)
+- Run a project's saved actions from the workspace header, ⌘R or ⌘K, start
+  "Run after setup" actions once per workspace, and open preview URLs in a
+  TerminalX browser tab. (PRO-363, PRO-155, #943, #931)
+- Open file (⌘P) lists recent and changed files first and offers to search
+  inside files or include ignored files when nothing matches; All files can
+  be filtered. (PRO-298, PRO-296, #940, #931)
+- Add view options to the file tab: wrap lines, show whitespace, copy the
+  whole file and download it. (PRO-297, #942)
+- Search settings from Settings and ⌘K, and copy a link to any setting.
+  (PRO-127, #920)
+- Per-project settings: the Projects group with General, Environment,
+  Actions, Preview URLs and Scripts pages; a project can check out only
+  chosen folders in new workspaces; setup and archive scripts resolve through
+  layered configuration, and an archive script runs before a workspace is
+  removed. (PRO-131, PRO-144, PRO-307, PRO-149, #943, #931, #928, #929)
+- Confirm a phone pairing by comparing a fingerprint on the Mac and the
+  phone, and show how each paired device is connected. (PRO-314, #923)
+- Resetting a chat to a turn can also restore the worktree to that turn.
+  (PRO-261, #931)
+- Drag sessions into, between and out of sidebar sections, and reorder
+  sections. (PRO-174, #931)
+- Clearer errors: a copyable error toast, a notice when notifications are
+  off, an empty model list with Retry, failed tab opens and closes, pull
+  request panel errors, a rename on a detached HEAD and a failed
+  comparison-branch switch. (PRO-326, PRO-327, PRO-292, PRO-291, PRO-207,
+  PRO-295, #915, #931, #941)
+- Whole-word search in files and replace, and short deterministic names for
+  sessions started from a long prompt. (PRO-299, PRO-333, #915)
+- Make text readable over panels: opaque overlays in glass mode, respect
+  macOS Reduce transparency, and raise faint text contrast. (PRO-336, #910)
+- Completed automation runs can archive their session. (#912)
+- When agents may control cloud workspaces, they can stop one without the
+  approval dialog. (#951)
+- Sessions an orchestration run starts (workers, verifiers) no longer play
+  the attention chime; personal sessions and the run's lead still do. (#950)
+- Attention sounds release the audio output after the last note instead of
+  keeping it open after the first chime. (#952)
+- Applying a comparison change keeps a scope picked during its branch check,
+  and worktrees detached at the same commit get a sidebar row each, so
+  Create a branch here and Rename act on the chosen worktree. (PRO-367, #949)
+- An issue pipeline no longer stops with "reviewer still asks for changes"
+  when main is merged in after the final approving review. (#954)
+- Orchestration runs (Experimental): orchestrate an issue from its page,
+  set budgets to No limit, act on blocked pieces, read workers' reports,
+  set tries and effort ceilings, open the run view with ⌘⇧O, name retries by
+  their piece and stop workers when a run ends. (PRO-269, PRO-337, PRO-335,
+  PRO-361, PRO-362, PRO-364, #911, #913, #909, #921, #936, #937)
+- Linux terminal supervisor follow-ups: stop escalation as callers ask, and
+  review fixes; macOS keeps its existing stop behaviour. (#467, #935, #939,
+  #945)
+- The settings watcher reports a change only once the file holds still.
+  (#918)
 - On Linux, give every terminal and terminal agent a supervisor of its own
   that owns all its processes, including jobs that leave the shell's session
   or outlive the shell. Stop is confirmed only once none is left. Supervised

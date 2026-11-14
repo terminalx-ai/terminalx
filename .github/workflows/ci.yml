@@ -96,10 +96,9 @@ jobs:
         run: pnpm build
       - name: Install WebKit for the layout checks
         run: pnpm exec playwright install webkit
+      # scripts/webkit/run-all.mjs runs them several at once, permission-details among them.
       - name: WebKit layout checks
-        run: |
-          pnpm test:webkit-layout
-          node scripts/webkit/permission-details.mjs
+        run: pnpm test:webkit-layout
 
   linux-rust:
     runs-on: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -247,9 +246,30 @@ jobs:
       - name: build the computer-use helper app
         run: node scripts/build-computer-macos.mjs
 
+      # One compiler working on this crate holds over 5 GB, and this runner has
+      # 7 GB. --all-targets and a full cargo test each start two at once (the
+      # library and its test build) and the runner swaps. Each pair of steps
+      # below does the same work one compiler at a time: the second step builds
+      # only what the first did not. The first clippy step names an integration
+      # test because that checks the library as --all-targets will, with the
+      # test-only dependency features on.
+      #
+      # clippy stays ahead of the tests. The first compile after the frontend
+      # changes writes the embedded assets, and the next cargo command then
+      # repeats that one compile: here that is a one-minute check, not the
+      # library's test build.
+      - name: clippy (the library by itself)
+        working-directory: src-tauri
+        run: cargo clippy --locked --test serde_field_naming -- -D warnings
+
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: build the library's tests by themselves
+        if: needs.macos-rust-changes.outputs.required == 'true'
+        working-directory: src-tauri
+        run: cargo test --locked --lib --no-run
 
       - name: cargo test (full macOS suite when selected)
         if: needs.macos-rust-changes.outputs.required == 'true'
@@ -272,6 +292,10 @@ jobs:
   headless-serve:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The tests build unoptimised ([profile.test]). Build the binary the
+      # same way, so they reuse its library instead of compiling it twice.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -360,10 +384,15 @@ jobs:
             ci-v3-desktop-platforms-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
       - name: Build frontend and verify off-macOS helper build is a no-op
         run: pnpm build:computer-macos && pnpm build
+      # On Linux, linux-rust already checks every target (clippy) and runs
+      # these tests in its full suite, and frontend runs every script test:
+      # the three steps marked "not Linux" are for the other platforms.
       - name: Platform build
+        if: runner.os != 'Linux'
         working-directory: src-tauri
         run: cargo check --all-targets
       - name: Computer contract tests
+        if: runner.os != 'Linux'
         working-directory: src-tauri
         run: "cargo test --lib computer::"
       # The local owner path needs no macOS APIs; reuse Linux's build setup.
@@ -384,6 +413,7 @@ jobs:
         working-directory: src-tauri
         run: cargo test --lib named_pipe_serves_authenticated_control_and_hook_frames
       - name: Desktop script input safety tests
+        if: runner.os != 'Linux'
         run: pnpm vitest run scripts/computer-use-modifier-safety.test.mjs scripts/computer-use-mouse-button-routing.test.mjs scripts/computer-use-windows-horizontal-scroll.test.mjs
       - name: Linux render tests
         if: runner.os == 'Linux'

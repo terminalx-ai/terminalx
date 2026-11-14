@@ -20,6 +20,8 @@ import { hasWorkspaceConnection, workspaceConnection, type CloudWorkspace, type 
 import { cloudConnectionInfo, resetCloudConnections, retainCloudConnection } from "./cloudConnections";
 import {
   checkRuntime,
+  operationFailureStands,
+  provisioningFailureKey,
   cleanupStateText,
   dateTimeText,
   deadlineText,
@@ -291,5 +293,36 @@ describe("checkRuntime", () => {
     connectWith("suspended");
     expect(await checkRuntime(workspace("ready"), server("ready"))).toEqual({ kind: "offline" });
     expect(mocks.close).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("resolved operation failures", () => {
+  it.each([
+    [null, "ready"], ["resume", "ready"], ["suspend", "suspended"],
+    ["archive", "archived"], ["delete", "destroyed"],
+  ])("clears %s only when the catalog establishes its target state %s", (action, state) => {
+    const row = { workspace: { state: "attention-required" }, latestOperation: { action, state: "failed" } } as Parameters<typeof operationFailureStands>[0];
+    expect(operationFailureStands(row)).toBe(true);
+    row.workspace.state = state as CloudWorkspace["state"];
+    expect(operationFailureStands(row)).toBe(false);
+  });
+
+  it("keeps unresolved deletes even while the machine is ready and online", () => {
+    expect(operationFailureStands({ workspace: { state: "ready", runtimeActivity: { online: true } }, latestOperation: { action: "delete", state: "failed" } } as Parameters<typeof operationFailureStands>[0])).toBe(true);
+  });
+});
+
+
+describe("recovered provisioning revision", () => {
+  it("ignores only the exact failed create revision and keeps later or lifecycle failures", () => {
+    const row = { workspace: { id: "w", state: "attention-required" }, latestOperation: { id: "create", workspaceId: "w", type: "create", action: null, state: "failed", createdAt: 10, updatedAt: 90, errorCode: "cloud_provider_unavailable" } } as Parameters<typeof operationFailureStands>[0];
+    const key = provisioningFailureKey(row)!;
+    expect(operationFailureStands(row)).toBe(true);
+    expect(operationFailureStands(row, key)).toBe(false);
+    for (const patch of [{ id: "next" }, { updatedAt: 110 }, { action: "delete" }, { action: "suspend" }, { workspaceId: "other" }, { errorCode: "cloud_workspace_provisioning_timeout" }]) {
+      const next = { ...row, latestOperation: { ...row.latestOperation, ...patch } } as typeof row;
+      expect(operationFailureStands(next, key)).toBe(true);
+    }
   });
 });

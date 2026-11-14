@@ -1,5 +1,6 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
+import { continuationWorkspaces, containingWorkspace, continuationDefaultProject, type ContainingWorkspace } from "@/lib/continuation-destination";
 import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
@@ -8,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { agent, api, errorMessage, onPromptDelivery, type DeliveryStage } from "@/lib/api";
-import { continuationPrompt, launchContinuation, moveChatToProject, type ContextMode, type ContinuationContext, type Launched } from "@/lib/continuation";
+import { continuationPrompt, launchContinuation, launchContinuationInDestination, moveChatToProject, type ContextMode, type ContinuationContext, type Launched, type ProjectDestination } from "@/lib/continuation";
 import { loadModels, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
 import { handoffStart, launchSettingsOf, useSessionAgent, type LaunchSettings } from "@/lib/useSessionAgent";
@@ -21,7 +22,7 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
 /**
  * A new agent conversation with the context of an existing one, launched with
  * the same settings controls as New Session. Without `into` it is Continue in
- * New Session: a tab beside the source, in the same workspace. With it, a chat
+ * New Session: a tab in the source workspace, or a session in the chosen project. With it, a chat
  * moves into a project: a new session starts there, and the chat is archived
  * once it has. The settings are this launch's own: what is picked here is not
  * saved as a preference.
@@ -79,18 +80,47 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   ));
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
   const store = useSessionStore();
-  const project = into?.project ?? store.projects.find((project) => project.path === session.projectPath);
+  const [projectChoice, setProjectChoice] = useState<string | null | undefined>(undefined);
+  const [workspaceRevision, setWorkspaceRevision] = useState(0);
+  const projects = into ? [into.project] : store.projects.filter((project) => !project.archived);
+  // Only a quick chat's automatic default needs discovery across projects.
+  // Explicit destinations query that project alone; staying here needs no lookup.
+  const inferProject = !into && !reviewPrompt && session.kind === "quick" && projectChoice === undefined;
+  const explicitProject = into?.project.path ?? (projectChoice !== undefined ? projectChoice : session.kind === "quick" ? null : session.projectPath ?? null);
+  const staysHere = !into && (reviewPrompt || (session.kind === "quick" ? explicitProject === null : explicitProject === (session.projectPath ?? null)));
+  const discoveryProjects = reviewPrompt ? [] : inferProject ? projects : staysHere || !explicitProject ? [] : projects.filter((project) => project.path === explicitProject);
+  const needsDiscovery = discoveryProjects.length > 0;
+  const workspaceKey = JSON.stringify([inferProject, discoveryProjects.map((project) => [project.path, project.kind]), context?.cwd, attempt, workspaceRevision]);
+  const [workspaceState, setWorkspaceState] = useState<{ key: string; workspaces: ContainingWorkspace[]; error?: string }>();
+  useEffect(() => {
+    if (!context || !needsDiscovery) return;
+    let canceled = false;
+    void continuationWorkspaces(discoveryProjects).then(
+      (workspaces) => { if (!canceled) setWorkspaceState({ key: workspaceKey, workspaces }); },
+      (e) => { if (!canceled) setWorkspaceState({ key: workspaceKey, workspaces: [], error: `Could not resolve project workspaces: ${errorMessage(e)}` }); },
+    );
+    return () => { canceled = true; };
+  }, [workspaceKey, needsDiscovery]); // eslint-disable-line react-hooks/exhaustive-deps
+  const discoveryReady = !needsDiscovery || (workspaceState?.key === workspaceKey && !workspaceState.error);
+  const workspaces = workspaceState?.key === workspaceKey ? workspaceState.workspaces : [];
+  const selectedProject = inferProject ? continuationDefaultProject(session, context?.cwd ?? session.cwd, workspaces) : explicitProject;
+  const sameSession = !into && (reviewPrompt || (session.kind === "quick" ? selectedProject === null : selectedProject === (session.projectPath ?? null)));
+  const project = into?.project ?? store.projects.find((project) => project.path === selectedProject);
+  const destinationReady = !!destination || (discoveryReady && (sameSession || selectedProject === null || !!project));
+  const matchingWorkspace = project && context ? containingWorkspace(workspaces, context.cwd, project.path) : undefined;
+  const target = project ? { projectPath: project.path, worktree: !matchingWorkspace && project.kind !== "folder" && worktree, ...(matchingWorkspace ? { cwd: context!.cwd } : {}) } : null;
+  const launchedPlan = useRef<{ sameSession: boolean; target: ProjectDestination | null; settings: LaunchSettings } | undefined>(undefined);
   const pipelines = useIssuePipelines();
   // Continuing here hands this session's pipeline to the new conversation, and
   // an off sent with it is a revocation: the switches start as the pipeline
   // holds them, so leaving them alone changes nothing (#700). A merged one is
   // history and is not handed on; with none, they start at the project's
   // defaults for a session, as automation is not what is being started here.
-  const held = !into ? pipelineForSession(pipelines, session.id) : null;
+  const held = sameSession ? pipelineForSession(pipelines, session.id) : null;
   const carried = held?.role === "author" && held.pipeline.state !== "merged" ? { autoMerge: held.pipeline.autoMerge, resolveConflicts: held.pipeline.resolveConflicts ?? false } : "session";
-  const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
+  const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (!sameSession && (matchingWorkspace ? matchingWorkspace.isMain : !worktree)) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!reviewPrompt && (!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!reviewPrompt && (sameSession || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {
@@ -159,25 +189,33 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   }, [session.id, source.id, attempt, initialHarness, reviewPrompt]);
 
   const start = async () => {
-    if (startingRef.current || !context || !settings || sent) return;
+    if (loading || startingRef.current || !context || !settings || sent || !destinationReady) return;
     startingRef.current = true;
+    const plan = launchedPlan.current ?? { sameSession: !!sameSession, target, settings };
     setStarting(true);
     setDelivering(false);
     setProgress(null);
     setError(null);
     try {
-      const prompt = preparedPrompt.current ?? reviewPrompt ?? continuationPrompt(context, mode, into?.project.path);
+      let prompt = preparedPrompt.current ?? reviewPrompt ?? continuationPrompt(context, mode, into && !matchingWorkspace ? into.project.path : undefined);
+      if (!preparedPrompt.current && !reviewPrompt && !into && !sameSession && !matchingWorkspace) {
+        prompt = prompt.replace("Inspect the current workspace, including git status and relevant files. Workspace files are authoritative when they differ from the history. This is the same shared workspace, branch, and uncommitted changes; subsequent edits affect it as usual.",
+          `This is a new destination ${project ? `in the project at ${project.path}` : "in a quick chat"}. Inspect the current working directory before continuing. Files mentioned in the historical source may be in a different workspace; do not assume they are present here.`);
+      }
       preparedPrompt.current = prompt;
       const created = (made: Launched) => {
+        launchedPlan.current = plan;
         launched.current = made;
         if (active.current) setDestination(made);
       };
       const confirming = () => { if (active.current) setDelivering(true); };
       const result = into
-        ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination, confirming)
+        ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, plan.target!, plan.settings, prompt, created, destination, confirming)
+        : !plan.sameSession
+          ? await launchContinuationInDestination(context, plan.target, plan.settings, prompt, created, destination, confirming)
         : reviewPrompt
-          ? await launchContinuation(context, settings, prompt, created, destination, confirming, "review")
-          : await launchContinuation(context, settings, prompt, created, destination, confirming);
+          ? await launchContinuation(context, plan.settings, prompt, created, destination, confirming, "review")
+          : await launchContinuation(context, plan.settings, prompt, created, destination, confirming);
       if (!active.current) {
         if (result.stage !== "delivered") onLateError?.(result.error);
         return;
@@ -235,13 +273,11 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   }[progress ?? "body_written"];
   const canClose = !starting || !!destination;
   const locked = starting || !!destination;
-  const isGit = into?.project.kind !== "folder";
+  const isGit = project?.kind !== "folder";
   return (
     <Dialog open onOpenChange={(open) => { if (!open && canClose) close(); }}>
       <DialogContent width="max-w-[34rem]" className="max-h-[calc(100vh-2rem)] overflow-y-auto p-6" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
-        {/* Only what the reader decides here: which agent picks it up and how much context it carries, both in
-            view; Autopilot, set less often, is folded away. Where it runs and what it came from are the session they are in; the rest is said
-            once, in the line under the title. */}
+        {/* Destination, agent and context stay in view; Autopilot is folded away. */}
         <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">{reviewPrompt ? "Second opinion" : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
@@ -254,7 +290,17 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
           {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
         </p>}
-        {into && (isGit ? (
+        {!into && !reviewPrompt && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
+          Project
+          <select aria-label="Project" className="h-8 rounded-md border bg-background px-2 text-xs" disabled={locked} value={inferProject && !discoveryReady ? "__resolving__" : selectedProject ?? ""} onChange={(event) => { setProjectChoice(event.target.value || null); setWorkspaceRevision((n) => n + 1); setWorktree(false); }}>
+            {inferProject && !discoveryReady && <option disabled value="__resolving__">Choose a project or wait for workspace discovery</option>}
+            <option value="">No project (quick chat)</option>
+            {selectedProject && !projects.some((project) => project.path === selectedProject) && <option value={selectedProject}>{selectedProject}</option>}
+            {projects.map((project) => <option key={project.path} value={project.path}>{project.name}</option>)}
+          </select>
+        </label>}
+        {!reviewPrompt && project && !sameSession && matchingWorkspace && <p className="mt-4 text-xs text-muted-foreground">In the existing workspace: {context?.cwd}</p>}
+        {!reviewPrompt && discoveryReady && project && !sameSession && !matchingWorkspace && (isGit ? (
           <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
             <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
             <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
@@ -308,12 +354,14 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {inInput && <p role="status" className="mt-4 text-sm">{inInput.pressed
           ? `Pressed Enter. Waiting for ${agentName} to take the handoff… If nothing happens, open the new session and check its terminal.`
           : `The handoff is in ${agentName}'s input but has not been sent yet. Press Enter to send it.`}</p>}
+        {!discoveryReady && !(workspaceState?.key === workspaceKey && workspaceState.error) && <p role="status" className="mt-4 text-xs text-muted-foreground">Checking project workspaces…</p>}
+        {needsDiscovery && workspaceState?.key === workspaceKey && workspaceState.error && <p role="alert" className="mt-4 text-sm text-destructive">{workspaceState.error} <Button variant="secondary" onClick={() => setWorkspaceRevision((n) => n + 1)}>Retry</Button></p>}
         {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
         <DialogFooter className="mt-6">
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
           {inInput && <Button disabled={pressing} onClick={() => void pressEnter()}>{pressing ? <><LoaderCircle className="size-4 animate-spin" />Pressing Enter…</> : inInput.pressed ? "Press Enter Again" : "Press Enter"}</Button>}
-          {!sent && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
+          {!sent && <Button disabled={loading || starting || !context || !settings || !destinationReady} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
