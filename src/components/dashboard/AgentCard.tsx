@@ -140,7 +140,8 @@ export function AgentCard({
           )}
         </div>
 
-        <SessionStatus session={session} />
+        {/* A session's card is its detail view: it names the state behind the label too. */}
+        <SessionStatus session={session} detail />
         <Snippet who="You" text={summary?.lastPrompt} icon={<MessageSquare className="size-3" />} />
         {column === "needs" ? (
           <Snippet who={agentName} text={summary?.waitingOn ?? summary?.lastReply} tone="warning" />
@@ -271,7 +272,7 @@ export function CloudAgentCard({
           </span>
         </div>
 
-        <StatusBadge status={detailedStatus(session.rowStatus ?? session)} />
+        <StatusBadge status={detailedStatus(session.rowStatus ?? session)} detail />
         {column === "needs" && <Snippet who={agentName} text={state} tone="warning" />}
         {session.stopped && <Snippet who={agentName} text="Workspace stopped" />}
 

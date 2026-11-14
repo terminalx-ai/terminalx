@@ -1157,6 +1157,8 @@ pub struct SessionManager {
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
     starts: Arc<std::sync::atomic::AtomicU64>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Only callers hold this sender; its last drop wakes and ends the watcher.
+    watcher_lifetime: Option<std::sync::mpsc::Sender<()>>,
     stop_pids: Arc<Mutex<Vec<u32>>>,
     session_stop_pids: Arc<Mutex<HashMap<String, Vec<u32>>>>,
     /// Tabs following their terminal (#437); off until the desktop app asks.
@@ -1542,6 +1544,7 @@ impl SessionManager {
         status: Arc<crate::status::StatusState>,
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
+        let (watcher_lifetime, stop_watching) = std::sync::mpsc::channel();
         let manager = Self {
             row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
@@ -1558,18 +1561,23 @@ impl SessionManager {
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            watcher_lifetime: Some(watcher_lifetime),
             history_downloads: Arc::default(),
             typing: Arc::default(),
             stop_pids: Arc::new(Mutex::new(Vec::new())),
             session_stop_pids: Arc::default(),
             follow: Arc::default(),
         };
-        let watcher = manager.clone();
-        std::thread::spawn(move || loop {
-            // Short, because an unacknowledged prompt is judged here and the
-            // reader is waiting on it; a pass only looks at each tab.
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+        let mut watcher = manager.clone();
+        // The polling copy must not keep its own lifetime alive. In particular,
+        // dropping a test fixture must release its thread and retained state.
+        drop(watcher.watcher_lifetime.take());
+        std::thread::spawn(move || {
+            // Preserve the five-second polling interval, but wake immediately
+            // when every caller has dropped its manager.
+            while matches!(stop_watching.recv_timeout(std::time::Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
+            }
         });
         manager
     }
@@ -1815,6 +1823,37 @@ impl SessionManager {
             "resolveConflicts" => serde_json::to_value(engine::set_resolve_conflicts_by(&host,string("id")?,params["value"].as_bool().context("value is required")?,crate::issue_pipeline::SwitchActor::Person)?)?,
             "act" => serde_json::to_value(engine::act(&host,string("id")?,serde_json::from_value(params["action"].clone())?)?)?,
             _ => anyhow::bail!("unsupported desktop pipeline operation"),
+        })
+    }
+
+    /// What the window asks of orchestration runs (`orchestration`). Approve
+    /// and Edit are here and nowhere in the `terminalx` CLI: the lead runs
+    /// the CLI, and a lead does not approve its own plan.
+    pub(crate) fn orchestration(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        use crate::orchestration::{engine, host::ManagerHost, store};
+        let host = ManagerHost::new(self.sink.clone(), self.clone());
+        let string = |key: &str| params[key].as_str().with_context(|| format!("{key} is required"));
+        // A refusal keeps its code and its particulars: the window shows a refused edit by the piece it names.
+        let refused = |error: engine::EngineError| anyhow!("{}", serde_json::to_string(&error).unwrap_or_else(|_| error.message.clone()));
+        Ok(match method {
+            "forSession" => match store::for_lead(string("sessionId")?)? {
+                Some(run) => engine::shown(&engine::refreshed(&host, &run.id).map_err(refused)?),
+                None => serde_json::Value::Null,
+            },
+            "list" => serde_json::Value::Array(store::list()?.iter().map(engine::shown).collect()),
+            // A plan file a person chose in the session's Run view: checked and stored as the CLI's would be.
+            "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
+            "approve" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
+            }
+            "start" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
+            }
+            "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
+            "updatePlan" => engine::shown(&engine::update_plan(&host, string("id")?, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?).map_err(refused)?),
+            _ => anyhow::bail!("unsupported orchestration operation"),
         })
     }
 
@@ -4724,6 +4763,14 @@ impl SessionManager {
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
         ];
+        // A run's worker never pushes (`orchestration::guard`): every git its
+        // agent starts, in a script as much as on a command line, reads a
+        // configuration that sends a push nowhere. Without it the worker
+        // does not start.
+        if crate::orchestration::guard::limited(entry) {
+            let config = crate::orchestration::guard::git_config(&entry.id, Path::new(&entry.cwd)).context("write the run worker's git configuration")?;
+            env.push(("GIT_CONFIG_GLOBAL".to_string(), config.to_string_lossy().into_owned()));
+        }
         // A fresh secret per launch, per tab: the socket path is inherited by
         // every process the agent starts, so what keeps one tab's hooks from
         // speaking for another is that only this CLI was given this token.
@@ -4737,7 +4784,10 @@ impl SessionManager {
         // snapshot: the variables, the creator's own route for this agent
         // (PRO-18: its model, what its CLI takes on the command line) and
         // Codex's auth file. The tab is told what keeps a route from working.
-        let grant = crate::cloud_grants::launch_grant(&tab.harness, Path::new(&entry.cwd));
+        // On a Mac, the API key saved for the agent in Settings, if it uses
+        // one (`agent_keys`, PRO-306): a tab set to use a key this runtime
+        // does not have is not started on another login.
+        let grant = crate::agent_keys::launch_grant(&tab.harness, Path::new(&entry.cwd))?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
@@ -4763,6 +4813,7 @@ impl SessionManager {
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
         crate::cloud_grants::record_launch(&pane, &grant);
+        crate::agent_keys::record_launch(&pane, &tab.harness, &rt.session_id, &rt.tab_id);
         let mut unset = Vec::new();
         for (name, value) in grant.env {
             match value {
@@ -4888,6 +4939,11 @@ impl SessionManager {
         if let Some(env) = route.map(|route| &route.claude_settings_env).filter(|env| !env.is_empty()) {
             settings["env"] = env.iter().map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone()))).collect::<serde_json::Map<_, _>>().into();
         }
+        // A run's worker is handed its limits at launch (`orchestration::guard`):
+        // deny rules hold in every permission mode, bypass included.
+        if crate::orchestration::guard::limited(entry) {
+            crate::orchestration::guard::claude_settings(&mut settings);
+        }
         // A route that names its model runs on it: the endpoint may serve no
         // model of the tab's name.
         let route_model = route.and_then(|route| route.model.clone());
@@ -5006,6 +5062,12 @@ impl SessionManager {
         let restart = rollout.is_none().then(|| unsent::restart(unsent::said_in(&rt.log_path, tab.follow.conversation.as_deref()), tab.continuation, resume.is_some())).flatten();
         if rollout.is_none() {
             resume = None;
+        }
+        // A run's worker is handed its limits at launch (`orchestration::guard`):
+        // Codex reads a checkout's own rules, and applies them in bypass too.
+        // Without them the worker does not start: bypass is safe only with them.
+        if crate::orchestration::guard::limited(entry) {
+            crate::orchestration::guard::write_codex_rules(Path::new(&entry.cwd)).context("write the run worker's deny rules")?;
         }
         let command = launcher.command(codex::pty::LaunchOptions {
             resume: resume.as_deref(),
@@ -6389,6 +6451,15 @@ impl SessionManager {
         if frame.event == "PreToolUse" && crate::issue_pipeline::admission::check(&frame.session, &frame.tab).is_err() {
             return reply_for(kind, "PreToolUse", Decision::Deny);
         }
+        // A run's worker never pushes, merges or deploys, in any permission
+        // mode: refused here as well as by the rules its agent was launched
+        // with, which match a command by its first words only.
+        if frame.event == "PreToolUse" {
+            if let Some(reason) = crate::orchestration::guard::refusal(&frame.payload).filter(|_| index::get(&frame.session).is_ok_and(|session| crate::orchestration::guard::limited(&session))) {
+                log::info!("run worker {}/{}: {reason}", frame.session, frame.tab);
+                return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+            }
+        }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {
                 self.emit_usage();
@@ -7057,6 +7128,9 @@ impl SessionManager {
         let payload = match payload {
             Payload::TurnCompleted { status, final_text, usage, duration_ms, auth_failed, detail, .. } => {
                 let head = None; // The publication path captures and pins the completed tree.
+                // Occupancy as the turn left it, and the tab's token and cost
+                // totals read again from its agent's transcript (PRO-273),
+                // both off this thread: a long transcript takes a moment.
                 if let Some(u) = &usage {
                     let (s, t) = (rt.session_id.clone(), rt.tab_id.clone());
                     let (cu, cm) = (u.context_used, u.context_max);
@@ -7071,6 +7145,10 @@ impl SessionManager {
                             Ok(())
                         });
                     });
+                }
+                if subagent.is_none() {
+                    let sink = self.sink.clone();
+                    crate::session_usage::schedule(&rt.session_id, &rt.tab_id, move |entry| sink.emit("session_updated", &entry));
                 }
                 let duration_ms = duration_ms.or_else(|| rt.turn_started_at.map(|t| t.elapsed().as_millis() as u64));
                 let auth_failed = auth_failed || (subagent.is_none() && std::mem::take(&mut rt.signed_out_in_turn));
@@ -7236,6 +7314,10 @@ mod idle_tests;
 #[cfg(all(test, unix))]
 #[path = "session_send_tests.rs"]
 mod send_tests;
+
+#[cfg(all(test, unix))]
+#[path = "session_agent_key_tests.rs"]
+mod agent_key_tests;
 
 #[cfg(test)]
 static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

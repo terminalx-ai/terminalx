@@ -99,14 +99,16 @@ describe("the chat list", () => {
     await act(async () => {});
     const [asks, said, alone, quiet] = rows();
     expect(within(asks!).getByTestId("chat-preview").textContent).toBe("web · raccoon/fix-login");
-    expect(within(asks!).getByText("Needs attention")).toBeTruthy();
+    // A mark, not a label: its name is the label.
+    expect(within(asks!).getByRole("img", { name: "Needs you" })).toBeTruthy();
     // What it waits on is still there, on hover.
     expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("fix login\nweb · raccoon/fix-login\nAllow rm -rf dist?");
     expect(within(said!).getByTestId("chat-preview").textContent).toBe("Done: the tests pass and the build is green.");
     expect(within(said!).getByRole("img", { name: "Unread" })).toBeTruthy();
     expect(within(alone!).getByTestId("chat-preview").textContent).toBe("Which file?");
     expect(within(quiet!).getByTestId("chat-preview").textContent).toBe("web · main");
-    expect(within(quiet!).queryByRole("img")).toBeNull();
+    // Only its status mark: nothing unread, nothing waiting.
+    expect(within(quiet!).getAllByRole("img").map((img) => img.getAttribute("aria-label"))).toEqual(["No changes"]);
   });
 
   it("opens a chat on click, and switches back to the project view from the View menu", async () => {

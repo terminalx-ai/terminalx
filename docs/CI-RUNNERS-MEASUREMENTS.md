@@ -1,0 +1,336 @@
+# PRO-267 measurements
+
+## Status on 2026-11-11
+
+The branch now integrates main `7284dbcba023` and its three-job split from
+[#882](https://github.com/terminalx-ai/terminalx/pull/882), merged at
+02:29:20 UTC on November 11. It preserves required names `check`, `frontend`
+and `webkit-layout`, moves the full portable Rust suite to Linux, and reserves
+private-runner selection for protected-main events only. No Hetzner deployment,
+activation or measured PR speedup is claimed.
+
+| Phase | Successful first-attempt PR runs | Whole-run median | Whole-run p90 | Status |
+| --- | ---: | ---: | ---: | --- |
+| Historical unsplit baseline, November 6 | 10 | 59.0 min | 74.1 min | Frozen historical sample, not today's three-job baseline |
+| Main's #882 three-job layout, November 11 | 6 | 52.2 min | 62.3 min | **Incomplete: 6/10**; descriptive only |
+| PRO-267 Linux Rust split | 0 | — | — | **Incomplete: 0/10** at preparation; collect after publication |
+| Hetzner main/nightly pilot | 0 main runs | — | — | Owner prerequisites and activation pending; cannot represent PR acceleration |
+
+The issue's 26-run mixed-event baseline (63-minute median, 76 p90) is a different
+cohort. Do not mix it with these samples or compare heterogeneous cohorts as a
+measured speedup. The November 11 sample contains successful first-attempt PR
+runs started after #882 merged, with all three job names and no `linux-rust` job.
+The raw sanitized observations are in
+[`baseline-three-jobs.json`](../infra/ci-runners/baseline-three-jobs.json).
+The workflow blob on each included PR head matches main exactly: `28f0ae3e08612918769f48b0f92082391f14e47e`.
+Run `42950103996` was excluded after checking its different workflow revision,
+even though its job names matched. A later completed run (`42994223501`)
+matched the workflow and was added in the final refresh. The ten-run acceptance
+criteria remain open.
+
+## Current main's three-job sample (incomplete)
+
+Main three-job layout before PRO-267 (incomplete sample): 6 successful first attempts; durations in minutes.
+
+| Job | Runs | Median | p90 (nearest rank) |
+| --- | ---: | ---: | ---: |
+| Whole run | 6 | 52.2 | 62.3 |
+| check | 6 | 43.3 | 58.5 |
+| desktop-platforms (instabox-medium) | 6 | 9.9 | 12.2 |
+| frontend | 6 | 4.1 | 6.0 |
+| headless-serve | 6 | 5.2 | 6.1 |
+| legacy-runtime-probe (instabox-medium) | 6 | 0.1 | 0.2 |
+| legacy-runtime-probe (macos-latest) | 6 | 0.2 | 0.2 |
+| webkit-layout | 6 | 19.5 | 24.0 |
+
+Samples:
+- [42994223501](https://github.com/terminalx-ai/terminalx/actions/runs/42994223501) · 2026-11-11T09:19:35Z · `71aa466de0c9`
+- [42976833560](https://github.com/terminalx-ai/terminalx/actions/runs/42976833560) · 2026-11-11T07:04:28Z · `cdcd82088080`
+- [42974110579](https://github.com/terminalx-ai/terminalx/actions/runs/42974110579) · 2026-11-11T06:40:44Z · `bf27a131d9d4`
+- [42949051452](https://github.com/terminalx-ai/terminalx/actions/runs/42949051452) · 2026-11-11T02:53:25Z · `1260ee3e4ca5`
+- [42947045989](https://github.com/terminalx-ai/terminalx/actions/runs/42947045989) · 2026-11-11T02:35:20Z · `014d477cd82e`
+- [42946576296](https://github.com/terminalx-ai/terminalx/actions/runs/42946576296) · 2026-11-11T02:31:17Z · `22ea1940251f`
+
+## Method and collection after publication
+
+Whole-run duration is `run_started_at` to the last successful job's
+`completed_at`, including runner queue time. Job duration is `started_at` to
+`completed_at`, including setup and cache post-steps. p90 uses nearest rank
+(`ceil(0.9 * n)`). For six observations p90 is the maximum, which is another
+reason not to treat this small sample as stable. Failed, cancelled and rerun
+attempts are excluded; partial reruns are not independent observations.
+Skipped optional steps are not treated as zero-duration successful suites.
+
+The read-only collector uses `gh api` locally, never in CI. Stored observations
+contain only public run IDs/URLs, commit hashes, timestamps and durations; no
+runner identities, addresses or credentials. Reproduce the historical baseline:
+
+```sh
+python3 infra/ci-runners/timings.py --label 'Historical unsplit PR baseline' \
+  --input infra/ci-runners/baseline.json
+```
+
+Choose a non-overlapping creation-time window in GitHub's `START..END` syntax
+for each phase, then collect:
+
+```sh
+python3 infra/ci-runners/timings.py --label 'PRO-267: GitHub-hosted PR split' \
+  --created "$CI_SAMPLE_WINDOW" --count 10 --output /tmp/ci-step1.json
+```
+
+The collector rejects fewer than ten runs rather than claiming a comparison.
+Inspect each selected run's workflow/jobs: a date window alone can include PRs
+still using the previous layout. Keep only runs with this split. This PR changes
+native Rust/workflow files and therefore selects the full macOS suite; it cannot
+stand in for the faster ordinary-PR cohort. Record whether the macOS test step
+ran within `macos-native`, and compare ordinary and Apple-selected PRs separately.
+
+After owner activation, collect **main pushes separately**, using `--event push`.
+Compare main before/after on the same job mix, cache state and CPU architecture.
+Record cache hit/miss, server CPU type and queue effects. Post the public run
+links and per-job median/p90 in the PR and PRO-267. Local test durations are
+correctness evidence, not CI measurements. Neither a projection nor ten reruns
+of this one PR establishes the intended ten-run comparison.
+
+## Validation after merging current main (2026-11-11)
+
+- Passed: desktop/mobile TypeScript; all 5,392 Vitest tests in 456 files;
+  frontend build. No frontend code changed after these checks.
+- Passed: macOS helper build, all 123 Swift tests and all 18 icon tests.
+- Passed on both macOS and Linux: `cargo clippy --locked --all-targets -- -D
+  warnings`, including the final loader and timestamp-fixture changes.
+- Passed in TerminalX Local VM (Debian 12, ARM64): full default-feature
+  `cargo test --locked`, with **3,371 unit tests and 14 integration tests**;
+  zero failures and the same 17 pre-existing ignored tests. No test filter or
+  feature reduction. The VM had ripgrep and zsh installed, two Cargo build
+  jobs, two Rust test threads and two Tokio worker threads. Unit tests took
+  237.44 seconds; this is not a CI performance observation.
+- Passed on macOS: the merged baseline's full Rust suite, with **3,426 unit
+  tests and 14 integration tests**, the same 24 existing ignored tests, and
+  one Rust test thread. After the Linux-discovered fixes, all 16 approval-wrapper
+  tests, the session-grant directory regression and the cache-rewrite fixture
+  passed again on macOS. The updated full macOS suite is also selected for this
+  PR in CI; a second complete local macOS run is not claimed.
+- Passed: actionlint 1.7.12 and **23** CI policy/selector/measurement tests.
+  Negative fixtures reject unguarded custom runners, mutable actions, token
+  escalation, workflow-wide secret expressions, privileged triggers, broad
+  cache fallbacks, missing aggregate dependencies and missing security tools.
+  The aggregate accepts success and rejects failure, cancellation and skips.
+- Passed: diff whitespace checks and an added-line scan for credential/key/IP
+  patterns. Baseline JSON contains only public run metadata and durations.
+
+The first merged Linux run found four security-test failures: setting an empty
+loader-tracing flag returned success before executing either the command or its
+directory guard. The initial fix unset it before launching an executable.
+Independent review then found that a startup-defined `unset` function could
+execute before sanitization. The revised fix rejects a present flag using only
+redirection and parameter expansion, without a cleanup command or control
+keyword that startup functions or aliases could replace. Its regressions
+exercise sh, bash and zsh directly, including empty and readonly flags. CI
+requires both ripgrep and zsh so existing executable security fixtures cannot
+skip because of a missing tool.
+
+A later Linux run exposed an intermittent same-size cache rewrite whose mtime
+had not changed. A temporary deterministic same-timestamp reproduction failed
+with 34 instead of 68 tokens before the fixture fix, then passed afterwards.
+The fixture now explicitly advances mtime; production caching and all cost,
+rewrite-retention and deletion assertions remain unchanged. No new Rust ignore,
+macOS-only test gate, relaxed assertion or extended deadline was introduced.
+The final Linux run includes all these corrections; the changed Rust source
+hashes were checked against the worktree. Temporary diagnostic instrumentation
+and the transfer server were removed/stopped after validation.
+
+These checks establish local correctness, including a real Linux pass. Hosted
+AMD64 CI and independent review remain merge gates; no local timing is
+substituted for the incomplete ten-run comparisons or live Hetzner acceptance.
+
+## Review 1 corrections (2026-11-11)
+
+The reviewer reproduced an unapproved write through a startup-defined `unset`
+function, including when the later directory guard returned 125. The revised
+wrapper has no cleanup command to resolve: a present loader-tracing flag causes
+a redirection through `/dev/null/<fixed suffix>` to fail before execution.
+Normal execution retains stdin and the directory guard. The regression poisons
+`unset`, `builtin`, `command`, `false`, `exit` and aliases in bash/zsh startup
+files, proves the malicious fixture is active, and checks both accepted and
+refused commands without a marker write. The sh/bash/zsh loader tests also
+cover empty, unexported, exported and readonly flags.
+
+All four Cargo jobs now restore their own cache namespace first, then a matching
+main cache with the same job, OS, architecture and lockfile hash. Saves retain
+the original primary key and PR merge-ref isolation. The new namespace first
+needs a successful main run to populate it; no elapsed-time improvement is
+claimed, and the incomplete ten-run samples above remain unchanged.
+
+Validation of these corrections:
+
+- Passed: all 28 CI policy/selector/measurement tests and actionlint. New negative
+  fixtures reject other-PR restores, shared main write keys, saving to a matched
+  fallback key and removal of the main restore fallback.
+- Passed: desktop TypeScript. The full Vitest run had 5,385 passes and seven
+  five-second timeouts in five unchanged files while host load was about 199 on
+  16 CPUs. All 63 tests in those five files passed in a one-worker rerun, with
+  unchanged assertions and deadlines. No second full Vitest pass is claimed.
+- Passed: `cargo clippy --locked --all-targets -- -D warnings` on Linux and macOS.
+- Passed on macOS: all 17 approval-wrapper tests, plus the session-directory
+  regression using that freshly compiled test binary. A redundant second Cargo
+  compile was stopped; no second full macOS suite is claimed.
+- Passed in TerminalX Local VM (Debian 12 ARM64): full default-feature
+  `cargo test --locked`, **3,372 unit tests and 14 integration tests**, zero
+  failures and the same 17 pre-existing ignores. Both changed Rust files had
+  identical hashes in the VM and worktree. Unit tests took 297.49 seconds;
+  this is local correctness evidence, not a CI timing sample.
+- Passed: Rust formatting, diff whitespace and added-line credential/key/address
+  pattern checks. No runner, repository-setting or activation changes were made.
+
+## Review 2 correction (2026-11-11)
+
+The reviewer reproduced an inherited zsh `TRAPZERR` function writing a marker
+and exiting zero when loader rejection failed its redirection. The guarded
+execution now occupies the conditional side of `&&`, suppressing inherited error
+hooks while retaining a failing exit status. Only on success, the existing
+loader-masked `/usr/bin/env -i` launcher runs again without a payload to return
+zero silently. It resolves no new shell helper and performs no ordinary shell
+assignment; normal output, stdin and exit statuses are preserved.
+
+The new executable fixture installs `TRAPZERR`, `TRAPERR`, list-style zsh traps
+and bash `ERR` traps through shell startup files. Its unguarded control must
+write the marker and forge success. The approved wrapper must then preserve
+success, command failure and directory rejection, or fail closed for empty,
+set and readonly loader flags, with no marker. The matrix also covers strict
+shell modes. Existing startup-function coverage now poisons status/cleanup
+helpers, zsh null commands and a global alias for an empty status expansion.
+On Linux, it also requires bash nameref support and poisons `LC_ALL` with an
+array-index command substitution. This catches attempts to use an ordinary
+assignment as a status helper. macOS's system bash 3.2 lacks namerefs; all other
+cases run there. All existing checks remain enabled; runner activation remains
+owner-only.
+
+Validation of the final revision:
+
+- An initial candidate failed the startup-alias regression. The final revision
+  keeps that regression and uses the existing masked launcher instead of a
+  shell status helper. A Linux probe also demonstrated why an ordinary shell
+  assignment is unsafe with a nameref; the fixture now enforces that case.
+- Passed: desktop TypeScript and all **5,392 Vitest tests in 456 files** in one
+  run with two workers, without changing assertions or test deadlines.
+- Passed: `cargo clippy --locked --all-targets -- -D warnings` on macOS and Linux.
+- Passed on macOS: all **18 approval-wrapper tests** plus the session-directory
+  regression, **19 total**, in a single test invocation. No full macOS rerun is
+  claimed; that suite remains selected for this PR in CI.
+- Passed in TerminalX Local VM (Debian 12 ARM64): full default-feature
+  `cargo test --locked`, **3,373 unit tests and 14 integration tests**, zero
+  failures and the same 17 pre-existing ignores. Both changed Rust files had
+  identical hashes in the VM and worktree. Unit tests took 269.08 seconds;
+  this is local correctness evidence, not a CI measurement.
+- Passed: Rust formatting, diff whitespace and added-line credential/key/address
+  pattern checks. The incomplete ten-run samples and owner-only Hetzner
+  prerequisites remain open.
+
+## Review 3 correction (2026-11-11)
+
+The previous presence check could evaluate a Bash nameref's array subscript
+before environment cleanup or directory validation. The replacement never
+expands or tests a startup-defined named parameter. It probes the existing
+masked `env -i` launcher with a clean shell that exits 9, then uses shell-owned
+`$?` and descriptor duplication to reject the tracing loader's false status 0.
+No cleanup builtin or new aliasable control keyword runs in the startup shell.
+The previous function, alias and error-trap protections remain in place.
+
+The new regression first proves that the malicious nameref writes its marker
+when expanded, including a reference to an unset array element. The actual
+wrapper must then produce `hello` in the approved directory and status 125 in
+the wrong directory, without a marker in either case. Both unset and populated
+targets run on Linux Bash 5.2. macOS system Bash 3.2 cannot define namerefs.
+Unexported flags and Darwin's inert glibc flags now allow genuine sanitized
+execution; their tests require real output and the directory guard, rather
+than accepting an early zero status. Exported glibc flags still fail closed,
+including empty and readonly values. No existing case was removed.
+
+The new test failed against the previous wrapper with the reproduced marker
+write, then passed after the fix in a focused source-level Linux harness.
+Validation of the final source revision:
+
+- Passed on macOS and TerminalX Local VM (Debian 12 ARM64):
+  `cargo clippy --locked --all-targets -- -D warnings`.
+- Passed on each platform: **20 focused project tests**, comprising all 19
+  approval-wrapper tests and the session-directory regression, with zero
+  failures or ignores. The invocation was `cargo test --locked --lib --
+  harness::read_only
+  session::watch_tests::codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution`.
+  The new nameref payload ran on Linux Bash 5.2; macOS's Bash lacks namerefs,
+  as documented above. No new full-suite or frontend rerun is claimed.
+- The two Rust files had identical hashes in the VM and worktree. Rustfmt,
+  diff whitespace and added-line credential/key/address pattern checks passed.
+
+These local checks do not fill either incomplete ten-run CI sample.
+Infrastructure, credentials, repository settings and runner activation remain
+owner-only. The independent review hold is unchanged.
+
+## Observed baseline
+
+Before split: PR baseline: 10 successful first attempts; durations in minutes.
+
+| Job | Runs | Median | p90 (nearest rank) |
+| --- | ---: | ---: | ---: |
+| Whole run | 10 | 59.0 | 74.1 |
+| check | 10 | 58.9 | 63.5 |
+| desktop-platforms (ubuntu-latest) | 10 | 7.4 | 9.0 |
+| headless-serve | 10 | 3.1 | 3.4 |
+| legacy-runtime-probe (macos-latest) | 10 | 0.2 | 0.2 |
+| legacy-runtime-probe (ubuntu-latest) | 10 | 0.1 | 0.1 |
+
+Samples:
+- [42187021437](https://github.com/terminalx-ai/terminalx/actions/runs/42187021437) · 2026-11-06T08:20:55Z · `1cee963a2c39`
+- [42182759310](https://github.com/terminalx-ai/terminalx/actions/runs/42182759310) · 2026-11-06T07:43:37Z · `ef15312fad9a`
+- [42182220329](https://github.com/terminalx-ai/terminalx/actions/runs/42182220329) · 2026-11-06T07:38:37Z · `ce2f2110582f`
+- [42181472026](https://github.com/terminalx-ai/terminalx/actions/runs/42181472026) · 2026-11-06T07:31:52Z · `c5562d809ebd`
+- [42180827149](https://github.com/terminalx-ai/terminalx/actions/runs/42180827149) · 2026-11-06T07:25:53Z · `8edc397e3119`
+- [42083542482](https://github.com/terminalx-ai/terminalx/actions/runs/42083542482) · 2026-11-05T18:22:07Z · `9d129c44ccad`
+- [42081866999](https://github.com/terminalx-ai/terminalx/actions/runs/42081866999) · 2026-11-05T18:11:39Z · `76b522c487d3`
+- [42078671635](https://github.com/terminalx-ai/terminalx/actions/runs/42078671635) · 2026-11-05T17:51:25Z · `1acbdee62d4d`
+- [42078411228](https://github.com/terminalx-ai/terminalx/actions/runs/42078411228) · 2026-11-05T17:49:47Z · `78d9293d62a9`
+- [41801072107](https://github.com/terminalx-ai/terminalx/actions/runs/41801072107) · 2026-11-04T08:38:30Z · `6a1c10b41cff`
+
+## Historical local validation (2026-11-06, before merging current main)
+
+- Passed: workflow validation with actionlint 1.7.12; 11 coverage-selector/timing
+  regression tests; aggregate-gate exercises for success, failure, cancellation
+  and skipped dependencies; `git diff --check`.
+- Passed on macOS: desktop and mobile type checking, `pnpm build`, all 18 icon
+  checks, Swift helper tests/build, `cargo clippy --locked --all-targets -- -D
+  warnings`, the full `pnpm test:webkit-layout` command and permission-details
+  WebKit check.
+- Passed on macOS: full `cargo test --locked`, with 2,871 unit tests and eight
+  integration tests passing. The final full run used `RUST_TEST_THREADS=1`
+  while other builds were active on the host (743.99 seconds for unit tests).
+  Earlier runs hit timing-sensitive fixture failures; assertions and their
+  existing deadlines were retained. The 24 existing ignored tests remain
+  unchanged; this change adds no ignored Rust test.
+  The final unread-input fixture synchronization also passed a focused macOS
+  run after the full suite.
+- Passed on macOS: the headless server's all-target Clippy check and all 43
+  `local_handover`, `local_lifetime` and `owner_pretool` integration tests,
+  covering the session and terminal changes in the shared Rust library.
+- Passed on the follow-up run: the unmodified `pnpm check` command, including
+  TypeScript and all 4,129 Vitest tests across 339 files (88.91 seconds). Earlier
+  runs had timeouts and a worker exit; no assertions, test timeouts or CI checks
+  were relaxed to obtain this pass.
+- Passed in TerminalX Local VM (Debian 12, ARM64): desktop/mobile type checking,
+  all 4,129 Vitest tests in 339 files, frontend build, all five portable icon
+  tests and all 11 CI-helper tests. The three Apple icon decoders are exercised
+  by the macOS job. Vitest used one worker to fit the VM's 4 GB memory limit.
+- Passed on Linux: `cargo clippy --locked --all-targets -- -D warnings` with
+  default desktop features. No warning suppression was added.
+- Passed on Linux: full default-feature `cargo test --locked`, with 2,821 unit
+  tests and eight integration tests passing (206.69 seconds for unit tests).
+  The 17 existing ignored tests remain unchanged. Validation used Git 2.51.0,
+  two Cargo build jobs, two Rust test threads and two Tokio worker threads to
+  fit the VM; no test was filtered out. Linux failures led to the portability,
+  watcher-lifetime and PTY deadline fixes described in `CI-RUNNERS.md`.
+
+That earlier Linux suite passed on a real Linux kernel, in an ARM64 VM. These
+local checks are correctness evidence, not CI performance measurements: they
+do not substitute for GitHub-hosted AMD64 CI or either post-change ten-run
+comparison. No Hetzner runner has been provisioned, activated or certified by
+this change.

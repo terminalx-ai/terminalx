@@ -530,12 +530,21 @@ pub async fn cloud_provider(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.provider(provider))
 }
 
-enum ProviderPromptError { Cancelled, Empty, Unavailable }
+enum ProviderPromptError {
+    // Only the AppKit secure dialog can be cancelled or submit an empty field.
+    #[cfg(target_os = "macos")]
+    Cancelled,
+    #[cfg(target_os = "macos")]
+    Empty,
+    Unavailable,
+}
 
 impl ProviderPromptError {
     fn client_error(self) -> crate::cloud_workspaces::CloudWorkspaceClientError {
         let code = match self {
+            #[cfg(target_os = "macos")]
             Self::Cancelled => "cloud_provider_entry_cancelled",
+            #[cfg(target_os = "macos")]
             Self::Empty => "cloud_provider_credential_required",
             Self::Unavailable => "cloud_provider_secure_input_unavailable",
         };
@@ -4958,12 +4967,147 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
     store::settings::load().experimental
 }
 
+/// Each switch is optional: the one the reader flipped is changed and the
+/// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: bool) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
-    settings.experimental.native_codex = native_codex;
+    if let Some(on) = native_codex {
+        settings.experimental.native_codex = on;
+    }
+    if let Some(on) = session_cost {
+        settings.experimental.session_cost = on;
+    }
+    if let Some(on) = orchestrator_runs {
+        settings.experimental.orchestrator_runs = on;
+    }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
+}
+
+// ---------------------------------------------------------------- orchestration runs (PRO-274)
+
+/// Settings → Orchestrator: the app-wide values and each project's own.
+#[tauri::command]
+pub fn orchestrator_settings() -> crate::store::settings::OrchestratorSettings {
+    store::settings::load().orchestrator
+}
+
+/// One change to the orchestrator settings. `project` names the project
+/// whose own answer changes; without it the app-wide value does. For a
+/// project, a setting given as `null` goes back to following the app.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorPatch {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default, deserialize_with = "given")]
+    require_approval: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "given")]
+    piece_limit: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "given")]
+    worker_mode: Option<Option<String>>,
+}
+
+/// A field that is present, even as `null`, is `Some`: absent is "leave it".
+fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[tauri::command]
+pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
+    use crate::store::settings::{MAX_PIECE_LIMIT, WORKER_MODES};
+    if let Some(Some(limit)) = patch.piece_limit {
+        if !(1..=MAX_PIECE_LIMIT).contains(&limit) {
+            return Err(format!("A plan may have from 1 to {MAX_PIECE_LIMIT} pieces, not {limit}."));
+        }
+    }
+    if let Some(Some(mode)) = &patch.worker_mode {
+        if !WORKER_MODES.contains(&mode.as_str()) {
+            return Err(format!("Workers cannot run in {mode}."));
+        }
+    }
+    let mut settings = store::settings::load();
+    let orchestrator = &mut settings.orchestrator;
+    match patch.project {
+        Some(path) => {
+            let project = orchestrator.projects.entry(path.clone()).or_default();
+            if let Some(value) = patch.require_approval { project.require_approval = value; }
+            if let Some(value) = patch.piece_limit { project.piece_limit = value; }
+            if let Some(value) = patch.worker_mode { project.worker_mode = value; }
+            // A project that follows the app in everything has no entry of its own.
+            if project.is_empty() { orchestrator.projects.remove(&path); }
+        }
+        None => {
+            // The app-wide value has no "follow": `null` is not a value for it.
+            if let Some(value) = patch.require_approval { orchestrator.require_approval = value.ok_or("Say whether a run asks first.")?; }
+            if let Some(value) = patch.piece_limit { orchestrator.piece_limit = value.ok_or("Say how many pieces a plan may have.")?; }
+            if let Some(value) = patch.worker_mode { orchestrator.worker_mode = value.ok_or("Say which mode workers run in.")?; }
+        }
+    }
+    store::settings::save(&settings).map_err(err)?;
+    Ok(settings.orchestrator)
+}
+
+/// The run a session leads, as it is now, or `null` when it leads none.
+#[tauri::command]
+pub async fn orchestration_run_for_session(app: AppHandle, session_id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("forSession", serde_json::json!({"sessionId": session_id})).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn orchestration_runs(app: AppHandle) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("list", serde_json::json!({})).map_err(err)).await.map_err(err)?
+}
+
+/// Store a plan a person chose from a file as a run of `session_id`.
+#[tauri::command]
+pub async fn orchestration_create(app: AppHandle, session_id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("create", serde_json::json!({"sessionId": session_id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// What holds for runs in one project: its own answers where it gave them, the app's otherwise.
+#[tauri::command]
+pub fn orchestrator_limits(project_path: String) -> crate::store::settings::OrchestratorLimits {
+    store::settings::load().orchestrator.for_project(&project_path)
+}
+
+/// A person approves a run's plan: its first workers start. Here and not in
+/// the `terminalx` CLI, which the lead itself runs.
+#[tauri::command]
+pub async fn orchestration_approve(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("approve", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
+/// Stop a run, or discard a plan nobody approved.
+#[tauri::command]
+pub async fn orchestration_stop(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("stop", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
+/// Replace the plan of a run that has not started: what Edit saves.
+#[tauri::command]
+pub async fn orchestration_update_plan(app: AppHandle, id: String, plan: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("updatePlan", serde_json::json!({"id": id, "plan": plan})).map_err(err)).await.map_err(err)?
+}
+
+/// The header's usage popover (PRO-273): the session's tokens and estimated
+/// cost, read again from its agents' transcripts, and the session as it is
+/// now for the window to take.
+#[tauri::command]
+pub async fn session_usage(session_id: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (session, _) = crate::session_usage::refresh_session(&session_id).map_err(err)?;
+        Ok(serde_json::json!({"usage": crate::session_usage::session_json(&session), "session": session}))
+    })
+    .await
+    .map_err(err)?
 }
 
 type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;

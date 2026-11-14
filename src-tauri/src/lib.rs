@@ -8,6 +8,9 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_data;
+mod agent_keys;
+#[cfg(feature = "desktop")]
+mod agent_login_commands;
 pub mod data_privacy;
 #[cfg(feature = "desktop")]
 mod updater;
@@ -159,6 +162,7 @@ pub mod remote;
 mod session;
 mod sidebar_activity;
 mod session_archive;
+mod session_usage;
 mod session_ops;
 mod workspace_setup;
 mod stray_processes;
@@ -180,6 +184,7 @@ mod summaries;
 mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
+mod orchestration;
 mod worker_report;
 mod workspaces;
 mod workspace_restore;
@@ -447,6 +452,16 @@ pub fn run() {
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
+            agent_login_commands::agent_login_status,
+            agent_login_commands::agent_login_save_key,
+            agent_login_commands::agent_login_remove_key,
+            agent_login_commands::agent_login_set_mode,
+            agent_login_commands::agent_login_set_base_url,
+            agent_login_commands::agent_login_verify,
+            agent_login_commands::agent_login_shell_offer,
+            agent_login_commands::agent_login_import_shell,
+            agent_login_commands::agent_login_dismiss_shell,
+            agent_login_commands::agent_login_tabs,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
@@ -882,6 +897,16 @@ pub fn run() {
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,
             commands::set_experimental_settings,
+            commands::orchestrator_settings,
+            commands::set_orchestrator_settings,
+            commands::orchestration_run_for_session,
+            commands::orchestration_runs,
+            commands::orchestration_create,
+            commands::orchestrator_limits,
+            commands::orchestration_approve,
+            commands::orchestration_stop,
+            commands::orchestration_update_plan,
+            commands::session_usage,
             commands::organization_work_status,
             commands::set_organization_work_status,
             commands::session_link_issue,

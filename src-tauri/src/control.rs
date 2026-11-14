@@ -43,6 +43,10 @@ pub struct ControlError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
+    /// The refusal's particulars for a caller that branches on them: the
+    /// piece a plan rule names, the limit it broke. Most errors have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 impl ControlError {
@@ -55,7 +59,14 @@ impl ControlError {
             code: code.into(),
             message: message.into(),
             recovery: recovery.into(),
+            details: None,
         }
+    }
+
+    /// An orchestration refusal, with its own code and particulars.
+    fn of_run(error: crate::orchestration::engine::EngineError) -> Self {
+        let details = (!error.details.is_null()).then_some(error.details);
+        Self { code: error.code.into(), message: error.message, recovery: error.recovery, details }
     }
 
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
@@ -324,6 +335,11 @@ impl WindowControl {
             let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Environment revision required."))?;
             return crate::store::environment::desktop_snapshot(key, revision)
                 .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
+        }
+        if command == "agentKey.snapshot" {
+            let harness = params["harness"].as_str().ok_or_else(|| ControlError::invalid("Agent required."))?;
+            let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Key revision required."))?;
+            return crate::agent_keys::desktop_snapshot(harness, revision).map_err(|_| ControlError::internal("The agent's API key is unavailable."));
         }
         if let Some(action) = command.strip_prefix("share.") {
             let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
@@ -707,8 +723,11 @@ impl ControlService {
                 let selector = required_string(&params, "session")?;
                 let mut session = resolve_session(&selector)?;
                 self.manager.annotate_row_statuses(std::slice::from_mut(&mut session));
-                Ok(serde_json::to_value(session).map_err(ControlError::internal)?)
+                Ok(crate::session_usage::with_cost(&session))
             }
+            // Tokens and estimated cost (PRO-273): read again from the
+            // agents' transcripts, so a turn under way counts as far as it got.
+            "sessions.usage" => self.sessions_usage(params),
             "sessions.create" => self.sessions_create(params),
             "sessions.report" => self.sessions_report(params),
             // Commands of their own, not switches on `sessions.list`: a
@@ -809,9 +828,76 @@ impl ControlService {
                 None::<String>,
             )),
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
+            // A run's workers are sessions of a project on this computer, each in a worktree of its own:
+            // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
+        }
+    }
+
+    /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
+    /// workers started for them. There is no command to approve a run: the
+    /// lead runs this CLI, and a person approves its plan in the app.
+    fn runs(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::orchestration::{engine, host::ManagerHost, plan::Plan, store};
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        // The session the command runs in, when it runs in one the app knows.
+        let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        // A run's worker leads no run and steers none, its own lead's included: it may read them.
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start or stop a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        }
+        if command == "runs.create" {
+            let lead = match optional_string(&params, "lead") {
+                Some(selector) => resolve_session(&selector)?,
+                None => caller.clone().ok_or_else(|| ControlError::new("lead_required", "A run needs a lead session, and this command did not run inside one.", Some("Run it in the lead's session, or name the lead with --lead SESSION.".into())))?,
+            };
+            // The tab is the caller's own: `--lead` naming another session says nothing of which of its tabs leads.
+            let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
+            let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
+            let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
+            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
+        }
+        if command == "runs.list" {
+            let lead = optional_string(&params, "lead").map(|selector| resolve_session(&selector)).transpose()?;
+            let all = params["all"].as_bool().unwrap_or(false);
+            let runs: Vec<Value> = store::list()
+                .map_err(ControlError::internal)?
+                .into_iter()
+                .filter(|run| lead.as_ref().is_none_or(|lead| run.lead.session_id == lead.id))
+                .filter(|run| all || !run.state.ended())
+                // Each as it is now: a piece follows its worker.
+                .map(|run| engine::refreshed(&host, &run.id).map(|run| engine::shown(&run)).map_err(ControlError::of_run))
+                .collect::<Result<_, _>>()?;
+            return Ok(json!({"runs": runs}));
+        }
+        let run = match optional_string(&params, "run") {
+            Some(selector) => {
+                let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
+                match matching.len() {
+                    0 => return Err(ControlError::not_found(format!("No run matches {selector}."))),
+                    1 => matching.remove(0),
+                    _ => return Err(ControlError::ambiguous(format!("More than one run matches {selector}."))),
+                }
+            }
+            // Inside the lead's session the run need not be named: it leads one at a time.
+            None => caller.and_then(|caller| store::for_lead(&caller.id).ok().flatten()).ok_or_else(|| ControlError::invalid("Name the run: this command did not run inside a session that leads one. `terminalx runs list --all --json` lists them."))?,
+        };
+        match command {
+            "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
+            "runs.start" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+            }
+            "runs.stop" => {
+                let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&stop.run), "stopped": stop.stopped, "failed": stop.failed}))
+            }
+            other => Err(ControlError::invalid(format!("Unknown control command {other}."))),
         }
     }
 
@@ -842,6 +928,8 @@ impl ControlService {
 
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
         let mut sessions = index::load().map_err(ControlError::internal)?;
+        // Read once: which session on a branch carries its PR is chosen among all of them.
+        let stored = sessions.clone();
         let quick = params.get("quick").and_then(Value::as_bool).unwrap_or(false);
         // What the sidebar lists, or with `archived` what it lists under Show archived (#718).
         let archived = params.get("archived").and_then(Value::as_bool).unwrap_or(false);
@@ -854,7 +942,8 @@ impl ControlService {
             }
             let (project, worktree) = resolve_worktree(&params)?;
             let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
-            self.manager.annotate_row_statuses(&mut held);
+            self.manager.annotate_row_statuses_among(&mut held, &stored);
+            let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
         }
         if let Some(selector) = optional_string(&params, "project") {
@@ -870,8 +959,44 @@ impl ControlService {
             sessions.retain(SessionEntry::is_quick);
         }
         sessions.retain(|session| session.archived == archived);
-        self.manager.annotate_row_statuses(&mut sessions);
+        self.manager.annotate_row_statuses_among(&mut sessions, &stored);
+        let sessions: Vec<Value> = sessions.iter().map(crate::session_usage::with_cost).collect();
         Ok(json!({"sessions": sessions}))
+    }
+
+    /// `sessions usage <session>`, or `--children-of <lead>`: the lead's own
+    /// usage, a row per worker it started, and the grand total of them all.
+    fn sessions_usage(&self, params: Value) -> Result<Value, ControlError> {
+        use crate::session_usage::{merge, refresh_session, session_json, total};
+        let refresh = |id: &str| -> Result<SessionEntry, ControlError> {
+            let (session, changed) = refresh_session(id).map_err(ControlError::internal)?;
+            if changed {
+                self.sink.emit("session_updated", &session);
+            }
+            Ok(session)
+        };
+        let Some(selector) = optional_string(&params, "childrenOf") else {
+            let session = resolve_session(&required_string(&params, "session")?)?;
+            return Ok(session_json(&refresh(&session.id)?));
+        };
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let lead = resolve_lead(&sessions, &selector)?;
+        let own = if lead.exists { Some(refresh(&lead.session_id)?) } else { None };
+        let workers = sessions
+            .iter()
+            .filter(|session| session.started_by(&lead.session_id))
+            .map(|session| refresh(&session.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let everyone: Vec<&SessionEntry> = own.iter().chain(&workers).collect();
+        let models = merge(everyone.iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models));
+        Ok(json!({
+            "parent": lead,
+            "lead": own.as_ref().map(session_json),
+            "workers": workers.iter().map(session_json).collect::<Vec<_>>(),
+            "models": models,
+            "total": total(&models),
+            "estimate": true,
+        }))
     }
 
     /// `sessions list --children-of`: the sessions a lead started (PRO-270),
@@ -1092,6 +1217,16 @@ impl ControlService {
                 .map_err(workspace_error)?
             }
         };
+        // A session a run's worker starts has the worker's limits, whoever it names as its
+        // parent, or none: marked before anything is sent to it (`orchestration::guard`).
+        let mut entry = entry;
+        if !entry.run_worker() && p.caller["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            entry = index::update_session(&entry.id, |session| {
+                session.mark_run_worker();
+                Ok(session.clone())
+            })
+            .map_err(ControlError::internal)?;
+        }
         let tab = entry
             .tabs
             .first()
@@ -1202,6 +1337,11 @@ impl ControlService {
 
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
+        // A run's worker changes no pipeline, its own or anyone's: each of these can push a
+        // branch, merge it, or let a merge through (`orchestration::guard`). It may still read them.
+        if !matches!(command, "pipelines.list" | "pipelines.show") && params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not start, steer or merge a pipeline. Report what is ready; the lead decides what happens to it.", None::<String>));
+        }
         if command == "pipelines.start" {
             let target = resolve_target(&required_string(&params, "target")?)?;
             self.manager.accepting_work().map_err(ControlError::internal)?;
@@ -2035,7 +2175,7 @@ fn wait_end(view: &WaitView) -> Option<WaitEnd> {
 /// The turn a tab is in, for `sessions report`: a report an earlier turn
 /// ended with is not the answer of one still open. A tab that only sits idle
 /// with its agent running is in none.
-fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
+pub(crate) fn open_turn(view: &WaitView) -> Option<crate::worker_report::OpenTurn> {
     use crate::worker_report::OpenTurn;
     if view.asks || view.status == TabStatus::Waiting {
         return Some(OpenTurn::Waiting);
@@ -2650,6 +2790,74 @@ mod tests {
             let refused = service.execute("sessions.create", request, "r").unwrap_err();
             assert_eq!(refused.code, "parent_not_found");
             assert_eq!(index::load().unwrap().len(), before);
+        }
+    }
+
+    /// PRO-273: a lead's own usage, a row per worker, and the grand total;
+    /// and once the lead is gone, its workers alone.
+    #[test]
+    fn sessions_usage_reports_a_lead_its_workers_and_their_total() {
+        use crate::session_usage::{ModelUsage, TabUsage};
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let create = |lead: Option<&SessionEntry>, harness: &str| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "worker",
+            "parent": lead.map(|lead| json!({"sessionId": lead.id, "tabId": lead.tabs[0].id})).unwrap_or(Value::Null),
+            "tab": {"harness": harness},
+        })).unwrap()).unwrap();
+        // Totals as a turn end left them; these tabs have no transcript to read again.
+        let used = |session: &SessionEntry, model: &str, input: u64, cost: Option<f64>| {
+            index::update_tab(&session.id, &session.tabs[0].id, |tab| {
+                tab.usage = Some(TabUsage { models: vec![ModelUsage { model: model.into(), input_tokens: input, output_tokens: 10, cost_usd: cost, ..Default::default() }], updated: "t".into() });
+                Ok(())
+            }).unwrap();
+        };
+        let lead = create(None, "claude");
+        let codex = create(Some(&lead), "codex");
+        let claude = create(Some(&lead), "claude");
+        let unpriced = create(Some(&lead), "claude");
+        let unrelated = create(None, "codex");
+        used(&lead, "claude-opus-5-5", 100, Some(1.0));
+        used(&codex, "gpt-5.6-sol", 200, Some(0.5));
+        used(&claude, "claude-opus-5-5", 300, Some(0.25));
+        used(&unpriced, "claude-new-9", 400, None);
+        used(&unrelated, "gpt-5.6-sol", 9999, Some(9.0));
+        let (service, _sink) = headless_service();
+
+        let report = service.execute("sessions.usage", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!(report["parent"], json!({"sessionId": lead.id, "title": lead.title, "exists": true}));
+        assert_eq!(report["lead"]["sessionId"], json!(lead.id));
+        assert_eq!(report["lead"]["total"]["costUsd"], json!(1.0));
+        let workers = report["workers"].as_array().unwrap();
+        let mut rows: Vec<(String, Value)> = workers.iter().map(|w| (w["sessionId"].as_str().unwrap().to_string(), w["total"]["costUsd"].clone())).collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = vec![(codex.id.clone(), json!(0.5)), (claude.id.clone(), json!(0.25)), (unpriced.id.clone(), Value::Null)];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows, expected, "a row per worker, the unrelated session left out");
+        assert_eq!(report["total"]["inputTokens"], json!(1000));
+        assert_eq!(report["total"]["costUsd"], json!(1.75));
+        assert_eq!(report["total"]["unpricedModels"], json!(["claude-new-9"]));
+        let opus = report["models"].as_array().unwrap().iter().find(|m| m["model"] == "claude-opus-5-5").unwrap().clone();
+        assert_eq!((opus["inputTokens"].clone(), opus["costUsd"].clone()), (json!(400), json!(1.25)), "the lead's and a worker's rows of one model merged");
+
+        // One session, and the cost `sessions list` carries.
+        let one = service.execute("sessions.usage", json!({"session": codex.id}), "r").unwrap();
+        assert_eq!((one["tabs"].as_array().unwrap().len(), one["total"]["costUsd"].clone()), (1, json!(0.5)));
+        let listed = service.execute("sessions.list", json!({}), "r").unwrap();
+        let entry = |id: &str| listed["sessions"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap().clone();
+        assert_eq!(entry(&codex.id)["estimatedCostUsd"], json!(0.5));
+        assert_eq!((entry(&unpriced.id)["estimatedCostUsd"].clone(), entry(&unpriced.id)["estimatedCostUnpricedModels"].clone()), (Value::Null, json!(["claude-new-9"])));
+        assert_eq!(service.execute("sessions.show", json!({"session": lead.id}), "r").unwrap()["estimatedCostUsd"], json!(1.0));
+
+        // The lead deleted: named by its full id, its workers still answer.
+        index::save(&index::load().unwrap().into_iter().filter(|s| s.id != lead.id).collect::<Vec<_>>()).unwrap();
+        let orphaned = service.execute("sessions.usage", json!({"childrenOf": lead.id}), "r").unwrap();
+        assert_eq!((orphaned["parent"]["exists"].clone(), orphaned["lead"].clone()), (json!(false), Value::Null));
+        assert_eq!(orphaned["workers"].as_array().unwrap().len(), 3);
+        assert_eq!(orphaned["total"]["costUsd"], json!(0.75));
+        for (params, code) in [(json!({}), "invalid_arguments"), (json!({"childrenOf": "no-such-session"}), "not_found"), (json!({"session": "no-such-session"}), "not_found")] {
+            assert_eq!(service.execute("sessions.usage", params, "r").unwrap_err().code, code);
         }
     }
 

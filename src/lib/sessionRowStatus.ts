@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { SESSION_STATUSES, combinedSessionStatus, type SessionStatusInput } from "@terminalx/portable/sessionStatus";
 import { api } from "./api";
 import type { SessionEntry } from "@/types/session";
@@ -57,6 +57,12 @@ export function useSessionRowStatus(sessions: readonly StatusSession[]) {
     };
   }, [key]);
   // Subscribe to this row's selected value: unrelated row changes do not render it.
-  const id = useSyncExternalStore(subscribe, () => combinedSessionStatus(sessions.map((session) => snapshot[session.id] ?? session.rowStatus ?? session)).id);
-  return SESSION_STATUSES.find((status) => status.id === id)!;
+  const selected = useSyncExternalStore(subscribe, () => {
+    const status = combinedSessionStatus(sessions.map((session) => snapshot[session.id] ?? session.rowStatus ?? session));
+    return `${status.id}#${status.pr ?? ""}`;
+  });
+  return useMemo(() => {
+    const [id, pr] = selected.split("#");
+    return { ...SESSION_STATUSES.find((status) => status.id === id)!, pr: pr ? Number(pr) : null };
+  }, [selected]);
 }

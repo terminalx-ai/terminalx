@@ -197,11 +197,20 @@ fn approved_input_in(
     }
     // The provider's outer shell may have loaded .zshenv, .bashrc, etc.
     // Clear what those files supplied before invoking our non-login shell.
-    // Quoted absolute paths also prevent aliases/functions replacing tools.
+    // Quoted absolute paths avoid aliases and PATH lookup; the clean inner
+    // shell does not inherit startup-defined functions.
     // env -i clears variables only after env itself has loaded. Mask loader
     // controls with shell assignments first, so startup-file LD_* / DYLD_*
     // values cannot inject libraries or create loader trace/profile files.
-    let mut wrapper = String::new();
+    // glibc enables LD_TRACE_LOADED_OBJECTS by presence, even when empty:
+    // assigning '' makes env print libraries and exit 0 without running the
+    // directory guard or command. Do not inspect that variable in the outer
+    // shell: even ${name+...} follows a startup-defined Bash nameref and can
+    // execute its array subscript. Cleanup builtins can also be functions.
+    // Instead, probe the same launcher with a clean shell that only exits 9.
+    // A tracing loader returns 0; discard its output and reject that status
+    // using descriptor duplication below, without inspecting any named variable.
+    let mut reset_env = String::new();
     for key in [
         "LD_PRELOAD",
         "LD_AUDIT",
@@ -209,7 +218,6 @@ fn approved_input_in(
         "LD_DEBUG_OUTPUT",
         "LD_PROFILE",
         "LD_PROFILE_OUTPUT",
-        "LD_TRACE_LOADED_OBJECTS",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_FRAMEWORK_PATH",
         "DYLD_FALLBACK_LIBRARY_PATH",
@@ -218,16 +226,36 @@ fn approved_input_in(
         "DYLD_IMAGE_SUFFIX",
         "DYLD_PRINT_TO_FILE",
     ] {
-        wrapper.push_str(key);
-        wrapper.push_str("='' ");
+        reset_env.push_str(key);
+        reset_env.push_str("='' ");
     }
-    wrapper.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
+    reset_env.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
+    let mut wrapper = format!("({reset_env} '/bin/sh' '-c' 'exit 9' >'/dev/null'; {reset_env}");
     for (key, value) in &execution.env {
         wrapper.push(' ');
         wrapper.push_str(&quote(&format!("{key}={value}")));
     }
     wrapper.push_str(" '/bin/sh' '-c' ");
     wrapper.push_str(&quote(&script));
+    // Save stdin on 8, close 0, and open 9 on /dev/null. Duplicating the probe's
+    // status as a descriptor succeeds for 9, but fails for the tracing loader's
+    // 0 before env dispatch. Restore stdin and close every temporary descriptor.
+    // $? is shell-owned status, not a named parameter that startup can turn
+    // into a nameref. It is the only expansion in the outer wrapper.
+    // Quote descriptor operands too: zsh expands global aliases on bare words
+    // such as 0, 8 and -, even when they follow a redirection operator.
+    wrapper.push_str(" 8<&'0' 0<&'-' 9<'/dev/null' 7<&\"$?\" 0<&'8' 7<&'-' 8<&'-' 9<&'-')");
+    // zsh inherits function-style TRAPZERR handlers into subshells. Keep the
+    // entire guarded execution on the conditional side of && so neither a
+    // rejection nor the requested command's failure invokes an outer error
+    // hook. Preserve its status: the right side runs only on success.
+    // Reuse the same masked env launcher with no payload: env -i prints an
+    // empty environment and returns zero. No new command name is resolved.
+    // A shell noop is unsafe here: true/: can be functions, a zero-word
+    // expansion can be a zsh global alias, a bare redirection uses NULLCMD,
+    // and an assignment can follow a startup-defined nameref. Do not wrap
+    // the whole && list in a subshell: its failure would trigger the hook.
+    wrapper.push_str(&format!(" && ({reset_env})"));
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"

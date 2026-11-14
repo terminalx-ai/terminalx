@@ -1,3 +1,7 @@
+import { RunStrip } from "@/components/orchestration/RunStrip";
+import { RunView } from "@/components/orchestration/RunView";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
 import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
@@ -68,6 +72,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { SessionCost } from "./SessionCost";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -425,6 +430,11 @@ export function SessionView({
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
+  // Orchestration runs (PRO-274), behind Settings → Experimental: a session of a git project on this computer can lead one.
+  const canLead = local && !cloud && !compact && !quick;
+  const runOffered = useExperimentalSettings(canLead)?.orchestratorRuns === true && canLead && isGit;
+  const run = useRun(session.id, runOffered);
+  const runShown = useRunViewShown(session.id) && runOffered;
   const prefs = usePrefs();
   const store = useSessionStore();
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
@@ -564,6 +574,9 @@ export function SessionView({
     if (local) void activateLatestTerminal(session.id, session.cwd);
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
+  // What the session's agents have used, at API list prices (PRO-273), beside
+  // where it is; Settings → Experimental → Session cost.
+  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
@@ -602,6 +615,7 @@ export function SessionView({
                 <span className="truncate text-foreground" title={[`On ${own.branch}, a name drawn for the workspace`, workspaceTitle].join("\n")} data-testid="session-title">
                   {session.title}
                 </span>
+                {costChip}
                 <WorkspaceMenu session={session} branch={own.branch} folder={session.worktreeName ?? null} base={baseNote} onContinue={continueTab} />
               </>
             ) : local && workspaceLabel ? (
@@ -636,12 +650,16 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
                 {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
+              {costChip}
               <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
               </>
             ) : (
-              <span className="truncate text-foreground" title={session.title} data-testid="session-title">
-                {session.title}
-              </span>
+              <>
+                <span className="truncate text-foreground" title={session.title} data-testid="session-title">
+                  {session.title}
+                </span>
+                {costChip}
+              </>
             )}
             {session.issue && (
               <WithTooltip label={session.issue.title + (session.issueWork?.link ? ` · ${linkText(session.issueWork.link)}` : "")}>
@@ -810,6 +828,8 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
+        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} onChange={(shown) => showRunView(session.id, shown)} />}
+        {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (
           <WorkspaceTabStrip
@@ -827,7 +847,8 @@ export function SessionView({
           <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
           {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
         </div>}
-        <section className="flex min-h-0 flex-1 flex-col">
+        {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
+        <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>
           <div className="@container/editor-host relative flex min-h-0 flex-1">
             <div
               className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col"

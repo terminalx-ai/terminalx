@@ -1,4 +1,5 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import type { OrchestratorPatch, OrchestratorSettings, Run, RunPlan, RunStart, RunStop } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2680,12 +2681,18 @@ export interface WorkStatusSettings {
 export interface ExperimentalSettings {
   /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
   nativeCodex: boolean;
+  /** The session header shows the session's estimated cost and its tokens by model (PRO-273). */
+  sessionCost?: boolean;
+  /** Show orchestration runs: a session's Run view and Settings → Orchestrator (PRO-274). */
+  orchestratorRuns?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
 export const experimental = {
   settings: () => invoke<ExperimentalSettings>("experimental_settings"),
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
+  setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;
@@ -2695,6 +2702,23 @@ export const experimental = {
       return false;
     }
   },
+};
+
+/** Orchestration runs (PRO-274). Approve, stop and edit are the person's: no `terminalx` command approves a run. */
+export const orchestration = {
+  /** The run a session leads, as it is now, or `null`. */
+  runForSession: (sessionId: string) => invoke<Run | null>("orchestration_run_for_session", { sessionId }),
+  runs: () => invoke<Run[]>("orchestration_runs"),
+  /** Store a plan a person chose from a file as a run of `sessionId`; refused as `runs create` refuses. */
+  create: (sessionId: string, plan: unknown) => invoke<Run>("orchestration_create", { sessionId, plan }),
+  /** What holds for runs in one project: its own answers, the app's where it gave none. */
+  limits: (projectPath: string) => invoke<{ requireApproval: boolean; pieceLimit: number; workerMode: string }>("orchestrator_limits", { projectPath }),
+  approve: (id: string) => invoke<RunStart>("orchestration_approve", { id }),
+  /** Stop a run, or discard a plan nobody approved. */
+  stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),
+  updatePlan: (id: string, plan: RunPlan) => invoke<Run>("orchestration_update_plan", { id, plan }),
+  settings: () => invoke<OrchestratorSettings>("orchestrator_settings"),
+  setSettings: (patch: OrchestratorPatch) => invoke<OrchestratorSettings>("set_orchestrator_settings", { patch }),
 };
 
 /** Settings → Storage: what is kept about the warnings tabs raise (#815). */

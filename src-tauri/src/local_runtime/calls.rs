@@ -37,6 +37,10 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 None => Value::Null,
             });
         }
+        // The tabs whose agent runs, and which keep a login older than new tabs get (PRO-306).
+        if method == "agentLoginTabs" {
+            return Ok(serde_json::to_value(crate::agent_keys::running(string(&params, "harness")?))?);
+        }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
             if ids.len() > 4096 || ids.iter().any(|id| id.is_empty() || id.len() > 256) { bail!("invalid pane list"); }
@@ -159,8 +163,9 @@ fn setup_panes(terminals: &crate::pty::Terminals, harness: &str) -> Vec<String> 
 pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> Result<Value> {
     if method == "rowStatuses" {
         let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
-        let sessions: Vec<_> = crate::store::index::load()?.into_iter().filter(|s| ids.contains(&s.id)).collect();
-        return Ok(serde_json::to_value(manager.row_statuses(&sessions))?);
+        let stored = crate::store::index::load()?;
+        let sessions: Vec<_> = stored.iter().filter(|s| ids.contains(&s.id)).cloned().collect();
+        return Ok(serde_json::to_value(manager.row_statuses_among(&sessions, &stored))?);
     }
     if method == "running" { return Ok(serde_json::to_value(manager.running_tabs())?); }
     if method == "permissions" { return Ok(serde_json::to_value(manager.pending_permissions())?); }
@@ -194,6 +199,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
             manager.sink().emit("session_updated", &session);
             return Ok(Value::Null);
         }
+        "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

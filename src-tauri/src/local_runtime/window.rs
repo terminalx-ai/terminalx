@@ -64,7 +64,7 @@ struct Dispatch { epoch: String, lease: String, command: String, params: Value }
 pub(crate) fn receive(request: &ControlRequest, current: &super::client::AttachmentIdentity) -> Result<(String, Value), ControlError> {
     if request.command != "window.dispatch" { return Err(unavailable("Only registered window dispatch is accepted.")); }
     let dispatch: Dispatch = serde_json::from_value(request.params.clone()).map_err(|_| unavailable("Invalid window dispatch."))?;
-    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !(supported(&dispatch.command) || dispatch.command == "environment.snapshot") {
+    if dispatch.epoch != current.epoch || dispatch.lease != current.lease || !(supported(&dispatch.command) || matches!(dispatch.command.as_str(), "environment.snapshot" | "agentKey.snapshot")) {
         return Err(unavailable("This request does not belong to the current desktop attachment."));
     }
     Ok((dispatch.command,dispatch.params))
@@ -130,6 +130,20 @@ impl Registry {
         serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid environment snapshot."))
     }
 
+    /// An agent's saved API key (PRO-306), from the desktop's Keychain, for
+    /// this runtime's memory only. Like an environment snapshot it travels
+    /// only in the private response, and no public command can ask for it.
+    pub(crate) fn agent_key_snapshot(&self, harness: &str, revision: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let mut value = self.dispatch("agentKey.snapshot", json!({ "harness": harness, "revision": revision }))
+            .map_err(|_| anyhow::anyhow!("The agent's API key is unavailable."))?;
+        anyhow::ensure!(value["revision"] == revision, "The agent's API key changed.");
+        // Moved out, not copied: the response holds no other copy of it.
+        match value.get_mut("key").map(Value::take) {
+            Some(Value::String(key)) => Ok(zeroize::Zeroizing::new(key)),
+            _ => anyhow::bail!("Invalid agent key snapshot."),
+        }
+    }
+
     pub(crate) fn call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         if !supported(command) { return Err(unavailable("This operation is not a window service.")); }
         self.dispatch(command, params)
@@ -149,7 +163,7 @@ impl Registry {
         let result = (|| -> anyhow::Result<ControlResponse> {
             let mut socket = UnixStream::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
-                .unwrap_or_else(|| if command == "environment.snapshot" { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
+                .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
             socket.set_read_timeout(Some(timeout))?;
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
             let dispatch = service.attachment.enter()?;
@@ -194,6 +208,52 @@ mod tests {
         assert!(receive(&request, &current).is_ok());
         request.params["lease"] = json!("another-desktop");
         assert!(receive(&request, &current).is_err());
+    }
+
+    /// PRO-306: an agent's API key is fetched like an environment snapshot,
+    /// and no more reachable: never a window service another command can
+    /// ask for, and only from the current desktop attachment.
+    #[test]
+    fn agent_key_snapshot_is_private_to_the_registered_desktop_and_cannot_be_proxied() {
+        assert!(!supported("agentKey.snapshot"));
+        let registry = Registry::default();
+        assert!(registry.call("agentKey.snapshot", json!({"harness":"claude","revision":"r"})).is_err());
+        let current = super::super::client::AttachmentIdentity { epoch:"owner".into(), lease:"desktop".into() };
+        let mut request = ControlRequest { id:"test".into(), token:"private-window-token".into(), command:"window.dispatch".into(),
+            params: json!({"epoch":"owner","lease":"desktop","command":"agentKey.snapshot","params":{"harness":"claude","revision":"r"}}) };
+        assert!(receive(&request, &current).is_ok());
+        request.params["lease"] = json!("another-desktop");
+        assert!(receive(&request, &current).is_err());
+        request.params["lease"] = json!("desktop");
+        request.params["epoch"] = json!("old-owner");
+        assert!(receive(&request, &current).is_err());
+        // Only by way of the registered window's dispatch, never as a command of its own.
+        request.params["epoch"] = json!("owner");
+        request.command = "agentKey.snapshot".into();
+        assert!(receive(&request, &current).is_err());
+    }
+
+    #[test]
+    fn agent_key_travels_only_in_the_private_response_for_the_revision_asked() {
+        let _home = crate::store::temp_home();
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let endpoint = prepare_control().unwrap();
+        let attachment = attach(&lifetime);
+        let identity = super::super::client::AttachmentIdentity {
+            epoch: attachment["epoch"].as_str().unwrap().into(), lease: attachment["lease"].as_str().unwrap().into(),
+        };
+        serve_private(endpoint.clone(), |_| HookReply::default(), move |request| {
+            let (command, params) = receive(&request, &identity).unwrap();
+            assert_eq!(command, "agentKey.snapshot");
+            assert!(!serde_json::to_string(&request).unwrap().contains("sk-ant-private"));
+            // A desktop that answers for another revision is not believed.
+            let revision = if params["revision"] == "stale" { "current" } else { params["revision"].as_str().unwrap() };
+            ControlResponse::success(request.id, json!({"revision":revision,"key":"sk-ant-private-0123456789abcdef"}))
+        }).unwrap();
+        lifetime.window.register(&lifetime, registration(&attachment, &endpoint)).unwrap();
+        assert_eq!(lifetime.window.agent_key_snapshot("claude", "r1").unwrap().as_str(), "sk-ant-private-0123456789abcdef");
+        assert!(lifetime.window.agent_key_snapshot("claude", "stale").is_err());
+        assert!(lifetime.window.call("agentKey.snapshot", json!({"harness":"claude","revision":"r1"})).is_err());
     }
 
     #[test]
