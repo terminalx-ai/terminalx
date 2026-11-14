@@ -186,9 +186,13 @@ try {
       page.on("pageerror", (error) => errors.push(error.message));
       const list = page.getByRole("navigation", { name: "Conversations" });
       await list.waitFor();
-      await list.getByRole("button", { name: /View all/ }).click().catch(() => {});
       const lead = page.locator('[data-lead="lead"]');
       const starter = page.locator('[data-lead="starter"]');
+      // A project with more conversations than it shows folds the rest behind
+      // "View all", which is drawn with the rows: open it when it is there.
+      const viewAll = list.getByRole("button", { name: /View all/ });
+      await lead.or(viewAll).first().waitFor();
+      if (await viewAll.count()) await viewAll.click();
       await lead.waitFor();
       await starter.waitFor();
       await page.locator('[data-worker="starter-b"]').waitFor();
