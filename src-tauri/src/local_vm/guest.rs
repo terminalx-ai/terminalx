@@ -224,7 +224,15 @@ struct Record {
     /// so a cancellation needs no reboot to prove it (review 2).
     #[serde(default)]
     worker_exit_confirmed: bool,
+    /// Failed attempts to retain this task's results (`RETENTION_ATTEMPTS`).
+    #[serde(default)]
+    retention_failures: u32,
 }
+
+/// How often retention is tried before it stops: an output over its bounds
+/// fails the same way every time, and each attempt holds the state lock
+/// through `git add --all` and the artifact writes (review 2).
+const RETENTION_ATTEMPTS: u32 = 3;
 
 struct RecoveryReceipt {
     target: TaskTarget,
@@ -802,6 +810,7 @@ impl Guest {
                 boot_identity: self.boot_identity.clone(),
                 prior_external_outcome_unknown: false,
                 worker_exit_confirmed: false,
+                retention_failures: 0,
             },
         );
         self.save(&state)?; // Before directories, files, sessions or prompts.
@@ -829,15 +838,21 @@ impl Guest {
             }
             if record.artifacts_pending {
                 match self.retain(record) {
-                    Ok(()) => record.artifacts_pending = false,
+                    Ok(()) => { record.artifacts_pending = false; record.retention_failures = 0; }
                     Err(error) => {
                         let prior = if record.prior_external_outcome_unknown {
                             PRIOR_OUTCOME_UNKNOWN
                         } else {
                             ""
                         };
-                        record.task.detail =
-                            Some(format!("Result retention incomplete: {error:#}. {prior}"))
+                        record.retention_failures += 1;
+                        if record.retention_failures >= RETENTION_ATTEMPTS {
+                            record.artifacts_pending = false;
+                            record.task.detail = Some(format!("Result retention stopped after {RETENTION_ATTEMPTS} attempts: {error:#}. The results kept so far are listed. {prior}"));
+                            event(&mut record.task, json!({"type":"retentionStopped","attempts":RETENTION_ATTEMPTS}));
+                        } else {
+                            record.task.detail = Some(format!("Result retention incomplete: {error:#}. {prior}"));
+                        }
                     }
                 }
             }
@@ -1087,6 +1102,7 @@ impl Guest {
                 (false, false) => None,
             };
             record.artifacts_pending = true;
+            record.retention_failures = 0;
             let status = record.task.status;
             event(
                 &mut record.task,
@@ -1146,6 +1162,7 @@ impl Guest {
                     // Stopped and seen gone already, waiting for guest login, say.
                     record.task.status = TaskStatus::Canceled;
                     record.artifacts_pending = true;
+                    record.retention_failures = 0;
                     event(&mut record.task, json!({"type":"canceled","workerExitConfirmed":true}));
                 } else if let Err(error) = cancel_after_boot_change(record, self.boot_identity.as_deref())
                 {
@@ -1167,6 +1184,7 @@ impl Guest {
                     self.collect(record)?;
                     record.task.status = TaskStatus::Canceled;
                     record.artifacts_pending = true;
+                    record.retention_failures = 0;
                     event(&mut record.task, json!({"type":"canceled"}));
                 }
                 Err(error) => unknown(record, &format!("Worker exit unconfirmed: {error:#}")),
@@ -2137,6 +2155,7 @@ fn cancel_after_boot_change(record: &mut Record, current: Option<&str>) -> Resul
     record.task.detail = Some(PRIOR_OUTCOME_UNKNOWN.into());
     record.artifacts_pending =
         record.task.worker_session_id.is_some() && record.task.worker_tab_id.is_some();
+    record.retention_failures = 0;
     let previous = record.boot_identity.clone();
     event(
         &mut record.task,
@@ -3584,6 +3603,7 @@ mod tests {
             boot_identity: None,
             prior_external_outcome_unknown: false,
             worker_exit_confirmed: false,
+            retention_failures: 0,
         }
     }
 
@@ -4671,6 +4691,31 @@ mod tests {
         seed(&guest, unconfirmed);
         let unknown: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
         assert_eq!(unknown.status, TaskStatus::OutcomeUnknown);
+    }
+
+    /// Review 2: a retention that failed was retried on every tick, forever,
+    /// holding the state lock through git add --all and the artifact writes.
+    #[test]
+    fn a_failing_retention_stops_after_its_attempts_and_says_so() {
+        let (_home, guest, mut task) = setup();
+        // Settled, but with no worker session to read results from.
+        task.status = TaskStatus::Completed;
+        let mut settled = record(task.clone());
+        settled.artifacts_pending = true;
+        seed(&guest, settled);
+        for attempt in 1..=RETENTION_ATTEMPTS {
+            guest.tick().unwrap();
+            let state = guest.state.lock().unwrap();
+            let kept = &state.records[&task.target.task_id];
+            assert_eq!(kept.retention_failures, attempt);
+            assert_eq!(kept.artifacts_pending, attempt < RETENTION_ATTEMPTS);
+        }
+        guest.tick().unwrap();
+        let state = guest.state.lock().unwrap();
+        let kept = &state.records[&task.target.task_id];
+        assert_eq!(kept.retention_failures, RETENTION_ATTEMPTS, "no attempt after the last");
+        assert!(kept.task.detail.as_deref().unwrap().starts_with("Result retention stopped after"));
+        assert_eq!(kept.task.events.iter().filter(|e| e.payload["type"] == "retentionStopped").count(), 1);
     }
 
     #[test]
