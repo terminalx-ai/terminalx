@@ -18,10 +18,11 @@
 //!   make by itself and the one recorded. A clean merge has none. Conflict
 //!   resolutions and edits made while merging are exactly that difference;
 //! - the pull request's change set relative to its base (`base...commit`,
-//!   the three-dot diff GitHub shows) is compared before and after, hunk
-//!   positions left out: the base moving code above a change shifts its line
-//!   numbers and nothing else. Trees are not compared, since merging the
-//!   base changes them by design.
+//!   the three-dot diff GitHub shows) is compared before and after, line
+//!   numbers left out: the base moving code above a change shifts them and
+//!   nothing else. Context lines stay in, so a reviewed line moved elsewhere
+//!   in its file is a different change set. Trees are not compared, since
+//!   merging the base changes them by design.
 //!
 //! Merges with no resolution and an unchanged change set carry the verdict
 //! as it is. Anything else that only merges the base gets the light check of
@@ -37,6 +38,14 @@
 //! options the checkout's config could use to hide a change (submodules,
 //! `diff.relative`, external diff and textconv drivers) are pinned on the
 //! command line, which config does not override.
+//!
+//! A remerge is only as honest as the merge rules it runs with. A merge
+//! driver in the checkout's config, or attributes in `.git/info/attributes`,
+//! could make Git's own merge reproduce any recorded result, moved code
+//! included, so a checkout that has either carries nothing; nor does one
+//! whose working tree holds a `.gitattributes` that is not the committed one
+//! (changed, untracked, or ignored), since Git reads attributes from there.
+//! The user's attributes file is left out.
 
 use std::path::Path;
 
@@ -103,6 +112,45 @@ fn rewritten_history(cwd: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// Why Git's own merge in this checkout cannot be taken as the plain one, if
+/// it cannot: a configured merge driver, or local attributes, which could
+/// pick any result.
+fn custom_merge_rules(cwd: &Path) -> Result<Option<String>> {
+    let drivers = git::inspect_output(cwd, &["config", "--get-regexp", r"^merge\..+\.driver$"])?;
+    match drivers.status.code() {
+        Some(0) => return Ok(Some("this checkout configures a merge driver, which decides what a merge of the base gives".into())),
+        Some(1) => {}
+        _ => anyhow::bail!("git config failed: {}", String::from_utf8_lossy(&drivers.stderr).trim()),
+    }
+    let local = run(cwd, &["rev-parse", "--path-format=absolute", "--git-path", "info/attributes"])?;
+    let rules = std::fs::read_to_string(local.trim()).unwrap_or_default();
+    if rules.lines().map(str::trim).any(|line| !line.is_empty() && !line.starts_with('#')) {
+        return Ok(Some("this checkout has attributes of its own in .git/info/attributes, which can change what a merge gives".into()));
+    }
+    // Git reads attributes from the working tree: only committed ones count.
+    let stray = run(cwd, &["status", "--porcelain", "--ignored=matching", "--untracked-files=all", "--", ":(glob).gitattributes", ":(glob)**/.gitattributes"])?;
+    if let Some(line) = stray.lines().find(|line| !line.trim().is_empty()) {
+        return Ok(Some(format!("the working tree has a .gitattributes that is not the committed one ({}), which can change what a merge gives", line.get(3..).unwrap_or(line).trim())));
+    }
+    Ok(None)
+}
+
+/// The diff options pinned for every read: nothing the checkout's config
+/// or the user's attributes file says changes
+/// what a commit is shown to contain.
+fn pinned(command: &[&str], tail: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = ["-c", "core.quotepath=off", "-c", "core.attributesFile=/dev/null"].map(String::from).to_vec();
+    args.extend(command.iter().map(|arg| arg.to_string()));
+    args.extend(["--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--ignore-submodules=none", "--src-prefix=a/", "--dst-prefix=b/"].map(String::from));
+    args.extend(tail.iter().map(|arg| arg.to_string()));
+    args
+}
+
+/// [`run`] with owned arguments.
+fn run_owned(cwd: &Path, args: &[String]) -> Result<String> {
+    run(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 fn full(cwd: &Path, rev: &str) -> Result<String> {
     Ok(run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).with_context(|| format!("{} is not a commit in this checkout", short(rev)))?.trim().to_string())
 }
@@ -117,13 +165,14 @@ fn is_ancestor(cwd: &Path, ancestor: &str, of: &str) -> Result<bool> {
 }
 
 /// The pull request's change at `commit` relative to `base`, as the
-/// three-dot diff has it, with nothing that depends on where in a file a
-/// hunk lands: no context lines (`-U0`), no hunk headers, no blob ids.
-/// Every option that could make two runs print the same change differently
-/// is pinned.
+/// three-dot diff has it, without what only says where in a file a hunk
+/// lands: hunk headers (line numbers) and blob ids go, context lines stay,
+/// so the same lines added in another place are another change. Every
+/// option that could make two runs print the same change differently is
+/// pinned.
 fn change_set(cwd: &Path, base: &str, commit: &str) -> Result<String> {
     let range = format!("{base}...{commit}");
-    let patch = run(cwd, &["-c", "core.quotepath=off", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--ignore-submodules=none", "--binary", "--src-prefix=a/", "--dst-prefix=b/", &range, "--"])?;
+    let patch = run_owned(cwd, &pinned(&["diff", "--no-renames", "--binary"], &[&range, "--"]))?;
     Ok(patch.lines().filter(|line| !line.starts_with("@@") && !line.starts_with("index ")).collect::<Vec<_>>().join("\n"))
 }
 
@@ -131,7 +180,7 @@ fn change_set(cwd: &Path, base: &str, commit: &str) -> Result<String> {
 /// branch at `base_commit`. Reads objects only: nothing is written to the
 /// checkout, its index or its refs.
 pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Result<Carry> {
-    if let Some(why) = rewritten_history(cwd)? {
+    if let Some(why) = rewritten_history(cwd)?.or(custom_merge_rules(cwd)?) {
         return Ok(Carry::NewWork(why));
     }
     let base_commit = full(cwd, base_commit)?;
@@ -176,7 +225,7 @@ pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Re
     // remerge is made in a temporary object store Git removes afterwards.
     let mut resolution = String::new();
     for merge in &merges {
-        let shown = run(cwd, &["-c", "core.quotepath=off", "show", "--remerge-diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--ignore-submodules=none", "--src-prefix=a/", "--dst-prefix=b/", "--format=", merge, "--"])?;
+        let shown = run_owned(cwd, &pinned(&["show", "--remerge-diff", "--format="], &[merge, "--"]))?;
         let shown = shown.trim_matches('\n');
         if !shown.is_empty() {
             resolution.push_str(&format!("Merge {merge}:\n{shown}\n"));
@@ -390,6 +439,54 @@ mod tests {
         std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
         std::fs::write(&grafts, format!("{head} {reviewed} {base}\n")).unwrap();
         assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains("grafts")));
+    }
+
+    #[test]
+    fn a_merge_driver_or_local_attributes_in_the_checkout_carry_nothing() {
+        let repo = Repo::new();
+        let reviewed = branch_reviewed(&repo);
+        repo.git(&["checkout", "-q", "main"]);
+        let base = repo.commit("shared.txt", &lines(|n| (n == 2).then(|| "line 2, from main".into())), "main edits the shared file");
+        repo.git(&["checkout", "-q", "feature"]);
+        // The reviewer's case: a driver of the author's own decides the
+        // merge, and Git's remerge in this checkout would agree with it.
+        repo.git(&["config", "merge.mover.driver", "true"]);
+        let attributes = repo.path().join(".git/info/attributes");
+        std::fs::create_dir_all(attributes.parent().unwrap()).unwrap();
+        std::fs::write(&attributes, "shared.txt merge=mover\n").unwrap();
+        repo.git(&["merge", "-q", "--no-edit", "main"]);
+        let head = repo.head();
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains("merge driver")));
+        // No driver, but a built-in merge rule set in the checkout alone.
+        repo.git(&["config", "--unset", "merge.mover.driver"]);
+        std::fs::write(&attributes, "# kept\nshared.txt merge=union\n").unwrap();
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains("attributes")));
+        // Comments alone are nothing.
+        std::fs::write(&attributes, "# nothing here\n\n").unwrap();
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::BaseMerges(_)));
+        // A .gitattributes in the working tree that is not committed, even
+        // one hidden from `git status` by an ignore rule, is read by Git.
+        std::fs::write(repo.path().join(".git/info/exclude"), ".gitattributes\n").unwrap();
+        std::fs::write(repo.path().join(".gitattributes"), "shared.txt merge=union\n").unwrap();
+        assert_eq!(repo.git(&["status", "--porcelain"]), "", "hidden from a plain status");
+        assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains(".gitattributes")));
+    }
+
+    #[test]
+    fn the_same_lines_added_in_another_place_are_another_change_set() {
+        let repo = Repo::new();
+        let base = repo.commit("shared.txt", &lines(|_| None), "base");
+        let guarded = |after: usize| lines(move |n| (n == after).then(|| format!("line {n}\nguard();")));
+        repo.git(&["checkout", "-q", "-b", "late"]);
+        let late = repo.commit("shared.txt", &guarded(15), "guard after line 15");
+        repo.git(&["checkout", "-q", "-b", "early", &base]);
+        let early = repo.commit("shared.txt", &guarded(3), "guard after line 3");
+        assert_ne!(change_set(repo.path(), &base, &late).unwrap(), change_set(repo.path(), &base, &early).unwrap());
+        // While the same line at the same place, numbered differently, is the same.
+        repo.git(&["checkout", "-q", "-b", "shifted", &base]);
+        let shifted_base = repo.commit("shared.txt", &format!("header\n{}", lines(|_| None)), "a header");
+        let shifted = repo.commit("shared.txt", &format!("header\n{}", guarded(15)), "guard after line 15, numbered 16");
+        assert_eq!(change_set(repo.path(), &base, &late).unwrap(), change_set(repo.path(), &shifted_base, &shifted).unwrap());
     }
 
     #[test]

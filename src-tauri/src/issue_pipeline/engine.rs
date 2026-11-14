@@ -1328,20 +1328,27 @@ impl Step<'_> {
         }
         let base = self.host.base_ref(&self.cwd, &pr.base);
         let diff = self.host.diff(&self.cwd, &base, &pr.head_sha)?;
-        let security_areas = categories::security_areas(&diff.paths, &diff.patch);
+        let mut security_areas = categories::security_areas(&diff.paths, &diff.patch);
         if self.halted() {
             return Ok(());
         }
         // A passing verdict carries over commits that only merge the base
         // (#947): as it is over clean merges, through a light check of what
         // the merges changed otherwise. A review a person asks for is a full one.
+        let mut not_carried = String::new();
         let merge_check = if by_person {
             None
         } else {
-            match self.carry_forward(&pr, &security_areas)? {
+            match self.carry_forward(&pr)? {
                 Carried::Forward => return Ok(()),
-                Carried::Check(merges) => Some(merges),
-                Carried::No => None,
+                Carried::Check(merges, areas) => {
+                    security_areas = areas;
+                    Some(merges)
+                }
+                Carried::Not(why) => {
+                    not_carried = why;
+                    None
+                }
             }
         };
         // The light check is not a round, so the limit does not refuse it.
@@ -1350,7 +1357,7 @@ impl Step<'_> {
                 let reason = match self.p.verdict.as_ref() {
                     // It passed: the review the head needs is what is missing, not a fix.
                     Some(verdict) if verdict.decision == Decision::Merge && gate::verdict_blocker(verdict).is_none() && !same_commit(&verdict.commit, &pr.head_sha) => {
-                        StopReason::MovedAfterFinalReview { reviewed: verdict.carried_from.clone().unwrap_or_else(|| verdict.commit.clone()), head: pr.head_sha.clone(), rounds: self.p.round }
+                        StopReason::MovedAfterFinalReview { reviewed: verdict.carried_from.clone().unwrap_or_else(|| verdict.commit.clone()), head: pr.head_sha.clone(), rounds: self.p.round, why: not_carried }
                     }
                     verdict => {
                         let blocking: Vec<_> = verdict.into_iter().flat_map(|verdict| verdict.blocking()).collect();
@@ -1442,25 +1449,33 @@ impl Step<'_> {
     /// one carries. Clean merges that leave the pull request's change as it
     /// was carry it as it is, and the merge gate takes over;
     /// [`Carried::Check`] is a light check of what the merges changed.
-    fn carry_forward(&mut self, pr: &PrSnapshot, security_areas: &[String]) -> Result<Carried> {
-        let Some(verdict) = self.p.verdict.clone() else { return Ok(Carried::No) };
-        if same_commit(&verdict.commit, &pr.head_sha) || verdict.decision != Decision::Merge || gate::verdict_blocker(&verdict).is_some() || verdict.checks == Some(ReviewChecks::Failed) {
-            return Ok(Carried::No);
+    fn carry_forward(&mut self, pr: &PrSnapshot) -> Result<Carried> {
+        let Some(verdict) = self.p.verdict.clone() else { return Ok(Carried::Not(String::new())) };
+        if same_commit(&verdict.commit, &pr.head_sha) || verdict.decision != Decision::Merge || gate::verdict_blocker(&verdict).is_some() {
+            return Ok(Carried::Not(String::new()));
         }
-        if !security_areas.is_empty() && verdict.security_pass != SecurityPass::Clean {
-            return Ok(Carried::No);
+        if verdict.checks == Some(ReviewChecks::Failed) {
+            return Ok(Carried::Not(format!("the reviewer's checks failed on {}", short(&verdict.commit))));
         }
         self.doing = "Comparing the new commits with the reviewed one";
         let merges = match self.host.base_merges(&self.cwd, &verdict.commit, &pr.head_sha, pr) {
             Ok(Carry::BaseMerges(merges)) => merges,
-            Ok(Carry::NewWork(_)) => return Ok(Carried::No),
+            Ok(Carry::NewWork(why)) => return Ok(Carried::Not(why)),
             Err(error) => {
                 self.record("note", format!("Whether the commits since {} only merge {} could not be told, so the new head is reviewed in full: {error:#}", short(&verdict.commit), pr.base));
-                return Ok(Carried::No);
+                return Ok(Carried::Not(format!("whether the new commits only merge {} could not be told ({error:#})", pr.base)));
             }
         };
+        // What the change touches, against the base it was compared with:
+        // the checkout's own ref for the base can lag behind the merged
+        // commits, and would count the base's own changes as the branch's.
+        let diff = self.host.diff(&self.cwd, &merges.base_commit, &pr.head_sha)?;
+        let security_areas = categories::security_areas(&diff.paths, &diff.patch);
+        if !security_areas.is_empty() && verdict.security_pass != SecurityPass::Clean {
+            return Ok(Carried::Not(format!("the change touches {} and that review's security pass was not clean", list(&security_areas))));
+        }
         if !merges.clean() {
-            return Ok(Carried::Check(merges));
+            return Ok(Carried::Check(merges, security_areas));
         }
         let from = verdict.carried_from.clone().unwrap_or_else(|| verdict.commit.clone());
         let mut carried = verdict.clone();
@@ -1473,7 +1488,7 @@ impl Step<'_> {
             carried.checks_note = Some(format!("the reviewer's checks passed on {}, before the merge of {}, and have not run since", short(&from), pr.base));
         }
         self.p.verdict = Some(carried.clone());
-        self.p.security_areas = security_areas.to_vec();
+        self.p.security_areas = security_areas;
         self.p.review_commit = Some(pr.head_sha.clone());
         self.p.merge_check = None;
         let count = merges.merges.len();
@@ -1947,10 +1962,12 @@ enum Carried {
     /// The verdict stands for the new head; the merge gate has taken over.
     Forward,
     /// Only merges of the base, which resolved something or changed the
-    /// pull request's change: the reviewer checks just that.
-    Check(BaseMerges),
-    /// A review as before.
-    No,
+    /// pull request's change: the reviewer checks just that, with the
+    /// security areas the change touches against that base.
+    Check(BaseMerges, Vec<String>),
+    /// A review as before, and why the verdict did not carry, for the
+    /// record; empty where there was no passing verdict to carry.
+    Not(String),
 }
 
 fn capitalized(text: &str) -> String {

@@ -146,13 +146,13 @@ describe("an issue's pipeline on its page", () => {
   it("says the final review passed when the branch moved after it, and offers one more review of the new head (#947)", async () => {
     const moved = pipeline({
       stage: "merge", state: "needsYou", round: 3, reviewCommit: C1,
-      reason: { kind: "movedAfterFinalReview", reviewed: C1, head: "2222222222222222222222222222222222222222", rounds: 3 },
-      note: "The branch moved to 2222222222 after the final review (3 of 3) passed 1111111111. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head.",
+      reason: { kind: "movedAfterFinalReview", reviewed: C1, head: "2222222222222222222222222222222222222222", rounds: 3, why: "2222222222 is a commit of its own, not a merge of the base branch" },
+      note: "The branch moved to 2222222222 after the final review (3 of 3) approved 1111111111, and that review does not carry to the new head: 2222222222 is a commit of its own, not a merge of the base branch. Allow one more review of the new head.",
       verdict: { commit: C1, decision: "merge", securityPass: "notNeeded", findings: [], checks: "passed", round: 3, at: "2026-10-12T10:05:00.000Z" },
     });
     render(<IssuePipelinePanel pipeline={moved} />);
     expect(screen.getByText("Needs you")).toBeTruthy();
-    expect(screen.getByText(/after the final review \(3 of 3\) passed 1111111111/)).toBeTruthy();
+    expect(screen.getByText(/after the final review \(3 of 3\) approved 1111111111, and that review does not carry/)).toBeTruthy();
     expect(screen.queryByText(/still asks for changes/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Review the new head once more" }));

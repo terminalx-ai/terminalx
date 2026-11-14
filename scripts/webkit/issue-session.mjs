@@ -277,11 +277,11 @@ try {
         const reviewed = "1111111111111111111111111111111111111111";
         const merged = "2222222222222222222222222222222222222222";
         const head = "3333333333333333333333333333333333333333";
-        const note = "The branch moved to 3333333333 after the final review (3 of 3) passed 1111111111. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head.";
+        const note = "The branch moved to 3333333333 after the final review (3 of 3) approved 1111111111, and that review does not carry to the new head: 3333333333 is a commit of its own, not a merge of the base branch. Allow one more review of the new head.";
         window.__PIPELINE__ = {
           ...window.__PIPELINE__,
           stage: "merge", state: "needsYou", round: 3, reviewCommit: merged,
-          reason: { kind: "movedAfterFinalReview", reviewed, head, rounds: 3 },
+          reason: { kind: "movedAfterFinalReview", reviewed, head, rounds: 3, why: "3333333333 is a commit of its own, not a merge of the base branch" },
           note,
           verdict: {
             commit: merged, carriedFrom: reviewed, decision: "merge", securityPass: "notNeeded", round: 3, at: "2026-10-01T00:20:00Z",
@@ -311,7 +311,7 @@ try {
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "a move after the final review fits the detail pane": !movedLayout.scrolls && movedLayout.inside && !movedLayout.overlaps,
-        "it says the final review passed and the new commits need a review": movedLayout.text.includes("after the final review (3 of 3) passed 1111111111") && !movedLayout.text.includes("still asks for changes"),
+        "it says the final review approved the old head and why it does not carry": movedLayout.text.includes("after the final review (3 of 3) approved 1111111111") && !movedLayout.text.includes("still asks for changes"),
         "the record shows the verdict carried over the merge of main": movedLayout.text.includes("review 3 of 3 carries forward to the new head"),
         "the one way on is another review of the new head, and a merge is not offered": (await panel.getByRole("button", { name: "Review the new head once more", exact: true }).count()) === 1 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 0,
       }, { scrolls: movedLayout.scrolls, inside: movedLayout.inside, overlaps: movedLayout.overlaps });

@@ -104,10 +104,17 @@ pub enum StopReason {
     SessionStopped { role: String, detail: String },
     /// Still not clean after the last allowed review.
     RoundLimit { rounds: u32, count: usize, worst: Option<Severity> },
-    /// The last allowed review passed `reviewed`, and the branch then moved
-    /// to `head` with commits that need a review of their own: more than
-    /// merges of the base branch, or a change the security pass has to see.
-    MovedAfterFinalReview { reviewed: String, head: String, rounds: u32 },
+    /// The last allowed review approved `reviewed`, and the branch then
+    /// moved to `head` with commits that review could not carry to: `why`
+    /// says what kept it (more than merges of the base, the security pass
+    /// rule, checks that failed, or a comparison that could not be made).
+    MovedAfterFinalReview {
+        reviewed: String,
+        head: String,
+        rounds: u32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        why: String,
+    },
     /// A step failed for a reason of its own (push refused, GitHub unreachable).
     Failed { step: String, message: String },
 }
@@ -181,7 +188,10 @@ impl StopReason {
                 Some(worst) => format!("Still not clean after {}: {} of medium severity or higher {} (worst: {}).", count(*rounds as usize, "review", "reviews"), count(*n, "finding", "findings"), if *n == 1 { "remains" } else { "remain" }, worst.label()),
                 None => format!("The reviewer still asks for changes after {}.", count(*rounds as usize, "review", "reviews")),
             },
-            Self::MovedAfterFinalReview { reviewed, head, rounds } => format!("The branch moved to {} after the final review ({rounds} of {rounds}) passed {}. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head.", short(head), short(reviewed)),
+            Self::MovedAfterFinalReview { reviewed, head, rounds, why } => match why.trim().trim_end_matches('.') {
+                "" => format!("The branch moved to {} after the final review ({rounds} of {rounds}) approved {}, and the new head needs a review of its own. Allow one more review of the new head.", short(head), short(reviewed)),
+                why => format!("The branch moved to {} after the final review ({rounds} of {rounds}) approved {}, and that review does not carry to the new head: {why}. Allow one more review of the new head.", short(head), short(reviewed)),
+            },
             Self::Failed { step, message } => format!("{step} did not work: {message}"),
         }
     }
@@ -829,7 +839,8 @@ pub(crate) mod tests {
             (StopReason::UncommittedChanges { files: vec!["a.rs".into()] }, "The workspace has uncommitted changes in 1 file: a.rs. Commit or discard them."),
             (StopReason::RoundLimit { rounds: 3, count: 2, worst: Some(Severity::Medium) }, "Still not clean after 3 reviews: 2 findings of medium severity or higher remain (worst: medium)."),
             (StopReason::RoundLimit { rounds: 1, count: 0, worst: None }, "The reviewer still asks for changes after 1 review."),
-            (StopReason::MovedAfterFinalReview { reviewed: HEAD.into(), head: NEXT.into(), rounds: 3 }, "The branch moved to 2222222222 after the final review (3 of 3) passed 1111111111. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head."),
+            (StopReason::MovedAfterFinalReview { reviewed: HEAD.into(), head: NEXT.into(), rounds: 3, why: "2222222222 is a commit of its own, not a merge of the base branch".into() }, "The branch moved to 2222222222 after the final review (3 of 3) approved 1111111111, and that review does not carry to the new head: 2222222222 is a commit of its own, not a merge of the base branch. Allow one more review of the new head."),
+            (StopReason::MovedAfterFinalReview { reviewed: HEAD.into(), head: NEXT.into(), rounds: 3, why: String::new() }, "The branch moved to 2222222222 after the final review (3 of 3) approved 1111111111, and the new head needs a review of its own. Allow one more review of the new head."),
             (StopReason::Failed { step: "Pushing the branch".into(), message: "rejected".into() }, "Pushing the branch did not work: rejected"),
         ] {
             assert_eq!(reason.describe(), text);

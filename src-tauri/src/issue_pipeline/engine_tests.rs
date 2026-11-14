@@ -160,6 +160,10 @@ struct World {
     carry: Option<Carry>,
     /// The `(reviewed, head)` pairs the pipeline asked git about.
     carry_asked: Vec<(String, String)>,
+    /// What asking git about them fails with.
+    carry_error: Option<String>,
+    /// The diff against a particular base, where it is not `diff`.
+    diff_against: BTreeMap<String, Diff>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -238,6 +242,8 @@ impl FakeHost {
             background: BTreeMap::new(),
             carry: None,
             carry_asked: Vec::new(),
+            carry_error: None,
+            diff_against: BTreeMap::new(),
         }))
     }
 
@@ -411,6 +417,7 @@ impl Host for FakeHost {
     fn base_merges(&self, _cwd: &Path, reviewed: &str, head: &str, _pr: &PrSnapshot) -> Result<Carry> {
         let mut world = self.world();
         world.carry_asked.push((reviewed.into(), head.into()));
+        if let Some(error) = &world.carry_error { bail!("{error}"); }
         Ok(world.carry.clone().unwrap_or_else(|| Carry::NewWork(format!("{} is a commit of its own", &head[..10]))))
     }
 
@@ -437,12 +444,13 @@ impl Host for FakeHost {
         format!("origin/{base_branch}")
     }
 
-    fn diff(&self, _cwd: &Path, _base: &str, _head: &str) -> Result<Diff> {
+    fn diff(&self, _cwd: &Path, base: &str, _head: &str) -> Result<Diff> {
         let hook = self.world().during_diff.take();
         if let Some(hook) = hook {
             hook();
         }
-        Ok(self.world().diff.clone())
+        let world = self.world();
+        Ok(world.diff_against.get(base).cloned().unwrap_or_else(|| world.diff.clone()))
     }
 
     fn push(&self, _cwd: &Path) -> Result<()> {
@@ -4107,8 +4115,8 @@ fn a_real_commit_after_the_final_review_still_needs_a_review_and_says_so() {
     let stopped = run.poll();
     assert_eq!((stopped.stage, stopped.state), (Stage::Merge, State::NeedsYou));
     let reason = stopped.reason.clone().unwrap();
-    assert_eq!(reason, StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1 });
-    assert_eq!(stopped.note.as_deref(), Some("The branch moved to 2222222222 after the final review (1 of 1) passed 1111111111. The new commits are not only merges of the base branch, so they need a review: allow one more review of the new head."));
+    assert_eq!(reason, StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1, why: "2222222222 is a commit of its own".into() });
+    assert_eq!(stopped.note.as_deref(), Some("The branch moved to 2222222222 after the final review (1 of 1) approved 1111111111, and that review does not carry to the new head: 2222222222 is a commit of its own. Allow one more review of the new head."));
     assert!(!reason.describe().contains("still asks for changes"));
     assert!(run.merges().is_empty());
 
@@ -4153,8 +4161,8 @@ fn a_carried_verdict_keeps_the_security_pass_rule() {
         world.carry = Some(clean_merges());
     }
     let stopped = run.poll();
-    assert_eq!(stopped.reason, Some(StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1 }));
-    assert!(run.host.world().carry_asked.is_empty(), "nothing to carry, so git is not asked");
+    assert_eq!(stopped.reason, Some(StopReason::MovedAfterFinalReview { reviewed: C1.into(), head: C2.into(), rounds: 1, why: "the change touches billing and that review's security pass was not clean".into() }));
+    assert!(stopped.note.unwrap().contains("security pass was not clean"), "only merges of main came in, so the reason is the pass, not new work");
     assert!(run.merges().is_empty());
     // One temporary home at a time: a second waits for the first to go.
     drop(run);
@@ -4204,4 +4212,29 @@ fn a_conflict_the_pipelines_resolver_merged_after_the_final_review_gets_the_ligh
     assert_eq!((checking.stage, checking.state, checking.round, checking.merge_check.as_deref()), (Stage::Review, State::Working, 1, Some(C1)), "{:?} {:?}", checking.note, checking.reason);
     assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Merged);
     assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+}
+
+#[test]
+fn a_stale_base_ref_does_not_count_the_bases_own_changes_against_a_carry() {
+    // The checkout's origin/main lags behind the main that was merged: a
+    // three-dot diff against it holds main's own billing change. Against the
+    // base the merges were compared with, the change touches nothing.
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    run.host.world().diff_against.insert("origin/main".into(), Diff { paths: vec!["saas/src/billing/plans.ts".into(), "src/lib/format.ts".into()], patch: String::new() });
+    let merged = run.poll();
+    assert_eq!(merged.state, State::Merged, "{:?} {:?}", merged.note, merged.reason);
+    assert!(merged.security_areas.is_empty());
+    assert_eq!(merged.verdict.unwrap().carried_from.as_deref(), Some(C1));
+}
+
+#[test]
+fn a_comparison_that_cannot_be_made_is_said_as_the_reason_not_new_work() {
+    let run = moved_after_final_review(None, "not_needed", Some(clean_merges()));
+    run.host.world().carry_error = Some("Fetching the pull request base failed: timed out".into());
+    let stopped = run.poll();
+    let note = stopped.note.clone().unwrap();
+    assert!(matches!(&stopped.reason, Some(StopReason::MovedAfterFinalReview { why, .. }) if why.contains("could not be told")), "{:?}", stopped.reason);
+    assert!(note.contains("whether the new commits only merge main could not be told (Fetching the pull request base failed: timed out)"), "{note}");
+    assert!(!note.contains("not only merges"), "{note}");
+    assert!(stopped.events.iter().any(|event| event.kind == "note" && event.message.contains("timed out")));
 }
