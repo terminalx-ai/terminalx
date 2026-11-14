@@ -1036,6 +1036,17 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        if method == "environment.cancel" {
+            return super::environment::cancel(peer.id(), &params);
+        }
+        if method == "environment.report" {
+            // Retain admission until every probe and its I/O have ended.
+            let _privacy = ticket.enter().map_err(|_| RpcError::forbidden("Environment report is unavailable"))?;
+            return super::environment::report(peer.id(), &params, || {
+                ticket.valid() && !peer.hung_up() && peer.granted("environment/1") &&
+                    self.authority(peer) == Authority::Manage
+            }).await;
+        }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
@@ -3696,3 +3707,40 @@ mod pipeline_reviewer_tests;
 
 #[cfg(test)]
 pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn environment_rpc_preserves_handshake_capability_and_member_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
+        let (peer, _events) = Peer::for_user("environment-viewer".into(), Authority::Participate, Some("viewer".into()));
+        let call = |method: &'static str, params: Value| {
+            let rpc = rpc.clone();
+            let peer = peer.clone();
+            async move { rpc.handle(&peer, &json!({"id": "env-test", "method": method, "params": params})).await }
+        };
+        let params = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "hello_required");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["fs/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "capability_not_granted");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": "viewer"}]})).unwrap()));
+        for role in ["viewer", "driver", "manager"] {
+            rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": role}]})).unwrap()));
+            assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden", "a listed {role} cannot consume the manager probe slot");
+            assert_eq!(call("environment.cancel", params.clone()).await["error"]["code"], "forbidden");
+        }
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "owner", "role": "manager"}]})).unwrap()));
+        let (manager, _events) = Peer::for_user("environment-owner".into(), Authority::Manage, Some("owner".into()));
+        let invoke = |method: &str, params: Value| json!({"id": "owner-env", "method": method, "params": params});
+        rpc.handle(&manager, &invoke("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]}))).await;
+        assert_eq!(rpc.handle(&manager, &invoke("environment.cancel", params.clone())).await["ok"], true);
+        assert_eq!(rpc.handle(&manager, &invoke("environment.report", json!({"requestId": "bad", "command": "env"}))).await["error"]["code"], "invalid_params");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": []})).unwrap()));
+        assert_eq!(call("environment.report", params).await["error"]["code"], "forbidden");
+    }
+}

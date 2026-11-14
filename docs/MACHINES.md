@@ -687,6 +687,8 @@ the pull request that adds it.
 | `lease.acquire` | `collab/1` | Not served | As `collab.state`; two operating computers on one tab are not arbitrated in the first version |
 | `lease.release` | `collab/1` | Not served | As `lease.acquire` |
 | `lease.takeOver` | `collab/1` | Not served | As `lease.acquire` |
+| `environment.report` | `environment/1` | Served | Manage authority only; bounded installed-tool versions from the machine, fixed probes and a per-caller limit, no caller-supplied command or project path |
+| `environment.cancel` | `environment/1` | Served | Manage authority only; cancels only this attachment's report request |
 | `ports.list` | `ports/1` | Served | The machine's loopback |
 | `ports.open` | `ports/1` | Served | A forward ends with the connection (PRO-355) |
 | `ports.write` | `ports/1` | Served | |

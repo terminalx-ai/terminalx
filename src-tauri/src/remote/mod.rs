@@ -16,6 +16,7 @@ pub mod agent_commands;
 pub mod bootstrap_link;
 pub mod client;
 pub mod collab;
+pub mod environment;
 pub mod files;
 pub mod git;
 pub mod host;
