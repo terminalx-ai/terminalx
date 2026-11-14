@@ -188,7 +188,7 @@ pub struct Pipeline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted_resolution: Option<Resolution>,
     /// A restarted merge may contain manual edits and must not be aborted automatically.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_resolution_edits: bool,
     /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
     /// the merge is a person's, made from their computer with their own `gh`.
