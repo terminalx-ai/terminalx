@@ -43,6 +43,9 @@ export interface Prefs {
   panelTerminalOpen: boolean;
   panelTerminalHeight: number;
   editorPaneWidth: number;
+  /** A file tab's source view (PRO-297): wrap long lines, and draw spaces and tabs. Separate from the diff view's options. */
+  editorWrap: boolean;
+  editorShowWhitespace: boolean;
   updateChannel: "stable" | "beta";
   sounds: boolean;
   animations: boolean;
@@ -169,6 +172,8 @@ const DEFAULTS: Prefs = {
   panelTerminalOpen: false,
   panelTerminalHeight: 260,
   editorPaneWidth: 520,
+  editorWrap: false,
+  editorShowWhitespace: false,
   updateChannel: "stable",
   sounds: true,
   animations: true,
@@ -299,6 +304,8 @@ function load(legacyOnly = false): Prefs {
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
     prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;
     prefs.diffWrap = prefs.diffWrap !== false;
+    prefs.editorWrap = prefs.editorWrap === true;
+    prefs.editorShowWhitespace = prefs.editorShowWhitespace === true;
     prefs.diffWrapFiles = prefs.diffWrapFiles && typeof prefs.diffWrapFiles === "object" && !Array.isArray(prefs.diffWrapFiles)
       ? Object.fromEntries(Object.entries(prefs.diffWrapFiles).filter(([, value]) => typeof value === "boolean")) : {};
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);

@@ -3938,6 +3938,20 @@ pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
 }
 
 #[tauri::command]
+pub async fn read_whole_text_file(path: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::read_whole_text(Path::new(&path))).await.map_err(err)?.map_err(err)
+}
+
+/// Local-main-window only: the file tab's Download, to a path the person chose in a save dialog.
+#[tauri::command]
+pub async fn export_file(to: String, from: Option<String>, content: Option<String>) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::export_file(Path::new(&to), from.as_deref().map(Path::new), content.as_deref()))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
 pub fn file_mtime(path: String) -> Option<u64> {
     crate::files::stat_mtime(Path::new(&path))
 }
