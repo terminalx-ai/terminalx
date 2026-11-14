@@ -66,14 +66,24 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   an older runtime would ignore: a client sends one only once this is granted.
 /// - `pipeline/2`: paginated persistent reviewer identities, independent of pipeline history.
 /// - `session-status/1`: `session.update.manualStatus`, separate from agent activity.
+/// - `agent-commands/1` (PRO-343): send, steer, stop and the permission
+///   decision as live calls, for a runtime with no cloud mailbox (a machine,
+///   docs/MACHINES.md decision 3). `session.steer`, `session.stop` and
+///   `session.decide`; with it granted, `session.send` is held to the same
+///   rules. Each outcome is a durable receipt per connection device and
+///   `clientRequestId` (`agent_commands.rs`). A runtime with a mailbox never
+///   offers it, so a cloud command has exactly one path.
 ///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
-/// list, which every runtime serves: see [`served`].
-pub const CAPABILITIES: [&str; 24] = [
+/// list, which every runtime of this build knows: see [`served`].
+pub const CAPABILITIES: [&str; 25] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
 ];
+
+/// The namespace of live agent commands (spelled out in [`CAPABILITIES`]).
+pub const AGENT_COMMANDS: &str = "agent-commands/1";
 
 /// The namespace that lets a connection address an agent tab's own terminal
 /// (spelled out in [`CAPABILITIES`], which the client's tests read).
@@ -134,8 +144,10 @@ pub const METHODS: &[Method] = &[
     // Participate may send only to sessions shared with it; the server checks.
     method("session.send", "session/1", Participate, true),
     method("session.subscribe", "session/1", Participate, false),
-    // PRO-22: agent tabs. Sends, steers, stops and permission decisions
-    // come through the API mailbox, never as live calls (docs/CLOUD-AGENT-TABS.md).
+    // PRO-22: agent tabs. In a cloud workspace, sends, steers, stops and
+    // permission decisions come through the API mailbox, never as live calls
+    // (docs/CLOUD-AGENT-TABS.md); a runtime with no mailbox takes them live
+    // under `agent-commands/1` (PRO-343, below).
     method("session.tabs", "session/1", Participate, false),
     method("session.configure", "session/1", Manage, true),
     method("session.markRead", "session/1", Participate, false),
@@ -161,6 +173,13 @@ pub const METHODS: &[Method] = &[
     // to the same per-call rules. Only a runtime that makes native tabs has
     // any to move, so no newer version was needed. A resend changes nothing.
     method("session.toTerminal", "session/3", Participate, true),
+    // PRO-343: the mailbox's steer, stop and permission decision as live
+    // calls, on a runtime with no mailbox. Each is decided by the mailbox's
+    // own rules (a driver steers and stops, an approver decides) and
+    // answered from its durable receipt when resent.
+    method("session.steer", "agent-commands/1", Participate, true),
+    method("session.stop", "agent-commands/1", Participate, true),
+    method("session.decide", "agent-commands/1", Participate, true),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
     // What the composer of an agent tab offers: read-only, and never more
@@ -303,6 +322,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/3" => &["session.attach"],
         "ports/1" => &["ports."],
         "machine/1" => &["machine."],
+        "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
 }
@@ -361,8 +381,8 @@ pub fn failure(id: &str, error: &RpcError) -> Value {
 }
 
 /// `rpc.hello`: the intersection of what the client wants and what this
-/// runtime serves (`offered`, from [`served`]). No overlap at all is
-/// `update_required`.
+/// runtime offers (`offered`: [`served`], less `agent-commands/1` beside a
+/// mailbox). No overlap at all is `update_required`.
 pub fn negotiate(params: &Value, offered: &[&str]) -> Result<Vec<String>, RpcError> {
     if params.get("protocol").and_then(Value::as_str) != Some(PROTOCOL) {
         return Err(RpcError::new("update_required", format!("this runtime speaks {PROTOCOL}")));
@@ -426,7 +446,7 @@ impl IdempotencyCache {
 }
 
 /// Error codes are a closed set; map a stored one back to its static name.
-fn leak_code(code: &str) -> &'static str {
+pub(crate) fn leak_code(code: &str) -> &'static str {
     const CODES: &[&str] = &[
         "invalid_params",
         "not_found",
@@ -554,6 +574,13 @@ mod tests {
         // An interrupt is for the turn running now: never replayed from a cache.
         let interrupt = find_method("session.interrupt").unwrap();
         assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));
+        // The mailbox's other commands, live for a runtime without one:
+        // each carries a request id and is answered from its receipt.
+        for name in ["session.steer", "session.stop", "session.decide"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), (AGENT_COMMANDS, Participate, true), "{name}");
+        }
+        assert!(CAPABILITIES.contains(&AGENT_COMMANDS));
         assert!(find_method("runtime.exec").is_none());
         assert!(find_method("invoke").is_none());
     }
@@ -594,6 +621,11 @@ mod tests {
         assert!(CAPABILITIES.contains(&AGENT_PTY));
         assert_eq!(negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/9"]}), &workspace).unwrap_err().code, "update_required");
         assert_eq!(negotiate(&json!({"protocol": "terminalx-workspace-rpc/2", "want": ["pty/1"]}), &workspace).unwrap_err().code, "update_required");
+        // A runtime grants only what it offers, whatever this build knows.
+        let offered: Vec<&str> = workspace.iter().copied().filter(|capability| *capability != AGENT_COMMANDS).collect();
+        let cloud = negotiate(&json!({"protocol": PROTOCOL, "want": CAPABILITIES}), &offered).unwrap();
+        assert!(!cloud.iter().any(|capability| capability == AGENT_COMMANDS));
+        assert_eq!(negotiate(&json!({"protocol": PROTOCOL, "want": [AGENT_COMMANDS]}), &offered).unwrap_err().code, "update_required");
     }
 
     /// PRO-340: `machine/1` is offered only where it is served, and a client

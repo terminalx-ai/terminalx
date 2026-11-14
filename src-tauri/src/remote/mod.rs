@@ -11,7 +11,10 @@
 //! - [`collab`]: who may do what in a shared workspace (`collab/1`, PRO-30).
 //! - [`machine`]: `machine/1`, one runtime serving every project of its
 //!   machine (PRO-340).
+//! - [`agent_commands`]: receipts of live agent commands on a runtime with
+//!   no cloud mailbox (`agent-commands/1`, PRO-343).
 
+pub mod agent_commands;
 pub mod bootstrap_link;
 pub mod client;
 pub mod collab;

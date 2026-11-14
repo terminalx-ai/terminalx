@@ -139,6 +139,10 @@ same process and gains nothing.
   - A send queued behind a running turn is not settled. A repeat finds the queued
     copy instead of queueing a second one (`send_ids.rs`, "Only settled replies
     answer a repeat").
+    *Built in PRO-343:* the copy waits in the tab's durable follow-up queue
+    (`receipts::FollowUps`, the mailbox's own), not in a queue tied to the
+    connection as a phone's is. Its receipt (`queued: true`) is written once it
+    is queued, and a repeat is answered from it, so it is queued once.
 - `session.interrupt` stays live and is never idempotent (#427,
   `src-tauri/src/remote/protocol.rs:142`). After a drop it is not resent.
 - Refusals reuse existing codes with a `data.reason`, as the server already
@@ -152,6 +156,49 @@ same process and gains nothing.
   through `self.agents()` (`src-tauri/src/remote/server.rs:3368`). A machine
   runtime has no cloud agents layer, so PRO-343 must give it that store without
   the mailbox, or images cannot be sent to a machine.
+  *Settled in PRO-343:* the "cloud agents layer" splits in two. The mailbox
+  (`CloudAgents::api`, its poller, launches and scheduled runs) is absent on a
+  machine. The rest (agent tabs, the follow-up queue and the attachment store)
+  is `CloudAgents::open` with no API, as `terminalx-serve` already opens it
+  without a cloud bootstrap (`start_cloud_agents` in `src-tauri/src/serve.rs`).
+  The machine host (PRO-341) builds its `WorkspaceRpc` with that, so
+  `session.attach` works unchanged.
+
+PRO-343 settles the rest of the namespace as follows:
+
+- `agent-commands/1` is offered exactly when the runtime's agents have no
+  mailbox API and the receipt journal opened (`WorkspaceRpc::set_agents`). A
+  runtime with a mailbox does not grant it in `rpc.hello`, and answers
+  `session.steer`, `session.stop` and `session.decide` with `method_not_found`.
+- The four commands are decided and applied by the mailbox's own code
+  (`cloud_agents::mailbox::decide`), so they mean what the mailbox kinds mean:
+  who may send, steer and stop (a driver, or a manager over a held lease), who
+  may decide (an approver), what a plain driver may type (PRO-88), and settings
+  on a send. Tab driver leases apply only to a connection that names a person,
+  as for the live `session.send` before it: a paired computer names none, and
+  a machine serves no `lease.*`, so one computer's send never locks another
+  out of a tab with no way to take it over.
+- Parameters are the mailbox plaintexts plus `sessionId`, `tabId` and
+  `clientRequestId`: `text`, `images`, `model`, `effort` and `mode` for a send;
+  `text` for a steer; nothing more for a stop; `requestId` with `optionId` or
+  `answers` for a decision. The result names `sessionId` and `tabId` with the
+  receipt's own fields (`queued` and `settingsIgnored` for a send,
+  `droppedFollowUps` for a stop, `requestId` for a decision).
+- Receipts live in `agent-commands.jsonl` beside the rest of the agent state,
+  keyed by the connection's `device_id` (the paired computer on a machine) and
+  the `clientRequestId`. Each stores a digest of the method and every
+  parameter but the id. No message text is written there.
+- A refusal made before the `applying` mark (not allowed, a held lease, a
+  malformed body, a slash command from a plain driver) touched nothing. It is
+  not kept, so a send that was refused can be tried again in full, as a phone's
+  failed send can.
+- Refusals: `conflict` with `data.reason` `request-not-pending` (and the
+  `requestId`) for a decision whose request was answered or is gone, `id-reused`
+  for an id sent again with another body. `outcome_unknown` with `data.reason`
+  `runtime-interrupted` for an id cut off mid-apply. The rest map from the
+  mailbox category, which is `data.reason`: `forbidden`, `lease_held`,
+  `invalid_params` (`payload-invalid`, `attachment-missing`) and `not_found`.
+  No new error code was needed.
 - While a machine cannot be reached, nothing is queued on the operating
   computer. The composer says it cannot send (PRO-352). A command whose reply
   was lost is resent with the same id once the connection is back.
@@ -614,6 +661,9 @@ the pull request that adds it.
 | `session.delete` | `session/2` | Served | |
 | `session.interrupt` | `session/3` | Served | Live only; never resent after a drop |
 | `session.toTerminal` | `session/3` | Served | |
+| `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |
+| `session.stop` | `agent-commands/1` | Served | Drops queued sends, stops the agent; applied again after a crash (decision 3) |
+| `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |
 | `runtime.agents` | `agents/1` | Served | Machine-wide; PRO-350 adds each agent's sign-in state as a field |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
