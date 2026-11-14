@@ -554,7 +554,7 @@ export function TabView({
         {
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
-          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
+          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-6 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
             <span className="min-w-0 flex-1">
               {viewing
                 ? `An earlier conversation in this tab, with ${agentName(viewing.harness)}. It is kept as it was.`
@@ -576,7 +576,7 @@ export function TabView({
         <>
         {banner("composer")}
         {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
-          <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
+          <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>
               Steer now

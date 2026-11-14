@@ -2,6 +2,7 @@ import * as React from "react";
 import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
 import { Check, ChevronRight } from "@/icons";
 import { cn } from "@/lib/cn";
+import { isContextMenuKey, isContextMenuTextField, openContextMenu } from "@/lib/contextMenu";
 
 export const DropdownMenu = Prim.Root;
 export const DropdownMenuTrigger = Prim.Trigger;
@@ -114,7 +115,24 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
 // ---- Context menus share the dropdown's look; only the trigger differs.
 
 export const ContextMenu = Ctx.Root;
-export const ContextMenuTrigger = Ctx.Trigger;
+export const ContextMenuTrigger = React.forwardRef<
+  React.ComponentRef<typeof Ctx.Trigger>,
+  React.ComponentPropsWithoutRef<typeof Ctx.Trigger>
+>(({ onKeyDown, disabled, ...props }, ref) => (
+  <Ctx.Trigger
+    {...props}
+    ref={ref}
+    disabled={disabled}
+    onKeyDown={(event) => {
+      onKeyDown?.(event);
+      if (event.defaultPrevented || disabled || !isContextMenuKey(event) || isContextMenuTextField(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openContextMenu(event.currentTarget);
+    }}
+  />
+));
+ContextMenuTrigger.displayName = "ContextMenuTrigger";
 
 export const ContextMenuContent = React.forwardRef<
   React.ComponentRef<typeof Ctx.Content>,

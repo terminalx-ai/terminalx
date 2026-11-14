@@ -242,6 +242,11 @@ function GeneralTab() {
         control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
       />
       <SettingRow
+        label="Prompt map"
+        description="A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it."
+        control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
+      />
+      <SettingRow
         label="Autocorrect"
         description="Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed."
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}

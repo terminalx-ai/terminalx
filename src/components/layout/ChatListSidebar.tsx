@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import { Archive, CheckSquare, Ellipsis, GitBranch, Pencil, Pin, Settings, SquarePen, Trash2 } from "@/icons";
+import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { ContextMenu, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { ContextMenu, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
@@ -14,19 +14,18 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import { isUnread } from "@/lib/dashboard";
 import { usePrefs } from "@/lib/prefs";
-import { addProject, archiveSession, pinSession, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
+import { addProject, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
-import { openRenameSession, openSettle } from "@/lib/dialogs";
-import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
+import { openRenameSession } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
 import type { Project } from "@/types/session";
 import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
 import { SidebarBulkBar } from "./SidebarBulkBar";
-import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
+import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
@@ -251,27 +250,7 @@ function ChatRow({
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </ContextMenu>
         <DropdownMenuContent align="end" className="w-56">
-          <DropdownMenuItem onSelect={rename}>
-            <Pencil /> Rename…
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void pinSession(session.id, !session.pinned)}>
-            <Pin /> {session.pinned ? "Unpin" : "Pin"}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
-            <Archive /> {session.archived ? "Unarchive" : "Archive"}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => togglePicked(ids)}>
-            <CheckSquare /> {picked ? "Deselect" : "Select"}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {session.worktreeName && !session.worktreeRemoved && (
-            <DropdownMenuItem onSelect={() => openSettle(session)}>
-              <GitBranch /> Remove workspace, keep conversations…
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
-            <Trash2 /> Delete…
-          </DropdownMenuItem>
+          <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
