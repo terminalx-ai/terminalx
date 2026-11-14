@@ -1690,6 +1690,8 @@ mod tests {
         }
         assert!(journal.read().unwrap().environments.is_empty());
     }
+    // A reservation exists only where creation passed its Apple Silicon gate.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn create_reservation_is_atomic_keyed_and_retains_deleted_receipt() {
         let temp = tempfile::tempdir().unwrap();

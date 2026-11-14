@@ -2772,7 +2772,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::journal::{new_id, InputFile, Journal, TaskInput};
+    use super::super::journal::{new_id, Journal, TaskInput};
     use super::*;
 
     /// The key the test host installed its guest with.
@@ -2835,6 +2835,8 @@ mod tests {
         (home, guest, task)
     }
 
+    // macOS desktop attachment; a Linux guest has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_host_adapter_routes_real_guest_leases_and_recovers_lost_receipts_without_replay() {
         use super::super::attachment::{Adapter,Binding,recover_using};
@@ -2900,6 +2902,8 @@ mod tests {
         journal.submit("after-release",task.input).unwrap();
     }
 
+    // macOS desktop attachment; a Linux guest has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn discovery_uses_retained_ownership_and_unknown_helper_exit_cannot_advertise_capability() {
         use super::super::attachment::{Binding,probe_using,recover_using};
@@ -2937,6 +2941,8 @@ mod tests {
         assert!(journal.submit("unknown-discovery-blocks-task",task.input).is_err());
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn release_tombstone_blocks_late_acquisition_and_missing_mcp_exit_stays_fenced() {
         let (_home,guest,_task)=setup();let identity=guest.state.lock().unwrap().identity.clone();
@@ -2955,6 +2961,8 @@ mod tests {
         assert!(guest.attachment_tools(&binding).is_err());
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn attached_guest_calls_are_exclusive_durable_and_never_replayed_after_unknown_exit() {
         let (_home, guest, task) = setup();
@@ -3005,6 +3013,8 @@ mod tests {
         assert_eq!(released["calls"]["input-lost"]["status"],"outcomeUnknown");
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn idle_attached_guest_release_retains_history_and_rejects_delayed_input() {
         let (_home, guest, _task)=setup();
@@ -3114,12 +3124,12 @@ mod tests {
             Journal::open_existing(&crate::store::root().unwrap().join("host-journal")).unwrap();
         journal.cancel(&task.target).unwrap();
         guest.cancel(&task.target).unwrap();
-        let key = "interrupted-desktop-check";
+        let key = "interrupted-account-check";
         let params = request(
             &guest,
             "environment.setupAction",
             json!({
-                "action":"desktop.verify", "idempotencyKey":key, "confirm":true
+                "action":"provider.codexAccount.verify", "idempotencyKey":key, "confirm":true
             }),
         )
         .params;
@@ -3311,7 +3321,7 @@ mod tests {
             &guest,
             "environment.setupAction",
             json!({
-            "action":"driver.start","idempotencyKey":"setup-exact-key","confirm":true}),
+            "action":"provider.codexAccount.verify","idempotencyKey":"setup-exact-key","confirm":true}),
         )
         .params;
         let count = std::sync::atomic::AtomicUsize::new(0);
@@ -3368,7 +3378,7 @@ mod tests {
             .is_err());
         assert_eq!(count.load(Ordering::Relaxed), 1);
         let mut changed = params.clone();
-        changed["action"] = json!("desktop.verify");
+        changed["action"] = json!("provider.codexDeviceLogin.start");
         assert!(guest
             .setup_action_using(&changed, |_, _, _, _| panic!("changed key effect"))
             .is_err());
@@ -3386,7 +3396,7 @@ mod tests {
             &guest,
             "environment.setupAction",
             json!({
-            "action":"desktop.verify","idempotencyKey":"setup-disk-key","confirm":true}),
+            "action":"provider.codexAccount.verify","idempotencyKey":"setup-disk-key","confirm":true}),
         )
         .params;
         let path = guest.base.join("runtime").join(STATE);
@@ -3605,7 +3615,7 @@ mod tests {
         // key. Without the key itself nothing is routed (review 2: a waiting
         // task must not grant itself approval).
         for offered in [json!(null), json!(""), json!(digest), json!("0".repeat(64))] {
-            let mut params = json!({"method":"task.permission","params":req.params});
+            let mut params = json!({"method":"task.permission","params":req.params,"expectedRuntimeSha256":req.expected_runtime_sha256});
             if !offered.is_null() { params["hostKey"] = offered.clone(); }
             let response = service.handle(crate::control::ControlRequest {
                 id: new_id(),
@@ -3619,7 +3629,7 @@ mod tests {
             id: new_id(),
             token: String::new(),
             command: "local_vm.guest".into(),
-            params: json!({"method":req.method,"params":req.params,"hostKey":req.host_key}),
+            params: json!({"method":req.method,"params":req.params,"hostKey":req.host_key,"expectedRuntimeSha256":req.expected_runtime_sha256}),
         });
         assert!(response.ok);
         assert_eq!(
@@ -3801,7 +3811,8 @@ mod tests {
         params["environmentId"] = json!(identity.environment_id);
         params["generation"] = json!(identity.generation);
         Request {
-            expected_runtime_sha256: None,
+            // As the host sends it; a Linux guest refuses a request without it.
+            expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
             method: method.into(),
             params,
@@ -3926,7 +3937,7 @@ mod tests {
             let response: Task = serde_json::from_value(
                 guest
                     .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
                         method: req.method.clone(),
                         params: req.params.clone(),
@@ -3953,7 +3964,7 @@ mod tests {
         changed["text"] = json!("Different input");
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: changed
@@ -3965,7 +3976,7 @@ mod tests {
         wrong["target"]["workspaceId"] = json!(new_id());
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
                 method: req.method,
                 params: wrong
@@ -3991,7 +4002,7 @@ mod tests {
         assert!(retained.prior_external_outcome_unknown);
         guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone(),
@@ -4047,7 +4058,7 @@ mod tests {
         );
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone()
@@ -4660,6 +4671,9 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
+    // Starts the fixture's desktop task, which a Linux guest refuses without a
+    // container binding before any receipt is read.
+    #[cfg(target_os = "macos")]
     #[test]
     fn lost_start_receipt_and_restart_never_create_a_second_worker_or_replay() {
         let (_home, guest, mut task) = setup();
@@ -4796,6 +4810,9 @@ mod tests {
         assert_eq!(kept.task.events.iter().filter(|e| e.payload["type"] == "retentionStopped").count(), 1);
     }
 
+    // Starts the fixture's desktop task, which a Linux guest refuses without a
+    // container binding before it reads the tombstone.
+    #[cfg(target_os = "macos")]
     #[test]
     fn cancel_before_a_delayed_start_leaves_a_durable_tombstone() {
         let (_home, guest, task) = setup();
@@ -4874,11 +4891,13 @@ mod tests {
         assert!(page(&task, 0).unwrap_err().to_string().contains("gap"));
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn selected_files_require_exact_content_manifest_and_safe_paths() {
         let (_home, guest, mut task) = setup();
         let bytes = b"selected context only";
-        task.input.files = vec![InputFile {
+        task.input.files = vec![super::super::journal::InputFile {
             path: "src/input.txt".into(),
             sha256: digest(bytes),
             bytes: bytes.len() as u64,
