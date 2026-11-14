@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use std::time::Duration;
 
@@ -71,7 +71,33 @@ done
 /bin/launchctl bootstrap "$domain" "$2"
 "#;
 static ADMISSION: RwLock<()> = RwLock::new(());
+/// Held by the controller through each tick, which can wait on a 45 s guest
+/// probe. Exclusive operations wait for it briefly instead of being refused
+/// whenever a tick happens to be running (review 2), and hold it themselves,
+/// so no tick runs meanwhile. Always taken before `ADMISSION`.
+static TICK: Mutex<()> = Mutex::new(());
+const TICK_WAIT: Duration = Duration::from_secs(60);
 static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// No controller tick and no other VM operation, for as long as it is held.
+#[derive(Debug)]
+pub struct Exclusive {
+    _admission: RwLockWriteGuard<'static, ()>,
+    _tick: MutexGuard<'static, ()>,
+}
+
+/// The controller's tick, once the one under way ends, within `budget`.
+fn tick_within(budget: Duration) -> Result<MutexGuard<'static, ()>> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match TICK.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(std::sync::TryLockError::WouldBlock) => bail!("The Local VM controller is still checking a guest; try again in a moment"),
+        }
+    }
+}
 pub(crate) fn stopping() -> bool {
     STOPPING.load(Ordering::Acquire)
 }
@@ -89,14 +115,15 @@ pub fn admit(lifetime: &Lifetime) -> Result<RwLockReadGuard<'static, ()>> {
 
 /// Selected at the owner route instead of a shared guard, never upgraded from
 /// one. Keep through fresh probes and the durable disposition/deletion write.
-pub fn admit_exclusive(lifetime: &Lifetime) -> Result<RwLockWriteGuard<'static, ()>> {
+pub fn admit_exclusive(lifetime: &Lifetime) -> Result<Exclusive> {
+    let tick = tick_within(TICK_WAIT)?;
     let guard = ADMISSION.try_write().map_err(|_| {
         anyhow::anyhow!("A Local VM operation is in flight; wait for it and inspect again")
     })?;
     if lifetime.is_stopping() || stopping() {
         bail!("The local owner is stopping; no VM operation was routed");
     }
-    Ok(guard)
+    Ok(Exclusive { _admission: guard, _tick: tick })
 }
 
 pub(crate) fn initialized(root: &Path) -> bool {
@@ -145,24 +172,26 @@ pub fn has_work() -> bool {
 
 /// A stop acknowledgement must not imply that independent guest actors stopped.
 /// Hold the exclusive admission fence through the owner's stop commit.
-pub fn prepare_stop() -> Result<RwLockWriteGuard<'static, ()>> {
+pub fn prepare_stop() -> Result<Exclusive> {
+    let tick = tick_within(TICK_WAIT)?;
     let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight; Stop all was refused before changing owner state. Wait for it or request task/provision cancellation, then retry."))?;
     if has_work() {
         super::owner_shutdown::verify(&Journal::open_existing(&host::root()?)?)?;
     }
-    Ok(guard)
+    Ok(Exclusive { _admission: guard, _tick: tick })
 }
 
 /// Held through a runtime handover (#765) until the exec, or until the
 /// handover is off. Local VM work is not carried over: the replacement starts
 /// its own supervisor from the journal. So none may be in flight or under way,
 /// and none is admitted meanwhile.
-pub fn prepare_handover() -> Result<RwLockWriteGuard<'static, ()>> {
+pub fn prepare_handover() -> Result<Exclusive> {
+    let tick = tick_within(TICK_WAIT)?;
     let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
     if has_work() {
         bail!("Local VM work is under way");
     }
-    Ok(guard)
+    Ok(Exclusive { _admission: guard, _tick: tick })
 }
 
 pub struct Supervisor {
@@ -240,7 +269,11 @@ impl Supervisor {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             };
-            let Ok(admission) = admit(&lifetime) else { break; };
+            if lifetime.is_stopping() || stopping() { break; }
+            // A tick, not a VM operation: shared operations run beside it,
+            // and exclusive ones wait for it to end (`TICK`).
+            let ticking = TICK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if lifetime.is_stopping() || stopping() { break; }
             let outcome = tick(&journal, &worker_stopped);
             *diagnostic.lock().unwrap() = outcome.err().map(|e| crate::remote::protocol::redact(&e.to_string()));
             let working = journal.read().is_ok_and(|state| state.tasks.values().any(|t| {
@@ -253,7 +286,7 @@ impl Supervisor {
                     .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
             }
             if !working { if let Some(mut child)=assertion.take() {let _=child.kill(); let _=child.wait();} }
-            drop(admission);
+            drop(ticking);
             drop(request);
             for _ in 0..30 {
                 if worker_stopped.load(Ordering::Acquire) || lifetime.is_stopping() { break; }
@@ -864,6 +897,41 @@ mod tests {
         assert!(admit(&life).is_err());
         assert!(admit_exclusive(&life).is_err());
         assert!(ensure_running(&AtomicBool::new(true)).is_err());
+    }
+
+    /// Review 2: the controller held admission through each whole tick, so
+    /// Stop all, Delete and other exclusive operations were refused whenever
+    /// a tick happened to be running, even one waiting on a guest probe.
+    #[test]
+    fn an_exclusive_operation_waits_for_a_running_tick_and_holds_off_the_next() {
+        let _home = crate::store::temp_home();
+        let life = Lifetime::new(Duration::ZERO);
+        let ticking = TICK.lock().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let exclusive = admit_exclusive(&Lifetime::new(Duration::ZERO));
+            sent.send(started.elapsed()).unwrap();
+            exclusive.map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(received.try_recv().is_err(), "it waits for the tick rather than being refused");
+        drop(ticking);
+        waiting.join().unwrap().unwrap();
+        assert!(received.recv().unwrap() >= Duration::from_millis(250));
+        let exclusive = admit_exclusive(&life).unwrap();
+        assert!(TICK.try_lock().is_err(), "no tick runs during an exclusive operation");
+        drop(exclusive);
+        // Past its budget it is refused, and says why.
+        let ticking = TICK.lock().unwrap();
+        assert!(format!("{:#}", tick_within(Duration::from_millis(100)).unwrap_err()).contains("still checking"));
+        drop(ticking);
+        // A user operation in flight still refuses it at once.
+        let operation = admit(&life).unwrap();
+        let started = std::time::Instant::now();
+        assert!(admit_exclusive(&life).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(operation);
     }
 
     #[test]
