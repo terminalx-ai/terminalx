@@ -85,6 +85,10 @@ pub struct Incident {
     pub escalated_at: Option<i64>,
     pub recovered_at: Option<i64>,
     pub launches: Vec<String>,
+    /// Human waits hold recovery, but do not make their pipelines affected.
+    /// Keep their identities separately to retain dismissal progress on restart.
+    #[serde(default)]
+    pub recovery_waits: Vec<String>,
     /// Pipelines whose new local checks were held, including dependencies
     /// not themselves exhibiting the signature. No PR metadata is required.
     pub blocked_pipelines: Vec<String>,
@@ -118,7 +122,7 @@ impl Snapshot {
         if !overdue.is_empty() {
             if self.active().is_none() {
                 self.incidents.push(Incident { id: uuid::Uuid::new_v4().to_string(), detected_at: at,
-                    escalated_at: None, recovered_at: None, launches: vec![], blocked_pipelines: vec![], probe: None });
+                    escalated_at: None, recovered_at: None, launches: vec![], recovery_waits: vec![], blocked_pipelines: vec![], probe: None });
             }
             let incident = self.incidents.last_mut().expect("active incident");
             for id in overdue { if !incident.launches.contains(&id) { incident.launches.push(id); } }
@@ -134,7 +138,7 @@ impl Snapshot {
             let removable = self.launches.iter().position(|launch|
                 matches!(launch.phase, Phase::Exited | Phase::Unobserved)
                     && (launch.recorder.is_none() || launch.phase == Phase::Exited)
-                    && !self.active().is_some_and(|incident| incident.launches.contains(&launch.id)));
+                    && !self.active().is_some_and(|incident| incident.launches.contains(&launch.id) || incident.recovery_waits.contains(&launch.id)));
             let Some(index) = removable else { break };
             self.launches.remove(index);
         }

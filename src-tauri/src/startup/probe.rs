@@ -181,8 +181,10 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     let Some(incident) = state.incidents.iter_mut().rev().find(|incident| incident.recovered_at.is_none()) else { return Ok(()) };
     // Human waits anywhere on this host block recovery. Retain their progress
     // boundary after dismissal so an older probe cannot clear that wait.
+    // These launches do not belong to the stalled startup: pipeline admission
+    // must not mistake an unrelated permission card for an affected session.
     for launch in state.launches.iter().filter(|launch| launch.phase == Phase::PermissionPrompt) {
-        if !incident.launches.contains(&launch.id) { incident.launches.push(launch.id.clone()); }
+        if !incident.recovery_waits.contains(&launch.id) { incident.recovery_waits.push(launch.id.clone()); }
     }
     let Some(probe) = &mut incident.probe else { return Ok(()) };
     // Treat ids from disk as data, not a path capability.
@@ -199,7 +201,8 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot, at: i64) -> Result
     probe.observation_timed_out |= completed_at.saturating_sub(probe.started_at) >= OBSERVE_MS;
     let still_stalled = state.launches.iter().any(|launch| launch.phase == Phase::PermissionPrompt
         || incident.launches.contains(&launch.id) && matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady));
-    let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id)).map(|launch| launch.last_progress_at).max().unwrap_or(incident.detected_at);
+    let last_progress = state.launches.iter().filter(|launch| incident.launches.contains(&launch.id) || incident.recovery_waits.contains(&launch.id))
+        .map(|launch| launch.last_progress_at).max().unwrap_or(incident.detected_at);
     // Both health steps must follow progress. A later completion alone can
     // contain a shell result from before readiness, exit or a human wait.
     let fresh_observation = !state.census_incomplete && probe.started_at > last_progress

@@ -111,6 +111,9 @@ repeated readiness or observation of the same permission card does not refresh
 that clock. Dismissing a known application permission card preserves its proven
 startup. Any pending human wait holds host recovery, including one outside the
 original stalled launch set; its dismissal requires newer health evidence.
+These recovery waits are persisted separately from affected startup launches;
+an unrelated pipeline showing a permission card continues its productive work
+and is not added to the incident's blocked pipelines by background polling.
 For the same process birth, a later smaller image or quiet period does not undo
 recorded startup already proven by readiness or a grown image. That proof is
 persisted independently of the current phase, including when the image first

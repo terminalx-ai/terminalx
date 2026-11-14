@@ -308,12 +308,62 @@ fn any_pending_human_prompt_prevents_host_recovery() {
     completed_health(&mut state, 130_000, 140_000);
     probe::refresh(directory.path(), &mut state, 140_002).unwrap();
     assert!(state.active().is_some());
+    assert_eq!(state.active().unwrap().launches, [state.launches[0].id.clone()]);
+    assert_eq!(state.active().unwrap().recovery_waits, [state.launches[1].id.clone()]);
+    let mut state: Snapshot = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
     state.launches[1].phase = Phase::Running;
     state.launches[1].last_progress_at = 150_000;
     probe::refresh(directory.path(), &mut state, 150_001).unwrap();
     // The existing health predates this human interaction. A new probe is
     // required, even though the prompt was outside the affected launch set.
     assert!(state.active().is_some());
+    completed_health(&mut state, 160_000, 170_000);
+    probe::refresh(directory.path(), &mut state, 170_002).unwrap();
+    assert!(state.active().is_none(), "fresh health after dismissal permits recovery");
+}
+
+#[test]
+fn unrelated_pipeline_permission_card_does_not_join_or_block_on_a_startup_incident() {
+    use crate::issue_pipeline::{engine::Host, host::LocalHost, Pipeline, SessionRef};
+    let _home = crate::store::temp_home();
+    let directory = crate::store::ensure_dir(crate::store::root().unwrap().join("startup")).unwrap();
+    let mut state = Snapshot { launches: vec![launch("tab:stalled", Phase::AwaitingReady)], ..Snapshot::default() };
+    state.tick(120_000);
+    let affected = state.launches[0].id.clone();
+    state.launches.push(launch("tab:human", Phase::PermissionPrompt));
+    let human = state.launches[1].id.clone();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+    let manager = crate::session::SessionManager::new(
+        sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+        crate::hooks::prepare_control().unwrap(),
+    );
+    let host = LocalHost::new(sink, manager);
+    let mut pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+    pipeline.author = SessionRef { session_id: "unrelated".into(), tab_id: "human".into() };
+    pipeline.reviewer = None;
+    pipeline.resolver = None;
+    let mut stalled = pipeline.clone();
+    stalled.id = "stalled-pipeline".into();
+    stalled.author = SessionRef { session_id: "affected".into(), tab_id: "stalled".into() };
+    for dismissed in [false, true] {
+        if dismissed {
+            state.launches[1].phase = Phase::Running;
+            state.launches[1].last_progress_at = 150_000;
+        }
+        // Repeated monitor refreshes must not attach the ordinary card, and
+        // persistence must preserve the same distinction after dismissal.
+        for at in [160_000, 170_000] { probe::refresh(&directory, &mut state, at).unwrap(); }
+        crate::store::write_json(&directory.join("incidents.json"), &state).unwrap();
+        assert!(host.startup_blocker(&pipeline, false).unwrap().is_none());
+        assert!(host.startup_blocker(&stalled, false).unwrap().is_some());
+        state = snapshot().unwrap();
+        let incident = state.active().unwrap();
+        assert_eq!(incident.launches, std::slice::from_ref(&affected));
+        assert_eq!(incident.recovery_waits, std::slice::from_ref(&human));
+        assert_eq!(incident.blocked_pipelines, [stalled.id.clone()]);
+    }
+    assert!(host.startup_blocker(&pipeline, true).unwrap().is_some(), "new heavy validation is still held");
 }
 
 #[test]
