@@ -36,10 +36,12 @@ pub fn command(program: &str) -> Result<Command> {
     Ok(command)
 }
 
-/// Cua's `sb exec` reaches a macOS guest through `lume ssh`, which falls back
-/// to `/usr/bin/ssh` with this environment and the user's own ssh config. With
-/// no agent socket in that session, a config that forwards the agent cannot
-/// hand the host's keys to the guest. Lume signs in with the guest password.
+/// Defence in depth for Cua and Lume. The legacy route TerminalX sends
+/// (`legacy_route.rs`) never reaches `lume ssh`: pinned Cua's `sb exec -i` and
+/// `sb cp` go through the guest's cua-spacesd. If some Cua path did reach it,
+/// Lume falls back to `/usr/bin/ssh` with this environment and the user's own
+/// ssh config, so with no agent socket here a config that forwards the agent
+/// still could not hand the host's keys to a guest.
 fn without_host_agent(command: &mut Command) {
     command.env_remove("SSH_AUTH_SOCK");
 }
