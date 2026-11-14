@@ -1447,12 +1447,12 @@ describe("attention across catalog refreshes (#934)", () => {
     cacheCloudSessions(ORG, "w", [{ id: "old", created: new Date(99).toISOString(), tabs: [{ id: "t", status: "idle" }] }] as never, null);
     expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
     expect(read()).not.toHaveProperty("resolvedLaunchFailure");
-    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 2, activeTurns: 1 } })] });
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 200, activeTurns: 1 } })] });
     await refreshCloudCatalog(ORG, () => 200);
     expect(resolveCloudAttention(read())).toBeNull();
     expect(deriveCloudActivity(read()).label).toBe("Working");
     for (const online of [true, false]) {
-      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 3, online } })] });
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity: { ...runtimeActivity, reportedAt: 300, online } })] });
       await refreshCloudCatalog(ORG, () => online ? 300 : 400);
       expect(resolveCloudAttention(read())).toBeNull();
       expect(deriveCloudActivity(read()).label).toBe("Ready");
@@ -1542,6 +1542,52 @@ describe("attention across catalog refreshes (#934)", () => {
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state, launch: { ...launch, launchId: "next", timings: { failedAt: 600 } }, runtimeActivity })] });
     await refreshCloudCatalog(ORG, () => 600);
     expect(resolveCloudAttention(read())?.code).toBe("agent-sign-in-required");
+  });
+
+
+  it.each(["activeTurns", "pendingApprovals"])("requires later runtime evidence after initially preexisting %s", async (activity) => {
+    signIn();
+    const launch = { launchId: "first", phase: "failed", state: "failed", category: "runtime-interrupted" };
+    const runtime = { online: true, reportedAt: 500, activeTurns: 0, pendingApprovals: 0, [activity]: 1 };
+    const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
+    const refresh = async (runtimeActivity: unknown, at: number, launchId = "first") => {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { state: "attention-required", launch: { ...launch, launchId }, runtimeActivity })] });
+      await refreshCloudCatalog(ORG, () => at);
+    };
+    // The report's clock is ahead of the observer. Even this active report
+    // belongs to initial evidence and must not create a recovery marker.
+    await refresh(runtime, 100);
+    expect(read()).toHaveProperty("launchFailureObservation.at", 500);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    for (const reportedAt of [undefined, 499, 500]) {
+      await refresh({ ...runtime, reportedAt }, 600);
+      expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+      expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    }
+    for (const flags of [{ online: false }, { stale: true }, { reporting: false }]) {
+      await refresh({ ...runtime, reportedAt: 501, ...flags }, 610);
+      expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+      expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    }
+    // Initial work can stop without proving any post-failure activity.
+    const idle = { ...runtime, activeTurns: 0, pendingApprovals: 0, reportedAt: 501 };
+    await refresh(idle, 620);
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    // A fresh, online active report after the fixed boundary proves recovery.
+    await refresh({ ...runtime, reportedAt: 502 }, 700);
+    expect(resolveCloudAttention(read())).toBeNull();
+    expect(read()).toHaveProperty("resolvedLaunchFailure");
+    await refresh({ ...idle, reportedAt: 503 }, 800);
+    expect(resolveCloudAttention(read())).toBeNull();
+    const saved = parseCatalog(JSON.parse(JSON.stringify(serializeCatalog(getCloudCatalog()))))!;
+    expect(resolveCloudAttention(saved.orgs[ORG].workspaces[0])).toBeNull();
+    // A distinct failure cannot inherit the marker or the old active report.
+    await refresh({ ...runtime, reportedAt: 900 }, 900, "next");
+    expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
+    await refresh({ ...runtime, reportedAt: 901 }, 1000, "next");
+    expect(resolveCloudAttention(read())).toBeNull();
   });
 
 });

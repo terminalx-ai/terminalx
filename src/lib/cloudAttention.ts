@@ -66,20 +66,20 @@ function launchFailureKey(item: CloudWorkspaceListItem): string {
 
 function runtimeAgentRan(item: CloudWorkspaceListItem): boolean {
   const runtime = item.workspace.runtimeActivity;
-  const failedAt = item.workspace.launch?.timings?.failedAt;
   return !!(runtime?.online && !runtime.stale && runtime.reporting !== false
     && (runtime.activeTurns > 0 || runtime.pendingApprovals > 0)
-    && (failedAt == null || (runtime.reportedAt != null && runtime.reportedAt > failedAt)));
+    && afterFailure(item, runtime.reportedAt ?? undefined));
 }
 
 /**
  * Catalog ingestion records authoritative agent activity for this exact failure.
  * Carry it across list/snapshot replacement so going idle/offline cannot revive
  * the historical failure. A different launch/failure starts with no such evidence.
- * Current runtime activity also counts when older launch reports omit failedAt.
+ * Runtime reports, like session activity, must be dated after the boundary.
  * Without failedAt, earlier launch milestones are only lower bounds, not proof
  * of failure time. Record the first observation time, at least as late as those
- * milestones and all initially cached activity (including clock skew). Keep that
+ * milestones, the initial runtime report, and cached activity (including clock
+ * skew). Initial active reports cannot establish recovery. Keep that
  * boundary for the exact failure across unchanged snapshots; never advance it
  * on later refreshes. Cached sessions must have activity after this boundary.
  * Credential installation and an online idle runtime deliberately do not count.
@@ -91,7 +91,7 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
   const boundary = finiteTime(item.workspace.launch?.timings?.failedAt) ? undefined
     : observation(item, key) ?? observation(previous, key) ?? {
       key,
-      at: Math.max(observedAt, ...Object.values(item.workspace.launch?.timings ?? {}).filter(finiteTime), ...sessionActivityTimes(sessions)),
+      at: Math.max(observedAt, ...Object.values(item.workspace.launch?.timings ?? {}).filter(finiteTime), ...sessionActivityTimes(sessions), ...[item.workspace.runtimeActivity?.reportedAt].filter(finiteTime)),
     };
   const candidate: ObservedItem = boundary ? { ...clean, launchFailureObservation: boundary } : clean;
   const laterSession = sessions.some((session) => session.tabs?.length > 0 && (
@@ -99,7 +99,7 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
     || afterFailure(candidate, Date.parse(session.lastMessageAt ?? ""))
     || session.tabs.some((tab) => tabAfterFailure(candidate, tab))
   ));
-  const resolved = laterSession || runtimeAgentRan(item)
+  const resolved = laterSession || runtimeAgentRan(candidate)
     || (item as ObservedItem).resolvedLaunchFailure === key
     || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key;
   return resolved ? { ...candidate, resolvedLaunchFailure: key } as ObservedItem : candidate;
@@ -120,8 +120,8 @@ function tabAfterFailure(item: CloudWorkspaceListItem, tab: { created?: string; 
  * Preserve explicit agentRan assertions for this read without changing the item.
  * All tabs require dated evidence, including live tabs: connection liveness does
  * not establish when an agent ran. Only reconciliation records durable recovery, using
- * dated activity after the failure or current runtime activity when failedAt is
- * absent; these caller hints never set its marker.
+ * dated activity after the failure or its observation boundary; these caller
+ * hints never set its marker.
  */
 export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<CloudAttentionInput, "tabs" | "agentRan" | "agentActivityAt" | "fromCache"> = {}): boolean {
   if (input.agentRan) return false;

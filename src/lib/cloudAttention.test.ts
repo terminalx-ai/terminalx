@@ -38,6 +38,7 @@ describe("shared attention and recovery", () => {
 
   it("keeps a failed first task until agent evidence, including when the runtime is merely online", () => {
     const row = failed("agent-sign-in-required");
+    row.workspace.launch!.timings = { failedAt: 0 } as NonNullable<typeof row.workspace.launch>["timings"];
     row.workspace.runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
     expect(resolveCloudAttention(row)?.code).toBe("agent-sign-in-required");
     expect(resolveCloudAttention(row, { agentRan: true })).toBeNull();
@@ -143,10 +144,15 @@ describe("shared attention and recovery", () => {
     expect(resolveCloudAttention(reconciled)?.code).toBe("runtime-interrupted");
   });
 
-  it("persists current runtime recovery even without a dated failure", () => {
+  it("persists later runtime recovery without a dated failure, never initial activity", () => {
     const row = failed("runtime-interrupted");
     row.workspace.runtimeActivity = { online: true, reportedAt: 20, activeTurns: 1, pendingApprovals: 0 };
-    const reconciled = reconcileCloudAttention(row);
+    const observed = reconcileCloudAttention(row, undefined, [], 100);
+    expect(resolveCloudAttention(row)?.code).toBe("runtime-interrupted");
+    expect(resolveCloudAttention(observed)?.code).toBe("runtime-interrupted");
+    expect(observed).not.toHaveProperty("resolvedLaunchFailure");
+    row.workspace.runtimeActivity.reportedAt = 101;
+    const reconciled = reconcileCloudAttention(row, observed, [], 200);
     expect(resolveCloudAttention(reconciled)).toBeNull();
     expect(reconciled).toHaveProperty("resolvedLaunchFailure");
     reconciled.workspace.runtimeActivity = null;
