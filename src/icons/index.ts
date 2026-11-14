@@ -52,6 +52,7 @@ export {
   FileText,
   FileCode2,
   GitBranch,
+  GitBranchPlus,
   GitMerge,
   GitPullRequest,
   GitPullRequestDraft,
