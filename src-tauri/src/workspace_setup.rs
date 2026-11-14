@@ -9,6 +9,9 @@ use serde_json::json;
 use crate::{archive_script::{self, Runner, ScriptRun}, session::SessionManager, store};
 use crate::store::index::SessionEntry;
 
+/// Emitted only for a newly created workspace, never for an adopted checkout.
+pub(crate) const CREATED_EVENT: &str = "workspace_created";
+
 const EVENT: &str = "workspace_setup_changed";
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_CONCURRENT: usize = 2;
@@ -267,7 +270,7 @@ pub fn log(manager: &SessionManager, session: &str, pane: &str) -> Result<String
 
 pub fn follow_creations(manager: &SessionManager) {
     let owner = manager.clone();
-    manager.sink().listen("session_created", Box::new(move |payload| {
+    manager.sink().listen(CREATED_EVENT, Box::new(move |payload| {
         let Ok(entry) = serde_json::from_str::<SessionEntry>(payload) else { return };
         if entry.worktree_name.is_none() { return }
         let owner = owner.clone();

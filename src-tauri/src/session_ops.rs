@@ -240,11 +240,12 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 pub(crate) fn create_session_blocking(sink: &dyn EventSink, req: NewSession) -> Result<SessionEntry> {
-    let entry = create_session_entry(req)?;
-    sink.emit("session_created", &entry);
+    let (entry, workspace_created) = create_session_workspace(req, None).map_err(err)?;
+    emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
 
+#[cfg(test)]
 pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
     create_session_entry_with_name(req, None).map_err(err)
 }
@@ -252,12 +253,22 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
 /// CLI creation keeps an explicit `--name` distinct from the automatically
 /// uniquified worktree-name hints used by the issue view and automations.
 pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    let entry = create_session_entry_with_name(req, name)?;
-    sink.emit("session_created", &entry);
+    let (entry, workspace_created) = create_session_workspace(req, name)?;
+    emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
 
+fn emit_created(sink: &dyn EventSink, entry: &SessionEntry, workspace_created: bool) {
+    sink.emit("session_created", entry);
+    if workspace_created { sink.emit(crate::workspace_setup::CREATED_EVENT, entry); }
+}
+
+#[cfg(test)]
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    create_session_workspace(req, name).map(|(entry, _)| entry)
+}
+
+fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
     let _request = crate::github_process::scope();
     if crate::git::is_repo(Path::new(&req.project_path)) {
         crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
@@ -317,11 +328,13 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         entry.mark_orchestrate_start();
     }
 
+    let mut workspace_created = false;
     if let Some(cwd) = req.cwd.as_deref().filter(|c| !c.is_empty()) {
         let cwd = projects::canonical_directory(cwd).map_err(err)?;
         projects::refuse_mirror(&cwd).map_err(err)?;
         entry.branch = git::current_branch(Path::new(&cwd));
-        entry.cwd = cwd;
+        entry.cwd = cwd.clone();
+        adopt_existing_workspace(&mut entry, project_path, &cwd)?;
     } else if has_agent && req.use_worktree && git::is_repo(project_path) {
         let issue_name = req.issue.as_ref().map(|issue| format!("{} {}", issue.identifier, issue.title));
         // A title with no ASCII letters/numbers is still a valid title.
@@ -344,6 +357,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         entry.branch = Some(wt.branch);
         entry.base_ref = Some(wt.base_tree);
         entry.worktree_base = wt.worktree_base;
+        workspace_created = true;
     }
 
     entry.title = requested_title.unwrap_or_else(|| {
@@ -363,10 +377,43 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     }
     // The checkout and index entry already exist. Setup bookkeeping must not
     // turn a successful creation into an error that invites a duplicate retry.
-    if let Err(error) = crate::workspace_setup::prepare(&entry) {
-        log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+    if workspace_created {
+        if let Err(error) = crate::workspace_setup::prepare(&entry) {
+            log::warn!("Record workspace setup for {}: {error:#}", entry.id);
+        }
     }
-    Ok(entry)
+    Ok((entry, workspace_created))
+}
+
+/// Attach to an existing checkout only when Git says it belongs to this
+/// project. Resolve the checkout root before comparing: a cwd may be a
+/// subdirectory, and a worktree may live anywhere on disk.
+fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str) -> Result<bool> {
+    let Ok(cwd) = std::fs::canonicalize(cwd) else { return Ok(false) };
+    if cwd == project {
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.branch = git::current_branch(&cwd);
+        return Ok(true);
+    }
+    let Some(top) = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
+        .and_then(|top| std::fs::canonicalize(top.trim()).ok()) else { return Ok(false) };
+    if !git::is_worktree_of(project, &top) {
+        return Ok(false);
+    }
+    entry.cwd = cwd.to_string_lossy().into_owned();
+    entry.branch = git::current_branch(&cwd);
+    if top != project {
+        entry.worktree_name = top.file_name().map(|name| name.to_string_lossy().into_owned());
+        // Creation provenance cannot be inferred from today's HEAD. Reuse
+        // it from a session already attached to this exact checkout, if any.
+        if let Some(source) = sessions_within(index::load().map_err(err)?, &top).into_iter()
+            .find(|session| !session.is_quick() && !session.worktree_removed && (session.base_ref.is_some() || session.worktree_base.is_some()))
+        {
+            entry.base_ref = source.base_ref;
+            entry.worktree_base = source.worktree_base;
+        }
+    }
+    Ok(true)
 }
 
 /// A quick chat to create: a session with no project, and so no worktree,
@@ -499,15 +546,16 @@ fn quick_chat(session_id: &str) -> Result<SessionEntry> {
 /// carried where the CLI will look, so the same conversation resumes. Claude
 /// Code files a transcript under its directory's name; Codex finds a rollout
 /// by id wherever it runs. A tab whose conversation cannot be carried still
-/// has its history here, and can be continued with a handoff.
-fn carry_conversations(entry: &SessionEntry, to: &str) {
+/// has its history here, and can be continued with a handoff. Moving into a
+/// project preserves the source transcript, even when the cwd changes.
+fn carry_conversations(entry: &SessionEntry, to: &str, preserve_source: bool) {
     let Some(projects) = crate::agent_data::claude_projects_root() else { return };
     for tab in entry.tabs.iter().filter(|tab| tab.harness == "claude") {
         // A fork that has not started yet has no conversation of its own: its
         // CLI will reopen the parent's from the new directory, so a copy of
         // that goes along. The parent's own stays where the parent uses it.
         let (id, keep_source) = match (tab.provider_session_id.as_deref(), tab.fork_from.as_deref()) {
-            (Some(own), _) => (own, false),
+            (Some(own), _) => (own, preserve_source),
             (None, Some(parent)) => (parent, true),
             (None, None) => continue,
         };
@@ -540,7 +588,7 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
     // Nothing starts in the old folder between the stop and the move.
     let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
-    carry_conversations(&entry, &target);
+    carry_conversations(&entry, &target, false);
     let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
     let updated = index::update_session(session_id, |session| {
         session.cwd = target.clone();
@@ -577,18 +625,24 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
     projects::refuse_mirror(&project).map_err(err)?;
     let _moving = admission::fence(admission::Kind::Refuse(admission::SESSION_MOVED), [admission::Scope::Session(entry.id.clone())]);
     stop(&entry)?;
-    carry_conversations(&entry, &project);
-    let branch = git::current_branch(Path::new(&project));
+    let mut workspace = entry.clone();
+    workspace.cwd = project.clone();
+    workspace.branch = git::current_branch(Path::new(&project));
+    workspace.worktree_name = None;
+    workspace.base_ref = None;
+    workspace.worktree_base = None;
+    adopt_existing_workspace(&mut workspace, Path::new(&project), &entry.cwd)?;
+    carry_conversations(&entry, &workspace.cwd, true);
     let updated = index::update_session(session_id, |session| {
         session.kind = SessionKind::Project;
         session.project_path = project.clone();
-        session.cwd = project.clone();
-        session.branch = branch.clone();
-        session.worktree_name = None;
+        session.cwd = workspace.cwd.clone();
+        session.branch = workspace.branch.clone();
+        session.worktree_name = workspace.worktree_name.clone();
         session.worktree_removed = false;
         session.removed_workspace = None;
-        session.base_ref = None;
-        session.worktree_base = None;
+        session.base_ref = workspace.base_ref.clone();
+        session.worktree_base = workspace.worktree_base.clone();
         for tab in &mut session.tabs {
             tab.status = TabStatus::Idle;
         }
@@ -1924,11 +1978,18 @@ mod tests {
     /// A project with a remote, so "merged" can be verified.
     fn repo_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
         let dir = repo();
-        let remote = tempfile::tempdir().unwrap();
-        git::run(remote.path(), &["init", "-q", "--bare", "-b", "main"]).unwrap();
-        git::run(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]).unwrap();
-        git::run(dir.path(), &["push", "-q", "-u", "origin", "main"]).unwrap();
+        let remote = attach_local_remote(dir.path());
         (dir, remote)
+    }
+
+    /// Seed a disposable remote from the fixture's commits without pushing.
+    fn attach_local_remote(project: &Path) -> tempfile::TempDir {
+        let remote = tempfile::tempdir().unwrap();
+        git::run(project, &["clone", "-q", "--bare", project.to_str().unwrap(), remote.path().to_str().unwrap()]).unwrap();
+        git::run(project, &["remote", "add", "origin", remote.path().to_str().unwrap()]).unwrap();
+        git::run(project, &["fetch", "-q", "origin"]).unwrap();
+        git::run(project, &["branch", "--set-upstream-to=origin/main", "main"]).unwrap();
+        remote
     }
 
     fn quick_chat(cwd: Option<&Path>) -> SessionEntry {
@@ -2094,6 +2155,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
         let began = claude_transcript(&chat, CONVERSATION);
+        let began_before = std::fs::read(&began).unwrap();
         let log = store::log_path(&chat.id, &chat.tabs[0].id).unwrap();
         std::fs::write(&log, "{\"transcript\":true}\n").unwrap();
         let project = repo();
@@ -2116,7 +2178,8 @@ mod tests {
         assert_eq!(moved.tabs[0].provider_session_id.as_deref(), Some(CONVERSATION));
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "{\"transcript\":true}\n");
         let projects_root = crate::agent_data::claude_projects_root().unwrap();
-        assert!(crate::harness::claude::transcript::transcript_in(&projects_root, &moved.cwd, CONVERSATION).exists() && !began.exists());
+        assert!(crate::harness::claude::transcript::transcript_in(&projects_root, &moved.cwd, CONVERSATION).exists() && began.exists());
+        assert_eq!(std::fs::read(&began).unwrap(), began_before);
         assert_eq!(index::get(&chat.id).unwrap(), moved);
         // The project was added for it, and listeners heard about both.
         assert_eq!(projects::list().unwrap().0.iter().map(|p| p.path.clone()).collect::<Vec<_>>(), vec![moved.project_path.clone()]);
@@ -2127,6 +2190,141 @@ mod tests {
         // It is an ordinary session of the project from here on.
         assert_eq!(taken_worktree_names(&project_path).unwrap(), Vec::<String>::new());
         assert!(move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| {}).is_err());
+    }
+
+    #[test]
+    fn creating_in_an_existing_worktree_preserves_metadata_and_the_source_conversation() {
+        let _home = crate::store::temp_home();
+        let project = repo();
+        let source = worktree_session(project.path());
+        let transcript = claude_transcript(&source, CONVERSATION);
+        let source = index::get(&source.id).unwrap();
+        let transcript_before = std::fs::read(&transcript).unwrap();
+        let log = said(&source.id, &source.tabs[0].id, "keep this conversation");
+        let log_before = std::fs::read(&log).unwrap();
+        let dirty = Path::new(&source.cwd).join("a.txt");
+        std::fs::write(&dirty, "committed work").unwrap();
+        git::run(Path::new(&source.cwd), &["commit", "-q", "-am", "later work"]).unwrap();
+        git::run(Path::new(&source.cwd), &["branch", "-m", "renamed-work"]).unwrap();
+        // Read today's branch, but keep creation-time provenance instead of
+        // treating this later commit as the worktree's starting point.
+        let branch = git::current_branch(Path::new(&source.cwd));
+        std::fs::write(&dirty, "uncommitted work").unwrap();
+        let trees = git::list_worktrees(project.path()).unwrap();
+        let subdir = Path::new(&source.cwd).join("src");
+        std::fs::create_dir(&subdir).unwrap();
+
+        for cwd in [PathBuf::from(&source.cwd), subdir] {
+            let continued = session_in(project.path(), cwd.to_str().unwrap(), "Continuation");
+            assert_eq!(Path::new(&continued.cwd), cwd.canonicalize().unwrap());
+            assert_eq!(continued.worktree_name, source.worktree_name);
+            assert_eq!(continued.branch, branch);
+            assert_eq!(continued.base_ref, source.base_ref);
+            assert_eq!(continued.worktree_base, source.worktree_base);
+        }
+        assert_eq!(index::get(&source.id).unwrap(), source);
+        assert_eq!(std::fs::read(transcript).unwrap(), transcript_before);
+        assert_eq!(std::fs::read(log).unwrap(), log_before);
+        assert_eq!(std::fs::read_to_string(dirty).unwrap(), "uncommitted work");
+        assert_eq!(git::list_worktrees(project.path()).unwrap(), trees);
+    }
+
+    #[test]
+    fn moving_to_a_project_preserves_its_managed_and_external_worktrees() {
+        let _home = crate::store::temp_home();
+        let project = repo();
+        let source = worktree_session(project.path());
+        let external = tempfile::tempdir().unwrap();
+        let external_tree = external.path().join("external-worktree");
+        git::run(project.path(), &["worktree", "add", "-q", "-b", "external", external_tree.to_str().unwrap()]).unwrap();
+        for top in [PathBuf::from(&source.cwd), external_tree] {
+            let subdir = top.join("nested");
+            std::fs::create_dir(&subdir).unwrap();
+            std::fs::write(top.join("a.txt"), "dirty tracked file").unwrap();
+            std::fs::write(top.join("untracked.txt"), "dirty untracked file").unwrap();
+            let status = git::run(&top, &["status", "--porcelain"]).unwrap();
+            let branch = git::current_branch(&top);
+            let head = git::head_commit(&top);
+            for cwd in [&top, &subdir] {
+                let chat = quick_chat(Some(cwd));
+                let transcript = claude_transcript(&chat, CONVERSATION);
+                let transcript_before = std::fs::read(&transcript).unwrap();
+                let chat = index::get(&chat.id).unwrap();
+                let log = said(&chat.id, &chat.tabs[0].id, "keep my history");
+                let log_before = std::fs::read(&log).unwrap();
+                let calls = std::cell::Cell::new(0);
+                let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| calls.set(calls.get() + 1)).unwrap();
+                assert_eq!(calls.get(), 1);
+                assert_eq!(moved.cwd, chat.cwd);
+                assert_eq!(moved.branch, branch);
+                assert_eq!(git::current_branch(&top), branch);
+                assert_eq!(git::head_commit(&top), head);
+                assert_eq!(moved.worktree_name.as_deref(), top.file_name().and_then(|name| name.to_str()));
+                assert_eq!(moved.tabs, chat.tabs);
+                assert_eq!(std::fs::read(&transcript).unwrap(), transcript_before);
+                assert_eq!(std::fs::read(log).unwrap(), log_before);
+                assert_eq!(git::run(&top, &["status", "--porcelain"]).unwrap(), status);
+                assert_eq!(std::fs::read_to_string(top.join("a.txt")).unwrap(), "dirty tracked file");
+                assert_eq!(std::fs::read_to_string(top.join("untracked.txt")).unwrap(), "dirty untracked file");
+                if top == Path::new(&source.cwd) {
+                    assert_eq!(moved.base_ref, source.base_ref);
+                    assert_eq!(moved.worktree_base, source.worktree_base);
+                } else {
+                    assert!(moved.base_ref.is_none() && moved.worktree_base.is_none());
+                }
+            }
+            // Both operations recognize detached worktrees without inventing
+            // a branch or changing the checkout.
+            git::run(&top, &["checkout", "-q", "--detach"]).unwrap();
+            let continued = session_in(project.path(), top.to_str().unwrap(), "Detached continuation");
+            assert!(continued.branch.is_none());
+            assert!(continued.worktree_name.is_some());
+            let chat = quick_chat(Some(&top));
+            let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
+            assert_eq!(moved.cwd, chat.cwd);
+            assert!(moved.branch.is_none());
+            assert_eq!(moved.worktree_name, continued.worktree_name);
+            assert_eq!(git::head_commit(&top), head);
+            assert_eq!(git::run(&top, &["status", "--porcelain"]).unwrap(), status);
+        }
+        assert_eq!(index::get(&source.id).unwrap(), source);
+    }
+
+    #[test]
+    fn moving_from_a_subdirectory_of_the_target_checkout_keeps_that_directory() {
+        let _home = crate::store::temp_home();
+        let project = repo();
+        let subdir = project.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+        let chat = quick_chat(Some(&subdir));
+        let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
+        assert_eq!(moved.cwd, chat.cwd);
+        assert_eq!(moved.branch.as_deref(), Some("main"));
+        assert!(moved.worktree_name.is_none() && moved.base_ref.is_none() && moved.worktree_base.is_none());
+    }
+
+    #[test]
+    fn unrelated_folders_and_repositories_do_not_become_target_worktrees() {
+        let _home = crate::store::temp_home();
+        let project = repo();
+        let other = repo();
+        // A foreign worktree under the target's managed folder must still
+        // fall back to the target checkout: its location proves nothing.
+        let foreign = git::worktree_path(project.path(), "foreign");
+        std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        git::run(other.path(), &["worktree", "add", "-q", "-b", "foreign", foreign.to_str().unwrap()]).unwrap();
+        let boundary = PathBuf::from(format!("{}-unrelated", project.path().display()));
+        std::fs::create_dir(&boundary).unwrap();
+        for cwd in [other.path(), foreign.as_path(), boundary.as_path()] {
+            let chat = quick_chat(Some(cwd));
+            let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
+            assert_eq!(Path::new(&moved.cwd), project.path().canonicalize().unwrap());
+            assert_eq!(moved.branch.as_deref(), Some("main"));
+            assert!(moved.worktree_name.is_none() && moved.base_ref.is_none() && moved.worktree_base.is_none());
+            let explicit = session_in(project.path(), cwd.to_str().unwrap(), "Explicit unrelated cwd");
+            assert!(explicit.worktree_name.is_none() && explicit.base_ref.is_none() && explicit.worktree_base.is_none());
+        }
+        std::fs::remove_dir(boundary).unwrap();
     }
 
     #[test]
@@ -2300,6 +2498,11 @@ mod tests {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
         let destination = repo();
+        let transcript = claude_transcript(&chat, CONVERSATION);
+        let transcript_before = std::fs::read(&transcript).unwrap();
+        let original = index::get(&chat.id).unwrap();
+        let log = said(&chat.id, &chat.tabs[0].id, "retain this history");
+        let log_before = std::fs::read(&log).unwrap();
         let marker = Path::new(&chat.cwd).join("retained.txt");
         std::fs::write(&marker, "retained").unwrap();
         let stop = |_: &SessionEntry| Err("fixture stop refused".to_string());
@@ -2309,6 +2512,9 @@ mod tests {
         let kept = index::get(&chat.id).unwrap();
         assert_eq!(kept.cwd, chat.cwd);
         assert!(kept.is_quick());
+        assert_eq!(kept, original);
+        assert_eq!(std::fs::read(transcript).unwrap(), transcript_before);
+        assert_eq!(std::fs::read(log).unwrap(), log_before);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "retained");
     }
 
@@ -2620,13 +2826,13 @@ mod tests {
     #[test]
     fn a_workspace_with_an_initialised_submodule_can_be_removed_after_the_second_confirmation() {
         let _home = crate::store::temp_home();
-        let (dir, _remote) = repo_with_remote();
+        let dir = repo();
         let lib = tempfile::tempdir().unwrap();
         git::run(lib.path(), &["init", "-q", "-b", "main"]).unwrap();
         git::run(lib.path(), &["-c", "user.name=L", "-c", "user.email=l@example.com", "commit", "-q", "--allow-empty", "-m", "lib"]).unwrap();
         git::run(dir.path(), &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.path().to_str().unwrap(), "lib"]).unwrap();
         git::run(dir.path(), &["commit", "-q", "-m", "add lib"]).unwrap();
-        git::run(dir.path(), &["push", "-q", "origin", "main"]).unwrap();
+        let _remote = attach_local_remote(dir.path());
         let session = worktree_session(dir.path());
         let cwd = Path::new(&session.cwd);
         git::run(cwd, &["-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init"]).unwrap();
