@@ -6,9 +6,11 @@ import type { TabStatus } from "@/types/session";
 
 export interface CloudAttentionInput {
   connection?: WorkspaceConnectionState["state"] | null;
-  tabs?: readonly { status: TabStatus; created?: string; lastMessageAt?: string | null }[];
-  /** Compatibility hint only: existence of an agent does not date its activity. */
+  tabs?: readonly { status: TabStatus; live?: boolean; created?: string; lastMessageAt?: string | null }[];
+  /** Explicit caller evidence that an agent ran; affects this read only, never durable recovery. */
   agentRan?: boolean;
+  /** Cached tabs alone are not live caller evidence. */
+  fromCache?: boolean;
   /** Verified agent creation/message time (epoch ms), not cache fetch or session modification time. */
   agentActivityAt?: number;
   /** Explicit support from the caller's authorized recovery path; never inferred from a stored login. */
@@ -64,7 +66,7 @@ export function reconcileCloudAttention(item: CloudWorkspaceListItem, previous?:
     || afterFailure(item, Date.parse(session.lastMessageAt ?? ""))
     || session.tabs.some((tab) => tabAfterFailure(item, tab))
   ));
-  const resolved = launchFailed(item) && (laterSession || runtimeAgentRan(item)
+  const resolved = launchFailed(item) && (laterSession || (runtimeAgentRan(item) && afterFailure(item, item.workspace.runtimeActivity?.reportedAt ?? undefined))
     || (item as ObservedItem).resolvedLaunchFailure === key
     || (previous as ObservedItem | undefined)?.resolvedLaunchFailure === key);
   const { resolvedLaunchFailure: _old, ...clean } = item as ObservedItem;
@@ -83,11 +85,13 @@ function tabAfterFailure(item: CloudWorkspaceListItem, tab: { created?: string; 
 }
 
 /**
- * Bare tabs/agentRan cannot establish ordering: an older session can coexist
- * with a new failed launch. Pass dated evidence or rely on catalog reconciliation.
- * Missing failure timestamps conservatively require current runtime activity.
+ * Preserve explicit caller evidence for this read: agentRan or live tabs can
+ * suppress a historical failure without changing the item. Cached tabs require
+ * dated evidence. Only reconcileCloudAttention records durable recovery, using
+ * activity strictly after the failed launch; these hints never set its marker.
  */
-export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<CloudAttentionInput, "tabs" | "agentRan" | "agentActivityAt"> = {}): boolean {
+export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<CloudAttentionInput, "tabs" | "agentRan" | "agentActivityAt" | "fromCache"> = {}): boolean {
+  if (input.agentRan || input.tabs?.some((tab) => tab.live || !input.fromCache)) return false;
   if (afterFailure(item, input.agentActivityAt) || input.tabs?.some((tab) => tabAfterFailure(item, tab))) return false;
   if ((item as ObservedItem).resolvedLaunchFailure === launchFailureKey(item)) return false;
   return !runtimeAgentRan(item);

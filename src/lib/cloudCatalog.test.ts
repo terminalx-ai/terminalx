@@ -1341,7 +1341,7 @@ describe("attention across catalog refreshes (#934)", () => {
 
   it("keeps the failed task after a login repair and clears it on later agent activity", async () => {
     signIn();
-    const launch = { phase: "failed", state: "failed", category: "agent-sign-in-required" };
+    const launch = { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 0 } };
     const runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [item("w", { launch, runtimeActivity })] });
     await refreshCloudCatalog(ORG, () => 100);
@@ -1404,7 +1404,9 @@ describe("attention across catalog refreshes (#934)", () => {
     if (when === "after") cacheCloudSessions(ORG, "w", sessions, null, 400);
     const read = () => getCloudCatalog().orgs[ORG].workspaces[0];
     expect(resolveCloudAttention(read())?.code).toBe("runtime-interrupted");
-    expect(deriveCloudActivity(read(), { agentRan: true, tabs: [{ status: "idle" }] }).tone).toBe("attention");
+    expect(deriveCloudActivity(read(), { fromCache: true, tabs: [{ status: "idle" }] }).tone).toBe("attention");
+    expect(resolveCloudAttention(read(), { agentRan: true })).toBeNull();
+    expect(read()).not.toHaveProperty("resolvedLaunchFailure");
     // Repeated reads, snapshots, feed deltas and persisted catalogs cannot turn
     // a cache fetch time or a session rename into agent activity.
     cacheCloudSessions(ORG, "w", sessions, null, 500);

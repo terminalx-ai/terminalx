@@ -40,8 +40,8 @@ describe("shared attention and recovery", () => {
     const row = failed("agent-sign-in-required");
     row.workspace.runtimeActivity = { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 };
     expect(resolveCloudAttention(row)?.code).toBe("agent-sign-in-required");
-    expect(resolveCloudAttention(row, { agentRan: true })?.code).toBe("agent-sign-in-required");
-    expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }] })?.code).toBe("agent-sign-in-required");
+    expect(resolveCloudAttention(row, { agentRan: true })).toBeNull();
+    expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }] })).toBeNull();
     row.workspace.runtimeActivity.activeTurns = 1;
     expect(resolveCloudAttention(row)).toBeNull();
     row.workspace.runtimeActivity.stale = true;
@@ -107,6 +107,7 @@ describe("shared attention and recovery", () => {
   it("retains evidence only for the exact failed launch, without global workspace state", () => {
     const row = failed("agent-sign-in-required");
     row.workspace.launch!.launchId = "launch-1";
+    row.workspace.launch!.timings = { failedAt: 10 } as NonNullable<typeof row.workspace.launch>["timings"];
     row.workspace.runtimeActivity = { online: true, reportedAt: 20, activeTurns: 1, pendingApprovals: 0 };
     const recovered = reconcileCloudAttention(row);
     row.workspace.runtimeActivity = null;
@@ -128,4 +129,28 @@ describe("shared attention and recovery", () => {
     row.workspace.runtimeActivity.reporting = true;
     expect(resolveCloudAttention(reconcileCloudAttention(row))).toBeNull();
   });
+
+  it("keeps explicit caller suppression separate from durable recovery", () => {
+    const row = failed("runtime-interrupted");
+    row.workspace.launch!.timings = { failedAt: 100 } as NonNullable<typeof row.workspace.launch>["timings"];
+    const before = JSON.stringify(row);
+    expect(resolveCloudAttention(row, { agentRan: true })).toBeNull();
+    expect(resolveCloudAttention(row, { tabs: [{ status: "idle", live: true }], fromCache: true })).toBeNull();
+    expect(resolveCloudAttention(row, { tabs: [{ status: "idle" }], fromCache: true })?.code).toBe("runtime-interrupted");
+    expect(JSON.stringify(row)).toBe(before);
+    const reconciled = reconcileCloudAttention(row, undefined, [{ tabs: [{ status: "idle" }] }] as never);
+    expect(reconciled).not.toHaveProperty("resolvedLaunchFailure");
+    expect(resolveCloudAttention(reconciled)?.code).toBe("runtime-interrupted");
+  });
+
+  it("does not persist runtime recovery without a dated failure", () => {
+    const row = failed("runtime-interrupted");
+    row.workspace.runtimeActivity = { online: true, reportedAt: 20, activeTurns: 1, pendingApprovals: 0 };
+    const reconciled = reconcileCloudAttention(row);
+    expect(resolveCloudAttention(reconciled)).toBeNull();
+    expect(reconciled).not.toHaveProperty("resolvedLaunchFailure");
+    reconciled.workspace.runtimeActivity = null;
+    expect(resolveCloudAttention(reconciled)?.code).toBe("runtime-interrupted");
+  });
+
 });
