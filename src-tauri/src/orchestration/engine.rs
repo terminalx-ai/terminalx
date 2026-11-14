@@ -104,7 +104,9 @@ pub enum VerifierNow {
     Working,
     /// Its last turn ended with this reply.
     Replied(String),
-    /// It stopped without a reply, or waits on a person: why, in a sentence.
+    /// A permission request or question needs attention; it can resume.
+    Waiting(String),
+    /// It stopped without a reply: why, in a sentence.
     Stuck(String),
     /// Its conversation was closed.
     Gone,
@@ -962,7 +964,15 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()).and_then(|check| check.review.as_mut()) else { continue };
             let Some(verifier) = review.verifiers.get_mut(index).filter(|verifier| verifier.session.as_ref() == Some(&session) && !verifier.settled()) else { continue };
             match now {
-                VerifierNow::Working => continue,
+                VerifierNow::Working => {
+                    verifier.waiting = None;
+                    continue;
+                }
+                VerifierNow::Waiting(why) => {
+                    verifier.waiting = Some(why);
+                    verifier.tokens = tokens;
+                    continue;
+                }
                 VerifierNow::Replied(reply) => match checks::verdict(&reply) {
                     Ok(verdict) => (verifier.verdict, verifier.evidence) = (Some(verdict.decision), verdict.evidence),
                     Err(problem) => verifier.problem = Some(problem),
@@ -970,6 +980,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 VerifierNow::Stuck(why) => verifier.problem = Some(why),
                 VerifierNow::Gone => verifier.problem = Some("Its conversation was closed before it gave a verdict.".into()),
             }
+            verifier.waiting = None;
             verifier.tokens = tokens;
         }
         for piece in run.pieces.iter_mut().filter(|piece| piece.state == PieceState::Verifying) {
@@ -993,7 +1004,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     })
     .map_err(EngineError::internal)?;
     // A runtime that restarted has no watcher yet for the workers it found running.
-    if after.in_turn() > 0 || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
+    if after.in_turn() > 0 || after.pieces.iter().any(|piece| piece.state == PieceState::Verifying) || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
         host.watch();
     }
     // Past its budget: nothing new starts from here on, but what this read found is still
@@ -1060,8 +1071,14 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
 /// Count the verdicts of a piece's review once every verifier has given
 /// one or stopped without, and end the check with what they come to.
 fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules) {
-    let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()) else { return };
+    let Some(attempt) = piece.tries.last_mut() else { return };
+    let Some(check) = attempt.verification.as_mut().filter(|check| check.review_open()) else { return };
     let Some(review) = check.review.as_ref() else { return };
+    piece.note = if review.verifiers.iter().any(|verifier| verifier.waiting.is_some()) {
+        Some("A verifier needs you: open its conversation to answer its permission request or question. Verification resumes there.".into())
+    } else {
+        attempt.report.as_ref().map(|report| report.result.clone())
+    };
     let passes = review.verifiers.iter().filter(|verifier| verifier.verdict == Some(checks::Decision::Pass)).count();
     let (outcome, said) = match checks::tally(review) {
         Tally::Open => return,
@@ -1147,7 +1164,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             .map(|number| {
                 let made = host.create_verifier(&run, piece, &worker, &chosen.model, chosen.effort.as_deref(), number);
                 let problem = made.as_ref().err().map(|error| format!("It could not be started: {error:#}"));
-                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, tokens: None }
+                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, waiting: None, tokens: None }
             })
             .collect();
         // Stored before anything is sent: a verifier is known as one, and held to reading, from its first turn.
@@ -1193,6 +1210,9 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         })
         .map_err(EngineError::internal)?;
         announce(host, &after, &last);
+        if last.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
+            host.watch();
+        }
     }
     stored(id)
 }
@@ -2276,10 +2296,15 @@ pub fn watch(host: &dyn Host) -> bool {
                 None => {}
             }
         }
+        if run.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
+            if let Err(error) = refreshed(host, &run.id) {
+                log::warn!("read the verifiers of run {}: {error}", run.id);
+            }
+        }
         if let Err(error) = mark_stalls(host, &run.id, now) {
             log::warn!("check run {} for stalled workers: {error}", run.id);
         }
-        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0);
+        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0 || run.pieces.iter().any(|piece| piece.state == PieceState::Verifying || capacity_held(piece)));
         fill |= matches!(run.state, RunState::Running | RunState::Failed) && run.pieces.iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit)));
     }
     // What waits for a slot is looked at on every tick, not only when a turn ends: a slot can
@@ -2374,6 +2399,16 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     None
 }
 
+fn capacity_held(piece: &Piece) -> bool {
+    matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit))
+}
+
+fn verifier_waiting(piece: &Piece) -> bool {
+    piece.state == PieceState::Verifying && piece.tries.last().and_then(|attempt| attempt.verification.as_ref())
+        .filter(|check| check.review_open()).and_then(|check| check.review.as_ref())
+        .is_some_and(|review| review.verifiers.iter().any(|verifier| verifier.waiting.is_some() && !verifier.settled()))
+}
+
 /// Why a lead that waits on its run is woken, or `None` while there is
 /// nothing for it to do. `began` is the run when the wait began.
 ///
@@ -2390,16 +2425,18 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped | PieceState::Skipped);
     let changed: Vec<&Piece> = now.pieces.iter().filter(|piece| settled(piece.state) && began.piece(&piece.id).is_none_or(|before| before.state != piece.state)).collect();
     // A piece whose next try waits is started without the lead: it is not the lead's to start.
-    let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits()).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
-    let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits());
+    let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits() && !capacity_held(piece)).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
+    // Capacity queues are started automatically, including when another run frees an app slot.
+    let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits() || capacity_held(piece));
     // Every result accepted: the lead is woken to merge them.
     let to_merge = now.state == RunState::Merging;
     let ended = now.state != RunState::Running;
+    let attention: Vec<&Piece> = now.pieces.iter().filter(|piece| verifier_waiting(piece)).collect();
     let woken = match all {
         true => ended || !under_way,
         // Nothing under way and nothing to start: whatever holds the run up (a blocked piece,
         // from before this wait began) will not change by waiting.
-        false => ended || !changed.is_empty() || !ready.is_empty() || !under_way,
+        false => ended || !changed.is_empty() || !ready.is_empty() || !attention.is_empty() || !under_way,
     };
     if !woken {
         return None;
@@ -2409,6 +2446,9 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
         PieceState::Blocked if piece.gave_up() => format!("{} is blocked after {} tries.", piece.id, piece.tries.len()),
         state => format!("{} is {}.", piece.id, name(state)),
     }).collect();
+    for piece in attention {
+        why.push(format!("{} has a verifier that needs you: open its conversation to answer its permission request or question.", piece.id));
+    }
     if !ready.is_empty() {
         why.push(format!("Ready to start with `terminalx runs start`: {}.", ready.join(", ")));
     }
@@ -2442,7 +2482,7 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
 pub fn shown(run: &Run) -> Value {
     let (estimate, unestimated) = run.estimate();
     let mut value = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
-    value["ready"] = json!(if matches!(run.state, RunState::Planned | RunState::Running) { run.ready().iter().map(|piece| piece.id.clone()).collect() } else { Vec::<String>::new() });
+    value["ready"] = json!(if matches!(run.state, RunState::Planned | RunState::Running) { run.ready().into_iter().filter(|piece| !capacity_held(piece)).map(|piece| piece.id.clone()).collect() } else { Vec::<String>::new() });
     value["waiting"] = json!(waiting(run));
     value["estimate"] = json!(estimate);
     value["unestimated"] = json!(unestimated);
