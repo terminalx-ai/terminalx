@@ -915,10 +915,12 @@ impl Guest {
             let bytes = STANDARD.decode(&file.content_base64)?;
             atomic_private_write(&path, &bytes)?;
         }
-        git(&cwd, &["init", "--quiet"], None)?;
-        git(&cwd, &["add", "--all", "--", "."], None)?;
+        private_directory(&self.base.join("repositories"))?;
+        let repository = self.repository(&record.task)?;
+        git(&repository, &cwd, &["init", "--quiet"], None)?;
+        git(&repository, &cwd, &["add", "--all", "--", "."], None)?;
         record.baseline = Some(
-            String::from_utf8(git(&cwd, &["write-tree"], None)?)?
+            String::from_utf8(git(&repository, &cwd, &["write-tree"], None)?)?
                 .trim()
                 .into(),
         );
@@ -1613,9 +1615,11 @@ impl Guest {
             if index.try_exists()? {
                 fs::remove_file(&index)?;
             }
-            git(&cwd, &["read-tree", baseline], Some(&index))?;
-            git(&cwd, &["add", "--all", "--", "."], Some(&index))?;
+            let repository = self.repository(&record.task)?;
+            git(&repository, &cwd, &["read-tree", baseline], Some(&index))?;
+            git(&repository, &cwd, &["add", "--all", "--", "."], Some(&index))?;
             let patch = git(
+                &repository,
                 &cwd,
                 &[
                     "diff",
@@ -1713,6 +1717,13 @@ impl Guest {
         Ok(json!({"artifact":artifact,"contentBase64":STANDARD.encode(bytes)}))
     }
 
+    /// The task's Git repository, kept in the runtime's directory beside the
+    /// workspace and out of the worker's reach (`git`).
+    fn repository(&self, task: &Task) -> Result<PathBuf> {
+        validate_id(&task.target.task_id)?;
+        Ok(self.base.join("repositories").join(&task.target.task_id))
+    }
+
     fn workspace(&self, task: &Task) -> Result<PathBuf> {
         let path = self.base.join("workspaces").join(&task.target.workspace_id);
         if Path::new(&task.guest_cwd) != path
@@ -1746,7 +1757,8 @@ impl Guest {
     fn disposition(&self) -> Result<Value> {
         let state = self.state.lock().unwrap();
         let tasks = state.records.values().map(|record| -> Result<Value> {
-            let status = self.workspace(&record.task).and_then(|cwd| git(&cwd,&["status","--porcelain=v1","--untracked-files=all"],None));
+            let status = self.workspace(&record.task).and_then(|cwd| git(&self.repository(&record.task)?, &cwd,
+                &["status","--porcelain=v1","--untracked-files=all","--ignore-submodules=all"],None));
             let event_digests = record.task.events.iter().map(|e| -> Result<Value> {
                 Ok(json!({"seq":e.seq,"digest":digest(&serde_json::to_vec(e)?)}))
             }).collect::<Result<Vec<_>>>()?;
@@ -2263,7 +2275,8 @@ fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInp
     let mut total = 0;
     for file in files {
         validate_relative(&file.path)?;
-        if file.path.split('/').any(|p| p == ".git") || !paths.insert(&file.path) {
+        // Case-insensitively: on APFS `.Git` names the same directory.
+        if file.path.split('/').any(|p| p.eq_ignore_ascii_case(".git")) || !paths.insert(&file.path) {
             bail!("Duplicate path or imported Git control directory");
         }
         let approved = task
@@ -2403,19 +2416,34 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
+/// Git over a task's workspace with nothing its worker can configure (review
+/// 2): the repository lives in the runtime's own directory (`repository`),
+/// never in the worker-writable workspace, so no `.git/config` there defines
+/// a filter, hook or fsmonitor that would run here after the worker exited.
+/// System and global configuration and attributes are off as well, and
+/// submodules, which carry configuration of their own, are never entered.
+fn git(repository: &Path, cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
     command
         .current_dir(cwd)
         .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.attributesFile=/dev/null",
+            "-c", "core.untrackedCache=false",
+            "-c", "diff.ignoreSubmodules=all",
+            "-c", "status.submoduleSummary=false",
+            "-c", "submodule.recurse=false",
         ])
         .args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
+        .env("GIT_DIR", repository)
+        .env("GIT_WORK_TREE", cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_INDEX_FILE");
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
@@ -2439,7 +2467,7 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>, depth: usize)
     }
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        if entry.file_name().eq_ignore_ascii_case(".git") {
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -4679,9 +4707,15 @@ mod tests {
         let mut altered = files.clone();
         altered[0].content_base64 = STANDARD.encode(b"changed");
         assert!(validate_task(&identity, &guest.base, &task, &altered).is_err());
-        let mut unsafe_files = files;
+        let mut unsafe_files = files.clone();
         unsafe_files[0].path = "../host-file".into();
         assert!(validate_task(&identity, &guest.base, &task, &unsafe_files).is_err());
+        // A Git control directory in any spelling APFS treats as `.git`.
+        for path in [".git/config", ".Git/config", "src/.GIT/hooks/pre-commit"] {
+            let mut planted = files.clone();
+            planted[0].path = path.into();
+            assert!(validate_task(&identity, &guest.base, &task, &planted).unwrap_err().to_string().contains("Git control directory"), "{path}");
+        }
     }
 
     #[test]
@@ -4837,15 +4871,39 @@ mod tests {
             .any(|(name, _)| name.contains("TOKEN") || name.contains("KEY")));
     }
 
+    /// Review 2: retention ran Git with the workspace's own configuration, so
+    /// a worker that could only edit files could define a filter that ran
+    /// after its exit was confirmed.
+    #[test]
+    fn retention_git_never_runs_what_the_workspace_configures() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cwd, repository, ran) = (dir.path().join("workspace"), dir.path().join("repository"), dir.path().join("ran"));
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        let planted = format!("[filter \"planted\"]\n\tclean = touch {0}\n\tsmudge = touch {0}\n[core]\n\tfsmonitor = touch {0}\n\thooksPath = {1}\n",
+            ran.display(), dir.path().display());
+        fs::write(cwd.join(".git/config"), &planted).unwrap();
+        fs::write(cwd.join(".gitattributes"), "* filter=planted diff=planted\n").unwrap();
+        fs::write(cwd.join("output.txt"), "changed").unwrap();
+        git(&repository, &cwd, &["init", "--quiet"], None).unwrap();
+        git(&repository, &cwd, &["add", "--all", "--", "."], None).unwrap();
+        git(&repository, &cwd, &["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"], None).unwrap();
+        git(&repository, &cwd, &["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"], None).unwrap();
+        assert!(!ran.exists(), "nothing the workspace configured ran");
+        assert!(!fs::read_to_string(repository.join("config")).unwrap().contains("planted"));
+        assert!(repository.join("HEAD").exists() && !cwd.join(".git/HEAD").exists(), "the repository is the runtime's");
+    }
+
     #[test]
     fn real_shell_pty_outputs_files_and_patch_are_retained_without_commits() {
         let (_home, guest, mut task) = setup();
         let cwd = PathBuf::from(&task.guest_cwd);
         fs::create_dir(&cwd).unwrap();
         fs::write(cwd.join("selected.txt"), b"before\n").unwrap();
-        git(&cwd, &["init", "--quiet"], None).unwrap();
-        git(&cwd, &["add", "--all", "--", "."], None).unwrap();
-        let baseline = String::from_utf8(git(&cwd, &["write-tree"], None).unwrap())
+        private_directory(&guest.base.join("repositories")).unwrap();
+        let repository = guest.repository(&task).unwrap();
+        git(&repository, &cwd, &["init", "--quiet"], None).unwrap();
+        git(&repository, &cwd, &["add", "--all", "--", "."], None).unwrap();
+        let baseline = String::from_utf8(git(&repository, &cwd, &["write-tree"], None).unwrap())
             .unwrap()
             .trim()
             .to_owned();
