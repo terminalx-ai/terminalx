@@ -60,6 +60,8 @@ export interface LocalVmTask {
   createdAt: string;
   updatedAt: string;
   lastEventSeq: number;
+  /** Guest events past the host's per-task budget: counted, not kept. */
+  eventsDropped?: number;
   events: LocalVmTaskEvent[];
   artifacts: LocalVmArtifact[];
   outcome: string | null;

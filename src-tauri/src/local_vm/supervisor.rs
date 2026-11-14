@@ -579,8 +579,17 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     {
         bail!("Guest task identity changed; possible snapshot rollback. No prompt was replayed");
     }
-    for event in &guest.events {
-        journal.append(&task.target, event.clone())?;
+    let (_, over_budget) = journal.append_all(&task.target, &guest.events)?;
+    if over_budget {
+        // Past what the host keeps of a task: its worker is stopped, and its
+        // history stays as kept. Later events still bring its status.
+        ensure_running(stopped)?;
+        let canceled = host::guest_rpc(env, "task.cancel", json!({"target":task.target}));
+        journal.transaction(|s| {
+            let t = journal::bound(s, &task.target)?;
+            if let Ok(response) = &canceled { host::retain_cancellation(t, response); }
+            Ok(())
+        })?;
     }
     let seq = journal.read()?.tasks[&task.target.task_id].last_event_seq;
     if seq != guest.last_event_seq {
@@ -620,6 +629,11 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
             (Some(detail), Some(refused)) => Some(format!("{detail} {refused}")),
             (detail, refused) => refused.clone().or(detail),
         };
+        if t.events_dropped > 0 {
+            let budget = format!("The task was stopped after {} guest events: the host keeps at most {} events or {} MiB of one task's history, and {} later events were not kept.",
+                t.events.len(), journal::MAX_TASK_EVENTS, journal::MAX_TASK_EVENT_BYTES / (1024 * 1024), t.events_dropped);
+            t.detail = Some(match t.detail.take() { Some(detail) => format!("{detail} {budget}"), None => budget });
+        }
         t.updated_at = journal::now();
         Ok(())
     })

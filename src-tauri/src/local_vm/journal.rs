@@ -125,7 +125,21 @@ pub struct Task {
     /// before its worker has a session ID, so status alone cannot cancel it.
     #[serde(default)]
     pub dispatch_started: bool,
+    /// The bytes of the guest events kept, and how many later events were
+    /// counted but not kept (`MAX_TASK_EVENTS`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub event_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub events_dropped: u64,
 }
+
+fn is_zero(value: &u64) -> bool { *value == 0 }
+
+/// What the host keeps of one task's guest events, so that a guest cannot grow
+/// the journal that gates every VM operation without bound (review 2). Events
+/// past it still move the cursor, so the task's status keeps arriving.
+pub(super) const MAX_TASK_EVENTS: usize = 10_000;
+pub(super) const MAX_TASK_EVENT_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -408,6 +422,8 @@ impl Journal {
                 outcome: None,
                 detail: None,
                 dispatch_started: false,
+                event_bytes: 0,
+                events_dropped: 0,
             };
             state
                 .tasks
@@ -443,21 +459,39 @@ impl Journal {
     }
 
     pub fn append(&self, target: &TaskTarget, event: TaskEvent) -> Result<Task> {
+        self.append_all(target, std::slice::from_ref(&event)).map(|(task, _)| task)
+    }
+
+    /// A page of guest events, in one transaction rather than one per event.
+    /// Returns the task, and whether this page first went past the budget.
+    pub fn append_all(&self, target: &TaskTarget, events: &[TaskEvent]) -> Result<(Task, bool)> {
         self.transaction(|state| {
             let task = bound(state, target)?;
-            if event.seq <= task.last_event_seq {
-                if task.events.iter().any(|prior| prior == &event) {
-                    return Ok(task.clone());
+            let within = task.events_dropped == 0;
+            for event in events {
+                if event.seq <= task.last_event_seq {
+                    // Sent again: it must match what was kept. One past the
+                    // budget was never kept and cannot be compared.
+                    match task.events.iter().find(|prior| prior.seq == event.seq) {
+                        Some(prior) if prior == event => continue,
+                        None if task.events_dropped > 0 => continue,
+                        _ => bail!("Guest event differs from retained history; possible snapshot rollback"),
+                    }
                 }
-                bail!("Guest event differs from retained history; possible snapshot rollback");
+                if event.seq != task.last_event_seq + 1 {
+                    bail!("Guest event gap: fetch retained events before continuing");
+                }
+                task.last_event_seq = event.seq;
+                let size = serde_json::to_vec(event)?.len() as u64;
+                if task.events_dropped == 0 && task.events.len() < MAX_TASK_EVENTS && task.event_bytes + size <= MAX_TASK_EVENT_BYTES {
+                    task.event_bytes += size;
+                    task.events.push(event.clone());
+                } else {
+                    task.events_dropped += 1;
+                }
+                task.updated_at = now();
             }
-            if event.seq != task.last_event_seq + 1 {
-                bail!("Guest event gap: fetch retained events before continuing");
-            }
-            task.last_event_seq = event.seq;
-            task.events.push(event);
-            task.updated_at = now();
-            Ok(task.clone())
+            Ok((task.clone(), within && task.events_dropped > 0))
         })
     }
 
@@ -814,6 +848,33 @@ mod tests {
         );
         fs::remove_dir_all(dir).unwrap();
     }
+    /// Review 2: a guest could grow the host journal without bound.
+    #[test]
+    fn a_task_keeps_a_bounded_history_and_its_cursor_still_moves_past_it() {
+        let (_dir, journal, input) = setup();
+        let task = journal.submit("bounded", input.clone()).unwrap();
+        let event = |seq: u64, bytes: usize| TaskEvent { seq, timestamp: now(), payload: serde_json::json!({"text":"x".repeat(bytes)}) };
+        let page: Vec<_> = (1..=MAX_TASK_EVENTS as u64).map(|seq| event(seq, 8)).collect();
+        let (kept, over) = journal.append_all(&task.target, &page).unwrap();
+        assert!(!over);
+        assert_eq!(kept.events.len(), MAX_TASK_EVENTS);
+        let next = MAX_TASK_EVENTS as u64 + 1;
+        let (kept, over) = journal.append_all(&task.target, &[event(next, 8), event(next + 1, 8)]).unwrap();
+        assert!(over, "the first page past the budget says so");
+        assert_eq!((kept.events.len(), kept.events_dropped, kept.last_event_seq), (MAX_TASK_EVENTS, 2, next + 1));
+        let (kept, over) = journal.append_all(&task.target, &[event(next + 1, 8), event(next + 2, 8)]).unwrap();
+        assert!(!over, "only once");
+        assert_eq!((kept.events_dropped, kept.last_event_seq), (3, next + 2), "a resent dropped event is not compared");
+        // The byte budget holds as well as the count.
+        journal.transaction(|state| { state.tasks.values_mut().for_each(|t| t.status = TaskStatus::Completed); Ok(()) }).unwrap();
+        let other = journal.submit("bytes", input).unwrap();
+        let big = (MAX_TASK_EVENT_BYTES / 4) as usize;
+        let (kept, over) = journal.append_all(&other.target, &(1..=5).map(|seq| event(seq, big)).collect::<Vec<_>>()).unwrap();
+        assert!(over);
+        assert_eq!((kept.events.len(), kept.events_dropped), (3, 2));
+        assert!(kept.event_bytes <= MAX_TASK_EVENT_BYTES);
+    }
+
     #[test]
     fn rejects_cross_environment_routes_event_gaps_and_rollback() {
         let (dir, journal, input) = setup();

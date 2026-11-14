@@ -318,7 +318,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     }
 }
 
-fn retain_cancellation(task: &mut Task, response: &Value) {
+pub(super) fn retain_cancellation(task: &mut Task, response: &Value) {
     // A tombstone prevents a delayed start but cannot erase evidence of an
     // earlier dispatch whose guest record has disappeared or rolled back.
     if response["absent"] == true {
