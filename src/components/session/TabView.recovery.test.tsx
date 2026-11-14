@@ -329,6 +329,46 @@ describe("TabView recovery lifecycle", () => {
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])("keeps sign-in usable after Stop fails (login already open: %s)", async opened => {
+    const original = mocks.invoke.getMockImplementation()!;
+    let failStop = true;
+    mocks.invoke.mockImplementation((command: string, args: unknown) => command === "stop_tab" && failStop
+      ? Promise.reject(new Error("Stop failed")) : original(command, args));
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    if (opened) {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await screen.findByText(/After sign-in is verified/);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement).disabled).toBe(false));
+    failStop = false;
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("retains the login incident when the delivered recovery turn is also signed out", async () => {
+    render(<Harness />);
+    emit({ type: "recovery", kind: "signed_out" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(1));
+    // send_message emitted RECOVERY_PROMPT as a user message. It is still
+    // recovery of the same interrupted work, not a fresh login incident.
+    emit({ type: "recovery", kind: "signed_out" });
+    await signedIn();
+    expect(sends()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(2));
+    expect(mocks.openTerminal).toHaveBeenCalledOnce();
+  });
+
   it("allows another explicit attempt when the login terminal failed to open", async () => {
     mocks.openTerminal.mockRejectedValueOnce(new Error("Could not open terminal"));
     render(<Harness />);

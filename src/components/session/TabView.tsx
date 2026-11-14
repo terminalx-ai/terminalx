@@ -229,7 +229,7 @@ export function TabView({
   const loginTurn = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i];
-      if (!ev.subagent && ev.payload.type === "user_message" && !ev.payload.queued) return ev.seq;
+      if (!ev.subagent && ev.payload.type === "user_message" && !ev.payload.queued && ev.payload.text !== RECOVERY_PROMPT) return ev.seq;
     }
   }, [events]);
 
@@ -488,16 +488,19 @@ export function TabView({
       setError(STOP_REFUSED);
       return;
     }
-    currentLogin.current.cancelled = true;
+    const incident = currentLogin.current;
     setLoginPending(null);
     if (recoveryLock.current) {
+      incident.cancelled = true;
       actions.rejected("stop", "in_progress", surface);
       return;
     }
+    incident.paused = true;
     recoveryLock.current = true;
     setRecovering(true);
     const done = actions.start("stop", surface);
     void backend.stop(tab.id).then(() => {
+      incident.cancelled = true;
       backend.setTabStatus(tab.id, "idle");
       // A queued cloud stop ends the turn on the runtime; there is nothing local to resume.
       if (backend.caps.recovery) setStopped(true);
@@ -509,6 +512,7 @@ export function TabView({
       setError(local ? safeError(e) : commandError(e));
       done("failed", failure(e));
     }).finally(() => {
+      incident.paused = false;
       recoveryLock.current = false;
       setRecovering(false);
     });
