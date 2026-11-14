@@ -1421,6 +1421,10 @@ fn stop_all_reaps_terminal_descendants_after_the_leader_and_output_exit() {
     check_exited_terminal_descendants(false);
 }
 
+// macOS keeps main's leader-group stop (src/pty.rs `pid`): the strict session
+// census these rely on is not applied there while the Darwin census work is on
+// hold (#467, #939).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn stop_all_reaps_separate_job_group_after_the_shell_and_output_exit() {
     check_exited_terminal_descendants(true);
@@ -1529,6 +1533,10 @@ fn linux_desktop_attaches_to_a_local_owner_without_a_macos_tray() {
     client.stop_all().unwrap(); stopped(&mut serve);
 }
 
+// macOS keeps main's leader-group stop (src/pty.rs `pid`): the strict session
+// census these rely on is not applied there while the Darwin census work is on
+// hold (#467, #939).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn stop_all_reaps_interactive_shell_job_groups() {
     let world = AgentWorld::new();

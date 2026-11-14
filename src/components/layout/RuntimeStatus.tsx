@@ -90,7 +90,7 @@ function RuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRun
   const busy = (keeps || !failed) && work !== null && work.length > 0;
   const waiting = keeps
     ? failed ? `Handing it over to ${app} failed, and it does not try again by itself.`
-      : work === null || work.length === 0 ? `It hands its agents and terminals over to ${app} in a moment; they keep running.`
+      : work === null || work.length === 0 ? `It hands its agents and terminals over to ${app} when ready; they keep running. If the runtime is busy, TerminalX retries automatically.`
       : `It hands everything over to ${app}, keeping it running, except what it cannot carry over:`
     : failed ? `Moving to ${app} failed, and it does not try again by itself.`
     : work === null ? `It moves to ${app} by itself once it has checked that nothing it runs would be cut short.`

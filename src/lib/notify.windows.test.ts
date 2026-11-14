@@ -85,6 +85,47 @@ afterEach(() => {
   for (const [type, listener] of added.splice(0)) window.removeEventListener(type, listener);
   window.addEventListener = realAdd;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("helper session attention", () => {
+  it.each([true, false])("silences workers, retries and verifier tabs (focused: %s)", async (focused) => {
+    const { notify } = await openWindow("main", focused);
+    (await import("./prefs")).setPrefs({ sounds: true });
+    const audio = vi.fn(function () { throw new Error("No audio device"); });
+    vi.stubGlobal("AudioContext", audio);
+    const worker = { ...chat, id: "worker", parent: { sessionId: "lead", tabId: "lead-tab" } };
+    const retry = { ...worker, id: "retry" };
+    // Verifiers are fresh tabs in the worker's session. No run or lead needs
+    // to be loaded for the persisted parent relationship to keep them quiet.
+    for (const [session, agentTab] of [[worker, tab], [retry, tab], [worker, { ...tab, id: "verifier" }]] as const) {
+      for (const next of ["completed", "waiting"] as const) {
+        notify.noteStatusChange(session, agentTab, "in_progress", next);
+      }
+    }
+    await settle();
+    const { renderHook } = await import("@testing-library/react");
+    expect(renderHook(() => notify.useNotices()).result.current).toEqual([]);
+    expect(audio).not.toHaveBeenCalled();
+    expect(mocks.sendNotification).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("notification_permission");
+  });
+
+  it.each([undefined, null])("keeps personal and lead session attention with parent %s", async (parent) => {
+    const { notify } = await openWindow("main", true);
+    (await import("./prefs")).setPrefs({ sounds: true });
+    const audio = vi.fn(function () { throw new Error("No audio device"); });
+    vi.stubGlobal("AudioContext", audio);
+    const { renderHook } = await import("@testing-library/react");
+    for (const next of ["completed", "waiting"] as const) {
+      notify.noteStatusChange({ ...chat, parent }, tab, "in_progress", next);
+      const notices = renderHook(() => notify.useNotices()).result.current;
+      expect(notices).toHaveLength(1);
+      expect(notices[0].kind).toBe(next === "completed" ? "done" : "waiting");
+      notify.dismissNotice(notices[0].id);
+    }
+    expect(audio).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("attention across windows", () => {

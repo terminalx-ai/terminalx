@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.31"
+version = "0.2.32"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -148,6 +148,12 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.test]
+# The tests wait on processes, terminals and files far more than they compute:
+# unoptimised, the suite runs as fast, and this crate's test build takes a
+# fraction of the processor time and memory. Dependencies keep the level above.
+opt-level = 0
 
 [profile.release]
 codegen-units = 1

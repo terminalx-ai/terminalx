@@ -249,7 +249,8 @@ fn background_worker_syncs_without_a_view_poll() {
     assert!(r.start().active);
     fs::write(r.source.join("file.txt"), "live\n").unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while fs::read_to_string(r.root.join("file.txt")).unwrap() != "live\n" {
+    // Applying a patch can briefly remove the file before recreating it.
+    while !fs::read_to_string(r.root.join("file.txt")).is_ok_and(|content| content == "live\n") {
         assert!(std::time::Instant::now() < deadline, "worker did not mirror within a few seconds");
         std::thread::sleep(Duration::from_millis(50));
     }

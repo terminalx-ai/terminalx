@@ -215,12 +215,21 @@ function sendsBanner(): boolean {
 
 // ---- sounds, synthesised so there is nothing to ship
 
-let audio: AudioContext | null = null;
+let audio: { ctx: AudioContext; pending: number } | null = null;
+
+function closeAudio(current: NonNullable<typeof audio>) {
+  if (audio !== current) return;
+  // Detach immediately: a chime arriving while close() settles needs a new context.
+  audio = null;
+  void current.ctx.close().catch(() => {});
+}
 function tone(notes: { f: number; at: number; len: number }[], gain = 0.06) {
+  let current: typeof audio = null;
   try {
-    audio ??= new AudioContext();
-    const ctx = audio;
-    if (ctx.state === "suspended") void ctx.resume();
+    current = audio ??= { ctx: new AudioContext(), pending: 0 };
+    const { ctx } = current;
+    const playing = current;
+    if (ctx.state === "suspended") void ctx.resume().catch(() => closeAudio(playing));
     const t0 = ctx.currentTime;
     for (const n of notes) {
       const o = ctx.createOscillator();
@@ -231,10 +240,18 @@ function tone(notes: { f: number; at: number; len: number }[], gain = 0.06) {
       g.gain.linearRampToValueAtTime(gain, t0 + n.at + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.at + n.len);
       o.connect(g).connect(ctx.destination);
+      // Count all scheduled notes, including overlapping chimes and their tails.
+      playing.pending++;
+      o.onended = () => {
+        o.disconnect();
+        g.disconnect();
+        if (--playing.pending === 0) closeAudio(playing);
+      };
       o.start(t0 + n.at);
       o.stop(t0 + n.at + n.len + 0.05);
     }
   } catch {
+    if (current) closeAudio(current);
     /* no audio device */
   }
 }
@@ -307,6 +324,9 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   if (next === "waiting" && prev !== "waiting") kind = "waiting";
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
+  // Helpers report through their parent, not directly to the reader. This also
+  // covers retry workers and verifier tabs, without waiting for run metadata.
+  if (session.parent) return;
   // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
   if (isTabMuted(session, tab.id, getSessions().chatsPath)) return;
   const { title, body } = summarise(session, tab, kind);

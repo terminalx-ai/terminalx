@@ -219,6 +219,27 @@ it("keeps comparing against the previous branch when the new one can't be used, 
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
+it("keeps a scope picked while Apply checks the branch (PRO-367)", async () => {
+  const source = fakeSource("scope-during-check");
+  render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree />);
+  await screen.findByText(/Against main/);
+  let pass!: () => void;
+  const check = new Promise<void>((resolve) => { pass = resolve; });
+  vi.mocked(source.reviewRange).mockImplementationOnce(async (target) => { await check; return { target: target ?? "main", base: "merge-base", head: "snapshot" }; });
+  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(screen.getByRole("button", { name: "Apply" }).getAttribute("aria-busy")).toBe("true");
+  // The person moves on to Uncommitted before the check comes back.
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  await screen.findByRole("button", { name: /dirty.ts/ });
+  await act(async () => { pass(); await check; });
+  // The check passed: the scope they picked stays, and All changes now compares against the new branch.
+  expect((screen.getByLabelText("Changes scope") as HTMLSelectElement).value).toBe("uncommitted");
+  expect(screen.getByRole("button", { name: /dirty.ts/ })).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
+  await screen.findByText(/Against release/);
+});
+
 it("says a local name that names nothing is not here", async () => {
   const source = fakeSource("missing-local");
   render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);

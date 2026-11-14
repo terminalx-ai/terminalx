@@ -292,6 +292,19 @@ describe("listing", () => {
     expectNoWake();
   });
 
+  it("reports shared attention and recovery, and clears it when the catalog refreshes", async () => {
+    const failed = item("ws-failed", ORG, { launch: { state: "failed", phase: "failed", category: "repository-access-denied" } });
+    const operation = { ...item("ws-operation", ORG, { state: "attention-required" }), latestOperation: { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem;
+    await list(ORG, [failed, operation]);
+    const read = async () => ((await handleCloudControl("projects.list", { org: ORG })) as { projects: { workspaces: { id: string; status: string; attention: unknown }[] }[] }).projects.flatMap((project) => project.workspaces);
+    const rows = await read();
+    expect(rows.find((row) => row.id === "ws-failed")).toMatchObject({ status: "Needs attention", attention: { code: "repository-access-denied", message: expect.any(String), recovery: { action: "check-github-access", label: expect.any(String), instructions: expect.any(String) } } });
+    expect(rows.find((row) => row.id === "ws-operation")).toMatchObject({ status: "Needs attention", attention: { code: "cloud_provider_credential_invalid", recovery: { action: "open-provider-settings", instructions: expect.any(String) } } });
+    await list(ORG, [item("ws-failed", ORG), item("ws-operation", ORG)]);
+    expect((await read()).map((row) => row.attention)).toEqual([null, null]);
+    expectNoWake();
+  });
+
   it("lists sessions across organizations, or one project's, without attaching to or waking anything", async () => {
     const all = (await handleCloudControl("sessions.list")) as { sessions: { key: string; title: string; stopped: boolean; tabs: { id: string; agent: string }[] }[] };
     expect(all.sessions.map((entry) => [entry.key, entry.title, entry.stopped]).sort()).toEqual(
@@ -659,6 +672,101 @@ describe("why a wait ends (#668)", () => {
 });
 
 describe("creating a session", () => {
+  it.each(["ready", "attention-required"])("explains the only %s workspace's failed first task when starting an issue", async (state) => {
+    const failed = item("ws-failed", ORG, { state, launch: { state: "failed", phase: "failed", category: "repository-access-denied" } });
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    const attention = resolveCloudAttention(failed)!;
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toEqual({ code: "cloud_workspace_needs_attention", message: attention.message, recovery: attention.recovery.instructions });
+    expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    await list(ORG, [item("ws-failed", ORG)]);
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ created: "session" });
+  });
+
+  it.each([false, true])("starts a session in a recovered attention-required workspace (issue: %s)", async (withIssue) => {
+    const failed = item("ws-recovered", ORG, { state: "attention-required",
+      launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } },
+    });
+    await list(ORG, [failed]);
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 1, pendingApprovals: 0, reportedAt: 20 },
+    } }]);
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace,
+      runtimeActivity: { online: true, reporting: true, stale: false, activeTurns: 0, pendingApprovals: 0, reportedAt: 30 },
+    } }]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", ...(withIssue ? { issue } : {}) })).toMatchObject({
+      created: "session", workspace: `cloud:${ORG}:ws-recovered`, resumed: false,
+    });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[0][0]).toMatchObject({ kind: "reuse" });
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("uses checkpoint-only recovery when starting a session (issue: %s)", async (withIssue) => {
+    const workspaceId = "ws-checkpoint-recovered";
+    const scope = { organizationId: ORG, workspaceId };
+    const failed = item(workspaceId, ORG, { state: "ready",
+      launch: { phase: "failed", state: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } },
+    });
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ code: "cloud_workspace_needs_attention" });
+
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (args.workspaceId === workspaceId && command === "cloud_agent_checkpoints") return [{ tabId: "recovered-tab", epoch: 1, version: 1 }];
+      if (args.workspaceId === workspaceId && command === "cloud_agent_checkpoint") return {
+        epoch: 1, version: 1, projection: {
+          v: 1, sessionId: "recovered", tabId: "recovered-tab", title: "Recovered task", harness: "claude",
+          model: "opus", effort: null, permissionMode: "default", status: "idle", process: "stopped",
+          created: new Date(20).toISOString(), lastMessageAt: new Date(30).toISOString(),
+          events: [], truncated: false, followUps: [], updatedAt: 30,
+        },
+      };
+      return base(command, args);
+    });
+    const agents = await import("@/lib/cloudAgents");
+    await agents.loadCloudAgents(scope);
+    await agents.refreshFromCheckpoint(scope, "recovered-tab");
+    expect(agents.getCloudAgents(scope).tabs[0]).toMatchObject({ source: "checkpoint", live: false });
+    // A catalog refresh alone does not learn the loaded checkpoint's recovery evidence.
+    await list(ORG, [failed]);
+    const catalogItem = catalog.findCloudWorkspace(catalog.getCloudCatalog(), ORG, workspaceId)!;
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    expect(catalog.getCloudCatalog().orgs[ORG].sessions[workspaceId]).toBeUndefined();
+    expect(resolveCloudAttention(catalogItem)?.code).toBe("agent-sign-in-required");
+
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", ...(withIssue ? { issue } : {}) })).toMatchObject({
+      created: "session", workspace: `cloud:${ORG}:${workspaceId}`, resumed: false,
+    });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[0][0]).toMatchObject({ kind: "reuse" });
+    expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+    expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+
+    // Post-launch activity does not clear a separate provider failure.
+    await list(ORG, [{ ...failed, workspace: { ...failed.workspace, state: "attention-required" }, latestOperation: { id: "later-op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem]);
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ code: "cloud_workspace_needs_attention" });
+    expect(newSession.startInWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves ambiguous workspace selection when one needs attention", async () => {
+    await list(ORG, [item("ws-failed", ORG, { state: "attention-required" }), item("ws-healthy", ORG)]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue })).toMatchObject({ workspace: `cloud:${ORG}:ws-healthy` });
+  });
+
+  it("returns operation recovery when the only workspace has a failed operation", async () => {
+    const failed = { ...item("ws-failed", ORG, { state: "attention-required" }), latestOperation: { id: "op", action: "resume", state: "failed", errorCode: "cloud_provider_credential_invalid" } } as CloudWorkspaceListItem;
+    await list(ORG, [failed]);
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Fix it", url: "https://github.com/acme/api/issues/433" };
+    const { resolveCloudAttention } = await import("@/lib/cloudAttention");
+    const attention = resolveCloudAttention(failed)!;
+    expect(await refusal("sessions.create", { project: PROJECT, prompt: "go", issue })).toEqual({ code: "cloud_workspace_needs_attention", message: attention.message, recovery: attention.recovery.instructions });
+    expect(newSession.startInWorkspace).not.toHaveBeenCalled();
+  });
   describe.each(["saved", "explicit"] as const)("%s permission modes", (source) => {
     it.each([
       ["default", "manual"],
@@ -1200,7 +1308,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
   ];
 
-  it("ships with the setting, off by default, and confirmation for stopping", () => {
+  it("ships with the setting, off by default", () => {
     expect(CLOUD_CONTROL_POLICY).toBe("both");
     setCloudControlEnabled(false);
     expect(cloudControlEnabled()).toBe(false);
@@ -1235,7 +1343,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
   });
 
-  describe("both together (what ships): the setting authorizes routine compute, stop still asks", () => {
+  describe("both together (what ships): the setting authorizes routine compute and lifecycle operations", () => {
     beforeEach(() => setCloudControlPolicy("both"));
 
     it("refuses everything while the setting is off, and asks nothing", async () => {
@@ -1244,6 +1352,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expect(mocks.ask).not.toHaveBeenCalled();
       expect(enqueued).toEqual([]);
       expectNoWake();
+      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
       expect(await handleCloudControl("status")).toMatchObject({ policy: "both", enabled: false, organizations: [] });
     });
 
@@ -1257,12 +1366,13 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expect(enqueued).toHaveLength(1);
     });
 
-    it("with the setting on, routine sends, resumes and session launches do not ask again", async () => {
+    it("with the setting on, routine sends, stops, resumes and session launches do not ask again", async () => {
       setCloudControlEnabled(true);
       mocks.ask.mockResolvedValue(false);
       for (const [action, params] of [
         ["send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" }],
         ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
+        ["stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true }],
         ["sessions.create", { project: PROJECT, prompt: "go" }],
         ["sessions.create", { project: `cloud:${ORG}:github.com/acme/web`, prompt: "go", wake: true }],
       ] as [string, Record<string, unknown>][]) {
@@ -1272,8 +1382,23 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expect(enqueued).toHaveLength(1);
       expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledOnce();
       expect(newSession.startInWorkspace).toHaveBeenCalledTimes(2);
-      expect((await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).code).toBe("declined");
-      expect(mocks.ask).toHaveBeenCalledOnce();
+      expect(mocks.api.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1", ORG);
+    });
+
+    it.each(["false", "error"] as const)("refuses a stop when the native grant is %s at admission", async (answer) => {
+      setCloudControlEnabled(true);
+      if (answer === "error") mocks.setting.mockRejectedValueOnce(new Error("unreadable"));
+      else mocks.setting.mockResolvedValueOnce(false);
+      expect(await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).toMatchObject({ code: "cloud_control_disabled" });
+      expect(mocks.setting).toHaveBeenCalledOnce();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
+    });
+
+    it("still requires --yes to stop with the setting on", async () => {
+      setCloudControlEnabled(true);
+      expect(await refusal("stop", { workspace: `cloud:${ORG}:ws-1` })).toMatchObject({ code: "confirmation_required" });
+      expect(mocks.ask).not.toHaveBeenCalled();
       expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
     });
 
@@ -1282,6 +1407,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       signIn({ [ORG]: "member", [OTHER]: "member" });
       await list(ORG, [item("ws-1", ORG, { you: { role: "viewer", canApprove: false, canManageShares: false } }), item("ws-stopped", ORG, { state: "suspended", you: { role: "viewer", canApprove: false, canManageShares: false } })]);
       for (const [action, params] of [
+        ["stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true }],
         ["resume", { workspace: `cloud:${ORG}:ws-stopped` }],
         ["send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "hi" }],
         ["sessions.create", { project: PROJECT, prompt: "go", wake: true, confirmSpend: true }],
@@ -1290,6 +1416,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       expect(enqueued).toEqual([]);
       expect(newSession.startInWorkspace).not.toHaveBeenCalled();
       expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
       expectNoWake();
     });
 
@@ -1538,7 +1665,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
 
   describe("a refusal is not asked about again right away", () => {
     it("answers declined without a question while the app is backing off, and says when to try again", async () => {
-      setCloudControlPolicy("both");
+      setCloudControlPolicy("confirm");
       setCloudControlEnabled(true);
       const native = await import("@/lib/cloudControlNative");
       const confirm = vi.spyOn(native.cloudControlNative, "confirm").mockResolvedValue("backoff:95");
@@ -1551,7 +1678,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
 
     it("acts only on an explicit yes: no answer in time, a question already on screen, a dialog that failed, and any other answer all do nothing", async () => {
-      setCloudControlPolicy("both");
+      setCloudControlPolicy("confirm");
       setCloudControlEnabled(true);
       const native = await import("@/lib/cloudControlNative");
       const confirm = vi.spyOn(native.cloudControlNative, "confirm");
