@@ -404,3 +404,25 @@ fn reading_a_completed_tab_does_not_change_its_dashboard_order() {
     assert_eq!(after.tab(TAB).unwrap().status, TabStatus::Idle);
     assert_eq!(rt.lock().unwrap().status, TabStatus::Idle);
 }
+
+#[test]
+fn stopping_a_signed_out_process_keeps_the_sign_in_incident() {
+    let rig = Rig::new(json!({}));
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    rig.idle_for_the_limit();
+    {
+        let rt = rig.rt();
+        rig.manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
+    }
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(!rig.running());
+    assert!(rig.manager.pipeline_idle(SESSION, TAB));
+    assert_eq!(rig.manager.wait_view(SESSION, TAB).recovery, Some(RecoveryKind::SignedOut));
+    // The automatic retry calls Stop again after authentication. It must not
+    // dismiss the incident before the retry can send either.
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert_eq!(rig.manager.wait_view(SESSION, TAB).recovery, Some(RecoveryKind::SignedOut));
+    let events = rig.manager.load_events(SESSION, TAB).unwrap();
+    let recovery: Vec<_> = events.iter().filter_map(|event| match event.payload { Payload::Recovery { kind } => Some(kind), _ => None }).collect();
+    assert_eq!(recovery, [Some(RecoveryKind::SignedOut)]);
+}

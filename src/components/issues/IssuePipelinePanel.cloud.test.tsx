@@ -65,6 +65,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("a cloud workspace's pipeline on its issue's page", () => {
+  it("keeps Advance available after a cloud conflict is resolved", async () => {
+    render(<IssuePipelinePanel pipeline={pipeline({ stage: "resolve", state: "needsYou" })} />);
+    expect(screen.queryByRole("button", { name: "Restart resolver" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect resolution" }));
+    await waitFor(() => expect(cloud.actOnCloudPipeline).toHaveBeenCalledWith(expect.objectContaining({ id: "p1" }), "advance"));
+  });
   it("has no switch to merge by itself, and says who merges", () => {
     render(<IssuePipelinePanel pipeline={pipeline()} />);
     expect(screen.queryByRole("switch", { name: "Merge when green" })).toBeNull();

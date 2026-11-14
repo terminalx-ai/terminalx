@@ -244,6 +244,30 @@ fn remote_head(cwd: &Path, url: &str, branch: &str) -> Result<Option<String>> {
     }))
 }
 
+/// Observe both repositories rather than trusting stale local remote refs.
+fn remote_resolution_complete(cwd: &Path, pr: &PrSnapshot) -> Result<bool> {
+    if pr.mergeable == "CONFLICTING" || matches!(pr.merge_state.as_str(), "DIRTY" | "BEHIND") { return Ok(false); }
+    let repository = pr.head_repository.as_deref().context("GitHub did not identify the PR head repository")?;
+    let (_, head_url) = crate::github::head_push_destination(cwd, &pr.head, repository)?;
+    let base_url = crate::github::base_fetch_destination(cwd, pr)?;
+    let base = remote_head(cwd, &base_url, &pr.base)?.context("The base branch is missing")?;
+    if remote_head(cwd, &head_url, &pr.head)?.as_deref() != Some(pr.head_sha.as_str()) { return Ok(false); }
+    for (url, commit) in [(&head_url, &pr.head_sha), (&base_url, &base)] {
+        crate::git::run_within(cwd, &["fetch", "--no-tags", "--no-write-fetch-head", "--", url, commit], PUSH_TIMEOUT, &|| false)
+            .map_err(|error| anyhow!("Fetching resolution evidence failed: {error:?}"))?;
+    }
+    let behind = crate::git::run(cwd, &["rev-list", "--count", &format!("{}..{base}", pr.head_sha)])?;
+    Ok(behind.trim() == "0")
+}
+
+/// Preserve local changes and divergent commits when accepting remote work.
+fn adopt_remote_head(cwd: &Path, head: &str) -> Result<()> {
+    let current = workspace(cwd)?;
+    if !current.dirty.is_empty() || !current.merging.is_empty() { bail!("Inspect and commit or abort the unfinished checkout changes before advancing."); }
+    crate::git::run(cwd, &["merge", "--ff-only", head])?;
+    Ok(())
+}
+
 /// The base branch's commit as the remote has it now, fetched: the pull
 /// request's base repository when there is a pull request, `origin` when not.
 fn fetch_base(cwd: &Path, base: &str, pr: Option<&PrSnapshot>) -> Result<String> {
@@ -418,6 +442,37 @@ impl Host for LocalHost {
 
     fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
         resolution_needed(cwd, branch, base, required, pr)
+    }
+
+    fn resolver_failure(&self, who: &SessionRef) -> Result<Option<String>> {
+        let Some(session) = index::load()?.into_iter().find(|session| session.id == who.session_id && session.tab(&who.tab_id).is_some()) else {
+            return Ok(Some("The conflict resolver tab was closed.".into()));
+        };
+        let view = self.manager.wait_view(&session.id, &who.tab_id);
+        Ok(view.recovery.filter(|kind| matches!(kind, crate::recovery::RecoveryKind::SignedOut | crate::recovery::RecoveryKind::Failed))
+            .map(|kind| kind.message().to_string()))
+    }
+
+    fn stop_resolver(&self, who: &SessionRef) -> Result<()> {
+        if index::load()?.iter().any(|session| session.id == who.session_id && session.tab(&who.tab_id).is_some()) {
+            self.manager.stop(&who.session_id, &who.tab_id)?;
+        }
+        Ok(())
+    }
+
+    fn close_resolver(&self, who: &SessionRef) -> Result<()> {
+        if index::load()?.iter().any(|session| session.id == who.session_id && session.tab(&who.tab_id).is_some()) {
+            self.manager.close_tab(&who.session_id, &who.tab_id)?;
+        }
+        Ok(())
+    }
+
+    fn remote_resolution_complete(&self, cwd: &Path, pr: &PrSnapshot) -> Result<bool> {
+        remote_resolution_complete(cwd, pr)
+    }
+
+    fn adopt_remote_head(&self, cwd: &Path, head: &str) -> Result<()> {
+        adopt_remote_head(cwd, head)
     }
 
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
@@ -854,6 +909,44 @@ mod tests {
         git(root, &["push", "-q", "origin", "main"]);
         git(root, &["checkout", "-q", "raccoon/433-work"]);
         (dir, upstream, fork, pr)
+    }
+
+    #[test]
+    fn remote_resolution_requires_the_latest_base_and_updates_only_a_clean_fast_forward() {
+        let (dir, _upstream, _fork, mut pr) = fork_with_conflicts();
+        let root = dir.path();
+        pr.mergeable = "MERGEABLE".into();
+        pr.merge_state = "CLEAN".into();
+        assert!(!remote_resolution_complete(root, &pr).unwrap(), "GitHub metadata alone is insufficient");
+        let old_head = pr.head_sha.clone();
+        let resolution = resolution_needed(root, &pr.head, &pr.base, true, Some(&pr)).unwrap().unwrap();
+        let merge = std::process::Command::new("git").current_dir(root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-edit", &resolution.base_commit]).output().unwrap();
+        assert!(!merge.status.success());
+        std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-qm", "resolve remotely"]);
+        pr.head_sha = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["push", "-q", "fork", &pr.head]);
+        git(root, &["checkout", "-q", "--detach", &old_head]);
+        assert!(remote_resolution_complete(root, &pr).unwrap());
+        std::fs::write(root.join("unfinished.txt"), "keep me").unwrap();
+        assert!(adopt_remote_head(root, &pr.head_sha).is_err());
+        std::fs::remove_file(root.join("unfinished.txt")).unwrap();
+        std::fs::write(root.join("local.txt"), "local work").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "divergent local work"]);
+        assert!(adopt_remote_head(root, &pr.head_sha).is_err());
+        git(root, &["checkout", "-q", "--detach", &old_head]);
+        adopt_remote_head(root, &pr.head_sha).unwrap();
+        assert_eq!(workspace(root).unwrap().head, pr.head_sha);
+        // Main moving again invalidates even a previously proved remote resolution.
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("new-base.txt"), "new main").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "advance main"]);
+        git(root, &["push", "-q", "origin", "main"]);
+        assert!(!remote_resolution_complete(root, &pr).unwrap());
     }
 
     #[test]

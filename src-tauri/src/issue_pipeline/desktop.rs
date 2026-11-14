@@ -36,13 +36,13 @@ pub fn turn_completed(app: &AppHandle, session_id: &str, tab_id: &str, final_mes
     off_thread(app, move |host| engine::turn_completed(host, &session_id, &tab_id, final_message.as_deref()));
 }
 
-pub fn turn_failed(app: &AppHandle, session_id: &str, tab_id: &str, interrupted: bool) {
+pub fn turn_failed(app: &AppHandle, session_id: &str, tab_id: &str, message: &str) {
     if !store::takes_part(session_id, tab_id) {
         return;
     }
     let (session_id, tab_id) = (session_id.to_string(), tab_id.to_string());
-    let detail = engine::turn_failure(interrupted);
-    off_thread(app, move |host| engine::turn_failed(host, &session_id, &tab_id, detail));
+    let detail = message.to_string();
+    off_thread(app, move |host| engine::turn_failed(host, &session_id, &tab_id, &detail));
 }
 
 /// A person answered a tab: its pipeline may be waiting on that answer.

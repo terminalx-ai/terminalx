@@ -2862,6 +2862,14 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
+        crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3912,6 +3920,16 @@ impl SessionManager {
         false
     }
 
+    fn set_stopped_status(&self, rt: &mut TabRuntime) {
+        if rt.recovery == Some(RecoveryKind::SignedOut) {
+            // Stopping the process does not authenticate it. Keep the same
+            // incident (and banner) until a new authenticated turn starts.
+            self.set_display_status(rt, TabStatus::Idle);
+        } else {
+            self.set_status(rt, TabStatus::Idle);
+        }
+    }
+
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         self.stop_with(session_id, tab_id, false)
@@ -4136,7 +4154,7 @@ impl SessionManager {
             self.settle_settings_without_process(&mut rt);
             // A reply nobody has read yet is still unread once its agent goes.
             if !(keep_unread && rt.status == TabStatus::Completed) {
-                self.set_status(&mut rt, TabStatus::Idle);
+                self.set_stopped_status(&mut rt);
             }
             (panes, pid)
         };
@@ -4205,6 +4223,7 @@ impl SessionManager {
             self.sink.emit("pty_closed", &pane);
         }
         crate::session_ops::close_tab_entry(session_id, tab_id).map_err(anyhow::Error::msg)?;
+        self.observer.automation_failed(session_id, tab_id, "Its tab was closed.");
         self.sink.emit("session_updated", &index::get(session_id)?);
         self.sink.emit("tab_state_changed", &index::tab_state()?);
         Ok(())
