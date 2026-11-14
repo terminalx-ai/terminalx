@@ -29,7 +29,6 @@ def check_steps(release: Release) -> list[tuple[str, list[str], Path]]:
         ('frontend', ['pnpm', 'build'], root),
         ('webkit-install', ['pnpm', 'exec', 'playwright', 'install', 'webkit'], root),
         ('webkit', ['pnpm', 'test:webkit-layout'], root),
-        ('permission-layout', ['node', 'scripts/webkit/permission-details.mjs'], root),
         ('console-layout', ['node', 'scripts/webkit/organization-console-link.mjs'], root),
         ('local-sharing', ['pnpm', 'test:webkit-local-sharing'], root),
         ('swift-tests', ['swift', 'test', '--package-path', 'native/computer-use-macos'], root),

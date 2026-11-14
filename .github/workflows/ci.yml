@@ -96,10 +96,9 @@ jobs:
         run: pnpm build
       - name: Install WebKit for the layout checks
         run: pnpm exec playwright install webkit
+      # scripts/webkit/run-all.mjs runs them several at once, permission-details among them.
       - name: WebKit layout checks
-        run: |
-          pnpm test:webkit-layout
-          node scripts/webkit/permission-details.mjs
+        run: pnpm test:webkit-layout
 
   linux-rust:
     runs-on: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
