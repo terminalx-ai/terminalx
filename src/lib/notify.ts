@@ -307,6 +307,9 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   if (next === "waiting" && prev !== "waiting") kind = "waiting";
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
+  // Helpers report through their parent, not directly to the reader. This also
+  // covers retry workers and verifier tabs, without waiting for run metadata.
+  if (session.parent) return;
   // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
   if (isTabMuted(session, tab.id, getSessions().chatsPath)) return;
   const { title, body } = summarise(session, tab, kind);
