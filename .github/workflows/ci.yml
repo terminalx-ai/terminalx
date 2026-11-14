@@ -246,9 +246,25 @@ jobs:
       - name: build the computer-use helper app
         run: node scripts/build-computer-macos.mjs
 
+      # One compiler working on this crate holds over 5 GB, and this runner has
+      # 7 GB. --all-targets and a full cargo test each start two at once (the
+      # library and its test build) and the runner swaps. Each pair of steps
+      # below does the same work one compiler at a time: the second step finds
+      # the first one's output fresh and builds only the rest. The first clippy
+      # step names an integration test because that checks the library as
+      # --all-targets will, with the test-only dependency features on.
+      - name: clippy (the library by itself)
+        working-directory: src-tauri
+        run: cargo clippy --locked --test serde_field_naming -- -D warnings
+
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: build the library's tests by themselves
+        if: needs.macos-rust-changes.outputs.required == 'true'
+        working-directory: src-tauri
+        run: cargo test --locked --lib --no-run
 
       - name: cargo test (full macOS suite when selected)
         if: needs.macos-rust-changes.outputs.required == 'true'
