@@ -233,7 +233,7 @@ export function TabView({
     }
   }, [events]);
 
-  // One login terminal and one authenticated retry belong to this turn.
+  // One login terminal and one automatic authenticated retry belong to this turn.
   // Replacing or unmounting its view revokes even work already awaiting Stop.
   const loginIncident = useMemo(() => ({ launched: false, opening: false, consumed: false, cancelled: false, paused: false }),
     [backend.key, backend.generation, session.id, tab.id, tab.harness, conversation, tab.front, loginTurn]);
@@ -707,9 +707,12 @@ export function TabView({
 
   async function requestSignIn() {
     const incident = loginIncident;
-    if (!signInAgent || !loginCurrent(incident) || incident.consumed || recoveryLock.current) return;
+    if (!signInAgent || !loginCurrent(incident) || recoveryLock.current) return;
     if (incident.launched) {
       if (incident.opening) return;
+      // An explicit retry may recover a failed delivery; readiness events
+      // alone never re-arm a consumed automatic attempt.
+      incident.consumed = false;
       if (loginPending === incident) await refreshLogin();
       else setLoginPending(incident);
       return;

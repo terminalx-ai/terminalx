@@ -341,7 +341,7 @@ describe("TabView recovery lifecycle", () => {
     expect(mocks.openTerminal).toHaveBeenCalledTimes(2);
   });
 
-  it("attempts delivery only once when backend admission refuses the authenticated retry", async () => {
+  it("does not loop after failed delivery but allows another explicit retry without another login", async () => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command: string, args: unknown) => command === "send_message"
       ? Promise.reject(new Error("Agent is signed out")) : original(command, args));
@@ -353,9 +353,13 @@ describe("TabView recovery lifecycle", () => {
     await waitFor(() => expect(sends()).toHaveLength(1));
     await act(async () => {});
     await signedIn();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await act(async () => {});
     expect(sends()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/After sign-in is verified/);
+    await signedIn();
+    await waitFor(() => expect(sends()).toHaveLength(2));
+    await signedIn();
+    expect(sends()).toHaveLength(2);
     expect(mocks.openTerminal).toHaveBeenCalledOnce();
   });
 
