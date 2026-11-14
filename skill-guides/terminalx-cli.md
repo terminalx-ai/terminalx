@@ -1541,7 +1541,9 @@ cloud workspaces" in Settings (`cloud status` then says `enabled: false`). Turni
 authorizes routine compute within the person's existing organization and workspace permissions:
 session launches, resume, send-wake and new workspace creation can incur billing without another
 native confirmation. The switch does not grant a new role or repository access.
-Stopping a workspace still requires `--yes` and the person's native confirmation. Enabling the
+Agents can stop and resume workspaces without another native confirmation. Stopping still
+requires `--yes` to acknowledge that running agent turns end; creating a new machine still
+requires `--confirm-spend`. Enabling the
 switch also requires native confirmation. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
