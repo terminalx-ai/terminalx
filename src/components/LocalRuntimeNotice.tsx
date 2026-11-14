@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { bootLocalRuntime, reconnectLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
+import { errorMessage } from "@/lib/api";
+import { bootLocalRuntime, reconnectLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
 /** A short gap says nothing: most reconnect before anyone would notice. */
 export const QUIET_MS = 3_000;
@@ -9,12 +10,17 @@ export const STALLED_MS = 2 * 60_000;
 
 /** Connection health only: a gap never means an agent stopped (#643). The
  * desktop reconnects by itself; this says so, and asks for nothing unless
- * retrying cannot help or has not helped for minutes. */
+ * retrying cannot help or has not helped for minutes. A runtime that stopped
+ * answering is the exception: only restarting it helps (#661). */
 export function LocalRuntimeNotice() {
   const { state, readAt } = useLocalRuntime();
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => { void bootLocalRuntime(); }, []);
+  // A failed restart is news only while the runtime is still not answering.
+  useEffect(() => { if (state?.state !== "unresponsive") setFailure(null); }, [state]);
   const down = state?.state === "connecting" ? state.downMs + Math.max(0, now - readAt) : 0;
   // Shown again as the gap crosses each threshold, without asking again.
   useEffect(() => {
@@ -25,6 +31,30 @@ export function LocalRuntimeNotice() {
     return () => clearTimeout(timer);
   }, [state, readAt, down]);
 
+  if (state?.state === "unresponsive") {
+    // Reconnecting would reach the same wedged process; only a restart
+    // recovers, and that stops its agents, so it is the reader's call. Only
+    // the runtime this window found not responding: another window may
+    // already have replaced it.
+    const { epoch } = state;
+    const restart = async () => {
+      setRestarting(true);
+      setFailure(null);
+      try { await restartLocalRuntime(epoch); }
+      catch (error) { setFailure(errorMessage(error)); }
+      finally { setRestarting(false); }
+    };
+    return (
+      <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+        <div className="min-w-0 flex-1 text-xs">
+          <div className="font-medium">TerminalX runtime is not responding</div>
+          <p className="mt-1 text-muted-foreground">{state.message} Restarting it stops the agents and terminals it runs; each agent picks up its conversation again when its tab starts.</p>
+          {failure && <p role="alert" className="mt-1 text-destructive">{failure}</p>}
+        </div>
+        <Button variant="outline" size="sm" disabled={restarting} onClick={() => void restart()}>{restarting ? "Restarting…" : "Restart runtime"}</Button>
+      </aside>
+    );
+  }
   if (state?.state !== "connecting" && state?.state !== "unavailable") return null;
   if (state.state === "connecting" && down < QUIET_MS) return null;
   const retry = async () => {

@@ -57,7 +57,9 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let data = string(&params, "data")?;
                 if data.len() > 1024 * 1024 { bail!("terminal input is too large"); }
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
-                manager.mobile.desktop_input(id, || terminals.write(id, &bytes))?;
+                // Queued, not written here: a program that is not reading
+                // must hold up neither this request nor the pane's gate (#661).
+                manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
@@ -118,6 +120,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "pane" => serde_json::to_value(manager.pane_of(session, tab))?,
         "queued" => serde_json::to_value(manager.queued(session, tab))?,
         "sendConfirmed" => serde_json::to_value(manager.send_confirmed(session, tab, string(&params, "text")?.into())?)?,
+        "resendUnsent" => serde_json::to_value(manager.resend_unsent(session, tab)?)?,
         "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send(session, tab, string(&params, "text")?.into(),

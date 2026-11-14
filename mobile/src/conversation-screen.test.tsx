@@ -7,6 +7,7 @@ import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
 import { forgetConversationState } from "@mobile/state/conversation-state";
+import { RelayOuterError } from "./transport/relay-client";
 
 const mocks = vi.hoisted(() => ({
   params: { sessionId: "worktree", tabId: "claude", hostId: "mac" },
@@ -89,13 +90,15 @@ beforeEach(() => {
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
-    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected",
+    hosts: [], activeHost: { id: mocks.params.hostId, label: "Mac", endpoint: "localhost" }, connectionStage: "connected", connectionAttempt: 0,
     sessions: [{ id: "worktree", title: "Create a new issue", project: "TerminalX", worktree: "issue-132", modified: "today", tabs: [
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
-    connection: { onEvent: () => () => {}, reportError: vi.fn() },
+    connection: { onEvent: () => () => {}, reportError: vi.fn(), retryNow: vi.fn() },
     api: {
       features: async () => ({}),
+      transport: () => "relay",
+      reassemblesFragments: async () => false,
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
       subscribeSession: vi.fn((tab, listener, ready) => { mocks.sessionListeners.set(tab, listener); if (ready) mocks.sessionReady.set(tab, ready); return () => { mocks.sessionListeners.delete(tab); mocks.sessionReady.delete(tab); }; }),
@@ -289,6 +292,61 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await publish("Retry me");
     expect(shown("Retry me")).toHaveLength(1);
+  });
+
+  it("says a send failed with the connection in plain words, keeps the draft, and offers Send again once connected (#670)", async () => {
+    const lost = new RelayOuterError(1001, "Stream end encountered", false);
+    mocks.app.api.sendSession.mockRejectedValueOnce(lost);
+    await render(); await type("How is it going?"); await click("Send");
+    expect(container.textContent).toContain("Not sent: the connection to your Mac dropped. Your message is still in the box.");
+    expect(container.textContent).not.toContain("relay_outer");
+    expect(input().value).toBe("How is it going?");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", lost);
+    mocks.app = { ...mocks.app, connectionStage: "reconnecting" }; await render();
+    expect(button("Send again").disabled).toBe(true);
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
+    expect(button("Send again").disabled).toBe(false);
+    await click("Send again");
+    // Send again goes under the same id as the first try (#675).
+    const [sendId] = mocks.app.api.sendSession.mock.calls[0].slice(3);
+    expect(sendId).toEqual(expect.any(String));
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "How is it going?", [], sendId], ["claude", "How is it going?", [], sendId]]);
+    expect(container.textContent).toContain("Sent to the agent.");
+    expect(input().value).toBe("");
+    expect(() => button("Send again")).toThrow();
+  });
+
+  it("does not call a send the Mac never answered 'not sent', nor offer to send it again", async () => {
+    const timedOut = new Error("RPC timed out: session.send");
+    mocks.app.api.sendSession.mockRejectedValueOnce(timedOut);
+    await render(); await type("Run the migration"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
+    expect(container.textContent).not.toContain("Not sent");
+    expect(container.textContent).not.toContain("RPC timed out");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Run the migration");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
+  });
+
+  it("says a worktree note the Mac never answered may have been added, not that it reached the agent", async () => {
+    mocks.app.api.postNote.mockRejectedValueOnce(new Error("RPC timed out: chat.post"));
+    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
+    expect(container.textContent).not.toContain("agent. Check");
+    expect(() => button("Send again")).toThrow();
+    expect(input().value).toBe("Deploying at 5");
+  });
+
+  it("does not offer Send again when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
+    mocks.app.api.sendSession
+      .mockRejectedValueOnce(new RelayOuterError(4401, "", false))
+      .mockResolvedValueOnce({ sent: false, message: "The agent is busy" });
+    await render(); await type("Ship it"); await click("Send");
+    expect(container.textContent).toContain("Not sent: this phone is no longer paired with your Mac; pair it again from Machines. Your message is still in the box.");
+    expect(() => button("Send again")).toThrow();
+    await click("Send");
+    expect(container.textContent).toContain("Message not sent: The agent is busy");
+    expect(() => button("Send again")).toThrow();
   });
 
   it("shows a promoted note and its user message as a single row, and the note in other tabs", async () => {
@@ -564,22 +622,87 @@ describe("mobile conversation navigation", () => {
     expect(input().value).toBe("Keep my draft");
   });
 
-  it("shows a recoverable offline error when the connection drops during the initial load", async () => {
+  it("says the phone is reconnecting when the connection drops during the initial load, and Retry reconnects at once (#670)", async () => {
     let reject!: (reason: Error) => void;
     mocks.app.api.tail.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    mocks.app.connectionEpoch = 1;
     await render();
     expect(container.textContent).toContain("Loading transcript");
-    mocks.app.connectionStage = "cant-connect";
+    mocks.app.connectionStage = "reconnecting";
     await render();
-    await act(async () => reject(new Error("Connection closed")));
-    expect(container.textContent).toContain("Reconnect to your Mac");
+    await act(async () => reject(new RelayOuterError(1001, "Stream end encountered", false)));
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).toContain("The transcript loads once the phone is connected.");
+    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("relay_outer");
     expect(container.textContent).not.toContain("No transcript yet");
     expect(container.textContent).not.toContain("Loading transcript");
-    expect(button("Retry loading transcript").disabled).toBe(true);
-    mocks.app.connectionStage = "connected";
+    expect(button("Retry loading transcript").disabled).toBe(false);
+    await click("Retry loading transcript");
+    expect(mocks.app.connection.retryNow).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
+    // Four failed attempts still read as reconnecting; the fifth says the Mac isn't reachable.
+    mocks.app = { ...mocks.app, connectionStage: "cant-connect", connectionAttempt: 4 };
+    await render();
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).not.toContain("Your Mac isn't reachable");
+    mocks.app = { ...mocks.app, connectionAttempt: 5 };
+    await render();
+    expect(container.textContent).toContain("Your Mac isn't reachable");
+    expect(container.textContent).not.toContain("Reconnecting to your Mac…");
+    expect(button("Retry loading transcript").disabled).toBe(false);
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 2 };
     await render();
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("Your Mac isn't reachable");
+    expect(() => button("Retry loading transcript")).toThrow();
+  });
+
+  it("keeps the saved transcript on screen while reconnecting, and says so (#670)", async () => {
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    mocks.app.connectionStage = "connecting"; mocks.app.connectionEpoch = 1;
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("Reconnecting to your Mac…");
+    expect(container.textContent).toContain("Showing the transcript saved on this phone.");
+    // At the latest edge, where the reader is, not above history they would have to scroll to.
+    expect(container.querySelector('[data-testid="list-footer"]')?.textContent).not.toContain("Reconnecting");
+  });
+
+  it("says in plain words when a sync fails with the connection, and logs the code (#670)", async () => {
+    const lost = new RelayOuterError(4408, "", false);
+    mocks.app.api.tail.mockRejectedValueOnce(lost);
+    await render();
+    expect(container.textContent).toContain("Could not load transcript");
+    expect(container.textContent).toContain("The connection to your Mac dropped.");
+    expect(container.textContent).not.toContain("relay_outer");
+    expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Transcript sync failed", lost);
+  });
+
+  it("stops asking for a page that keeps dropping the connection over Relay, until Retry (#670)", async () => {
+    mocks.app.api.features = async () => ({ transcript: 1 });
+    mocks.app.api.syncTranscript = vi.fn().mockRejectedValue(new RelayOuterError(1001, "Stream end encountered", false));
+    await render();
+    // The connection drops, the phone reconnects and asks again, and it drops again.
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 2 }; await render();
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac.");
+    expect(container.textContent).not.toContain("relay_outer");
+    // The next reconnect does not ask for it again, so the connection stays up for notes and sends.
+    mocks.app = { ...mocks.app, connectionStage: "connecting" }; await render();
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 3 }; await render();
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("too large to load over Relay");
+    // Retry asks once more.
+    mocks.app.api.syncTranscript.mockResolvedValueOnce({ events: [event("claude", "loaded at last", 10)], reset: true, cursor: { offset: 10, digest: "a".repeat(64) }, hasMore: false, hasEarlier: false });
+    await click("Retry loading transcript");
+    expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(3);
+    expect(container.textContent).toContain("loaded at last");
+    expect(container.textContent).not.toContain("too large to load over Relay");
   });
 
   it("only shows empty-history copy for a successfully loaded empty transcript", async () => {

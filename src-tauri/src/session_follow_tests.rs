@@ -260,6 +260,7 @@ impl Rig {
             codex_interrupt_hooks_owed: 0,
             codex_prompt_starts_turn: false,
             generation,
+            launched_at: Instant::now(),
             restart_when_idle: false,
             settings_asked_at: None,
             launched_for: None,

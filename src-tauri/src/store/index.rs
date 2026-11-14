@@ -209,12 +209,18 @@ pub struct TabEntry {
     pub context_used: Option<u64>,
     #[serde(default)]
     pub context_max: Option<u64>,
-    /// Provider conversation this tab was forked from. It drives the first
-    /// start only (a tab with an id of its own resumes that), and stays set
-    /// afterwards so the parent's transcript is not deleted before the fork
-    /// has one of its own.
+    /// Provider conversation this tab was forked from. It drives every start
+    /// until the fork has a transcript of its own (a tab whose own exists
+    /// resumes that), and stays set afterwards so the parent's transcript is
+    /// not deleted before the fork has one of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
+    /// The `seq` of the prompt that carried another conversation's context
+    /// into this tab (Continue in New Session). Should the CLI never have
+    /// taken it, it is the tab's whole brief, and the next launch sends it
+    /// again rather than leave the agent without it (#663).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<u64>,
     #[serde(flatten, default)]
     pub follow: Follow,
     #[serde(flatten, default)]
@@ -1286,7 +1292,7 @@ mod tests {
             modified: "now".into(),
             context_used: None,
             context_max: None,
-            fork_from: None,
+            fork_from: None, continuation: None,
             follow: Follow::default(),
             unknown: BTreeMap::new(),
         });

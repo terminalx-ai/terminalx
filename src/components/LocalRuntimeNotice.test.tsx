@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LocalRuntimeState } from "@/lib/api";
 
-const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), listeners: new Map<string, () => void>() }));
+const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), listeners: new Map<string, () => void>() }));
 const terminals = vi.hoisted(() => ({ reattachLocalTerminals: vi.fn() }));
 vi.mock("@/lib/api", () => ({ localRuntime: native, errorMessage: (error: unknown) => String(error) }));
 vi.mock("@/lib/terminal", () => terminals);
@@ -18,12 +18,18 @@ const connecting = (downMs: number, attempt = 2, terminal = false): LocalRuntime
   state: "connecting", terminal, attempt, retryInMs: 500, downMs,
   message: "Could not reconnect to the background runtime: connection refused",
 });
+const unresponsive: LocalRuntimeState = { state: "unresponsive", message: "The TerminalX runtime did not answer runtime.liveness within 15 seconds.", epoch: "owner" };
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.resetModules();
   native.status.mockReset().mockResolvedValue(connected);
   native.reconnect.mockReset().mockResolvedValue(connected);
+  // The desktop stops the runtime, then attaches a fresh one by itself.
+  native.restart.mockReset().mockImplementation(async () => {
+    native.status.mockResolvedValue({ ...connected, epoch: "fresh", generation: 2 });
+    return connecting(0, 1);
+  });
   native.listeners.clear();
   terminals.reattachLocalTerminals.mockReset();
 });
@@ -110,4 +116,45 @@ it("a late disconnect hint after recovery cannot bring the notice back while sta
   await advance(180_000);
   expect(screen.queryByRole("status")).toBeNull();
   expect(native.reconnect).not.toHaveBeenCalled();
+});
+
+it("offers a restart, never Try again, for a runtime that stopped answering, and the fresh one attaches in place", async () => {
+  await mounted();
+  await changed(unresponsive);
+  expect(screen.getByRole("status").textContent).toContain("TerminalX runtime is not responding");
+  expect(screen.getByRole("status").textContent).toContain("within 15 seconds");
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  await advance(180_000);
+  expect(native.reconnect).not.toHaveBeenCalled();
+  expect(native.restart).not.toHaveBeenCalled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
+  // Only the runtime this window found not responding.
+  expect(native.restart).toHaveBeenCalledExactlyOnceWith("owner");
+  expect(screen.queryByRole("status")).toBeNull();
+  // Its terminals move to the fresh runtime without a reload.
+  expect(terminals.reattachLocalTerminals).toHaveBeenCalledOnce();
+});
+
+it("shows the watchdog's finding as soon as it reports one, and clears once the runtime answers again", async () => {
+  await mounted();
+  expect(screen.queryByRole("status")).toBeNull();
+  await changed(unresponsive);
+  expect(screen.getByRole("status").textContent).toContain("TerminalX runtime is not responding");
+  await changed(connected);
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(native.restart).not.toHaveBeenCalled();
+  expect(terminals.reattachLocalTerminals).not.toHaveBeenCalled();
+});
+
+it("says why a restart failed and leaves it to be tried again", async () => {
+  native.restart.mockRejectedValue("Could not stop the TerminalX runtime: it was left running.");
+  await mounted();
+  await changed(unresponsive);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restart runtime" })); });
+  expect(screen.getByRole("alert").textContent).toContain("Could not stop the TerminalX runtime");
+  expect((screen.getByRole("button", { name: "Restart runtime" }) as HTMLButtonElement).disabled).toBe(false);
+  // Once it answers again, the failure is old news.
+  await changed(connected);
+  await changed(unresponsive);
+  expect(screen.queryByRole("alert")).toBeNull();
 });

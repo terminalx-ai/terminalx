@@ -4,7 +4,8 @@ import type { AgentEvent } from "@terminalx/portable/events";
 import type { HostConnection } from "../transport/connection";
 import { HostApi } from "./host-api";
 import { cacheEpoch, clearTranscriptCaches, readCache, writeCache, type SyncCursor, type TranscriptCache } from "./transcript-cache";
-import { watchTranscript } from "./transcript-sync";
+import { RelayOuterError } from "../transport/relay-client";
+import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "./transcript-sync";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client" }));
@@ -25,12 +26,17 @@ function host(initial = 20, supported = true) {
   let ready = () => {};
   let failOffset = -1;
   let afterPage: (() => void) | undefined;
+  let path: "direct" | "relay" = "direct";
+  let fitted = false;
+  // The connection drops with every session.sync in flight, as an oversized page does over Relay (#669).
+  let drop: number | null = null;
   const digest = (offset: number) => createHash("sha256").update(JSON.stringify(events.slice(0, offset))).digest("hex");
   const request = vi.fn(async (method: string, params: any = {}): Promise<any> => {
     if (method === "sync.capabilities") return { ok: true, value: supported ? { transcript: 1, conditionalLists: 1 } : {} };
     if (method === "session.tail") return { ok: true, value: { events: events.slice(-20), hasMore: events.length > 20 } };
     if (method !== "session.sync") throw new Error(method);
     if (params.cursor?.offset === failOffset) throw new Error("interrupted");
+    if (drop !== null) throw new RelayOuterError(drop, "", false);
     const c = params.cursor as SyncCursor | undefined;
     const reset = !c || c.offset > events.length || digest(c.offset) !== c.digest;
     const start = reset ? Math.max(0, events.length - 20) : c!.offset;
@@ -40,7 +46,7 @@ function host(initial = 20, supported = true) {
     return { ok: true, value };
   });
   const subscribe = vi.fn((_method, _params, callback) => { listener = callback; ready = () => callback({ subscriptionId: "subscription" }); return () => { listener = () => {}; }; });
-  const connection = { request, subscribe } as unknown as HostConnection;
+  const connection = { request, subscribe, transport: () => path, reassemblesFragments: async () => fitted } as unknown as HostConnection;
   let api = new HostApi(connection);
   const updates: { state: TranscriptCache; replace: boolean }[] = [];
   const error = vi.fn();
@@ -48,10 +54,11 @@ function host(initial = 20, supported = true) {
     const stop = watchTranscript(api, hostId, "session", "tab", connected, (state, replace) => updates.push({ state, replace }), error);
     stops.push(stop); return stop;
   };
-  return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; } };
+  return { request, subscribe, updates, error, start, restartApi: () => { api = new HostApi(connection); }, ready: () => ready(), live: (e: AgentEvent) => listener({ event: e }), append: (count: number) => { events.push(...Array.from({ length: count }, (_, i) => event(events.length + i + 1))); }, edit: () => { events[events.length - 1] = event(events.length, "reconciled"); }, fail: (offset: number) => { failOffset = offset; }, race: (callback: () => void) => { afterPage = callback; }, path: (next: "direct" | "relay") => { path = next; }, fits: (next: boolean) => { fitted = next; }, drop: (code: number | null) => { drop = code; } };
 }
 
-beforeEach(() => { storage.clear(); vi.useFakeTimers(); });
+// Clearing the caches also resets the drop counts kept across watchers.
+beforeEach(async () => { storage.clear(); await clearTranscriptCaches(); vi.useFakeTimers(); });
 afterEach(() => { stops.splice(0).forEach((stop) => stop()); vi.useRealTimers(); });
 
 describe("incremental transcript sync", () => {
@@ -200,5 +207,107 @@ describe("incremental transcript sync", () => {
     expect((await readCache("host", "session", "tab")).events).toEqual([]);
     expect((await readCache("other", "session", "tab")).events).toHaveLength(1);
     await clearTranscriptCaches(); expect(storage.size).toBe(0);
+  });
+});
+
+// #670: each reconnect started a new watcher that asked for the same page again,
+// and the page dropped the connection again, taking every other request with it.
+describe("a read that keeps dropping the connection", () => {
+  const syncs = (h: ReturnType<typeof host>) => h.request.mock.calls.filter(([method]) => method === "session.sync");
+  // One connection: the watcher runs until the connection drops, and the next one starts on the reconnect.
+  const connection = async (h: ReturnType<typeof host>, hostId: string) => { h.start(true, hostId); await settle(); stops.splice(0).forEach((stop) => stop()); };
+
+  it("stops asking over the same path after two losses in a row, and says why", async () => {
+    const h = host(100); h.path("relay"); h.drop(1001);
+    await connection(h, "halt");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(RelayOuterError));
+    await connection(h, "halt");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+    expect(h.error.mock.lastCall![0].message).toBe("This conversation is too large to load over Relay; open it on the same Wi-Fi as your Mac.");
+    h.request.mockClear(); h.error.mockClear();
+    // The next reconnect sends nothing, and neither does the poll or a live notification.
+    h.start(true, "halt"); await settle();
+    h.live(event(101));
+    await vi.advanceTimersByTimeAsync(60_000); await settle();
+    expect(syncs(h)).toEqual([]);
+    expect(h.error).toHaveBeenCalledTimes(1);
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+  });
+
+  it("asks again over another path, and counts afresh once a read is answered", async () => {
+    const h = host(100); h.path("relay"); h.drop(1001);
+    await connection(h, "path"); await connection(h, "path");
+    // On the Mac's Wi-Fi the phone connects directly, where the page fits.
+    h.path("direct"); h.drop(null); h.request.mockClear();
+    await connection(h, "path");
+    expect(syncs(h)).toHaveLength(1);
+    expect((await readCache("path", "session", "tab")).cursor?.offset).toBe(100);
+    // Back on Relay, a single loss is only the first of a new count.
+    h.path("relay"); h.append(1); h.drop(1001);
+    await connection(h, "path");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(RelayOuterError));
+    h.drop(null); h.request.mockClear();
+    await connection(h, "path");
+    expect(syncs(h)).toHaveLength(1);
+  });
+
+  it("says it stopped, without blaming Relay, on a direct connection", async () => {
+    const h = host(100); h.path("direct"); h.drop(1006);
+    await connection(h, "direct"); await connection(h, "direct");
+    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+  });
+
+  it("does not blame the page's size on a Mac that sizes its pages to Relay (#669)", async () => {
+    const h = host(100); h.path("relay"); h.fits(true); h.drop(1001);
+    await connection(h, "fitted"); await connection(h, "fitted");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+    expect(h.error.mock.lastCall![0].message).toBe("Loading this conversation dropped the connection to your Mac twice, so the phone stopped asking. Retry to ask once more.");
+    h.request.mockClear();
+    await connection(h, "fitted");
+    expect(syncs(h)).toEqual([]);
+  });
+
+  it("sends a halted read once more on Retry, and halts at once if that drops too", async () => {
+    const h = host(100); h.path("relay"); h.drop(1001);
+    await connection(h, "retry"); await connection(h, "retry");
+    retryHaltedTranscript("retry", "session", "tab"); h.request.mockClear();
+    await connection(h, "retry");
+    expect(syncs(h)).toHaveLength(1);
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+    h.request.mockClear();
+    await connection(h, "retry");
+    expect(syncs(h)).toEqual([]);
+    retryHaltedTranscript("retry", "session", "tab"); h.drop(null);
+    await connection(h, "retry");
+    expect((await readCache("retry", "session", "tab")).cursor?.offset).toBe(100);
+  });
+
+  it("halts on the first of the relay's typed too-large closes", async () => {
+    const h = host(100); h.path("relay"); h.drop(4413);
+    await connection(h, "typed");
+    expect(h.error).toHaveBeenLastCalledWith(expect.any(TranscriptHaltedError));
+    h.request.mockClear();
+    await connection(h, "typed");
+    expect(syncs(h)).toEqual([]);
+  });
+
+  it("starts the count afresh once the host's transcript caches are cleared", async () => {
+    const h = host(100); h.path("relay"); h.drop(1001);
+    await connection(h, "cleared"); await connection(h, "cleared");
+    await clearTranscriptCaches("cleared"); h.drop(null); h.request.mockClear();
+    await connection(h, "cleared");
+    expect(syncs(h)).toHaveLength(1);
+    expect((await readCache("cleared", "session", "tab")).cursor?.offset).toBe(100);
+  });
+
+  it("does not count a read that never went out", async () => {
+    const h = host(100); h.path("relay");
+    h.request.mockImplementation(async (method: string) => {
+      if (method === "sync.capabilities") return { ok: true, value: { transcript: 1 } };
+      throw new Error("Host is disconnected");
+    });
+    for (let i = 0; i < 3; i++) await connection(h, "unsent");
+    expect(h.error.mock.calls.every(([cause]) => !(cause instanceof TranscriptHaltedError))).toBe(true);
+    expect(syncs(h)).toHaveLength(3);
   });
 });

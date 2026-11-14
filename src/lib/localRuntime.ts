@@ -77,6 +77,21 @@ export async function reconnectLocalRuntime(): Promise<void> {
   await refreshLocalRuntime();
 }
 
+/**
+ * Stop a runtime that stopped answering, with its agents and terminals (#661).
+ * The desktop attaches a fresh one, and terminals attach again in place as
+ * after any reconnect. `epoch` is the runtime this window found not
+ * responding: one another window already replaced is left alone. Throws why
+ * it could not be stopped.
+ */
+export async function restartLocalRuntime(epoch: string | null): Promise<void> {
+  try {
+    await localRuntime.restart(epoch);
+  } finally {
+    await refreshLocalRuntime();
+  }
+}
+
 export function useLocalRuntime(): LocalRuntimeView {
   return useSyncExternalStore(
     (listener) => {

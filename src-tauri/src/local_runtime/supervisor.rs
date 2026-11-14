@@ -39,6 +39,11 @@ pub enum ConnectionState {
     /// Retrying cannot help until something outside this window changes. It
     /// still goes on, at the slowest pace.
     Unavailable { message: String },
+    /// The runtime is there but does not answer, as the watchdog or an
+    /// attempt to attach found (`ui.rs`). Reconnecting reaches the same wedged
+    /// process; only restarting it recovers (#661). `epoch` names the attached
+    /// runtime, if any, so a restart cannot stop its replacement.
+    Unresponsive { message: String, epoch: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -171,9 +176,14 @@ impl Supervisor {
             loop {
                 let (target, loss) = supervisor.next();
                 let outcome = match &target {
-                    Target::Events => attach(&app).map_err(|error| match error.downcast_ref::<Blocked>() {
-                        Some(blocked) => (blocked.0.clone(), true),
-                        None => (format!("Could not reconnect to the background runtime: {error:#}"), false),
+                    Target::Events => attach(&app).map_err(|error| {
+                        // An owner that holds its socket and never answers is
+                        // not reached by trying again: say so (#661).
+                        state.runtime_health.attach_failed(&error);
+                        match error.downcast_ref::<Blocked>() {
+                            Some(blocked) => (blocked.0.clone(), true),
+                            None => (format!("Could not reconnect to the background runtime: {error:#}"), false),
+                        }
                     }),
                     Target::View(window) => reopen(&app, window)
                         .map_err(|error| (format!("Could not reconnect this window's terminal output: {error:#}"), false)),
@@ -182,6 +192,7 @@ impl Supervisor {
                     *state.runtime_error.lock().unwrap() = message.clone();
                 }
                 let reattached = match (&target, &outcome) { (Target::Events, Ok(generation)) => Some(*generation), _ => None };
+                if reattached.is_some() { state.runtime_health.clear(); }
                 supervisor.inner.lock().unwrap().settle(&target, loss, outcome, Instant::now(), jitter());
                 supervisor.emit();
                 // Every window re-reads what the gap may have changed.
@@ -304,7 +315,9 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
     let home = crate::store::root()?;
     // The owner that is running now, which may have restarted since the last
     // attachment, or a new one if it exited. A live owner is never replaced.
-    let client = super::launch::connect_desktop(&source, &home, &app.config().identifier)?;
+    // A runtime started here keeps its log beside the app's (#661).
+    let log = app.path().app_log_dir().ok().map(|dir| dir.join("runtime.log"));
+    let client = super::launch::connect_desktop(&source, &home, &app.config().identifier, log.as_deref())?;
     let next = Arc::new(match &previous {
         Some(previous) => previous.reconnect(client)?,
         None => Desktop::connect_watched(client, Arc::new(app.clone()), Some(watch(app)))?,

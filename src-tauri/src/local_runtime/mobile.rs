@@ -93,8 +93,9 @@ struct State {
     drivers: HashMap<String, Arc<Driver>>,
 }
 
+/// The fifth field is each pane's input gate: see [`Registry::desktop_input`].
 #[derive(Default)]
-pub struct Registry(Mutex<State>, Mutex<Queue>, std::sync::atomic::AtomicBool, Mutex<HashSet<(String,String)>>);
+pub struct Registry(Mutex<State>, Mutex<Queue>, std::sync::atomic::AtomicBool, Mutex<HashSet<(String,String)>>, Mutex<HashMap<String,Arc<Mutex<()>>>>);
 
 impl State {
     fn owner(&self, actor: &Actor) -> Result<()> {
@@ -214,8 +215,9 @@ impl Pending {
 }
 
 impl Registry {
-    // Lock hierarchy: sharing/admission (when needed), attachment, grant,
-    // driver/revision, registry metadata. Never wait for authority under registry.
+    // Lock hierarchy: pane gate (claims only), sharing/admission (when needed),
+    // attachment, grant, driver/revision, registry metadata. Never wait for
+    // authority under registry, and never write to a terminal under it.
     // An attachment serializes mutations for its lease; revalidate metadata after
     // acquiring it so a delayed old-generation request cannot affect a new owner.
     fn owner_attachment(&self, actor: &Actor) -> Result<Arc<Attachment>> {
@@ -266,6 +268,8 @@ impl Registry {
     }
     fn claim_driver(&self, connection: &str, permit: &WritePermit, session: &str, tab: &str, pane: &str, pid: u32) -> Result<Arc<Driver>> {
         self.prune();
+        let gate = self.gate(pane);
+        let _gate = gate.lock().unwrap();
         let _admitted = permit.enter()?;
         let mut state = self.0.lock().unwrap();
         state.owner(&permit.grant.actor)?;
@@ -301,15 +305,39 @@ impl Registry {
         Ok(())
     }
 
+    /// One pane's gate, which a driver claim and desktop input to that pane
+    /// both hold. Gates nobody holds are dropped as others are handed out.
+    fn gate(&self, pane: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.4.lock().unwrap();
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        gates.entry(pane.into()).or_default().clone()
+    }
+
     pub(crate) fn desktop_input<T>(&self, pane: &str, write: impl FnOnce() -> Result<T>) -> Result<T> {
         self.prune();
-        let state = self.0.lock().unwrap();
-        if state.drivers.values().any(|driver| driver.pane == pane) {
+        // Claim/release and desktop input serialize at the owner, not at an
+        // asynchronously projected boolean in the window. They meet at the
+        // pane's gate, not the registry: the write can wait on a program that
+        // has stopped reading, and every hook, control request and the
+        // owner's own loop need the registry meanwhile (#661).
+        let gate = self.gate(pane);
+        let _gate = gate.lock().unwrap();
+        self.refuse_if_driven(pane)?;
+        write()
+    }
+
+    /// Refuse desktop input to a pane a mobile device drives, before queueing
+    /// it. Only a first answer: [`Self::desktop_input`] asks again at the write.
+    pub(crate) fn check_desktop_input(&self, pane: &str) -> Result<()> {
+        self.prune();
+        self.refuse_if_driven(pane)
+    }
+
+    fn refuse_if_driven(&self, pane: &str) -> Result<()> {
+        if self.0.lock().unwrap().drivers.values().any(|driver| driver.pane == pane) {
             bail!("A mobile device is driving this terminal.");
         }
-        // Claim/release and desktop input serialize at the owner, not at an
-        // asynchronously projected boolean in the window.
-        write()
+        Ok(())
     }
 
     fn publish_drivers(&self, manager: &crate::session::SessionManager) {
@@ -861,6 +889,49 @@ mod repeat_tests {
         registry.1.lock().unwrap().items.clear();
         lifetime.command("runtime.detach",lease).unwrap();
         assert!(manager.terminals().panes().is_empty(),"a repeat must not launch a provider");
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A desktop write waiting on a program that stopped reading must not hold
+    /// the registry: every hook and the owner's own loop would wait with it (#661).
+    #[test]
+    fn a_waiting_desktop_write_holds_only_its_own_pane() {
+        let registry = Arc::new(Registry::default());
+        let (entered, writing) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let stuck = registry.clone();
+        let first = std::thread::spawn(move || stuck.desktop_input("tab:stuck", || {
+            entered.send(()).unwrap();
+            // A regression must fail rather than hang the test runner.
+            let _ = held.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        }));
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done, finished) = mpsc::channel();
+        let other = registry.clone();
+        std::thread::spawn(move || {
+            let tabs = other.driven_tabs();
+            let written = other.desktop_input("tab:other", || Ok(())).is_ok();
+            done.send((tabs, written)).unwrap();
+        });
+        let (tabs, written) = finished.recv_timeout(Duration::from_secs(2)).expect("the registry waited for another pane's write");
+        assert!(tabs.is_empty());
+        assert!(written);
+        // Input to the same pane still takes its turn after the first.
+        let (queued, delivered) = mpsc::channel();
+        let same = registry.clone();
+        std::thread::spawn(move || queued.send(same.desktop_input("tab:stuck", || Ok(())).is_ok()).unwrap());
+        assert!(delivered.recv_timeout(Duration::from_millis(300)).is_err(), "two writes to one pane overlapped");
+        release.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        assert!(delivered.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(registry.4.lock().unwrap().values().all(|gate| Arc::strong_count(gate) == 1));
     }
 }
 

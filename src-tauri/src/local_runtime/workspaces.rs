@@ -77,7 +77,7 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
                 expected_sessions: Some(&params.expected_sessions), direct, fetch: crate::landed::Fetch::Fresh, guard: None,
             };
             let removed = crate::session_ops::remove_workspace_fallible(sink,&request,&stop).map_err(anyhow::Error::msg)?;
-            Ok(json!({"sessions":removed.sessions,"keptBranch":removed.removal.kept_branch,"rescuedBranch":removed.removal.rescued_branch}))
+            Ok(json!({"sessions":removed.sessions,"keptBranch":removed.removal.kept_branch,"rescuedBranch":removed.removal.rescued_branch,"strayProcesses":removed.strays}))
         }
         "mergedSweep" => host(manager, |host| {
             let settings = crate::store::settings::load().merged_cleanup;

@@ -4,7 +4,7 @@ import { issuePipelines as pipelinesApi } from "@/lib/api";
 import { actOnCloudPipeline, getCloudPipelines, mergeCloudPipeline, subscribeCloudPipelines } from "@/lib/cloudPipelines";
 import { notePipelineState } from "@/lib/notify";
 import { getPrefs } from "@/lib/prefs";
-import type { IssuePipeline, IssuePipelineSettings, PipelineAction, PipelineStage, StartedIssuePipeline } from "@/types/issuePipeline";
+import type { IssuePipeline, IssuePipelineSettings, PipelineAction, PipelineStage, PipelineVerdict, StartedIssuePipeline } from "@/types/issuePipeline";
 
 /**
  * Issue pipelines as the Rust side reports them. The pipeline itself runs
@@ -266,6 +266,20 @@ function stepDetail(pipeline: IssuePipeline, stage: PipelineStage, status: StepS
   }
 }
 
+/**
+ * What the reviewer's own checks came to, as the record and the pull request
+ * say it. Nothing for a verdict stored before reviews said.
+ */
+export function reviewChecksLine(verdict: PipelineVerdict | null | undefined): string | null {
+  if (!verdict?.checks) return null;
+  // As `Verdict::checks_line` keeps it: one line, and not too long a one.
+  const words = (verdict.checksNote ?? "").split(/\s+/).filter(Boolean).join(" ");
+  const chars = [...words];
+  const note = (chars.length > 200 ? `${chars.slice(0, 200).join("").trimEnd()}…` : words).replace(/\.+$/, "");
+  const text = verdict.checks === "passed" ? "The reviewer's checks passed" : verdict.checks === "failed" ? "The reviewer's checks failed" : "Reviewed by reading only, tests not run";
+  return note ? `${text}: ${note}.` : `${text}.`;
+}
+
 export function countOf(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
@@ -304,6 +318,8 @@ export function pipelineActions(pipeline: IssuePipeline): { primary: PipelineAct
       }
       // Findings left open at the round limit: one more round is the reader's to grant.
       if (kind === "roundLimit") return { primary: { action: "advance", label: "Review once more" }, secondary: [stop] };
+      // The reviewer's own checks failed on the commit it passed: another look is the way on.
+      if (kind === "reviewChecksFailed") return { primary: { action: "review", label: "Review again" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       return { primary: { action: "advance", label: ADVANCE[pipeline.stage] }, secondary: [stop] };
     }
   }

@@ -50,6 +50,19 @@ four hours; Retry-After seconds and HTTP dates can extend that deadline. The
 popover explains retry pauses and transport failures. No credential refresh,
 login, account switching, CLI usage generation or new provider source is added.
 
+Reading Claude Code's login is local (#664): on macOS, `/usr/bin/security
+find-generic-password -w` for `Claude Code-credentials`, then
+`~/.claude/.credentials.json`. Claude Code writes that item with `security`, so
+reading it through `security` raises no Keychain prompt for TerminalX. The item
+holds an entry per MCP server Claude Code has signed in to and can reach
+several kilobytes, so its output is drained while `security` runs; read only
+after exit, a payload larger than the pipe buffer blocked it until the
+three-second deadline. A failed read is reported as timed out, failed with its
+exit code, not found (`security` exit 44), or holding no access token (with the
+payload's size), never with the payload. Such a failure backs off the timer as
+any other, but manual Refresh clears that backoff and tries again at once; a
+failure of the request itself, or a provider's Retry-After, still holds it.
+
 Expired Claude windows keep their last-known percentage, show an expired/stale
 label and muted meter, and remain stale even when recently received. Receiving
 that expired window again does not advance its confirmation timestamp. Each
@@ -85,8 +98,8 @@ indicator is hidden the timer stops and the fifteen-minute floor applies, as it
 does with the timer Off. The first tick is timed from the boot refresh.
 
 The interval is a normal cadence only. Failure backoff and Retry-After still
-gate every request, manual ones included, and an account change starts its own
-cadence. A failure keeps the last windows. Snapshots carry `lastSuccessAt` for
+gate every request, manual ones included (except after a local credential read
+failure, above), and an account change starts its own cadence. A failure keeps the last windows. Snapshots carry `lastSuccessAt` for
 Claude and a `codexRefresh` block (`retryAt`, `error`, `lastSuccessAt`); the
 agent detail panel shows "Last refreshed …" and, while paused or failed, that
 the values are last known.

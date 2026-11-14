@@ -230,14 +230,14 @@ mod tests {
     #[test]
     fn a_category_the_project_turned_off_does_not_hold_a_merge() {
         let none = ProtectedCategories { migrations: false, deploy: false, security: false, paths: Vec::new() };
-        let flagged = Verdict { commit: "abc1234".into(), decision: Decision::Merge, security_pass: SecurityPass::Flagged, findings: Vec::new(), round: 1, at: "now".into() };
+        let flagged = Verdict { commit: "abc1234".into(), decision: Decision::Merge, security_pass: SecurityPass::Flagged, findings: Vec::new(), checks: None, checks_note: None, round: 1, at: "now".into() };
         assert!(protected_hits(&none, &paths(&["db/migrations/1.sql", "Dockerfile"]), Some(&flagged)).is_empty());
     }
 
     #[test]
     fn anything_the_security_pass_flagged_is_protected() {
         let all = ProtectedCategories::default();
-        let mut verdict = Verdict { commit: "abc1234".into(), decision: Decision::Merge, security_pass: SecurityPass::Clean, findings: Vec::new(), round: 1, at: "now".into() };
+        let mut verdict = Verdict { commit: "abc1234".into(), decision: Decision::Merge, security_pass: SecurityPass::Clean, findings: Vec::new(), checks: None, checks_note: None, round: 1, at: "now".into() };
         assert!(protected_hits(&all, &paths(&["src/a.rs"]), Some(&verdict)).is_empty());
         verdict.security_pass = SecurityPass::Flagged;
         let hits = protected_hits(&all, &paths(&["src/a.rs"]), Some(&verdict));

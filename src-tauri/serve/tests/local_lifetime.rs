@@ -62,7 +62,13 @@ fn only_one_local_owner_can_touch_a_home() {
     let rejected = world.command().output().unwrap();
     assert!(!rejected.status.success());
     assert_eq!(std::fs::read(world.data.join("run/control.token")).unwrap(), token);
-    assert_eq!(serve.control("status", json!({}))["localRuntime"], before["localRuntime"]);
+    // The age of the loop's last pass moves on by itself (#661); nothing else may.
+    let owner = |status: serde_json::Value| {
+        let mut local = status["localRuntime"].clone();
+        local.as_object_mut().unwrap().remove("loopAgeMs");
+        local
+    };
+    assert_eq!(owner(serve.control("status", json!({}))), owner(before));
 }
 
 #[test]
@@ -1360,7 +1366,7 @@ fn history_larger_than_an_ipc_frame_loads_including_a_single_oversized_event() {
 fn linux_desktop_attaches_to_a_local_owner_without_a_macos_tray() {
     let world = AgentWorld::new();
     let mut serve = Serve::start(world.command(), &world.data);
-    let client = raccoon_lib::local_runtime::launch::connect_desktop(std::path::Path::new("unused-existing-owner"), &world.data,"com.terminalx.fixture").unwrap();
+    let client = raccoon_lib::local_runtime::launch::connect_desktop(std::path::Path::new("unused-existing-owner"), &world.data,"com.terminalx.fixture",None).unwrap();
     let status: serde_json::Value = client.call("status",json!({})).unwrap();
     assert_eq!(status["localRuntime"]["nativeTray"],false);
     client.stop_all().unwrap(); stopped(&mut serve);

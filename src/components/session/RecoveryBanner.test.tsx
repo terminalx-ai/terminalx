@@ -38,6 +38,26 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
+  it("offers a prompt the agent never received back, in place of a retry (#663)", () => {
+    // Raised by a launch, never classified out of an error's text.
+    expect(classifyRecovery("The agent never received your last prompt")).not.toBe("unsent");
+    const p = { ...props(), onResend: vi.fn() };
+    const { rerender } = render(<RecoveryBanner {...p} kind="unsent" />);
+    expect(screen.getByText("Prompt not received")).toBeTruthy();
+    expect(screen.getByText(/never received your last prompt/)).toBeTruthy();
+    // There is no turn to retry: the prompt itself is what goes again.
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Resend last prompt", "Stop session", "Continue in new session"]);
+    fireEvent.click(screen.getByRole("button", { name: "Resend last prompt" }));
+    expect(p.onResend).toHaveBeenCalledOnce();
+    // A tab that cannot resend (a cloud tab, a reader who may not send) still says what happened.
+    rerender(<RecoveryBanner {...props()} kind="unsent" />);
+    expect(screen.queryByRole("button", { name: "Resend last prompt" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+    // While busy, it waits.
+    rerender(<RecoveryBanner {...p} kind="unsent" busy />);
+    expect((screen.getByRole("button", { name: "Resend last prompt" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
     // The real Codex PreToolUse event has Bash + command, not the original
     // exec_command arguments the previous UI-only fixture supplied.

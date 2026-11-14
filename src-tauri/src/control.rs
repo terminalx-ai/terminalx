@@ -412,6 +412,19 @@ impl ControlService {
     #[cfg(unix)]
     pub(crate) fn with_vm_controller(mut self) -> Self { self.local_vm_available=true; self }
 
+    /// The Local VM protocols this owner serves, or `None` without a controller.
+    fn local_vm_capability(&self) -> Option<Value> {
+        #[cfg(unix)]
+        if self.local_vm_available {
+            return Some(json!({
+                "protocol": crate::local_vm::journal::PROTOCOL,
+                "reconciliationProtocol": crate::local_vm::provisioning::PROTOCOL,
+                "onboardingProtocol": crate::local_vm::setup::PROTOCOL,
+            }));
+        }
+        None
+    }
+
     pub(crate) fn with_local_lifetime(mut self, lifetime: Arc<crate::local_runtime::Lifetime>) -> Self {
         self.local_lifetime = Some(lifetime);
         self
@@ -460,6 +473,18 @@ impl ControlService {
                 }
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
+                }
+                if command == "runtime.liveness" {
+                    // What a desktop needs to find and watch this owner, and
+                    // nothing that waits on a session, tab, terminal or share:
+                    // a probe of a wedged owner must not become one more
+                    // request held up behind it (#661).
+                    let mut liveness = json!({ "pid": std::process::id(), "socket": self.endpoint.socket, "localRuntime": lifetime.status() });
+                    if let Some(kind) = &self.runtime_kind { liveness["runtimeKind"] = json!(kind); }
+                    // The desktop pins this owner's Local VM capability from
+                    // this answer; it is fixed for the owner's life.
+                    if let Some(local_vm) = self.local_vm_capability() { liveness["localVm"] = local_vm; }
+                    return Ok(liveness);
                 }
                 if command == "runtime.stopAll" {
                     return crate::local_runtime::stop_all(&self.manager, lifetime, params);
@@ -569,8 +594,7 @@ impl ControlService {
                 }
                 if let Some(lifetime) = &self.local_lifetime {
                     status["localRuntime"] = lifetime.status();
-                    #[cfg(unix)]
-                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL,"reconciliationProtocol":crate::local_vm::provisioning::PROTOCOL,"onboardingProtocol":crate::local_vm::setup::PROTOCOL}); } }
+                    if let Some(local_vm) = self.local_vm_capability() { status["localVm"] = local_vm; }
                 }
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;
@@ -1075,9 +1099,9 @@ impl ControlService {
         if let Some(desktop) = &self.desktop {
             desktop.browser.forget_workspace(&browser_key);
         }
-        let (entries, removal) = (removed.sessions, removed.removal);
+        let (entries, removal, strays) = (removed.sessions, removed.removal, removed.strays);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch, "strayProcesses": strays}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {
@@ -1647,8 +1671,11 @@ mod tests {
         let service=service.with_local_lifetime(life.clone());
         assert!(service.execute("local_vm.request",params.clone(),"test").is_err());
         assert!(service.execute("status",json!({}),"test").unwrap().get("localVm").is_none());
+        assert!(service.execute("runtime.liveness",json!({}),"test").unwrap().get("localVm").is_none());
         let service=service.with_vm_controller();
         assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["protocol"],1);
+        // The desktop pins the capability from liveness, so both answers agree.
+        assert_eq!(service.execute("runtime.liveness",json!({}),"test").unwrap()["localVm"],service.execute("status",json!({}),"test").unwrap()["localVm"]);
         assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["reconciliationProtocol"],crate::local_vm::provisioning::PROTOCOL);
         assert_eq!(service.execute("local_vm.request",params,"test").unwrap()["enabled"],false);
         let journal=crate::local_vm::host::journal().unwrap();

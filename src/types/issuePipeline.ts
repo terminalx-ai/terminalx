@@ -4,6 +4,8 @@ import type { IssueRef } from "@/types/session";
 export type PipelineStage = "work" | "pullRequest" | "review" | "address" | "resolve" | "merge";
 export type PipelineState = "working" | "waiting" | "readyToMerge" | "needsYou" | "merged" | "stopped";
 export type FindingSeverity = "nit" | "low" | "medium" | "high" | "critical";
+/** What the reviewer's own run of the project's checks came to. */
+export type ReviewChecks = "passed" | "failed" | "notRun";
 
 export interface PipelineFinding {
   severity: FindingSeverity;
@@ -21,6 +23,10 @@ export interface PipelineVerdict {
   decision: "merge" | "changes";
   securityPass: "notNeeded" | "clean" | "flagged";
   findings: PipelineFinding[];
+  /** Absent only on a verdict stored before reviews said. */
+  checks?: ReviewChecks | null;
+  /** The reviewer's few words on what ran, or why nothing did. */
+  checksNote?: string | null;
   round: number;
   at: string;
 }
@@ -74,6 +80,8 @@ export interface IssuePipeline {
   round: number;
   maxRounds: number;
   reviewCommit?: string | null;
+  /** When the reviewer said its own checks were still running; its verdict is waited for a while from then. */
+  reviewPendingSince?: string | null;
   verdict?: PipelineVerdict | null;
   /** Author-reported local failures, pinned to commits until explicitly passed. */
   failedLocalChecks?: string[];
@@ -81,6 +89,8 @@ export interface IssuePipeline {
   checkingLocally?: boolean;
   securityAreas: string[];
   merged?: { commit: string; at: string; by: "pipeline" | "person" | "elsewhere" } | null;
+  /** Conversations told the pipeline ended while in a turn; each one's agent is stopped when that turn ends. */
+  releasing?: PipelineSessionRef[];
   events: PipelineEvent[];
   created: string;
   modified: string;

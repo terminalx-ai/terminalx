@@ -174,6 +174,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         context_used: None,
         context_max: None,
         fork_from: None,
+        continuation: None,
         follow: Default::default(),
         unknown: BTreeMap::new(),
     }
@@ -775,6 +776,9 @@ pub(crate) struct WorkspaceRemoved {
     /// that they have moved to the project root.
     pub sessions: Vec<SessionEntry>,
     pub removal: git::WorktreeRemoval,
+    /// Processes found still working in it once its sessions were stopped:
+    /// leftover builds were stopped, anything else listed (`stray_processes`).
+    pub strays: Vec<crate::stray_processes::Stray>,
 }
 
 /// How an error from [`remove_workspace`] starts when the workspace was left
@@ -868,6 +872,13 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         guard()?;
     }
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
+    // What the sessions' tools let go of would run on from a deleted directory.
+    let strays = if on_disk { crate::stray_processes::stop_in(&target) } else { Vec::new() };
+    if !strays.is_empty() {
+        // Programs only: an argument can carry a token or a password.
+        let listed: Vec<String> = strays.iter().map(|stray| format!("{} {} ({})", stray.pid, stray.program, if stray.stopped { "stopped" } else { "left running" })).collect();
+        log::info!("removing workspace {}: processes still working in it: {}", target.display(), listed.join("; "));
+    }
     let removal = if on_disk {
         let verified_head = if after.safe { after.head.as_deref() } else { None };
         let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
@@ -891,7 +902,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
             moved
         }
     };
-    Ok(WorkspaceRemoved { sessions, removal })
+    Ok(WorkspaceRemoved { sessions, removal, strays })
 }
 
 /// Record that the workspace these sessions ran in is gone: they keep their

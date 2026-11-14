@@ -17,7 +17,7 @@ use crate::sink::EventSink;
 use crate::store::index::{self, IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{Diff, Host, Workspace};
+use super::engine::{AgentStop, Diff, Host, Workspace};
 use super::{Pipeline, SessionRef};
 
 /// The event a written pipeline is announced with: to the window on the
@@ -230,6 +230,33 @@ impl Host for LocalHost {
 
     fn last_reply(&self, session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
         last_reply(&self.manager.load_events(&session.session_id, &session.tab_id).ok()?)
+    }
+
+    fn agent_busy(&self, who: &SessionRef) -> bool {
+        let status = index::get(&who.session_id).ok().and_then(|session| session.tab(&who.tab_id).map(|tab| tab.status));
+        matches!(status, Some(index::TabStatus::InProgress | index::TabStatus::Waiting)) || !self.manager.pipeline_idle(&who.session_id, &who.tab_id)
+    }
+
+    fn stop_agent(&self, who: &SessionRef, note: &str) -> Result<AgentStop> {
+        let Ok(session) = index::get(&who.session_id) else { return Ok(AgentStop::NotRunning) };
+        let Some(tab) = session.tab(&who.tab_id) else { return Ok(AgentStop::NotRunning) };
+        // A terminal, or an agent a person started in one by hand, is theirs.
+        if tab.is_terminal() || tab.by_hand() {
+            return Ok(AgentStop::NotRunning);
+        }
+        // Held from the look to the stop: a prompt sent meanwhile is not cut off.
+        let _admission = super::admission::lock();
+        if !self.manager.is_running(&who.session_id, &who.tab_id) {
+            return Ok(AgentStop::NotRunning);
+        }
+        if self.agent_busy(who) {
+            return Ok(AgentStop::Busy);
+        }
+        if let Err(error) = self.manager.publish_external(&who.session_id, &who.tab_id, crate::events::Payload::Status { text: note.to_string() }) {
+            log::warn!("note in {}:{} before stopping its agent: {error:#}", who.session_id, who.tab_id);
+        }
+        self.manager.stop(&who.session_id, &who.tab_id)?;
+        Ok(AgentStop::Stopped)
     }
 
     /// An independent conversation in the owning session, with no fork or

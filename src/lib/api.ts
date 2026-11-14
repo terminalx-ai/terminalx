@@ -35,7 +35,7 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
-import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -521,7 +521,10 @@ export const api = {
   pairingStatus: () => invoke<PairingStatus>("pairing_status"),
   pairingGenerate: (connectionMode: PairingConnectionMode) => invoke<PairingStatus>("pairing_generate", { connectionMode }),
   pairingRevoke: (deviceId: string) => invoke<PairingStatus>("pairing_revoke", { deviceId }),
-  pairingSetHostName: (displayName: string) => invoke<PairingStatus>("pairing_set_host_name", { displayName }),
+  /** This Mac's name as the user's other devices show it (#686). */
+  machineName: () => invoke<MachineName>("machine_name"),
+  /** Name this Mac; null lets it follow the computer's own name again. */
+  setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
@@ -1750,7 +1753,9 @@ export type LocalRuntimeState =
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. */
-  | { state: "unavailable"; message: string };
+  | { state: "unavailable"; message: string }
+  /** There, but not answering: reconnecting reaches the same wedged runtime (#661). */
+  | { state: "unresponsive"; message: string; epoch: string | null };
 
 export type QuitBehavior = "keepRunning" | "stopAll";
 export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
@@ -1758,6 +1763,8 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** Stop the runtime without asking it, with its agents and terminals; the desktop attaches a fresh one. */
+  restart: (epoch: string | null) => invoke<LocalRuntimeState>("local_runtime_restart", { epoch }),
   settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
   setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
 };
@@ -1859,6 +1866,8 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
+  /** Send the tab's last prompt again, images and all: the one its agent never received (#663). */
+  resendUnsent: (sessionId: string, tabId: string) => invoke<SendOutcome>("resend_unsent", { sessionId, tabId }),
   /** Press Enter in the tab's agent for the continuation `seq` left in its input. False when it is no longer waiting there. */
   submitWaiting: (sessionId: string, tabId: string, seq: number) => invoke<boolean>("submit_waiting_prompt", { sessionId, tabId, seq }),
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
