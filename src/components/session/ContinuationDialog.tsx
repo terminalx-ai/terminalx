@@ -1,4 +1,5 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
+import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useRef, useState } from "react";
 import { GitBranch, LoaderCircle } from "@/icons";
@@ -65,7 +66,15 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
   const store = useSessionStore();
   const project = into?.project ?? store.projects.find((project) => project.path === session.projectPath);
-  const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined);
+  const pipelines = useIssuePipelines();
+  // Continuing here hands this session's pipeline to the new conversation, and
+  // an off sent with it is a revocation: the switches start as the pipeline
+  // holds them, so leaving them alone changes nothing (#700). A merged one is
+  // history and is not handed on; with none, they start at the project's
+  // defaults for a session, as automation is not what is being started here.
+  const held = !into ? pipelineForSession(pipelines, session.id) : null;
+  const carried = held?.role === "author" && held.pipeline.state !== "merged" ? { autoMerge: held.pipeline.autoMerge, resolveConflicts: held.pipeline.resolveConflicts ?? false } : "session";
+  const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
   const settings = value && selection.harness
     ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value } : {}) }
     : null;

@@ -92,6 +92,7 @@ hkdf = "0.12.4"
 hmac = "0.12"
 hpke = { version = "0.14.0", default-features = false, features = ["alloc", "chacha", "getrandom", "hkdfsha2", "x25519"] }
 if-addrs = "0.15"
+socket2 = { version = "0.6", features = ["all"] }
 parking_lot = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 log = "0.4"
@@ -133,7 +134,10 @@ objc2-speech = { version = "0.3", default-features = false, features = ["std", "
 transcribe-cpp = { version = "0.2", default-features = false, features = ["metal"], optional = true }
 
 [profile.dev]
-incremental = true
+# Keep local builds and per-worktree caches from consuming tens of GB each.
+incremental = false
+# Preserve file/line backtraces without full type and variable debug data.
+debug = "line-tables-only"
 opt-level = 1
 
 [profile.dev.package."*"]

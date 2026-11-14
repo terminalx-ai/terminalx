@@ -52,6 +52,7 @@ vi.mock("@/lib/sessions", () => ({
   createQuickChat,
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
+  linkSessionIssue: vi.fn(async () => {}),
   selectProject: vi.fn(),
   selectProjectInSidebar: vi.fn(),
   selectSession,
@@ -282,4 +283,39 @@ it("launches a non-issue branch with project automation defaults and the handoff
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
   expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "Improve the parser\n\nHANDOFF BRIEF", []);
+});
+
+it("starts a branch with both switches off, and one started from an issue picked here with both on", async () => {
+  const issue = {
+    provider: "github", id: "700", identifier: "#700", number: 700, title: "Merge issue sessions when green",
+    url: "https://example.test/issues/700", state: "OPEN", stateType: "open", labels: [], updatedAt: "2026-11-01T00:00:00Z", body: "Turn both on.",
+  };
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "preview_workspace_name") return "700-merge-issue-sessions";
+    if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    if (command === "issues_list") return [issue];
+    if (command === "issue_comments") return { comments: [], nextCursor: null };
+    if (command === "create_session") return created;
+    if (command === "issue_pipeline_start") return { pipeline: { id: "p1", resolveConflicts: false }, authorBrief: "HANDOFF BRIEF" };
+    if (command === "issue_pipeline_set_resolve_conflicts") return { id: "p1", resolveConflicts: true };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  render(<NewSessionView onCreated={vi.fn()} />);
+  const switches = () => {
+    if (!screen.queryByRole("switch", { name: "Merge when green" })) fireEvent.click(screen.getByRole("button", { name: "Session options" }));
+    return [screen.getByRole("switch", { name: "Resolve conflicts automatically" }), screen.getByRole("switch", { name: "Merge when green" })].map((toggle) => toggle.getAttribute("aria-checked"));
+  };
+  const closeOptions = () => fireEvent.keyDown(screen.getByRole("switch", { name: "Merge when green" }), { key: "Escape" });
+  expect(switches()).toEqual(["false", "false"]);
+  closeOptions();
+
+  fireEvent.click(screen.getByRole("button", { name: "Start from an issue" }));
+  fireEvent.click(await screen.findByText("Merge issue sessions when green"));
+  await screen.findByTestId("picked-issue");
+  expect(switches()).toEqual(["true", "true"]);
+  closeOptions();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
+  expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
 });

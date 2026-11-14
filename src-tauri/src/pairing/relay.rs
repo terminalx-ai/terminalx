@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use crate::account::AccountContext;
@@ -18,8 +20,108 @@ use super::model::RelayPairingOffer;
 use super::{pairing_websocket_config, PairingManager};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const BACKOFF_MS: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
+/// The cell pings every 20 s, so this is two missed pings and a margin.
+const SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often the control loop rechecks the account and the socket's liveness.
+const CONTROL_TICK: Duration = Duration::from_secs(2);
+/// Wall time beyond monotonic time between two ticks. macOS stops the
+/// monotonic clock in sleep, so this much more wall time means the Mac slept.
+const SLEEP_GAP: Duration = Duration::from_secs(10);
+/// Kernel probes on an idle control socket: about 45 s to a reset, like the silence timeout.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const KEEPALIVE_RETRIES: u32 = 3;
+
+#[derive(Clone, Copy)]
+struct ControlTiming {
+    tick: Duration,
+    silence: Duration,
+}
+
+impl Default for ControlTiming {
+    fn default() -> Self {
+        Self {
+            tick: CONTROL_TICK,
+            silence: SILENCE_TIMEOUT,
+        }
+    }
+}
+
+/// Whether the control socket still reaches the cell.
+///
+/// A dead path is often silent (#666). A Wi-Fi change removes the socket's
+/// source address, and a close the cell sends while the Mac sleeps never
+/// arrives. TCP then stays ESTABLISHED, and the Mac, which only answers the
+/// cell's pings, never writes to it and never sees an error. So silence is
+/// measured across loop passes, and the source address and sleep are checked
+/// on each tick.
+struct Liveness {
+    local_ip: Option<IpAddr>,
+    last_frame: Instant,
+    last_tick: (Instant, SystemTime),
+}
+
+impl Liveness {
+    fn new(local_ip: Option<IpAddr>, now: Instant, wall: SystemTime) -> Self {
+        Self {
+            local_ip,
+            last_frame: now,
+            last_tick: (now, wall),
+        }
+    }
+
+    fn frame(&mut self, now: Instant) {
+        self.last_frame = now;
+    }
+
+    /// Why the socket must be replaced, if it must.
+    fn check(
+        &mut self,
+        now: Instant,
+        wall: SystemTime,
+        silence: Duration,
+        address_assigned: impl FnOnce(IpAddr) -> bool,
+    ) -> Option<Category> {
+        let (tick, tick_wall) = std::mem::replace(&mut self.last_tick, (now, wall));
+        // A clock set backwards reads as no sleep; one set forwards by more
+        // than the gap costs a single reconnect.
+        let wall_elapsed = wall.duration_since(tick_wall).unwrap_or_default();
+        if wall_elapsed.saturating_sub(now.saturating_duration_since(tick)) > SLEEP_GAP {
+            return Some(Category::Woke);
+        }
+        if self.local_ip.is_some_and(|ip| !address_assigned(ip)) {
+            return Some(Category::NetworkChanged);
+        }
+        if now.saturating_duration_since(self.last_frame) > silence {
+            return Some(Category::Timeout);
+        }
+        None
+    }
+}
+
+fn control_tcp(socket: &ControlSocket) -> &tokio::net::TcpStream {
+    socket.get_ref().get_ref()
+}
+
+fn enable_keepalive(socket: &ControlSocket) {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    if let Err(error) = socket2::SockRef::from(control_tcp(socket)).set_tcp_keepalive(&keepalive) {
+        log::debug!("relay control keepalive unavailable: {error}");
+    }
+}
+
+/// An address the interface list cannot be read for counts as still assigned.
+fn address_assigned(ip: IpAddr) -> bool {
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces.iter().any(|interface| interface.ip() == ip),
+        Err(_) => true,
+    }
+}
+
 /// How long the control channel may go without a frame and still count as
 /// working: two missed cell pings (`PING_INTERVAL_MS` is 20 s) and slack.
 pub(super) const CONTROL_LIVENESS: Duration = Duration::from_secs(45);
@@ -539,7 +641,7 @@ async fn connect_once(
     };
     retry.connected(&manager, live.clone());
     manager.relay_ready(context.clone(), live.clone()).await;
-    control_loop(manager, socket, rx, live, context, keypair)
+    control_loop(manager, socket, rx, live, context, keypair, ControlTiming::default())
         .await
         .context(Stage::ControlSession)
 }
@@ -570,6 +672,7 @@ async fn open_control(
         )
         .await
         .context(Category::Timeout)??;
+        enable_keepalive(&socket);
         Ok::<_, anyhow::Error>(socket)
     }
     .await
@@ -669,7 +772,14 @@ async fn control_loop(
     live: RelayLive,
     context: AccountContext,
     keypair: HostKeypair,
+    timing: ControlTiming,
 ) -> Result<()> {
+    let local_ip = control_tcp(&socket).local_addr().ok().map(|address| address.ip());
+    let mut liveness = Liveness::new(local_ip, Instant::now(), SystemTime::now());
+    // One timer for the whole session: a per-pass timeout restarts on every
+    // pass, so a loop woken every tick never times out.
+    let mut tick = tokio::time::interval_at(Instant::now() + timing.tick, timing.tick);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut pending_invites = HashMap::<String, oneshot::Sender<Result<InviteCreated>>>::new();
     let mut pending_revokes = HashMap::<String, String>::new();
     let mut pending_installs =
@@ -739,9 +849,9 @@ async fn control_loop(
                     return Ok(());
                 }
             },
-            incoming = tokio::time::timeout(SILENCE_TIMEOUT, socket.next()) => {
-                let incoming = incoming.context(Category::Timeout)?
-                    .ok_or_else(|| anyhow!(Category::Network))??;
+            incoming = socket.next() => {
+                let incoming = incoming.ok_or_else(|| anyhow!(Category::Network))??;
+                liveness.frame(Instant::now());
                 live.signals.frame_received(now_ms());
                 let Message::Text(text) = incoming else {
                     if matches!(incoming, Message::Close(_)) { return Err(anyhow!(Category::Network)); }
@@ -800,14 +910,17 @@ async fn control_loop(
                         if connection.kind_name != "conn-open" || !valid_opaque_id(&connection.conn_id) || !valid_base64url_32(&connection.conn_ticket) || !matches!(connection.kind.as_str(), "invite" | "resume") || !valid_opaque_id(&connection.relay_device_id) || connection.attach_deadline_ms == 0 || connection.attach_deadline_ms > 60_000 {
                             bail!("invalid relay connection request");
                         }
+                        // A phone that cannot connect must leave a trace on the Mac (#666).
+                        manager.record_relay_diagnostic(Event::PhoneRequested, 0, None);
                         let manager = manager.clone();
                         let cell = live.cell_url.clone();
                         let host_id = live.relay_host_id.clone();
                         let generation = live.generation;
                         let keypair = keypair.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(error) = manager.handle_relay_connection(cell, host_id, generation, keypair, connection).await {
-                                log::debug!("relay data connection ended: {:?}", Failure::from_error(&error));
+                            match manager.clone().handle_relay_connection(cell, host_id, generation, keypair, connection).await {
+                                Ok(()) => manager.record_relay_diagnostic(Event::PhoneClosed, 0, None),
+                                Err(error) => manager.record_relay_diagnostic(Event::PhoneFailed, 0, Some(Failure::from_error(&error))),
                             }
                         });
                     }
@@ -836,9 +949,12 @@ async fn control_loop(
                     _ => bail!("relay sent an unknown control message"),
                 }
             }
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+            _ = tick.tick() => {
                 if manager.account_context().as_ref().map(|next| &next.user_id) != Some(&context.user_id) {
                     return Ok(());
+                }
+                if let Some(category) = liveness.check(Instant::now(), SystemTime::now(), timing.silence, address_assigned) {
+                    return Err(anyhow!(category));
                 }
             }
         }
@@ -988,6 +1104,52 @@ mod tests {
         assert_eq!(backoff(11), Duration::from_secs(60));
         assert_eq!(backoff(12), Duration::from_secs(90));
         assert_eq!(backoff(99), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn liveness_spans_ticks_and_notices_a_lost_address_or_a_sleep() {
+        let start = Instant::now();
+        let wall = SystemTime::now();
+        let source: IpAddr = "192.168.0.246".parse().unwrap();
+        let at = |seconds: u64| (start + Duration::from_secs(seconds), wall + Duration::from_secs(seconds));
+        let check = |liveness: &mut Liveness, (now, wall): (Instant, SystemTime)| {
+            liveness.check(now, wall, SILENCE_TIMEOUT, |_| true)
+        };
+
+        // Ticks alone never count as frames (#666): 45 s of them pass, 46 s is silence.
+        let mut liveness = Liveness::new(Some(source), start, wall);
+        for seconds in (2..=44).step_by(2) {
+            assert_eq!(check(&mut liveness, at(seconds)), None);
+        }
+        assert_eq!(check(&mut liveness, at(46)), Some(Category::Timeout));
+
+        // Frames, such as the cell's pings, keep it alive indefinitely.
+        let mut liveness = Liveness::new(Some(source), start, wall);
+        for seconds in (2..=600).step_by(2) {
+            if seconds % 20 == 0 {
+                liveness.frame(at(seconds).0);
+            }
+            assert_eq!(check(&mut liveness, at(seconds)), None);
+        }
+
+        // The Wi-Fi now has another address.
+        let mut liveness = Liveness::new(Some(source), start, wall);
+        let (now, wall_now) = at(2);
+        assert_eq!(
+            liveness.check(now, wall_now, SILENCE_TIMEOUT, |ip| ip != source),
+            Some(Category::NetworkChanged)
+        );
+
+        // An hour asleep: wall time moves on and the monotonic clock does not.
+        let mut liveness = Liveness::new(Some(source), start, wall);
+        assert_eq!(check(&mut liveness, at(2)), None);
+        let asleep = (start + Duration::from_secs(4), wall + Duration::from_secs(3_604));
+        assert_eq!(check(&mut liveness, asleep), Some(Category::Woke));
+
+        // A wall clock set back is not a sleep.
+        let mut liveness = Liveness::new(Some(source), start, wall);
+        let set_back = (start + Duration::from_secs(2), wall - Duration::from_secs(3_600));
+        assert_eq!(check(&mut liveness, set_back), None);
     }
 
     #[test]

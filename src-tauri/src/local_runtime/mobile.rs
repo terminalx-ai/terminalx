@@ -364,7 +364,7 @@ impl Registry {
     }
 
     fn send(&self, manager: &crate::session::SessionManager, pending: Pending) -> Result<Sent> {
-        if pending.bytes() > 8 * 1024 * 1024 { bail!("The mobile prompt is too large."); }
+        if pending.bytes() > MAX_PROMPT_BYTES { bail!("The mobile prompt is too large."); }
         let pending = match self.repeat(pending)? {
             Ok(repeat) => return Ok(Sent::Repeat(repeat)),
             Err(pending) => pending,
@@ -653,37 +653,52 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         result?;
         return Ok(serde_json::json!({"accepted":true,"bytesWritten":text.len()}));
     }
+    if method == "openTerminal" {
+        // What the desktop's terminal toggle does: a native Codex tab moves
+        // to Codex's own terminal (refused mid-turn), then the tab's agent is
+        // started if it is not running. The permit is checked, then let go:
+        // both steps take admission, which goes before a permit (#702).
+        // Neither writes input, and both are idempotent.
+        let session = string("sessionId")?;
+        let tab = string("tabId")?;
+        let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
+        drop(permit.enter()?);
+        manager.codex_stdio_to_terminal(session, tab)?;
+        manager.ensure_started(session, tab)?;
+        return Ok(serde_json::json!({"opened":true}));
+    }
     if method == "send" {
         let session = string("sessionId")?;
         let tab = string("tabId")?;
         let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
-        let display = string("text")?.to_string();
-        let prompt = string("prompt")?;
-        let mirror: Option<AccountMirror> = crate::store::read_json(&crate::store::root()?.join("account.json"))?;
-        let (user, name) = match mirror {
-            Some(mirror) if actor.user_id.as_deref() == Some(&mirror.user_id) =>
-                (mirror.user_id, if mirror.display_name.trim().is_empty() { mirror.email } else { mirror.display_name }),
-            None if actor.user_id.is_none() => (grant.device.id.clone(), if grant.device.label.trim().is_empty() { "Paired mobile device".into() } else { grant.device.label.clone() }),
-            _ => bail!("The mobile host identity changed."),
-        };
-        let envelope = serde_json::json!({"userId":user,"displayName":name,"authority":"host"});
         let message = match params.get("clientMessageId") {
             None | Some(Value::Null) => None,
             Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => Some(id.clone()),
             Some(_) => bail!("Invalid mobile message id."),
         };
-        let pending = Pending { session:session.into(),tab:tab.into(),
-            agent:format!("[TerminalX Effective User v1] {envelope}\n{prompt}"), display,
-            images:serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?,permit,message };
-        return Ok(match manager.mobile.send(manager,pending)? {
-            Sent::Outcome(outcome) => serde_json::to_value(outcome)?,
-            // Shaped as an outcome: `queued` reads as it always has.
-            Sent::Repeat(repeat) => serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat}),
-        });
+        let images = serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| serde_json::json!([])))?;
+        return phone_send(manager, &actor, &grant, (session, tab), permit, string("text")?.to_string(), string("prompt")?, images, message);
+    }
+    if let Some(result) = controls(manager, &actor, &grant, method, &params) {
+        return result;
     }
     let _admitted = grant.enter()?;
     match method {
         "check" => Ok(Value::Null),
+        // What the desktop starts from its new-session view, and the settings
+        // a phone may change on this Mac. The grant stays held while they act,
+        // so a phone revoked meanwhile neither starts a session nor changes one.
+        "create" => { grant.driver()?; create_session(manager, &params) }
+        "settings" => Ok(phone_settings(&crate::store::settings::load())),
+        "setSettings" => {
+            grant.driver()?;
+            let native_codex = params["nativeCodex"].as_bool().context("nativeCodex must be true or false")?;
+            let mut settings = crate::store::settings::load();
+            settings.experimental.native_codex = native_codex;
+            crate::store::settings::save(&settings)?;
+            manager.sink().emit("experimental_settings_changed", &settings.experimental);
+            Ok(phone_settings(&settings))
+        }
         "observe" => {
             if string("attachMode")? != "observe" || params["client"]["type"] != "mobile" || !params["capabilities"].is_object() {
                 bail!("Terminal observation capabilities are invalid.");
@@ -719,6 +734,170 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     }
 }
 
+
+/// The most a phone's prompt may carry, attachments included.
+const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
+
+/// A phone's prompt as the agent gets it: who it is from, then what was typed.
+fn attributed(actor: &Actor, grant: &Grant, prompt: &str) -> Result<String> {
+    let mirror: Option<AccountMirror> = crate::store::read_json(&crate::store::root()?.join("account.json"))?;
+    let (user, name) = match mirror {
+        Some(mirror) if actor.user_id.as_deref() == Some(&mirror.user_id) =>
+            (mirror.user_id, if mirror.display_name.trim().is_empty() { mirror.email } else { mirror.display_name }),
+        None if actor.user_id.is_none() => (grant.device.id.clone(), if grant.device.label.trim().is_empty() { "Paired mobile device".into() } else { grant.device.label.clone() }),
+        _ => bail!("The mobile host identity changed."),
+    };
+    let envelope = serde_json::json!({"userId":user,"displayName":name,"authority":"host"});
+    Ok(format!("[TerminalX Effective User v1] {envelope}\n{prompt}"))
+}
+
+/// A phone's prompt to a tab. It goes through the queue, so a busy tab takes
+/// it after its turn.
+#[allow(clippy::too_many_arguments)]
+fn phone_send(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, (session, tab): (&str, &str), permit: WritePermit,
+    display: String, prompt: &str, images: Vec<crate::session::ImageInput>, message: Option<String>) -> Result<Value> {
+    let pending = Pending { session:session.into(), tab:tab.into(), agent:attributed(actor, grant, prompt)?, display, images, permit, message };
+    Ok(match manager.mobile.send(manager,pending)? {
+        Sent::Outcome(outcome) => serde_json::to_value(outcome)?,
+        // Shaped as an outcome: `queued` reads as it always has.
+        Sent::Repeat(repeat) => serde_json::json!({"queued":repeat != Repeat::Delivered,"events":[],"repeat":repeat}),
+    })
+}
+
+/// The session controls a phone offers as the desktop does (`sessionControls`
+/// in the phone protocol). Each is the desktop's own operation, after a
+/// phone's device checks: a live grant for all of them, and a driver for any
+/// change. Nothing of the device is held across the operation: Stop waits for
+/// the agent's exit, and a mode, a tab or a send takes sharing and admission,
+/// which come before a device's grant in the lock order. `None` for any other
+/// method.
+fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Grant, method: &str, params: &Value) -> Option<Result<Value>> {
+    const CHANGES: &[&str] = &["stop", "interrupt", "setModel", "setEffort", "setMode", "resendUnsent", "continue"];
+    const READS: &[&str] = &["tab", "models", "prepareContinuation"];
+    if !CHANGES.contains(&method) && !READS.contains(&method) { return None; }
+    Some((|| {
+        let string = |key: &str| -> Result<&str> { params[key].as_str().with_context(|| format!("{key} must be a string")) };
+        if CHANGES.contains(&method) { grant.driver()?; }
+        drop(grant.enter()?);
+        if method == "models" {
+            return Ok(serde_json::to_value(crate::models::list(&manager.codex_models(), params["refresh"].as_bool().unwrap_or(false)))?);
+        }
+        let (session, tab) = (string("sessionId")?, string("tabId")?);
+        let entry = crate::store::index::get(session)?;
+        let current = entry.tab(tab).context("The tab does not belong to this session.")?;
+        Ok(match method {
+            "tab" => serde_json::json!({
+                "harness": current.harness, "model": current.model, "effort": current.effort, "permissionMode": current.permission_mode,
+                "requestedModel": current.requested_model, "requestedEffort": current.requested_effort,
+                "requestedPermissionMode": current.requested_permission_mode, "status": manager.status_of(session, tab),
+            }),
+            "stop" => { manager.stop(session, tab)?; Value::Null }
+            "interrupt" => serde_json::json!({ "interrupted": manager.interrupt(session, tab)? }),
+            "setModel" => { manager.set_model(session, tab, string("model")?)?; Value::Null }
+            "setEffort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
+            "setMode" => { manager.set_permission_mode(session, tab, string("mode")?)?; Value::Null }
+            "resendUnsent" => {
+                let (text, images) = manager.unsent_prompt(session, tab)?;
+                let permit = manager.mobile.permit(actor, string("connection")?, session, tab)?;
+                phone_send(manager, actor, grant, (session, tab), permit, text.clone(), &text, images, None)?
+            }
+            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+            // "Continue in new session": a new tab in this session with the
+            // chosen agent and settings, handed the prompt the phone built from
+            // `prepareContinuation`. It goes as any phone message (the sender
+            // named, the size held to a phone's, the permit checked again at
+            // the write) and is confirmed with a receipt as the desktop's is.
+            // The new tab's permit is taken once the tab has started: nothing
+            // of this phone is held across its start.
+            _ => {
+                let prompt = string("prompt")?;
+                anyhow::ensure!(prompt.len() <= MAX_PROMPT_BYTES, "The mobile prompt is too large.");
+                let agent = attributed(actor, grant, prompt)?;
+                let settings: crate::session_ops::NewTab = serde_json::from_value(params["tab"].clone()).context("Invalid new tab settings.")?;
+                let started = manager.add_tab(session, &settings)?;
+                let delivered = manager.ensure_started(session, &started.id)
+                    .and_then(|()| manager.mobile.permit(actor, string("connection")?, session, &started.id))
+                    .and_then(|permit| manager.send_mobile_confirmed(session, &started.id, agent, prompt.to_owned(), permit));
+                match delivered {
+                    Ok(outcome) => serde_json::json!({ "tab": started, "delivered": true, "inInput": outcome.in_input }),
+                    // The tab is there either way: the phone opens it to check.
+                    Err(error) => serde_json::json!({ "tab": started, "delivered": false, "error": format!("{error:#}") }),
+                }
+            }
+        })
+    })())
+}
+
+/// The settings of this Mac a phone shows and may change. Paths, credentials
+/// and what only this Mac's screen and hardware use stay on the desktop.
+fn phone_settings(settings: &crate::store::settings::Settings) -> Value {
+    serde_json::json!({"nativeCodex": settings.experimental.native_codex})
+}
+
+/// A session a paired phone starts: a project's (in a new worktree or on its
+/// checkout) or a quick chat, with the agent, model, effort and mode the
+/// phone chose. Made as the desktop's new-session view makes one, Settings →
+/// Experimental → Native Codex included; its first message goes through the
+/// phone's send, which checks the phone again as it writes.
+fn create_session(manager: &crate::session::SessionManager, params: &Value) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Create {
+        #[serde(default)]
+        quick: bool,
+        #[serde(default)]
+        project_id: Option<String>,
+        #[serde(default)]
+        use_worktree: bool,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        prompt: String,
+    }
+    use crate::session_ops::{NewQuickChat, NewSession, NewTab};
+    let p: Create = serde_json::from_value(params.clone()).context("Invalid new session request.")?;
+    let agent = crate::harness::offered().into_iter().find(|harness| harness.id == p.agent)
+        .with_context(|| format!("{} is not an agent this Mac offers.", p.agent))?;
+    if !agent.available { bail!("{} is not installed on this Mac.", agent.name); }
+    let mode = crate::store::index::requested_mode(p.mode);
+    if let Some(mode) = mode.as_deref() {
+        if !matches!(mode, "plan" | "manual" | "auto" | "acceptEdits" | "bypassPermissions") { bail!("Unknown permission mode {mode}."); }
+    }
+    let mut tab = NewTab { harness: agent.id, transport: Default::default(), model: p.model, effort: p.effort.filter(|effort| !effort.trim().is_empty()), permission_mode: mode };
+    crate::session_ops::prefer_native_codex(&mut tab, false);
+    // The title a session started from the window gets: the prompt's first line.
+    let title = p.title.filter(|title| !title.trim().is_empty())
+        .or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
+    let entry = match (p.quick, p.project_id) {
+        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { title, cwd: None, tab: Some(tab) })
+            .map_err(|error| anyhow::anyhow!(error))?,
+        (false, Some(id)) => {
+            let project = crate::store::projects::by_public_id(&id)?;
+            if p.use_worktree && project.kind != crate::store::projects::ProjectKind::Git {
+                bail!("{} is not a Git repository, so it has no worktrees. Start the session on its folder.", project.name);
+            }
+            let named = crate::names::from_prompt(&p.prompt);
+            let req = NewSession {
+                project_path: project.path, title, use_worktree: p.use_worktree, on_main: !p.use_worktree,
+                base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),
+                checkout_branch: None, issue: None, automation: None, cwd: None, tab: Some(tab),
+            };
+            crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
+            crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?
+        }
+        _ => bail!("Choose a project or a quick chat for the new session."),
+    };
+    let tab = entry.tabs.first().context("The new session has no tab.")?;
+    Ok(serde_json::json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title,
+        "native": tab.transport == crate::store::index::AgentTransport::ExperimentalCodexStdio}))
+}
 
 #[derive(Debug)]
 pub struct Busy;
@@ -892,6 +1071,99 @@ mod repeat_tests {
     }
 }
 
+/// Opening a tab's terminal from the phone, as the desktop's toggle does,
+/// against real grants: a read-only phone is refused, and a driver's moves a
+/// native Codex tab to Codex's terminal and starts it there. A stand-in Codex
+/// on the lookup path is what launches; runs in a child process.
+#[cfg(test)]
+mod open_terminal_tests {
+    use super::*;
+    use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "TERMINALX_TEST_MOBILE_OPEN_TERMINAL_CHILD";
+    const STAND_IN: &str = "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '  --no-daemon  Run without the shared daemon\\n'; exit 0; fi\nprintf 'stand-in codex %s\\n' \"$*\"\nexec sleep 30\n";
+
+    #[test]
+    fn a_driving_phone_opens_a_native_codex_tab_in_codexs_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local_runtime::mobile::open_terminal_tests::open_terminal_child", "--nocapture"])
+            .env(CHILD, "1").env("TERMINALX_HOME", dir.path().join("store")).env("CODEX_HOME", dir.path().join("codex"))
+            .stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
+            .spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if Instant::now() >= until {
+                child.kill().unwrap(); child.wait().unwrap();
+                panic!("mobile open-terminal fixture exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let log = std::fs::read_to_string(dir.path().join("child.log")).unwrap();
+        assert!(status.success(), "{log}");
+        assert!(log.contains("1 passed"), "the fixture did not run: {log}");
+    }
+
+    #[test]
+    fn open_terminal_child() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var(CHILD).is_err() { return; }
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), STAND_IN).unwrap();
+        std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(crate::binpath::set_priority_dir(&bin));
+        let entry: store::index::SessionEntry = serde_json::from_value(json!({
+            "id":"open","projectPath":root,"cwd":root,"title":"fixture",
+            "created":store::index::now(),"modified":store::index::now(),
+            "tabs":[{"id":"native","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":store::index::now()}]
+        })).unwrap();
+        store::index::save(&[entry]).unwrap();
+        let device = |id: &str, scope: &str| json!({"id":id,"label":"Fixture","platform":"test","token":format!("{id}-hash"),
+            "scope":scope,"provenance":"explicit","bindingGeneration":0,"createdAt":store::index::now()});
+        store::write_json(&root.join("devices.json"), &json!({"devices":[device("driver","driver"),device("viewer","viewer")]})).unwrap();
+        let manager = SessionManager::new(Arc::new(sink::BroadcastSink::new(256)),Arc::new(sink::NoObserver),
+            Arc::new(Host::new()),Arc::new(pty::Terminals::new()),Arc::new(Default::default()),
+            Arc::new(Default::default()),crate::hooks::prepare_control().unwrap());
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let lease = lifetime.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let actor: Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+        manager.mobile.register(&lifetime,actor.clone(),"phone","driver").unwrap();
+        manager.mobile.register(&lifetime,actor.clone(),"watch","viewer").unwrap();
+        let open = |connection: &str| execute(&manager,&lifetime,"openTerminal",json!({"actor":actor,"connection":connection,"sessionId":"open","tabId":"native"}));
+        let transport = || store::index::get("open").unwrap().tab("native").unwrap().transport;
+
+        let refused = open("watch").unwrap_err();
+        assert!(format!("{refused:#}").contains("read-only"), "{refused:#}");
+        assert_eq!(transport(), store::index::AgentTransport::ExperimentalCodexStdio, "a viewer moves nothing");
+        assert!(manager.terminals().panes().is_empty(), "a viewer starts nothing");
+
+        assert_eq!(open("phone").unwrap(), json!({"opened":true}));
+        assert_eq!(transport(), store::index::AgentTransport::Pty);
+        let pane = manager.pane_of("open","native").expect("Codex runs in the tab's terminal").pane_id;
+        let until = Instant::now() + Duration::from_secs(20);
+        let shown = loop {
+            let output = String::from_utf8_lossy(&manager.terminals().read_output(&pane).unwrap_or_default()).into_owned();
+            if output.contains("stand-in codex") || Instant::now() >= until { break output; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(shown.contains("stand-in codex --no-daemon"), "the terminal shows Codex's own interface: {shown}");
+        // Opening it again changes nothing: the same Codex keeps its pane.
+        assert_eq!(open("phone").unwrap(), json!({"opened":true}));
+        assert_eq!(manager.pane_of("open","native").unwrap().pane_id, pane);
+        assert_eq!(manager.terminals().panes().len(), 1);
+
+        manager.terminals().kill_all();
+        lifetime.command("runtime.detach",lease).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod input_tests {
     use super::*;
@@ -938,3 +1210,7 @@ mod input_tests {
 #[cfg(test)]
 #[path = "mobile_lock_tests.rs"]
 mod lock_tests;
+
+#[cfg(test)]
+#[path = "mobile_create_tests.rs"]
+mod create_tests;

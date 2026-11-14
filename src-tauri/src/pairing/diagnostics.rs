@@ -11,6 +11,8 @@ use thiserror::Error;
 use super::cloud::CloudHttpError;
 
 const MAX_RECORDS: usize = 128;
+/// A phone retrying in a loop must not push the control channel's history out.
+const MAX_PHONE_RECORDS: usize = MAX_RECORDS / 2;
 const MAX_BYTES: u64 = 64 * 1024;
 pub(super) const FILE_NAME: &str = "relay-diagnostics.json";
 
@@ -27,6 +29,12 @@ pub(super) enum Stage {
     /// The account service's heartbeat, grant and revocation requests for
     /// this host, made beside a connected control channel.
     HostBinding,
+    /// A phone's relay connection: the host data leg to the cell.
+    PhoneAttach,
+    /// The phone's E2EE handshake and device login, through the cell.
+    PhoneHandshake,
+    /// After the phone logged in.
+    PhoneSession,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Error, PartialEq, Eq)]
@@ -42,6 +50,12 @@ pub(super) enum Category {
     Timeout,
     Protocol,
     LocalStorage,
+    /// The control socket's source address left every interface.
+    NetworkChanged,
+    /// The Mac slept: the cell has dropped a control channel that missed its pings.
+    Woke,
+    /// The local runtime refused or did not answer a paired-device call.
+    LocalRuntime,
     Unknown,
 }
 
@@ -138,6 +152,12 @@ impl Failure {
                 "Relay returned an unexpected response. Retrying automatically. If this continues, check for a TerminalX update.",
             Category::LocalStorage =>
                 "TerminalX could not access its local Relay identity. Check Keychain access, then retry.",
+            Category::NetworkChanged =>
+                "This Mac's network changed. Reconnecting to Relay automatically.",
+            Category::Woke =>
+                "This Mac woke from sleep. Reconnecting to Relay automatically.",
+            Category::LocalRuntime =>
+                "TerminalX's local runtime did not answer. Retrying automatically. If this continues, quit and reopen TerminalX.",
             Category::Unknown =>
                 "Relay connection ended unexpectedly. Retrying automatically. You can use LAN meanwhile.",
         }
@@ -152,6 +172,25 @@ pub(super) enum Event {
     Connected,
     /// A host-binding request succeeded after `attempt` failed rounds.
     Recovered,
+    /// The cell asked for a host data leg (`conn-open`): a phone is connecting.
+    PhoneRequested,
+    PhoneAttached,
+    PhoneAuthenticated,
+    PhoneClosed,
+    PhoneFailed,
+}
+
+impl Event {
+    fn is_phone(self) -> bool {
+        matches!(
+            self,
+            Self::PhoneRequested
+                | Self::PhoneAttached
+                | Self::PhoneAuthenticated
+                | Self::PhoneClosed
+                | Self::PhoneFailed
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -201,6 +240,14 @@ impl DiagnosticLog {
             retry_count: attempt.saturating_sub(1),
             failure,
         });
+        if event.is_phone()
+            && self.records.iter().filter(|record| record.event.is_phone()).count()
+                > MAX_PHONE_RECORDS
+        {
+            if let Some(oldest) = self.records.iter().position(|record| record.event.is_phone()) {
+                self.records.remove(oldest);
+            }
+        }
         while self.records.len() > MAX_RECORDS {
             self.records.pop_front();
         }
@@ -309,6 +356,39 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn a_phone_in_a_reconnect_loop_cannot_push_out_the_control_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = DiagnosticLog::default();
+        log.configure(directory.path().to_owned()).unwrap();
+        let control = Failure {
+            stage: Stage::ControlSession,
+            category: Category::Timeout,
+            http_status: None,
+        };
+        for attempt in 1..=10 {
+            log.record(Event::Failed, attempt, Some(control)).unwrap();
+        }
+        let phone = Failure {
+            stage: Stage::PhoneHandshake,
+            category: Category::Authentication,
+            http_status: None,
+        };
+        for _ in 0..500 {
+            log.record(Event::PhoneRequested, 0, None).unwrap();
+            log.record(Event::PhoneFailed, 0, Some(phone)).unwrap();
+        }
+        let bytes = std::fs::read(directory.path().join(FILE_NAME)).unwrap();
+        let records: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(records.iter().filter(|record| record.event.is_phone()).count(), MAX_PHONE_RECORDS);
+        let control: Vec<_> = records.iter().filter(|record| !record.event.is_phone()).collect();
+        assert_eq!(control.len(), 11);
+        assert!(matches!(control[0].event, Event::Started));
+        assert_eq!(control.last().unwrap().attempt, 10);
+        assert!(matches!(records.last().unwrap().event, Event::PhoneFailed));
+        assert!(String::from_utf8(bytes).unwrap().contains("\"stage\":\"phone-handshake\""));
     }
 
     #[test]

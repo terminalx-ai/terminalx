@@ -1825,22 +1825,8 @@ export async function onPromptDelivery(sessionId: string, tabId: string, onStage
   }
 }
 
-export interface ModelInfo {
-  id: string;
-  label: string;
-  harness: string;
-  efforts: string[];
-  defaultEffort: string | null;
-  acceptsImages: boolean;
-  isDefault: boolean;
-  /** The model that replaces this one when the provider is retiring it. */
-  upgrade: string | null;
-  description: string | null;
-  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
-  alias?: boolean;
-  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
-  resolved?: string | null;
-}
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+export type { ModelInfo };
 
 export interface HandoffInfo {
   command: string;
@@ -1873,6 +1859,7 @@ export const agent = {
   /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
   interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
+  tabToTerminal: (sessionId: string, tabId: string) => invoke<void>("tab_to_terminal", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
@@ -2313,6 +2300,27 @@ export interface WorkStatusSettings {
   /** Teammates in an organization that connected the repository see what this person works on. */
   shareWithTeam: boolean;
 }
+
+/** Settings → Experimental: features that are on only when turned on. */
+export interface ExperimentalSettings {
+  /** New Codex sessions connect to Codex's app server instead of its terminal, where it can serve them (#644). */
+  nativeCodex: boolean;
+}
+
+/** Read when a tab is made: a change applies to new sessions, not to existing ones. */
+export const experimental = {
+  settings: () => invoke<ExperimentalSettings>("experimental_settings"),
+  setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
+  /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
+  nativeCodexFor: async (agent: string): Promise<boolean> => {
+    if (agent !== "codex") return false;
+    try {
+      return (await invoke<ExperimentalSettings>("experimental_settings"))?.nativeCodex === true;
+    } catch {
+      return false;
+    }
+  },
+};
 
 export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;

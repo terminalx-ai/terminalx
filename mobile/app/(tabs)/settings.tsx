@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Alert, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { Check, ChevronDown, ChevronUp, Trash2 } from "lucide-react-native";
 import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
+import type { MacSettings } from "@mobile/data/host-api";
 import { useApp } from "@mobile/state/AppProvider";
 import { hostDisplayName, hostDisplayNames } from "@mobile/store/host-name";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
@@ -15,6 +16,31 @@ export default function SettingsScreen() {
   const { name, palette, setName } = useTheme();
   const [notifications, setNotifications] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  // This Mac's own settings: undefined while asking, null from a Mac that does not offer them.
+  const [mac, setMac] = useState<MacSettings | null | undefined>(undefined);
+  const [macError, setMacError] = useState<string | null>(null);
+  const connected = app.connectionStage === "connected";
+
+  useEffect(() => {
+    let current = true;
+    setMac(undefined);
+    setMacError(null);
+    if (!connected) return;
+    app.api.macSettings().then((value) => { if (current) setMac(value); }).catch((cause: unknown) => { if (current) { setMac(null); setMacError(cause instanceof Error ? cause.message : String(cause)); } });
+    return () => { current = false; };
+  }, [app.api, connected, app.activeHost?.id]);
+
+  const toggleNativeCodex = async (on: boolean) => {
+    const before = mac;
+    setMac(mac ? { ...mac, nativeCodex: on } : mac);
+    setMacError(null);
+    try {
+      setMac(await app.api.setNativeCodex(on));
+    } catch (cause) {
+      setMac(before);
+      setMacError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   useEffect(() => {
     let current = true;
@@ -42,6 +68,11 @@ export default function SettingsScreen() {
 
     <SectionTitle>Paired machines</SectionTitle>
     <Card>{app.hosts.length ? app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>{names.get(host.id) ?? hostDisplayName(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{host.provenance.kind === "explicit" ? "QR pairing · kept after sign-out" : "Account pairing · removed at sign-out"}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Forget ${names.get(host.id) ?? hostDisplayName(host)}`} hitSlop={10} onPress={() => Alert.alert("Forget this Mac?", "Its device credential will be deleted from this phone. Agents on the Mac keep running.", [{ text: "Cancel", style: "cancel" }, { text: "Forget", style: "destructive", onPress: () => void app.forgetHost(host.id) }])}><Trash2 size={19} color={palette.danger} /></Pressable></View>) : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>No paired Macs on this phone.</Text></View>}</Card>
+
+    {app.activeHost ? <><SectionTitle>{`This Mac · ${names.get(app.activeHost.id) ?? hostDisplayName(app.activeHost)}`}</SectionTitle>
+    <Card>{mac ? <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Native Codex</Text><Text style={[styles.detail, { color: palette.muted }]}>Experimental. New Codex sessions on this Mac connect to Codex directly, so the chat reliably shows when Codex is compacting its context. Opening a session's terminal view on the Mac moves it to Codex's own terminal for good. Needs Codex 0.164.0 or newer.</Text></View><Switch accessibilityLabel="Native Codex" value={mac.nativeCodex} onValueChange={(value) => void toggleNativeCodex(value)} trackColor={{ true: palette.accent }} /></View>
+      : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>{!connected ? "Connect to this Mac to change its settings." : mac === undefined ? "Reading this Mac's settings…" : macError ?? "Update TerminalX on this Mac to change its settings from your phone."}</Text></View>}
+      {mac && macError ? <Text accessibilityRole="alert" style={[styles.detail, styles.macError, { color: palette.danger }]}>{macError}</Text> : null}</Card></> : null}
 
     <SectionTitle>Appearance</SectionTitle>
     <Card style={styles.themeGrid}>{themes.map((theme) => <Pressable key={theme} accessibilityRole="button" accessibilityState={{ selected: theme === name }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: theme === name ? palette.selected : palette.raised }]}><Text style={[styles.rowTitle, { color: palette.ink }]}>{theme}</Text>{theme === name ? <Check size={17} color={palette.accent} /> : null}</Pressable>)}</Card>
@@ -71,4 +102,5 @@ const styles = StyleSheet.create({
   logTime: { width: 70, fontSize: 11, fontVariant: ["tabular-nums"] },
   logDetail: { fontSize: 11, marginTop: 2 },
   privacy: { padding: 16, gap: 7, marginTop: 8 },
+  macError: { paddingHorizontal: 15, paddingBottom: 12 },
 });

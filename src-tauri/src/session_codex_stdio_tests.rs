@@ -16,7 +16,10 @@ pub(super) fn observed_full_pipe() {
 
 #[test]
 fn owned_stdio_lifecycle_is_process_bounded() {
-    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit"] {
+    for case in ["admission-drain", "retain-drained-child", "full-input-pipe", "expired-input-pipe", "stale-control", "private-diagnostics", "refused-handshake", "refused-exit", "resume-thread", "resume-other-thread", "settings", "to-terminal",
+        "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-ended", "host-while-shared",
+        "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart",
+        "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -56,9 +59,626 @@ impl Sink for GateSink {
     fn drained(&self, receipt: &TerminalReceipt) { self.sink.drained(receipt); }
 }
 
+/// Stands in for Codex at the process boundary: answers the version probe and
+/// the handshake, records each frame it is sent, and plays one turn per
+/// `turn/start` or manual compaction until its input closes. While a `hold`
+/// file exists it does not answer the thread request, so a test can act
+/// between a send and the write of its prompt. A `mode` file beside it, read
+/// for each frame, makes it exit after `initialize` (`die`) or never answer
+/// the thread request (`hang`).
+const RESUMING_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  mode=$(cat "$here/mode" 2>/dev/null)
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id"; [ "$mode" = die ] && exit 0 ;;
+    *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
+      while [ -f "$here/hold" ]; do sleep 0.02; done
+      [ "$mode" = hang ] || printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$(cat "$here/answer")" ;;
+    *'"method":"thread/compact/start"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"contextCompaction","id":"c%s"}}}\n' "$id" "$id"
+      printf '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-%s","item":{"type":"contextCompaction","id":"c%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-%s","itemId":"m%s","delta":"resumed"}}\n' "$id" "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+  esac
+done
+"#;
+
+/// A tab whose connection ended (app restart, Stop) keeps its thread: the next
+/// send resumes that thread in a new connection, and a reply naming any other
+/// thread gets no prompt.
+fn resume_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), if case == "resume-other-thread" { "thread-2" } else { "thread-1" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    manager.send("stdio-owner", "tab", "carry on".into(), Vec::new()).unwrap();
+    let events = || -> Vec<AgentEvent> { store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap() };
+    let until = Instant::now() + WAIT;
+    let settled = |events: &[AgentEvent]| events.iter().any(|event| matches!(&event.payload, Payload::TurnCompleted { .. } | Payload::Error { .. }));
+    while !settled(&events()) {
+        assert!(Instant::now() < until, "{case}: no outcome: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let methods: Vec<_> = received.iter().map(|frame| frame["method"].as_str().unwrap()).collect();
+    assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().provider_session_id.as_deref(), Some("thread-1"));
+    assert_eq!(received[2]["params"]["threadId"], "thread-1");
+    assert_eq!(received[2]["params"]["excludeTurns"], true);
+    let events = events();
+    if case == "settings" {
+        return settings_fixture(&manager, &bin, &received);
+    }
+    if case == "to-terminal" {
+        return to_terminal_fixture(&manager);
+    }
+    if case == "resume-thread" {
+        assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
+        assert_eq!(received[3]["params"]["input"][0]["text"], "carry on");
+        let said: Vec<_> = events.iter().filter_map(|event| match &event.payload {
+            Payload::AssistantText { text, .. } => Some(text.as_str()),
+            Payload::TurnCompleted { status, .. } => Some(if *status == TurnStatus::Ok { "ok" } else { "not ok" }),
+            _ => None,
+        }).collect();
+        assert_eq!(said, ["resumed", "ok"]);
+        assert!(rt_bound(&manager), "the resumed thread must own compaction status again");
+    } else {
+        assert_eq!(methods, ["initialize", "initialized", "thread/resume"], "no prompt for another thread");
+        assert!(events.iter().any(|event| matches!(&event.payload, Payload::Error { detail: Some(detail), .. } if detail.contains("resumed a different thread"))), "{:?}", events.iter().map(|event| &event.payload).collect::<Vec<_>>());
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+/// Model and effort reach a live connection with its next turn. A permission
+/// mode is only taken between turns: the connection stops, and the next send
+/// resumes the thread under the new approval policy and sandbox.
+fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::Value]) {
+    let frames = || -> Vec<serde_json::Value> { std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect() };
+    let turns = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().iter().filter(|event| matches!(event.payload, Payload::TurnCompleted { .. })).count();
+    let idle_after = |n: usize| {
+        let until = Instant::now() + WAIT;
+        while turns() < n || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "turn {n} did not settle");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    assert_eq!(first[3]["params"]["model"], serde_json::Value::Null);
+    idle_after(1);
+    manager.set_model("stdio-owner", "tab", "gpt-next").unwrap();
+    manager.set_effort("stdio-owner", "tab", Some("high")).unwrap();
+    assert!(matches!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::CodexStdio(_)), "model and effort keep the connection");
+    manager.send("stdio-owner", "tab", "next".into(), Vec::new()).unwrap();
+    idle_after(2);
+    let sent = frames();
+    assert_eq!(sent.len(), 5, "the same connection takes the next turn");
+    assert_eq!((&sent[4]["method"], &sent[4]["params"]["model"], &sent[4]["params"]["effort"]), (&json!("turn/start"), &json!("gpt-next"), &json!("high")));
+    for ask in ["manual", "default"] {
+        let refused = manager.set_permission_mode("stdio-owner", "tab", ask).unwrap_err();
+        assert!(refused.to_string().contains("Ask every time"), "{refused:#}");
+    }
+    manager.set_permission_mode("stdio-owner", "tab", "plan").unwrap();
+    assert!(matches!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::None), "the old approval policy and sandbox are not kept running");
+    manager.send("stdio-owner", "tab", "planned".into(), Vec::new()).unwrap();
+    idle_after(3);
+    let sent = frames();
+    let methods: Vec<_> = sent[5..].iter().map(|frame| frame["method"].as_str().unwrap()).collect();
+    assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
+    let resumed = &sent[7]["params"];
+    assert_eq!((&resumed["threadId"], &resumed["approvalPolicy"], &resumed["sandbox"], &resumed["model"]), (&json!("thread-1"), &json!("on-request"), &json!("read-only"), &json!("gpt-next")));
+    assert_eq!(sent[8]["params"]["effort"], "high");
+    manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open = true;
+    let refused = manager.set_permission_mode("stdio-owner", "tab", "auto").unwrap_err();
+    assert!(refused.to_string().contains("between turns"), "{refused:#}");
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+/// Opening the terminal view hands the thread to Codex's own terminal: never
+/// mid-turn, only once the connection has exited, and for good.
+fn to_terminal_fixture(manager: &SessionManager) {
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let chat = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+        .filter(|event| !matches!(event.payload, Payload::ContextCompactionLifecycle { .. })).count();
+    let before = chat();
+    rt.lock().unwrap().turn_open = true;
+    let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
+    assert!(refused.to_string().contains("finish this turn"), "{refused:#}");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::CodexStdio(_)));
+    rt.lock().unwrap().turn_open = false;
+    // An exit Stop cannot confirm leaves the tab where it was, to retry.
+    rt.lock().unwrap().stop_in_flight = true;
+    assert!(manager.codex_stdio_to_terminal("stdio-owner", "tab").is_err());
+    assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().transport, AgentTransport::ExperimentalCodexStdio);
+    rt.lock().unwrap().stop_in_flight = false;
+    let child = rt.lock().unwrap().child.clone().expect("a running connection");
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    assert!(child.terminal_receipt().is_some(), "the connection exits before the tab changes engine");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::None) && rt.lock().unwrap().child.is_none());
+    let tab = index::get("stdio-owner").unwrap().tab("tab").unwrap().clone();
+    assert_eq!((tab.transport, tab.provider_session_id.as_deref()), (AgentTransport::Pty, Some("thread-1")));
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    assert_eq!(chat(), before, "the move adds nothing to the chat");
+}
+
+/// Continue in New Session into an experimental tab: confirmed once Codex
+/// takes the turn, refused (and offered back, never replayed) when Codex goes
+/// before it does or Stop comes first, and sent again by "Resend last prompt"
+/// after a failure or an app restart.
+fn continuation_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), "thread-1").unwrap();
+    std::fs::write(bin.join("mode"), match case { "continuation-undelivered" => "die", "continuation-stopped" => "hang", _ => "" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let restart = case == "resend-after-restart";
+    // After a restart: a brief and a later prompt in the log, neither taken.
+    let tab = if restart {
+        json!({"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "continuation":1, "created":index::now()})
+    } else {
+        json!({"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()})
+    };
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(), "tabs":[tab]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let log = store::log_path("stdio-owner", "tab").unwrap();
+    if restart {
+        let line = |seq: u64, text: &str| json!({"id": format!("e{seq}"), "sessionId": "stdio-owner", "tabId": "tab", "harness": "codex", "seq": seq, "ts": index::now(),
+            "payload": {"type":"user_message", "text": text, "images": [], "queued": false}}).to_string();
+        std::fs::write(&log, format!("{}\n{}\n", line(1, "the brief"), line(2, "a later prompt"))).unwrap();
+    }
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    let frames = || -> Vec<serde_json::Value> { std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect() };
+    let starts = || frames().iter().filter(|frame| frame["method"] == "turn/start").map(|frame| frame["params"]["input"][0]["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let events = || store::read_lines::<AgentEvent>(&log).unwrap();
+    let settled = |n: usize| {
+        let until = Instant::now() + WAIT;
+        while events().iter().filter(|event| matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. })).count() < n || rt.lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "{case}: turn {n} did not settle: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    match case {
+        "continuation-delivered" => {
+            let outcome = manager.send_confirmed("stdio-owner", "tab", "the brief".into()).unwrap();
+            assert!(!outcome.in_input);
+            let seq = outcome.events[0].seq;
+            assert_eq!(index::get("stdio-owner").unwrap().tab("tab").unwrap().continuation, Some(seq));
+            let methods: Vec<_> = frames().iter().map(|frame| frame["method"].as_str().unwrap().to_owned()).collect();
+            assert_eq!(methods, ["initialize", "initialized", "thread/start", "turn/start"]);
+            assert_eq!(starts(), ["the brief"]);
+            settled(1);
+        }
+        "continuation-undelivered" | "continuation-stopped" => {
+            let refused = if case == "continuation-stopped" {
+                let sender = manager.clone();
+                let waiting = std::thread::spawn(move || sender.send_confirmed("stdio-owner", "tab", "the brief".into()));
+                let until = Instant::now() + WAIT;
+                while !frames().iter().any(|frame| frame["method"] == "thread/start") {
+                    assert!(Instant::now() < until, "Codex was never asked for a thread");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                manager.stop("stdio-owner", "tab").unwrap();
+                waiting.join().unwrap().unwrap_err()
+            } else {
+                manager.send_confirmed("stdio-owner", "tab", "the brief".into()).unwrap_err()
+            };
+            let said = format!("{refused:#}");
+            assert!(said.contains(if case == "continuation-stopped" { "stopped before Codex received" } else { "did not receive" }), "{said}");
+            assert!(starts().is_empty(), "Codex never took the brief");
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent));
+            assert!(!rt.lock().unwrap().turn_open);
+            let ended: Vec<_> = events().iter().filter_map(|event| match &event.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect();
+            assert_eq!(ended, [TurnStatus::Aborted]);
+            // Offered back, sent only when asked, and without a Stop first:
+            // a click comes after the dead child's readers have drained.
+            let until = Instant::now() + WAIT;
+            while rt.lock().unwrap().child.as_ref().is_some_and(|child| child.terminal_receipt().is_none()) {
+                assert!(Instant::now() < until, "the dead child was never drained");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::fs::write(bin.join("mode"), "").unwrap();
+            manager.resend_unsent("stdio-owner", "tab").unwrap();
+            settled(1);
+            assert_eq!(starts(), ["the brief"], "the brief goes once, when the reader resends it");
+        }
+        "resend-after-restart" => {
+            manager.load_events("stdio-owner", "tab").unwrap();
+            assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::Unsent), "never taken, so not a lost connection");
+            manager.resend_unsent("stdio-owner", "tab").unwrap();
+            settled(1);
+            let methods: Vec<_> = frames().iter().map(|frame| frame["method"].as_str().unwrap().to_owned()).collect();
+            assert_eq!(methods, ["initialize", "initialized", "thread/resume", "turn/start"]);
+            assert_eq!(starts(), ["the brief"], "the unanswered brief goes before the later prompt");
+        }
+        _ => unreachable!(),
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+/// A phone, a share's guest and the host of a shared session reach a native
+/// tab as they reach a PTY one. Each prompt is delivered under a permit that
+/// is still current when its frame is written; one that is not is withdrawn
+/// with nothing of it sent, and the turn it opened ends as stopped. It is not
+/// offered back: its sender may no longer give it, and a resend would be the
+/// host's.
+fn remote_input_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), "thread-1").unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    store::write_json(&root.join("devices.json"), &json!({"devices":[{
+        "id":"driver","label":"Fixture","platform":"test","token":"fixture-hash",
+        "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":index::now()
+    }]})).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    let methods = || -> Vec<String> {
+        std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect()
+    };
+    let last_frame = || -> serde_json::Value { serde_json::from_str(std::fs::read_to_string(bin.join("received")).unwrap().lines().last().unwrap()).unwrap() };
+    let idle_after = |frames: usize| {
+        let until = Instant::now() + WAIT;
+        while methods().len() < frames || manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().turn_open {
+            assert!(Instant::now() < until, "{case}: did not settle: {:?} {:?}", methods(), events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let ended = || events().iter().filter_map(|event| match &event.payload { Payload::TurnCompleted { status, .. } => Some(*status), _ => None }).collect::<Vec<_>>();
+    let users = || events().iter().filter_map(|event| match &event.payload {
+        Payload::UserMessage { text, author, .. } => Some((text.clone(), author.as_ref().map(|person| person.user_id.clone()))),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let ready = || matches!(&manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().engine, Engine::CodexStdio(engine) if engine.ready && !engine.blocked && !engine.exited);
+    if case.starts_with("phone-") {
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+        let actor: crate::local_runtime::mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+        manager.mobile.register(&lifetime, actor.clone(), "connection", "driver").unwrap();
+        let permit = manager.mobile.permit(&actor, "connection", "stdio-owner", "tab").unwrap();
+        // As `mobile::execute` sends it: who it is from, then what was typed.
+        let typed = if case == "phone-compact" { "/compact" } else { "from the phone" };
+        let agent = format!("[TerminalX Effective User v1] {{\"authority\":\"host\",\"userId\":\"driver\"}}\n{typed}");
+        if matches!(case, "phone-revoked" | "phone-reconcile-race") { std::fs::write(bin.join("hold"), "").unwrap(); }
+        let grant = permit.grant.clone();
+        manager.send_mobile("stdio-owner", "tab", agent.clone(), typed.into(), Vec::new(), permit).unwrap();
+        match case {
+            "phone-reconcile-race" => {
+                // A phone's reconcile holds its grant, then reads the tab
+                // (`mobile::execute`). The writer, reaching that phone's
+                // prompt meanwhile, must wait for the grant without holding
+                // the tab, or neither can go on.
+                let (held_tx, held_rx) = mpsc::channel();
+                let (read_tx, read_rx) = mpsc::channel();
+                let reconciling = manager.clone();
+                let reconciler = std::thread::spawn(move || {
+                    let _held = grant.enter().unwrap();
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    read_tx.send(reconciling.load_events("stdio-owner", "tab").map(|_| ())).unwrap();
+                });
+                held_rx.recv_timeout(WAIT).unwrap();
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                read_rx.recv_timeout(WAIT).expect("a phone reconcile and the native writer deadlocked").unwrap();
+                reconciler.join().unwrap();
+                idle_after(4);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], agent.as_str());
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+            "phone-input" => {
+                idle_after(4);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume", "turn/start"]);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], agent.as_str(), "the agent is told who the prompt is from");
+                assert_eq!(users(), [("from the phone".to_owned(), None)]);
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+            "phone-compact" => {
+                idle_after(4);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume", "thread/compact/start"]);
+                assert!(users().is_empty() && ended().is_empty(), "a compaction is no user message or turn (#524/#566)");
+            }
+            _ => {
+                manager.mobile.revoke_device(&actor, "driver").unwrap();
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                idle_after(3);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume"], "a revoked phone's prompt is not written");
+                assert_eq!(ended(), [TurnStatus::Aborted]);
+                assert!(ready(), "the connection stays usable");
+                assert_eq!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().recovery, None, "a withdrawn prompt is not offered back");
+            }
+        }
+    } else {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut share = crate::local_sharing::tests::fixture();
+        let link = share.links.get_mut("link").unwrap();
+        link.settings.expires_at = now + 3_600_000;
+        link.credential_expires_at = now + 3_600_000;
+        let mut guest = crate::local_sharing::tests::guest("guest-connection", "alice");
+        guest.verified_until = now + 3_600_000;
+        let person = guest.person.clone();
+        share.join(guest, now).unwrap();
+        let permit = share.write_permit("guest-connection", "tab").unwrap();
+        manager.sharing.lock().unwrap().sessions.insert("stdio-owner".into(), share);
+        match case {
+            "share-input" => {
+                manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
+                idle_after(4);
+                assert_eq!(last_frame()["params"]["input"][0]["text"], "from a guest");
+                assert_eq!(users(), [("from a guest".to_owned(), Some("alice".to_owned()))]);
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+            "share-ended" => {
+                std::fs::write(bin.join("hold"), "").unwrap();
+                manager.send_shared("stdio-owner", "tab", "from a guest".into(), person, permit).unwrap();
+                manager.sharing.lock().unwrap().sessions.remove("stdio-owner");
+                std::fs::remove_file(bin.join("hold")).unwrap();
+                idle_after(3);
+                assert_eq!(methods(), ["initialize", "initialized", "thread/resume"], "a guest of an ended share sends nothing");
+                assert_eq!(ended(), [TurnStatus::Aborted]);
+                assert!(ready(), "the connection stays usable");
+                assert_eq!(manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().recovery, None, "a withdrawn prompt is not offered back");
+            }
+            _ => {
+                manager.send("stdio-owner", "tab", "from the host".into(), Vec::new()).unwrap();
+                idle_after(4);
+                assert_eq!(users(), [("from the host".to_owned(), Some("host".to_owned()))], "the host's message says it is theirs");
+                assert_eq!(ended(), [TurnStatus::Ok]);
+            }
+        }
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+fn rt_bound(manager: &SessionManager) -> bool {
+    manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
+}
+
+/// Stands in for Codex at a tab's first launch: says the version it is told
+/// to, offers `--no-daemon` like a terminal-capable Codex, and records how it
+/// was started each time.
+/// A cloud workspace's grant snapshot and configuration for the
+/// `cloud-launch` case, as `cloud_grants` and `cloud_config` would give a
+/// terminal launch: a credential file, a variable, one to clear, a route with
+/// its own model and provider, and developer instructions.
+pub(super) fn cloud_stand_in() -> Option<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
+    if std::env::var(CASE).as_deref() != Ok("cloud-launch") { return None; }
+    let mut grant = crate::cloud_grants::LaunchGrant::default();
+    grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
+    grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), ..Default::default() });
+    grant.codex_auth = Some(Some(store::root().unwrap().join("grant-auth.json")));
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
+    Some((grant, config))
+}
+
+#[test]
+fn shell_quoted_launch_arguments_come_back_as_the_words_a_shell_would_pass() {
+    // How `cloud_config` and `cloud_grants` quote for a terminal launch.
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let instructions = "developer_instructions=\"Be brief.\nIt's fine.\"";
+    let server = "mcp_servers.docs={ url = \"https://example.test/mcp\", env_vars = [\"MCP_HEADER_SECRET_0\"] }";
+    let text = format!(" -c {} -c {}", quote(instructions), quote(server));
+    assert_eq!(shell_words(&text), ["-c", instructions, "-c", server]);
+    assert!(shell_words("").is_empty());
+    assert_eq!(shell_words(r#"a  ''  "b \"c\"" d\ e"#), ["a", "", "b \"c\"", "d e"]);
+}
+
+#[test]
+fn a_cloud_launch_takes_the_route_configuration_and_credential_like_a_terminal_one() {
+    let mut grant = crate::cloud_grants::LaunchGrant::default();
+    grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
+    grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), notice: Some("The route is not answering".into()), ..Default::default() });
+    let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: " -c 'developer_instructions=\"brief\"'".into() };
+    let native = native_launch(&grant, &config, " -c 'mcp_servers.computer={}'");
+    assert_eq!(native.args, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "-c", "mcp_servers.computer={}", "app-server", "--listen", "stdio://"]);
+    // The grant's variables come last, so a credential always wins.
+    assert_eq!(native.env, [("NODE_ENV".to_string(), "test".to_string()), ("CODEX_API_KEY".to_string(), "grant-secret".to_string())]);
+    assert_eq!(native.unset, ["OPENAI_API_KEY"]);
+    assert_eq!((native.model.as_deref(), native.notice.as_deref()), (Some("routed-model"), Some("The route is not answering")));
+
+    // Outside a workspace: the app server and nothing else.
+    let local = native_launch(&Default::default(), &Default::default(), "");
+    assert_eq!(local.args, ["app-server", "--listen", "stdio://"]);
+    assert!(local.env.is_empty() && local.unset.is_empty() && local.model.is_none());
+}
+
+/// Stands in for Codex in a cloud workspace: records the arguments and the
+/// variables it was started with, starts a thread and plays one turn.
+const CLOUD_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+printf '%s\n' "$@" > "$here/argv"
+printf 'CODEX_HOME=%s\nCODEX_API_KEY=%s\nNODE_ENV=%s\nOPENAI_API_KEY=%s\n' "${CODEX_HOME-}" "${CODEX_API_KEY-}" "${NODE_ENV-}" "${OPENAI_API_KEY-unset}" > "$here/env"
+while read -r line; do
+  printf '%s\n' "$line" >> "$here/received"
+  id=$(printf '%s' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$id"
+      printf '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-%s"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-%s","status":"completed"}}}\n' "$id" ;;
+  esac
+done
+"#;
+
+/// Native Codex in a cloud workspace (#644): started with the workspace's
+/// route, configuration and credential in a hook-free home, the variable the
+/// grant clears cleared, and the route's model; its thread is then picked up
+/// by the terminal engine when the reader opens the terminal view.
+fn cloud_launch_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    std::env::set_var("CODEX_HOME", root.join("user-codex"));
+    std::env::set_var("OPENAI_API_KEY", "inherited");
+    std::fs::write(root.join("grant-auth.json"), "{\"workspace\":true}").unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), CLOUD_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
+    let events = || -> Vec<AgentEvent> { store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default() };
+    let until = Instant::now() + WAIT;
+    while !events().iter().any(|event| matches!(event.payload, Payload::TurnCompleted { .. })) {
+        assert!(Instant::now() < until, "no turn: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let argv: Vec<String> = std::fs::read_to_string(bin.join("argv")).unwrap().lines().map(str::to_owned).collect();
+    assert_eq!(argv, ["-c", "model_provider=\"route\"", "-c", "developer_instructions=\"brief\"", "app-server", "--listen", "stdio://"]);
+    let native = root.join("codex-native");
+    let env = std::fs::read_to_string(bin.join("env")).unwrap();
+    assert_eq!(env.lines().collect::<Vec<_>>(), [format!("CODEX_HOME={}", native.display()).as_str(), "CODEX_API_KEY=grant-secret", "NODE_ENV=test", "OPENAI_API_KEY=unset"]);
+    assert_eq!(std::fs::read_link(native.join("auth.json")).unwrap(), root.join("grant-auth.json"), "the workspace's credential");
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(native.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks, json!({"hooks": {}}), "no Raccoon hook runs for an app-server session");
+    let received: Vec<serde_json::Value> = std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let started = received.iter().find(|frame| frame["method"] == "thread/start").expect("thread/start");
+    assert_eq!(started["params"]["model"], "routed-model", "the route's model, not the tab's");
+
+    // The terminal view: Codex's own terminal resumes the thread, whose rollout
+    // the app server kept in the native home.
+    let day = native.join("sessions/2026/11/01");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join("rollout-2026-11-01T00-00-00-thread-1.jsonl"), "{}\n").unwrap();
+    std::fs::write(bin.join("codex"), FIRST_LAUNCH_CODEX).unwrap();
+    std::fs::write(bin.join("version"), "codex-cli 0.166.0\n").unwrap();
+    manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap();
+    manager.ensure_started("stdio-owner", "tab").unwrap();
+    assert!(root.join("codex/sessions/2026/11/01/rollout-2026-11-01T00-00-00-thread-1.jsonl").is_file(), "adopted into the terminal engine's home");
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default();
+    let until = Instant::now() + WAIT;
+    while !launches().lines().any(|line| line.starts_with("--no-daemon") && line.contains("resume thread-1")) {
+        assert!(Instant::now() < until, "the terminal Codex did not resume the thread: {:?}", launches());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
+const FIRST_LAUNCH_CODEX: &str = r#"#!/bin/sh
+here=$(dirname "$0")
+printf '%s\n' "$*" >> "$here/launches"
+case "$1" in
+  --version) cat "$here/version"; exit 0 ;;
+  --help) printf '%s\n' "Usage: codex [OPTIONS]" "      --no-daemon  Keep this session to itself"; exit 0 ;;
+  app-server) exit 0 ;;
+esac
+exec sleep 10
+"#;
+
+/// Native Codex is tried, not required (#644): a tab that has not started its
+/// thread runs on the terminal engine when this Codex is older than the app
+/// server's minimum, decided when it is first shown or sent to, with no error.
+fn first_launch_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    // The terminal engine's home mirrors the reader's Codex home: a stand-in's.
+    std::env::set_var("CODEX_HOME", root.join("user-codex"));
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), FIRST_LAUNCH_CODEX).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("version"), if case == "native-supported-start" { "codex-cli 0.166.0\n" } else { "codex-cli 0.163.0\n" }).unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(),
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"auto", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)),
+        Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    if case == "native-fallback-send" {
+        manager.send("stdio-owner", "tab", "hello".into(), Vec::new()).unwrap();
+    } else {
+        manager.ensure_started("stdio-owner", "tab").unwrap();
+    }
+    let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default();
+    let transport = index::get("stdio-owner").unwrap().tab("tab").unwrap().transport;
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    if case == "native-supported-start" {
+        assert_eq!(transport, AgentTransport::ExperimentalCodexStdio);
+        assert!(matches!(rt.lock().unwrap().engine, Engine::None), "showing the tab starts nothing");
+        assert_eq!(launches().lines().collect::<Vec<_>>(), ["--version"]);
+        return;
+    }
+    assert_eq!(transport, AgentTransport::Pty, "{case}: an older Codex runs on the terminal engine");
+    assert!(matches!(rt.lock().unwrap().engine, Engine::Cli(_)), "{case}: started as a terminal tab");
+    let until = Instant::now() + WAIT;
+    while !launches().lines().any(|line| line.starts_with("--no-daemon")) {
+        assert!(Instant::now() < until, "{case}: the terminal Codex was not launched: {:?}", launches());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default();
+    assert!(!events.iter().any(|event| matches!(event.payload, Payload::Error { .. })), "{case}: {:?}", events.iter().map(|event| &event.payload).collect::<Vec<_>>());
+    manager.stop("stdio-owner", "tab").unwrap();
+}
+
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
+    if matches!(case.as_str(), "resume-thread" | "resume-other-thread" | "settings" | "to-terminal") { return resume_fixture(&case); }
+    if matches!(case.as_str(), "phone-input" | "phone-compact" | "phone-revoked" | "phone-reconcile-race" | "share-input" | "share-ended" | "host-while-shared") { return remote_input_fixture(&case); }
+    if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart") { return continuation_fixture(&case); }
+    if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
+    if case == "cloud-launch" { return cloud_launch_fixture(); }
     let _home = store::temp_home();
     let root = store::root().unwrap();
     let session: index::SessionEntry = serde_json::from_value(json!({
@@ -75,7 +695,7 @@ fn child_fixture() {
     let (release, gate) = mpsc::channel();
     let (settled, done) = mpsc::channel();
     let mut rt = rt_arc.lock().unwrap();
-    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into());
+    let mut engine = Stdio::new(root.to_string_lossy().into_owned(), String::new(), None, "auto".into(), None);
     let frame = if matches!(case.as_str(), "expired-input-pipe" | "stale-control") {
         engine.thread = Some("thread".into());
         engine.ready = true;
@@ -164,7 +784,7 @@ fn child_fixture() {
         drop(rt);
         // There is deliberately no child: a stale, entirely unsent control
         // must retire before touching stdin and without failing the owner.
-        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame).unwrap();
+        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, None).unwrap();
         assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(e) if !e.blocked));
         return;
     }
@@ -178,7 +798,7 @@ fn child_fixture() {
         r#"printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"unbound"}}'"#
     };
     let args = vec!["-c".into(), script.into()];
-    let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[] }, sink).unwrap();
+    let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
     rt.child_pid = Some(child.pid); rt.child = Some(child.clone());
     drop(rt);
     observed.recv_timeout(WAIT).unwrap();
@@ -191,7 +811,7 @@ fn child_fixture() {
         let (blocked, full_pipe) = mpsc::channel();
         let writer = std::thread::spawn(move || {
             FULL_PIPE.with(|hook| *hook.borrow_mut() = Some(blocked));
-            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame)).unwrap();
+            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame, None)).unwrap();
         });
         full_pipe.recv_timeout(WAIT).unwrap();
         // Buffered stdout and Stop must both advance despite the full stdin.

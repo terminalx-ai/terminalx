@@ -117,6 +117,31 @@ pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
     Ok(())
 }
 
+/// Settings → Experimental → Native Codex (#644): a Codex conversation a
+/// person starts goes through Codex's app server instead of its terminal,
+/// where the app server can serve it. Not an issue's or an automation's,
+/// which run on the terminal engine, nor one in Ask every time, which the app
+/// server cannot represent. A Codex older than its minimum is caught at the
+/// tab's first launch (`SessionManager::codex_stdio_falls_back`).
+pub(crate) fn prefer_native_codex(tab: &mut NewTab, background: bool) {
+    if crate::store::settings::load().experimental.native_codex { native_codex(tab, background) }
+}
+
+/// The rules alone, for a request that carries the preference itself: a cloud
+/// workspace's `session.create` / `session.addTab` from the desktop.
+pub(crate) fn native_codex(tab: &mut NewTab, background: bool) {
+    let mode = index::permission_mode_or_default(tab.permission_mode.as_deref());
+    if tab.harness == "codex" && !background && crate::harness::codex::stdio::Stdio::validate_mode(&mode).is_ok() {
+        tab.transport = index::AgentTransport::ExperimentalCodexStdio;
+    }
+}
+
+/// [`prefer_native_codex`] for a session's first tab.
+pub(crate) fn prefer_native_codex_session(req: &mut NewSession) {
+    let background = req.issue.is_some() || req.automation.is_some();
+    if let Some(tab) = &mut req.tab { prefer_native_codex(tab, background) }
+}
+
 fn validate_transport(tab: &NewTab) -> Result<()> {
     if tab.transport == index::AgentTransport::ExperimentalCodexStdio {
         if tab.harness != "codex" { return Err("Experimental stdio is available only for new Codex sessions.".into()); }
@@ -1123,6 +1148,33 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_codex_is_for_codex_conversations_a_person_starts_in_a_mode_it_can_serve() {
+        let tab = |harness: &str, mode: Option<&str>| NewTab { transport: Default::default(), harness: harness.into(), model: String::new(), effort: None, permission_mode: mode.map(Into::into) };
+        let chosen = |mut tab: NewTab, background: bool| { native_codex(&mut tab, background); tab.transport };
+        for mode in [None, Some("auto"), Some("plan"), Some("acceptEdits"), Some("bypassPermissions")] {
+            assert_eq!(chosen(tab("codex", mode), false), index::AgentTransport::ExperimentalCodexStdio, "{mode:?}");
+        }
+        assert_eq!(chosen(tab("codex", Some("manual")), false), index::AgentTransport::Pty, "Ask every time stays on the terminal");
+        assert_eq!(chosen(tab("codex", None), true), index::AgentTransport::Pty, "issues and automations stay on the terminal");
+        assert_eq!(chosen(tab("claude", None), false), index::AgentTransport::Pty);
+
+        let _home = store::temp_home();
+        let mut off = tab("codex", None);
+        prefer_native_codex(&mut off, false);
+        assert_eq!(off.transport, index::AgentTransport::Pty, "off unless turned on");
+        let mut settings = store::settings::load();
+        settings.experimental.native_codex = true;
+        store::settings::save(&settings).unwrap();
+        let mut issue = NewSession { project_path: "/p".into(), title: None, use_worktree: false, worktree_name: None, base_ref: None, checkout_branch: None, on_main: true, issue: None, automation: None, cwd: None, tab: Some(tab("codex", None)) };
+        prefer_native_codex_session(&mut issue);
+        assert_eq!(issue.tab.as_ref().unwrap().transport, index::AgentTransport::ExperimentalCodexStdio);
+        issue.tab = Some(tab("codex", None));
+        issue.issue = Some(IssueRef { provider: "github".into(), id: "1".into(), identifier: "#1".into(), title: "t".into(), url: "u".into() });
+        prefer_native_codex_session(&mut issue);
+        assert_eq!(issue.tab.unwrap().transport, index::AgentTransport::Pty);
+    }
 
     /// A quick chat is kept while the reader has a shell open in it. The
     /// shell that takes an exited agent's place is in the tab's own pane,

@@ -47,6 +47,18 @@ pub struct Settings {
     /// None follows the computer's own name (`pairing::MachineName`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
+    /// Settings → Experimental. Tabs are made by the Rust side, which reads
+    /// these when it makes one, so they live here.
+    pub experimental: ExperimentalSettings,
+}
+
+/// Features that are on only when the reader turns them on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExperimentalSettings {
+    /// New Codex conversations a person starts go through Codex's app server
+    /// (#644) where it can serve them (`session_ops::prefer_native_codex`).
+    pub native_codex: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -219,6 +231,7 @@ impl Default for Settings {
             merged_cleanup: MergedCleanupSettings::default(),
             work_status: WorkStatusSettings::default(),
             machine_name: None,
+            experimental: ExperimentalSettings::default(),
         }
     }
 }
@@ -267,6 +280,15 @@ mod tests {
         }
         let future: Settings = serde_json::from_str(r#"{"quitBehavior":"new-policy"}"#).unwrap();
         assert_eq!(future.quit_behavior, Some(QuitBehavior::KeepRunning));
+    }
+
+    #[test]
+    fn experimental_features_stay_off_until_turned_on() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(!legacy.experimental.native_codex);
+        let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
+        assert!(on.experimental.native_codex);
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true}));
     }
 
     #[test]

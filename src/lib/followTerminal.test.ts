@@ -468,6 +468,48 @@ describe("terminal view metadata lifetime", () => {
     window.hook.unmount();
   });
 
+  it("moves an experimental Codex tab to Codex's terminal when its terminal view is opened, and not when it is shown", async () => {
+    const window = await populated();
+    const calls: string[] = [];
+    bus.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "tab_to_terminal" || command === "ensure_tab_started") { calls.push(command); return null; }
+      if (command === "tab_pane") { calls.push(command); return window.info; }
+      return backend(command, args);
+    });
+    const experimental = { ...session.tabs[0], transport: "experimentalCodexStdio" as const };
+    await window.tabViews.startTabAgent(session, experimental);
+    expect(calls).toEqual(["ensure_tab_started", "tab_pane"]);
+    calls.length = 0;
+    await window.tabViews.enterTerminalView(session, experimental);
+    expect(calls).toEqual(["tab_to_terminal", "ensure_tab_started", "tab_pane", "tab_pane"]);
+    window.hook.rerender();
+    expect(window.hook.result.current.views.first).toBe("terminal");
+    window.hook.unmount();
+  });
+
+  it("asks a cloud workspace to move only a native Codex tab when its terminal view is opened, and stays on the chat when refused", async () => {
+    const window = await populated();
+    const toTerminal = vi.fn(async (_tabId: string) => undefined);
+    const native = { ...session.tabs[0], id: "cloud-native", transport: "experimentalCodexStdio" as const };
+    const plain = { ...session.tabs[0], id: "cloud-plain" };
+    await window.tabViews.enterTerminalView(session, plain, { remote: true, toTerminal });
+    expect(toTerminal).not.toHaveBeenCalled();
+    await window.tabViews.enterTerminalView(session, native, { remote: true, toTerminal });
+    expect(toTerminal).toHaveBeenCalledWith("cloud-native");
+    window.hook.rerender();
+    expect(window.hook.result.current.views).toMatchObject({ "cloud-plain": "terminal", "cloud-native": "terminal" });
+
+    // A viewer, or a turn still running: the runtime says no, and the tab keeps its chat.
+    const refused = { ...native, id: "cloud-refused" };
+    toTerminal.mockRejectedValueOnce(new Error("Wait for Codex to finish this turn, or interrupt it, before opening its terminal."));
+    await window.tabViews.enterTerminalView(session, refused, { remote: true, toTerminal });
+    window.hook.rerender();
+    expect(window.hook.result.current.views["cloud-refused"]).toBeUndefined();
+    expect(window.hook.result.current.errors["cloud-refused"]).toContain("finish this turn");
+    expect(window.hook.result.current.switching["cloud-refused"]).toBe(false);
+    window.hook.unmount();
+  });
+
   it("does not restore a start error or switching state after the tab is removed", async () => {
     const window = await populated();
     let reject!: (error: Error) => void;

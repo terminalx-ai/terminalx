@@ -22,9 +22,34 @@
   from the cell, so a phone stops offering Pair for a Mac it cannot reach.
   Accept a cell's `account-pairing-changed` hint, which polls at once and then
   every two seconds for a minute. (#671)
+- Notice a Relay control connection that died without a close, after a network
+  change, a new address, a VPN change or sleep. Reconnect within 2 seconds of an
+  address change or wake, or after 45 seconds of silence, instead of showing
+  Connected until TerminalX restarts. Record each phone's Relay connection, and
+  how far it got, in `relay-diagnostics.json`. Run paired-device calls to the
+  local runtime off the workers Relay runs on, so a stalled runtime cannot stop
+  Relay reconnecting. (#666)
 
 ### Mobile
 
+- Start sessions from the phone as the Mac's new-session view does: a project's
+  session in a new worktree (named for the work) or on its checkout, or a quick
+  chat, with the agent, model, effort, permission mode, title and first
+  message. Codex sessions follow Settings → Experimental → Native Codex. A
+  retry after a lost reply opens the first session instead of a second one.
+  Projects reach the phone by an id, never their path. Read-only and revoked
+  phones cannot start sessions.
+- Settings → This Mac on the phone turns Native Codex on or off for the Mac's
+  next Codex sessions; the Mac's own Settings follows it while open.
+- Open a tab's terminal view on the phone, as on the desktop. The agent's own
+  screen is emulated on the phone with the desktop's terminal (xterm.js) at the
+  size the Mac draws it, so full-screen CLIs like Codex and Claude Code show as
+  they do there. Type into it directly or send text whole, with Esc, Tab, Ctrl,
+  arrow and Enter keys sent as the desktop sends them. While the phone types,
+  desktop typing waits, and leaving the view gives it back. Opening the terminal
+  starts the tab's agent if it is not running, and moves a native Codex tab to
+  Codex's own terminal on the same conversation, as the desktop does. Shown only
+  for Macs that support it.
 - Switch to Sessions when tapping a connected machine on iPhone, preserving its
   active connection and session list. (#653)
 - Sending a message or worktree note again after the connection dropped no
@@ -32,6 +57,19 @@
   goes under one id, and a Mac that already has it answers as it did the first
   time, so the phone reports it sent and clears the box. Older Macs behave as
   before. (#675)
+- Control a session from the phone as from the desktop: Stop and Interrupt a
+  working agent; Retry safely, Resend last prompt, Continue here and Stop from
+  the recovery banner; change the model, effort and permission mode with the
+  desktop's choices, pending states and Bypass confirmation; and Continue in
+  new session with a chosen agent, settings and context. A read-only phone sees
+  the settings but cannot change them, and each control is checked against the
+  phone's access on the Mac. Shown only for a Mac that offers them.
+- Report each connection path's failure as it happens. A Relay refusal shows on
+  the Sessions card while LAN addresses are still pending, and LAN addresses that
+  have not answered get 3 more seconds once Relay has failed, not 15. Log
+  cancelled attempts and Relay director errors, race the paths again when the
+  phone changes network, and wait 1 second, rising, before reconnecting a
+  connection that keeps dropping straight after connecting. (#666)
 
 ### Organizations
 
@@ -75,6 +113,38 @@
   owned-stdio connection for explicitly created new Codex sessions, with confirmed
   compaction start/completion events and retained interruption status. Existing
   PTY sessions keep their current behavior. (#644)
+- Experimental Codex sessions continue after the app restarts, after Stop or
+  after a lost connection: the next message resumes the same Codex thread, with
+  nothing replayed, and **Retry safely** works for them. They accept Codex 0.164.0
+  or newer instead of exactly 0.164.0. (#644)
+- Change the model, effort or permission mode of an experimental Codex session
+  instead of creating a new one. Model and effort apply from the next turn; a
+  permission mode is taken between turns by resuming the thread under it. (#644)
+- Opening the terminal view of an experimental Codex session moves it to Codex's
+  own terminal interface on the same thread, instead of an empty terminal. The
+  chat keeps its history without repeating it; the move is one-way and waits for
+  a running turn to finish. (#644)
+- Message an experimental Codex session from a paired phone or as a guest or host
+  of a shared session, including `/compact` from the phone, instead of being
+  refused as local-only. Each message is checked against its sender's access when
+  it is delivered, as for other agents; one whose access ended is not sent. (#644)
+- Continue in New Session can hand off to an experimental Codex session. Delivery
+  is confirmed once Codex starts the handoff's turn. A handoff, or any prompt,
+  that Codex never took because it failed or was stopped first is offered back
+  with **Resend last prompt**, after a restart too, and is never sent again on
+  its own. (#644)
+- Add Settings → Experimental with a **Native Codex** switch, off by default. When
+  it is on, new Codex sessions and tabs started from the app or the `terminalx`
+  command line connect to Codex directly, for reliable compaction status. Sessions
+  from issues, automations and Ask every time keep the terminal.
+  A tab whose Codex is older than 0.164.0 when it first starts switches to the
+  terminal and sends as usual, with no error. Existing sessions are unchanged. (#644)
+- Native Codex in cloud workspaces: with the switch on, Codex sessions and tabs
+  the app starts in an existing workspace connect to Codex directly too. Codex
+  signs in with the workspace's credential and takes the creator's route and the
+  workspace's variables, secrets, instructions and MCP servers, in a home of its
+  own where no TerminalX hook runs; sign-in problems are reported as for other
+  sessions, and the terminal view moves the tab as on a Mac. (#644)
 
 ### Status bar
 
@@ -110,6 +180,20 @@
 
 ### Issue pipelines
 
+- Start a session from a GitHub or Linear issue with **Resolve conflicts
+  automatically** and **Merge when green** on: from the Issues page, an issue
+  picked in New Session, the command palette, and `terminalx sessions create
+  --issue` without `--auto-merge` or `--no-auto-merge`. Each launch can still
+  turn either off. Merge stays off where a person does the merge, where the
+  pipeline is off or unavailable, and in a cloud workspace. A merge still needs
+  the reviewed commit with its checks passed, and protected categories still
+  hold it. Other sessions start with both off, as before. In a project's
+  **Issue pipeline…** settings, each default is now **From issues**, **All
+  sessions** or **Off**, and a project set to Off keeps its issue sessions off.
+  A switch an older version saved as off whenever another setting was saved is
+  read once as **From issues**; one an older version saves after that reads as
+  Off. Continuing a session keeps its pipeline's switches as they are, and
+  starting an issue again takes the switches its pipeline holds. (#700)
 - When a pipeline's pull request is merged or closed, or the pipeline is
   stopped, stop the idle agents of its reviewer and conflict resolver (and,
   after a merge or close, its author), with the background commands and watches

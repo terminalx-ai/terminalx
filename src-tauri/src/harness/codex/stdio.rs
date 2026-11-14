@@ -1,6 +1,8 @@
 //! Explicitly experimental, single-owner stdio protocol. No process or store I/O.
-//! Contracts/emitter ordering are pinned to Codex 0.164.0. The session manager
-//! fences every action by the exact child launch and is the only final writer.
+//! Contracts/emitter ordering were verified on Codex 0.164.0; later releases
+//! only add optional fields to the stable v2 surface used here (checked through
+//! 0.166.0). The session manager fences every action by the exact child launch
+//! and is the only final writer.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use serde_json::{json, Value};
 use crate::events::*;
 use super::owned_transport::{self, Observation};
 
-pub const VERSION: &str = "0.164.0";
+pub const MIN_VERSION: &str = "0.164.0";
 const MAX_PENDING: usize = 32;
 const MAX_ASKS: usize = 64;
 
@@ -22,6 +24,8 @@ pub(crate) enum Action {
     Lifecycle(Observation),
     /// A manual compact command ends without becoming a user/model turn.
     CompactEnded,
+    /// Codex took the latest prompt: its turn was started or reported.
+    Accepted,
 }
 
 /// A queued frame retains the authority that produced it until the last byte.
@@ -31,9 +35,12 @@ pub(crate) struct Outbound {
     validity: WriteValidity,
 }
 #[derive(Debug)]
-enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool }, Reply(String) }
+enum WriteValidity { Connection, Request { id: u64, discard_if_stale: bool, prompt: bool }, Reply(String) }
 impl Outbound {
     pub(crate) fn connection(line: String) -> Self { Self { line, validity: WriteValidity::Connection } }
+    /// The frame that hands Codex a prompt: a turn or a manual compaction.
+    /// Its sender's authority is checked before its first byte is written.
+    pub(crate) fn delivers_prompt(&self) -> bool { matches!(self.validity, WriteValidity::Request { prompt: true, .. }) }
     pub(crate) fn can_discard_unsent(&self) -> bool {
         matches!(self.validity, WriteValidity::Reply(_) | WriteValidity::Request { discard_if_stale: true, .. })
     }
@@ -66,6 +73,27 @@ pub struct Stdio {
     mode: String,
     /// Only the initial, explicitly submitted local input. Never replayed.
     first: Option<(String, Vec<(String, String)>)>,
+    /// The tab's earlier thread, continued with `thread/resume` instead of a
+    /// new `thread/start`. Its turns are not requested back.
+    resume: Option<String>,
+    /// The latest prompt has not been taken yet: neither its `turn/start`
+    /// result nor its `turn/started` has arrived. Failure leaves it as it was.
+    awaiting: bool,
+    /// The owner has already reported this connection's failure.
+    failed: bool,
+    /// A cloud workspace creator's route (`cloud_grants::RouteLaunch`) serves
+    /// the model it names, whatever the tab asks for.
+    routed: bool,
+}
+
+/// Whether `codex --version` reports MIN_VERSION or a later release.
+pub(crate) fn supported(version: &str) -> bool {
+    let release = |text: &str| -> Option<(u64, u64, u64)> {
+        let mut parts = text.split(|c: char| !c.is_ascii_digit()).filter(|part| !part.is_empty()).map(str::parse);
+        Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
+    };
+    let Some(found) = version.trim().strip_prefix("codex-cli ").and_then(release) else { return false };
+    release(MIN_VERSION).is_some_and(|min| found >= min)
 }
 
 impl Stdio {
@@ -75,23 +103,38 @@ impl Stdio {
         Ok(())
     }
 
-    pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String) -> Self {
+    pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
         Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
-            seen_text: HashSet::new(), cwd, model, effort, mode, first: None }
+            seen_text: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
     }
+
+    /// Start on, and keep, the model a cloud route names (PRO-18): the route's
+    /// provider serves that model, not the account's list.
+    pub(crate) fn route_model(&mut self, model: String) {
+        self.model = model;
+        self.routed = true;
+    }
+
+    /// A new model or effort reaches Codex with the next turn it starts;
+    /// `turn/start` takes both for that turn and the ones after it.
+    pub(crate) fn set_model(&mut self, model: &str) {
+        if !self.routed { self.model = model.to_owned(); }
+    }
+    pub(crate) fn set_effort(&mut self, effort: Option<&str>) { self.effort = effort.map(str::to_owned); }
 
     fn request(&mut self, method: &str, params: Value, kind: Request) -> Result<Action> {
         ensure!(!self.exited && !self.blocked, "Experimental Codex connection is no longer writable");
         ensure!(self.pending.len() < MAX_PENDING, "Too many pending Codex requests");
         self.next_id = self.next_id.checked_add(1).ok_or_else(|| anyhow::anyhow!("request IDs exhausted"))?;
         self.pending.insert(self.next_id, Pending { kind, epoch: self.turn_epoch, turn: self.turn.clone() });
-        Ok(Action::Write(Outbound { line: json!({"id": self.next_id, "method": method, "params": params}).to_string(), validity: WriteValidity::Request { id: self.next_id, discard_if_stale: matches!(kind, Request::Interrupt) } }))
+        Ok(Action::Write(Outbound { line: json!({"id": self.next_id, "method": method, "params": params}).to_string(), validity: WriteValidity::Request { id: self.next_id, discard_if_stale: matches!(kind, Request::Interrupt), prompt: matches!(kind, Request::Turn | Request::Compact) } }))
     }
 
     pub(crate) fn start(&mut self, text: String, images: Vec<(String, String)>) -> Result<Vec<Action>> {
         ensure!(self.next_id == 0, "Codex handshake already started");
         self.manual_compact = text.trim() == "/compact";
+        self.awaiting = !self.manual_compact;
         self.first = Some((text, images));
         Ok(vec![self.request("initialize", json!({"clientInfo": {"name": "terminalx_experimental", "title": "TerminalX experimental stdio", "version": env!("CARGO_PKG_VERSION")}, "capabilities": {"experimentalApi": false}}), Request::Initialize)?])
     }
@@ -102,13 +145,16 @@ impl Stdio {
         if text.trim() == "/compact" {
             ensure!(images.is_empty(), "Compaction does not accept images");
             self.manual_compact = true;
+            self.awaiting = false;
             return Ok(vec![self.request("thread/compact/start", json!({"threadId": thread}), Request::Compact)?]);
         }
         ensure!(!text.trim_start().starts_with('/'), "Only /compact is supported in experimental Codex stdio");
         self.manual_compact = false;
+        self.awaiting = true;
         let mut input = vec![json!({"type": "text", "text": text})];
         input.extend(images.into_iter().map(|(mime, data)| json!({"type": "image", "url": format!("data:{mime};base64,{data}")})));
-        Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "effort": self.effort}), Request::Turn)?])
+        let model = if self.model.is_empty() { None } else { Some(&self.model) };
+        Ok(vec![self.request("turn/start", json!({"threadId": thread, "input": input, "model": model, "effort": self.effort}), Request::Turn)?])
     }
 
     pub(crate) fn interrupt(&mut self) -> Result<Vec<Action>> {
@@ -168,9 +214,28 @@ impl Stdio {
         }
     }
 
+    /// Whether Codex has yet to take the latest prompt: one that fails now
+    /// was never received, and is the reader's to send again.
+    pub(crate) fn unaccepted(&self) -> bool { self.awaiting }
+
+    fn accepted(&mut self) -> Option<Action> {
+        std::mem::take(&mut self.awaiting).then_some(Action::Accepted)
+    }
+
+    /// A prompt its sender may no longer give: nothing of it was written, so
+    /// its request is forgotten and the connection stays ready for the next.
+    /// It is settled as stopped, not awaited as one Codex has yet to take.
+    pub(crate) fn withdraw(&mut self, frame: &Outbound) {
+        self.retire_write(frame, false);
+        if frame.delivers_prompt() { self.manual_compact = false; self.awaiting = false; }
+    }
+
     pub(crate) fn is_manual_compact(&self) -> bool { self.manual_compact || self.first.as_ref().is_some_and(|(text, _)| text.trim() == "/compact") }
 
+    pub(crate) fn failed(&self) -> bool { self.failed }
+
     pub(crate) fn fail(&mut self) {
+        self.failed = true;
         self.blocked = true;
         self.first = None;
         self.pending.clear();
@@ -202,12 +267,22 @@ impl Stdio {
                 Request::Initialize => {
                     let (approval, sandbox) = super::stance(&self.mode);
                     let approval = if approval == super::pty::BYPASS { "never" } else { approval };
+                    let mut params = json!({"cwd": self.cwd, "model": if self.model.is_empty() { None } else { Some(&self.model) }, "approvalPolicy": approval, "sandbox": sandbox});
+                    let method = match &self.resume {
+                        Some(thread) => {
+                            params["threadId"] = json!(thread);
+                            params["excludeTurns"] = json!(true);
+                            "thread/resume"
+                        }
+                        None => "thread/start",
+                    };
                     Ok(vec![Action::Write(Outbound::connection(json!({"method":"initialized"}).to_string())),
-                        self.request("thread/start", json!({"cwd": self.cwd, "model": if self.model.is_empty() { None } else { Some(&self.model) }, "approvalPolicy": approval, "sandbox": sandbox}), Request::Thread)?])
+                        self.request(method, params, Request::Thread)?])
                 }
                 Request::Thread => {
                     let id = required(&result["thread"], "id")?;
                     ensure!(self.thread.is_none(), "Codex changed thread during initialization");
+                    ensure!(self.resume.as_ref().is_none_or(|thread| *thread == id), "Codex resumed a different thread");
                     self.thread = Some(id.clone());
                     self.ready = true;
                     let mut actions = vec![Action::ThreadReady(id)];
@@ -217,9 +292,10 @@ impl Stdio {
                 Request::Turn => {
                     let id = required(&result["turn"], "id")?;
                     // The notification owns turn lifetime; a delayed response
-                    // must not reopen a turn that already completed.
+                    // must not reopen a turn that already completed. It does
+                    // say the prompt was taken, whichever of the two is first.
                     let _ = id;
-                    Ok(Vec::new())
+                    Ok(self.accepted().into_iter().collect())
                 }
                 Request::Compact | Request::Interrupt => Ok(Vec::new()),
             };
@@ -237,6 +313,7 @@ impl Stdio {
                 self.turn = Some(required(&p["turn"], "id")?);
                 self.seen_text.clear();
                 if !self.manual_compact {
+                    out.extend(self.accepted());
                     out.push(Action::Emit(Payload::TurnStarted { model: None, provider_session_id: self.thread.clone(), prompt_seq: None, started_by: None, initiating_prompt: None }));
                 }
             }

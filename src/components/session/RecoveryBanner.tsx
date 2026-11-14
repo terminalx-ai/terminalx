@@ -1,5 +1,5 @@
 import type { RecoveryKind } from "@/types/events";
-import { RECOVERY_MESSAGES } from "@/lib/recovery";
+import { recoveryOffer } from "@/lib/recovery";
 import type { PendingAsk } from "@/lib/transcript";
 import { PermissionCard, QuestionCard } from "@/components/chat/AskCards";
 import { Button } from "@/components/ui/button";
@@ -53,14 +53,8 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   const now = useCountdownNow([kind === "usage_limit" ? limit?.resetsAt ?? null : null]);
   if (!kind && !waiting) return null;
   const reset = kind === "usage_limit" && limit ? usageLimitText(limit, now) : null;
-  const offerModels = (kind === "capacity" || kind === "usage_limit") && !asks.length;
-  // "continue" only where the turn has ended or the agent's process has gone (a send starts it again): a usage
-  // limit once its window has reset, and signed out as the step after signing in. Not on a turn still open (a
-  // timeout, or an older log's failed tool), where it would queue behind it; not when delivery is unconfirmed,
-  // since typing clears the CLI's input and the unsent prompt with it; not over a request, which it would answer.
   const limitReset = kind === "usage_limit" && limit?.resetsAt != null && limit.resetsAt <= now;
-  const offerSendContinue = !!onSendContinue && !asks.length
-    && (kind === "failed" || kind === "capacity" || kind === "disconnected" || kind === "signed_out" || limitReset);
+  const offer = recoveryOffer(kind, { asks: asks.length, limitReset, canResend: !!onResend, canSendContinue: !!onSendContinue, canSignIn: !!onSignIn });
   // Only a request to answer: the request's own card says it all, with stopping in its action bar.
   if (!kind && asks.length) {
     const stop = <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={onStop}>Stop session</Button>;
@@ -78,25 +72,23 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   return <section aria-label="Session recovery" role="status" className={placement === "composer"
     ? "mx-auto mb-2 max-h-[50vh] w-[calc(100%-2rem)] max-w-3xl shrink-0 overflow-auto rounded-xl border border-warning/30 bg-warning/10 p-3 text-xs"
     : "max-h-[50vh] shrink-0 overflow-auto border-b border-warning/30 bg-warning/10 p-3 text-xs"}>
-    <p className="font-medium">{asks.length ? "Waiting for input" : kind === "usage_limit" ? "Usage limit reached" : kind === "signed_out" ? "Signed out" : kind === "unsent" ? "Prompt not received" : kind ? "Needs attention" : "Waiting for input"}</p>
-    <p className="mt-1">{kind ? RECOVERY_MESSAGES[kind] : asks.length ? "Review the pending request to continue." : "Check the terminal for a pending decision, or stop the session."}</p>
+    <p className="font-medium">{offer.title}</p>
+    <p className="mt-1">{offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
-      {kind === "signed_out" && onSignIn && !asks.length && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
-      {/* The agent never had the prompt, so there is no turn to retry: the prompt itself is what goes again. */}
-      {kind === "unsent" && onResend && !asks.length && <Button size="sm" disabled={busy} onClick={onResend}>Resend last prompt</Button>}
-      {/* Signed out, a retry only fails again until the agent is signed in: it comes second, for after. */}
-      {kind && kind !== "usage_limit" && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && kind !== "unsent" && !asks.length && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{kind === "signed_out" ? "Retry" : "Retry safely"}</Button>}
-      {offerSendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={onSendContinue}>Continue here</Button>}
-      {offerModels && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
+      {offer.signIn && <Button size="sm" disabled={busy} onClick={onSignIn}>Sign in</Button>}
+      {offer.resend && <Button size="sm" disabled={busy} onClick={onResend}>Resend last prompt</Button>}
+      {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={() => onRetry()}>{offer.retry}</Button>}
+      {offer.sendContinue && <Button size="sm" variant="outline" disabled={busy} title={'Send "continue" to the agent in this conversation'} onClick={onSendContinue}>Continue here</Button>}
+      {offer.chooseModel && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={onStop}>Stop session</Button>
-      {kind && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}
+      {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}
     </div>
   </section>;
 }

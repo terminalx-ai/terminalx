@@ -3,7 +3,7 @@
 //! rust-v0.164.0 core/compact.rs and compact_remote_v2_installation.rs.
 use super::*;
 
-fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into()) }
+fn client() -> Stdio { Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), None) }
 
 fn wire(actions: &[Action]) -> Vec<Value> {
     actions.iter().filter_map(|a| match a { Action::Write(line) => Some(serde_json::from_str(&line.line).unwrap()), _ => None }).collect()
@@ -31,6 +31,37 @@ fn item(method: &str, thread: &str) -> String {
 }
 
 #[test]
+fn a_prompt_is_accepted_once_by_whichever_of_its_result_or_start_comes_first() {
+    let accepted = |actions: &[Action]| actions.iter().filter(|action| matches!(action, Action::Accepted)).count();
+    let (mut client, actions) = ready("hello");
+    assert!(client.unaccepted());
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 1);
+    assert!(!client.unaccepted());
+    assert_eq!(accepted(&turn(&mut client)), 0);
+
+    let (mut client, actions) = ready("hello");
+    let result = json!({"id": wire(&actions)[0]["id"], "result": {"turn": {"id": "turn"}}}).to_string();
+    let started = turn(&mut client);
+    assert!(matches!(started.first(), Some(Action::Accepted)), "taken before its turn is drawn");
+    assert_eq!(accepted(&client.handle(&result).unwrap()), 0);
+}
+
+#[test]
+fn a_refused_or_unanswered_prompt_stays_unaccepted_and_compaction_never_waits() {
+    let mut client = client();
+    client.start("hello".into(), vec![]).unwrap();
+    assert!(client.unaccepted(), "a prompt behind the handshake is not taken");
+    let (mut client, actions) = ready("hello");
+    let refused = json!({"id": wire(&actions)[0]["id"], "error": {"code": -32600, "message": "model not found"}}).to_string();
+    assert!(client.handle(&refused).is_err());
+    client.fail();
+    assert!(client.unaccepted() && client.failed(), "a refused prompt was never received");
+    let (client, _) = ready("/compact");
+    assert!(!client.unaccepted());
+}
+
+#[test]
 fn the_real_thread_is_bound_before_the_first_prompt_write() {
     let (client, actions) = ready("hello");
     assert_eq!(client.thread.as_deref(), Some("thread"));
@@ -40,6 +71,42 @@ fn the_real_thread_is_bound_before_the_first_prompt_write() {
     assert_eq!(requests[0]["method"], "turn/start");
     assert_eq!(requests[0]["params"]["threadId"], "thread");
     assert_eq!(requests[0]["params"]["input"][0]["text"], "hello");
+}
+
+#[test]
+fn a_known_thread_is_resumed_without_its_turns_before_the_first_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    let start = wire(&client.start("hello again".into(), vec![]).unwrap());
+    let initialized = wire(&client.handle(&json!({"id": start[0]["id"], "result": {}}).to_string()).unwrap());
+    assert_eq!(initialized[1]["method"], "thread/resume");
+    let params = &initialized[1]["params"];
+    assert_eq!((&params["threadId"], &params["excludeTurns"]), (&json!("thread"), &json!(true)));
+    assert_eq!((&params["approvalPolicy"], &params["sandbox"], &params["cwd"]), (&json!("on-request"), &json!("workspace-write"), &json!("/tmp/terminalx-stdio-contract")));
+    let actions = client.handle(&json!({"id": initialized[1]["id"], "result": {"thread": {"id":"thread"}}}).to_string()).unwrap();
+    assert!(matches!(actions.first(), Some(Action::ThreadReady(id)) if id == "thread"));
+    let requests = wire(&actions);
+    assert_eq!(requests[0]["method"], "turn/start");
+    assert_eq!(requests[0]["params"]["input"][0]["text"], "hello again");
+}
+
+#[test]
+fn a_resume_answered_with_another_thread_sends_no_prompt() {
+    let mut client = Stdio::new("/tmp/terminalx-stdio-contract".into(), "".into(), None, "auto".into(), Some("thread".into()));
+    client.start("hello again".into(), vec![]).unwrap();
+    client.handle(r#"{"id":1,"result":{}}"#).unwrap();
+    let error = client.handle(r#"{"id":2,"result":{"thread":{"id":"other"}}}"#).unwrap_err();
+    assert!(error.to_string().contains("different thread"), "{error:#}");
+    assert!(client.thread.is_none() && !client.ready);
+}
+
+#[test]
+fn codex_releases_from_the_verified_minimum_are_supported() {
+    for version in ["codex-cli 0.164.0", "codex-cli 0.166.0\n", "codex-cli 0.167.0-alpha.2", "codex-cli 1.0.0"] {
+        assert!(supported(version), "{version}");
+    }
+    for version in ["codex-cli 0.163.9", "codex-cli 0.99.0", "codex 0.166.0", "codex-cli", "codex-cli 0.166", ""] {
+        assert!(!supported(version), "{version}");
+    }
 }
 
 #[test]

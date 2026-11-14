@@ -172,6 +172,7 @@ function mockBackend() {
       };
     }
     if (command === "issue_details") return [...issues, ...linearIssues].find((issue) => issue.id === args?.id);
+    if (command === "issue_pipeline_set_resolve_conflicts") return pipelineOf(issues[0], { resolveConflicts: args?.value as boolean });
     if (command === "create_session") {
       const req = (args as { req: Record<string, unknown> }).req;
       return {
@@ -431,8 +432,9 @@ async function startIssue() {
 }
 
 describe("the pipeline an issue session starts", () => {
+  // A project that chose nothing for the launch switches.
   const settings = (patch: Partial<IssuePipelineSettings>): IssuePipelineSettings => ({
-    enabled: true, autoMerge: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
+    enabled: true, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
     protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
     ...patch,
   });
@@ -441,6 +443,12 @@ describe("the pipeline an issue session starts", () => {
     if (!screen.queryByRole("switch", { name: MERGE_SWITCH })) fireEvent.click(screen.getByRole("button", { name: "Session options" }));
     return screen.getByRole("switch", { name: MERGE_SWITCH });
   };
+  /** The start's two switches, conflicts first, as their row shows them. */
+  const launchSwitches = () => {
+    mergeSwitch();
+    return [screen.getByRole("switch", { name: "Resolve conflicts automatically" }), mergeSwitch()].map((toggle) => toggle.getAttribute("aria-checked"));
+  };
+  const resolveChoices = () => invoke.mock.calls.filter(([command]) => command === "issue_pipeline_set_resolve_conflicts").map(([, args]) => args);
   async function open(title = "Fix login timeout", onCreated = vi.fn()) {
     render(<IssuesView onCreated={onCreated} />);
     fireEvent.click(await screen.findByText(title));
@@ -452,17 +460,46 @@ describe("the pipeline an issue session starts", () => {
     await waitFor(() => expect(selectSession).toHaveBeenCalledWith("session-1"));
   }
 
-  it("is off for the merge by default, and carries the issue's own switch when it is turned on", async () => {
+  // #700: nobody has to remember to turn them on for each issue.
+  it.each(["github", "linear"] as const)("starts a %s issue set to resolve conflicts and merge when green", async (provider) => {
+    setPrefs({ issueProvider: provider });
     const onCreated = await open();
-    expect(mergeSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(launchSwitches()).toEqual(["true", "true"]);
     expect(screen.getByText("With automation enabled, TerminalX opens a pull request and reviews it. With merge off, it stops at Ready to merge.")).toBeTruthy();
-    fireEvent.click(mergeSwitch());
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
-    expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(issues[0])}\n\n${BRIEF}`);
+    expect(resolveChoices()).toEqual([{ id: "pipeline-1", value: true }]);
+    expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(provider === "github" ? issues[0] : linearIssues[0])}\n\n${BRIEF}`);
     // The pipeline is started for the session that exists, before the reader is taken to it.
     expect(vi.mocked(upsertSession).mock.invocationCallOrder[0]).toBeLessThan(startPipeline.mock.invocationCallOrder[0]);
     expect(startPipeline.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(selectSession).mock.invocationCallOrder[0]);
+  });
+
+  it.each(["github", "linear"] as const)("starts a %s issue with a switch turned off for that launch only", async (provider) => {
+    setPrefs({ issueProvider: provider });
+    await open();
+    fireEvent.click(mergeSwitch());
+    expect(launchSwitches()).toEqual(["true", "false"]);
+    await start();
+    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
+    expect(resolveChoices()).toEqual([{ id: "pipeline-1", value: true }]);
+    // The next issue starts with both on again, and so does this one if opened again.
+    fireEvent.click(screen.getByText("Repair session target"));
+    await screen.findByText("Second issue body.");
+    expect(launchSwitches()).toEqual(["true", "true"]);
+    fireEvent.click(screen.getByText("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    expect(launchSwitches()).toEqual(["true", "true"]);
+  });
+
+  it("keeps both off in a project that turned them off", async () => {
+    sessionStore.projects = [{ path: "/repo", name: "Raccoon", issuePipeline: settings({ autoMerge: false, resolveConflicts: false }) }];
+    await open();
+    expect(launchSwitches()).toEqual(["false", "false"]);
+    await start();
+    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
+    // The started pipeline already holds the project's off: nothing to change.
+    expect(resolveChoices()).toEqual([]);
   });
 
   it("starts each issue at the project's default, and does not carry one issue's choice to the next", async () => {
@@ -478,10 +515,13 @@ describe("the pipeline an issue session starts", () => {
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
   });
 
-  it("cannot be set to merge in a project that has a person do the merge", async () => {
-    sessionStore.projects = [{ path: "/repo", name: "Raccoon", issuePipeline: settings({ autoMerge: true, requirePerson: true }) }];
+  it.each([
+    ["left to its default", settings({ requirePerson: true })],
+    ["turned on", settings({ autoMerge: true, requirePerson: true })],
+  ])("cannot be set to merge in a project that has a person do the merge, with the switch %s", async (_, chosen) => {
+    sessionStore.projects = [{ path: "/repo", name: "Raccoon", issuePipeline: chosen }];
     await open();
-    expect(mergeSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(launchSwitches()).toEqual(["true", "false"]);
     expect(mergeSwitch().hasAttribute("disabled")).toBe(true);
     expect(screen.getByText("This project requires a person to merge.")).toBeTruthy();
     await start();
@@ -534,11 +574,11 @@ describe("the pipeline an issue session starts", () => {
     // One switch for the issue: the pipeline's own.
     expect(screen.getAllByRole("switch", { name: MERGE_SWITCH })).toHaveLength(1);
     expect(screen.getByTestId("issue-pipeline").contains(mergeSwitch())).toBe(true);
-    // The other issue has none, and offers the switch for its start.
+    // The other issue has none, and offers the switch for its start: on, whatever the first one's pipeline holds.
     fireEvent.click(screen.getByText("Repair session target"));
     await screen.findByText("Second issue body.");
     expect(screen.queryByTestId("issue-pipeline")).toBeNull();
-    expect(mergeSwitch().getAttribute("aria-checked")).toBe("false");
+    expect(mergeSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   it("starts an issue again with the choice its pipeline already holds", async () => {
@@ -546,6 +586,21 @@ describe("the pipeline an issue session starts", () => {
     await open();
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
+  });
+
+  // Its launch switches are hidden behind its pipeline's: what they default to must not come back unseen.
+  it("starts an issue again with conflict resolution as its pipeline has it, not as an issue's start defaults it", async () => {
+    pipelineStore.pipelines = [pipelineOf(issues[0], { autoMerge: false, resolveConflicts: false, state: "needsYou", note: "The author session stopped before it finished." })];
+    // As the app answers for an issue in a project that chose nothing: both on.
+    startPipeline.mockImplementation(async (_sessionId: string, _tabId: string, autoMerge: boolean | null) => ({ pipeline: pipelineOf(issues[0], { autoMerge: !!autoMerge, resolveConflicts: true }), authorBrief: BRIEF }));
+    await open();
+    // The one switch shown is the pipeline's own, on its panel.
+    const shown = screen.getByRole("switch", { name: "Resolve conflicts automatically" });
+    expect(screen.getByTestId("issue-pipeline").contains(shown)).toBe(true);
+    expect(shown.getAttribute("aria-checked")).toBe("false");
+    await start();
+    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
+    expect(resolveChoices()).toEqual([{ id: "pipeline-1", value: false }]);
   });
 });
 
@@ -702,7 +757,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     expect(selectSession).toHaveBeenCalledWith("session-1");
     // The issue itself, then how the pipeline wants the work handed over.
     expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", `${issuePrompt(issue)}\n\n${BRIEF}`);
-    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
+    // Set to merge when green, as every issue starts unless its project says otherwise.
+    expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
     view.unmount();
     render(<NewSessionView />);
     const agent = screen.getByTestId("agent-menu");

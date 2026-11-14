@@ -1,4 +1,6 @@
 import * as Crypto from "expo-crypto";
+import type { ModelInfo } from "@terminalx/portable/agentSettings";
+import type { ContinuationContext } from "@terminalx/portable/continuation";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
@@ -22,8 +24,55 @@ export interface ChatNote { id: string; body: string; createdAt: number; author:
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
 export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
-/** What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675). */
-export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number }
+/**
+ * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
+ * `sessionControls`: stop, interrupt, recovery, settings and continuing in a new tab, as on the desktop.
+ * `sessionCreate`: it starts sessions as its new-session view does. `macSettings`: it shows and changes its settings.
+ * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
+ */
+export interface HostFeatures { transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number }
+/** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
+export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
+/** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
+export interface TabControls {
+  harness: string;
+  model: string;
+  effort?: string | null;
+  permissionMode: string;
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
+  requestedPermissionMode?: string | null;
+  status: SessionStatus;
+}
+/** The agent and settings a new tab starts with. */
+export interface NewTabSettings { harness: string; model: string; effort?: string | null; permissionMode?: string | null }
+export type ControlResult = { done: true } | { done: false; message: string };
+/** "Continue in new session": the tab exists once `started`, whether or not the handoff was confirmed. */
+export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
+
+/** A project on the Mac, named by an id that is not its path. */
+export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean }
+export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
+export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
+/** What the Mac's new-session view lets a person choose. */
+export interface NewSessionOptions { projects: NewSessionProject[]; agents: NewSessionAgent[]; modes: { id: string; label: string }[]; defaultMode: string; nativeCodex: boolean }
+export interface NewSessionRequest {
+  /** A quick chat, or a project's session: in a new worktree, or on its checkout. */
+  where: { quick: true } | { projectId: string; useWorktree: boolean };
+  agent: string;
+  model: string;
+  effort?: string | null;
+  mode?: string | null;
+  title?: string;
+  text: string;
+  attachments?: AttachmentInput[];
+}
+/** A session the Mac started. `sendError`: its first message was not sent, and the session is there to retry in. */
+export type NewSessionResult =
+  | { created: true; sessionId: string; tabId: string; title: string; native: boolean; queued?: boolean; sendError?: string }
+  | { created: false; message: string };
+/** This Mac's settings a phone shows and may change. */
+export interface MacSettings { nativeCodex: boolean }
 
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
@@ -163,13 +212,83 @@ export class HostApi {
     return (await this.features()).sendIds === 1 ? { clientMessageId: messageId } : {};
   }
 
+  /** Whether this Mac takes the session controls; an older one offers sending and answering only. */
+  async sessionControls(): Promise<boolean> {
+    return (await this.features()).sessionControls === 1;
+  }
+
+  async tabControls(sessionId: string, tabId: string): Promise<TabControls | null> {
+    const result = await this.connection.request<TabControls>("session.tab", { sessionId, tabId });
+    return result.ok && typeof result.value?.harness === "string" ? result.value : null;
+  }
+
+  /** The Mac's models, as its own pickers list them; `refresh` asks the agents again. */
+  async models(refresh = false): Promise<ModelInfo[]> {
+    const result = await this.connection.request<ModelInfo[]>("models.list", refresh ? { refresh } : {});
+    return result.ok && Array.isArray(result.value) ? result.value.filter((model) => typeof model?.id === "string" && typeof model.harness === "string") : [];
+  }
+
+  async stop(sessionId: string, tabId: string): Promise<ControlResult> {
+    return this.control("session.stop", { sessionId, tabId });
+  }
+
+  /** Escape, as the agent takes it: the running turn ends and the agent stays. */
+  async interrupt(sessionId: string, tabId: string): Promise<ControlResult> {
+    return this.control("session.interrupt", { sessionId, tabId });
+  }
+
+  async setModel(sessionId: string, tabId: string, model: string): Promise<ControlResult> {
+    return this.control("session.setModel", { sessionId, tabId, model });
+  }
+
+  /** `null`: the agent's own default effort. */
+  async setEffort(sessionId: string, tabId: string, effort: string | null): Promise<ControlResult> {
+    return this.control("session.setEffort", { sessionId, tabId, effort });
+  }
+
+  async setMode(sessionId: string, tabId: string, mode: string): Promise<ControlResult> {
+    return this.control("session.setMode", { sessionId, tabId, mode });
+  }
+
+  /** "Resend last prompt": the prompt the agent never received, as it was sent. */
+  async resendUnsent(sessionId: string, tabId: string): Promise<SendResult> {
+    const result = await this.connection.request<{ queued?: unknown }>("session.resendUnsent", { sessionId, tabId });
+    if (!result.ok) return { sent: false, message: result.refusal.message };
+    return typeof result.value?.queued === "boolean" ? { sent: true, queued: result.value.queued } : { sent: false, message: "The host did not send the prompt again." };
+  }
+
+  async prepareContinuation(sessionId: string, tabId: string): Promise<ContinuationContext> {
+    const result = await this.connection.request<ContinuationContext>("session.prepareContinuation", { sessionId, tabId });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
+  }
+
+  async continueInNewTab(sessionId: string, tabId: string, tab: NewTabSettings, prompt: string): Promise<ContinueResult> {
+    const result = await this.connection.request<{ tab?: { id?: unknown }; delivered?: unknown; inInput?: unknown; error?: unknown }>("session.continue", { sessionId, tabId, tab, prompt });
+    if (!result.ok) return { started: false, message: result.refusal.message };
+    const id = result.value?.tab?.id;
+    if (typeof id !== "string") return { started: false, message: "The host did not open the new conversation." };
+    return { started: true, tabId: id, delivered: result.value.delivered === true, inInput: result.value.inInput === true, ...(typeof result.value.error === "string" ? { message: result.value.error } : {}) };
+  }
+
+  private async control(method: string, params: Record<string, unknown>): Promise<ControlResult> {
+    const result = await this.connection.request<unknown>(method, params);
+    return result.ok ? { done: true } : { done: false, message: result.refusal.message };
+  }
+
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {
     const result = await this.connection.request<{ status?: string }>("permission.respond", { sessionId, tabId, requestId, optionId });
     if (result.ok && result.value.status === "answered") return { answered: true };
     return { answered: false, message: result.ok ? "The host did not answer this request." : result.refusal.message };
   }
 
-  subscribeTerminal(sessionId: string, tabId: string, listener: (value: { type: string; chunk?: string; serialized?: string }) => void): () => void {
+  /** Start the tab's agent in its terminal, as opening the desktop's terminal view does; a native Codex tab moves there for good. */
+  async openTerminal(sessionId: string, tabId: string): Promise<{ opened: true } | { opened: false; message: string }> {
+    const result = await this.connection.request("terminal.open", { worktreeId: sessionId, tabId });
+    return result.ok ? { opened: true } : { opened: false, message: result.refusal.message };
+  }
+
+  subscribeTerminal(sessionId: string, tabId: string, listener: (value: TerminalPacket) => void): () => void {
     return this.connection.subscribe("terminal.subscribe", {
       worktreeId: sessionId,
       tabId,
@@ -178,26 +297,94 @@ export class HostApi {
       capabilities: { terminalBinaryStream: 1, mobileInputLeaseOnly: 1, writeUnavailable: 1 },
     }, (result) => {
       if (!result || typeof result !== "object") return;
-      const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown };
+      const value = result as { type?: unknown; chunk?: unknown; serialized?: unknown; cols?: unknown; rows?: unknown; error?: { message?: unknown } };
       if (typeof value.type !== "string") return;
-      listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}) });
+      if (value.type === "error") { listener({ type: "error", message: typeof value.error?.message === "string" ? value.error.message : "The Mac ended the terminal view." }); return; }
+      const size = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n > 0 && n <= 1000;
+      listener({ type: value.type, ...(typeof value.chunk === "string" ? { chunk: value.chunk } : {}), ...(typeof value.serialized === "string" ? { serialized: value.serialized } : {}),
+        ...(size(value.cols) && size(value.rows) ? { cols: value.cols as number, rows: value.rows as number } : {}) });
     });
   }
 
-  async readTerminal(sessionId: string, tabId: string): Promise<string | null> {
-    const result = await this.connection.request<unknown>("terminal.read", { worktreeId: sessionId, tabId });
-    if (!result.ok) return null;
-    const value = result.value as { text?: unknown };
-    return typeof value?.text === "string" ? value.text : null;
-  }
-
-  async queueInput(sessionId: string, tabId: string, text: string): Promise<boolean> {
-    return (await this.connection.request("steerLease.queueInput", { worktreeId: sessionId, tabId, text })).ok;
+  /** Type into the tab's terminal; the phone holds the tab's driver lease until it releases it. Refused with the Mac's reason. */
+  async queueInput(sessionId: string, tabId: string, text: string): Promise<{ accepted: true } | { accepted: false; message: string }> {
+    const result = await this.connection.request("steerLease.queueInput", { worktreeId: sessionId, tabId, text });
+    return result.ok ? { accepted: true } : { accepted: false, message: result.refusal.message };
   }
 
   async releaseInput(sessionId: string, tabId: string): Promise<void> {
     await this.connection.request("steerLease.release", { worktreeId: sessionId, tabId }).catch(() => undefined);
   }
+
+  /** What a new session can be started with; null from a Mac that cannot start one for a phone. */
+  async newSessionOptions(): Promise<NewSessionOptions | null> {
+    if ((await this.features()).sessionCreate !== 1) return null;
+    const result = await this.connection.request<unknown>("sessions.options");
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isNewSessionOptions(result.value)) throw new Error("The Mac returned new-session choices this phone cannot read.");
+    return result.value;
+  }
+
+  /** `messageId` names the draft (#675): starting it again after a lost reply gets the first session, not a second one. */
+  async createSession(request: NewSessionRequest, messageId?: string): Promise<NewSessionResult> {
+    if ((await this.features()).sessionCreate !== 1) return { created: false, message: "Update TerminalX on this Mac to start sessions from your phone." };
+    const where = "quick" in request.where ? { quick: true } : { projectId: request.where.projectId, useWorktree: request.where.useWorktree };
+    const result = await this.connection.request<Record<string, unknown>>("sessions.create", {
+      ...where,
+      agent: request.agent,
+      model: request.model,
+      ...(request.effort ? { effort: request.effort } : {}),
+      ...(request.mode ? { mode: request.mode } : {}),
+      ...(request.title?.trim() ? { title: request.title.trim() } : {}),
+      text: request.text,
+      ...(request.attachments?.length ? { attachments: request.attachments } : {}),
+      ...(messageId ? { clientMessageId: messageId } : {}),
+    });
+    if (!result.ok) return { created: false, message: result.refusal.message };
+    const value = result.value;
+    if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
+    return {
+      created: true,
+      sessionId: value.sessionId,
+      tabId: value.tabId,
+      title: typeof value.title === "string" ? value.title : "New session",
+      native: value.native === true,
+      ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
+      ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
+    };
+  }
+
+  /** This Mac's settings; null from a Mac that does not offer them to a phone. */
+  async macSettings(): Promise<MacSettings | null> {
+    if ((await this.features()).macSettings !== 1) return null;
+    const result = await this.connection.request<unknown>("mac.settings");
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    return result.value;
+  }
+
+  async setNativeCodex(on: boolean): Promise<MacSettings> {
+    const result = await this.connection.request<unknown>("mac.setSettings", { nativeCodex: on });
+    if (!result.ok) throw new Error(result.refusal.message);
+    if (!isMacSettings(result.value)) throw new Error("The Mac returned settings this phone cannot read.");
+    return result.value;
+  }
+}
+
+function isNewSessionOptions(value: unknown): value is NewSessionOptions {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const strings = (item: unknown, ...keys: string[]) => !!item && typeof item === "object" && keys.every((key) => typeof (item as Record<string, unknown>)[key] === "string");
+  return Array.isArray(record.projects) && record.projects.every((project) => strings(project, "id", "name") && typeof (project as NewSessionProject).git === "boolean")
+    && Array.isArray(record.agents) && record.agents.every((agent) => strings(agent, "id", "name") && typeof (agent as NewSessionAgent).available === "boolean"
+      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts)))
+    && Array.isArray(record.modes) && record.modes.every((mode) => strings(mode, "id", "label"))
+    && typeof record.defaultMode === "string" && typeof record.nativeCodex === "boolean";
+}
+
+function isMacSettings(value: unknown): value is MacSettings {
+  return !!value && typeof value === "object" && typeof (value as Record<string, unknown>).nativeCodex === "boolean";
 }
 
 export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): AgentEvent[] {

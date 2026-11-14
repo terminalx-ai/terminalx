@@ -206,12 +206,26 @@ async function adoptTabPane(sessionId: string, tabId: string, token: object) {
 /** Where a tab's terminal view lives: on this computer, or `remote` in a cloud workspace. */
 export interface TabViewPlace {
   remote?: boolean;
+  /** Remote: what moves a native Codex tab to its terminal there (the backend's `toTerminal`). */
+  toTerminal?: (tabId: string) => Promise<void>;
 }
 
 /** Show the tab's CLI. For a headless agent this stops it and resumes it there. */
 export async function enterTerminalView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
   if (state.switching[tab.id] || tabViewOf(tab) === "terminal") return;
   if (place.remote) {
+    // A native Codex tab has no terminal until it moves there, as on a Mac; the runtime decides who may move it.
+    if (tab.transport === "experimentalCodexStdio" && place.toTerminal) {
+      set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
+      try {
+        await place.toTerminal(tab.id);
+      } catch (e) {
+        set({ errors: { ...state.errors, [tab.id]: errorMessage(e) } });
+        return;
+      } finally {
+        set({ switching: { ...state.switching, [tab.id]: false } });
+      }
+    }
     set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
     return;
   }
@@ -220,6 +234,8 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
   set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
   try {
     if (isPtyFirst(tab.harness)) {
+      // Only here, never when the tab is merely shown: the move is for good.
+      if (tab.transport === "experimentalCodexStdio") await agent.tabToTerminal(session.id, tab.id);
       await startTabAgent(session, tab);
       // The toggle can be the first thing that happens to a tab in this
       // window, so the pane may still need claiming.

@@ -23,7 +23,7 @@ import { failureMessage, PHASES, phaseOf, RUNTIME_NOT_PICKED_UP, runtimeNotPicke
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import { archiving, deletion, isArchived, isOpen, lifecycleErrorMessage, machineRunning, resuming, stopping } from "@/lib/cloudLifecycle";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudIssueOutcome, type CloudSessionRequest } from "@/lib/cloudNewSession";
-import { cloudPipelineSettings } from "@/lib/issuePipeline";
+import { cloudPipelineSettings, pipelineLaunchDefaults } from "@/lib/issuePipeline";
 import { issueWorktreeName } from "@/lib/issueSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
@@ -841,8 +841,12 @@ async function sessionsCreate(params: Params) {
   };
   if (issue) {
     const settings = cloudPipelineSettings(project.key, prefs);
+    const pipeline = params.noPipeline !== true && settings.enabled;
     request.title = `${issue.identifier} ${issue.title}`.slice(0, 80);
-    request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline: params.noPipeline !== true && settings.enabled, settings };
+    request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline, settings };
+    // As the issue page starts one: the switches at the project's defaults for
+    // an issue, said outright so an older runtime does not take its own (#700).
+    if (pipeline) request.pipeline = pipelineLaunchDefaults(settings, true);
   }
   let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);

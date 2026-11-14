@@ -21,7 +21,7 @@ import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
@@ -464,7 +464,7 @@ export function Composer({
   const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   // A level the agent reported that this model's list does not carry is still the one in use.
-  const efforts = model?.efforts.length && tab.effort && !model.efforts.includes(tab.effort) ? [...model.efforts, tab.effort] : (model?.efforts ?? []);
+  const efforts = effortChoices(model, tab.effort);
   // The pickers show what the agent is running. A choice it has not confirmed yet is said beside them, not shown as made.
   const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;

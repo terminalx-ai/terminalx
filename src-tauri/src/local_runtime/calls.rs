@@ -137,6 +137,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }
         "markRead" => { manager.mark_read(session, tab)?; Value::Null }
         "handoff" => serde_json::to_value(manager.handoff(session, tab)?)?,
+        "toTerminal" => { manager.codex_stdio_to_terminal(session, tab)?; Value::Null }
         _ => bail!("unsupported local session operation"),
     };
     Ok(value)

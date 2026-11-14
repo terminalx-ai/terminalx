@@ -334,10 +334,9 @@ const ADVANCE: Record<PipelineStage, string> = {
   merge: "Check again",
 };
 
+// `autoMerge` and `resolveConflicts` are absent: no choice made (`pipelineLaunchDefaults`).
 export const DEFAULT_PIPELINE_SETTINGS: IssuePipelineSettings = {
   enabled: true,
-  autoMerge: false,
-  resolveConflicts: false,
   maxResolutions: 3,
   requirePerson: false,
   maxRounds: 3,
@@ -350,6 +349,29 @@ export const DEFAULT_PIPELINE_SETTINGS: IssuePipelineSettings = {
 export function pipelineSettings(project: { issuePipeline?: IssuePipelineSettings | null } | null | undefined): IssuePipelineSettings {
   const stored = project?.issuePipeline;
   return stored ? { ...DEFAULT_PIPELINE_SETTINGS, ...stored, protected: { ...DEFAULT_PIPELINE_SETTINGS.protected, ...stored.protected } } : DEFAULT_PIPELINE_SETTINGS;
+}
+
+/**
+ * What a new session's "Merge when green" and "Resolve conflicts
+ * automatically" start at before anyone touches them: the project's choice,
+ * else on for a session started from an issue (#700) and off for any other.
+ * Never set to merge where a person does the merge. As the app's
+ * `auto_merge_at_start` and `resolve_conflicts_at_start` decide it.
+ */
+export function pipelineLaunchDefaults(settings: IssuePipelineSettings, fromIssue: boolean): { autoMerge: boolean; resolveConflicts: boolean } {
+  return { autoMerge: !settings.requirePerson && (settings.autoMerge ?? fromIssue), resolveConflicts: settings.resolveConflicts ?? fromIssue };
+}
+
+/** Which new sessions a project's switch starts on in, as its settings offer the choice. */
+export type SwitchDefault = "issues" | "all" | "off";
+
+export function switchDefaultOf(choice: boolean | null | undefined): SwitchDefault {
+  return choice == null ? "issues" : choice ? "all" : "off";
+}
+
+/** As stored: nothing for "issues", which leaves it to where the session started. */
+export function switchChoiceOf(value: SwitchDefault): boolean | undefined {
+  return value === "issues" ? undefined : value === "all";
 }
 
 /**

@@ -125,7 +125,9 @@ export function NewSessionView({
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
     quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
-    cloud ? "Cloud workspaces require a person to merge." : undefined);
+    cloud ? "Cloud workspaces require a person to merge." : undefined,
+    // A picked issue makes this a session started from an issue: switches nobody touched follow it.
+    issue ? "issue" : "session");
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
