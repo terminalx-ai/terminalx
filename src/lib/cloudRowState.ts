@@ -1,5 +1,6 @@
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
+import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { phaseOf, PHASES, settled } from "@/lib/cloudCreate";
 import { archiving, deletion, isArchived, isOpen } from "@/lib/cloudLifecycle";
@@ -10,7 +11,8 @@ import type { TabStatus } from "@/types/session";
  * The first matching condition wins:
  *
  * 1. archived, being deleted or archived → Archived, Deleting, Archiving
- * 2. attention required, a failed launch or delete, a runtime update → Needs attention
+ *    (a failed delete still needs attention, including in the archive)
+ * 2. attention required, a failed launch or operation, a runtime update → Needs attention
  *    (a failed launch only until an agent runs in the workspace: see `launchFailureStands`)
  * 3. an operation running → Stopping, Resuming
  * 4. provisioning → Starting: <launch phase>
@@ -38,24 +40,16 @@ export interface ActivityInput {
   /** The live connection's state, when one is held. */
   connection?: WorkspaceConnectionState["state"] | null;
   /** The tabs to judge (one session's, or every session's for a workspace row). */
-  tabs?: readonly { status: TabStatus; unread?: boolean; pendingApprovals?: number; live?: boolean }[];
+  tabs?: readonly { status: TabStatus; unread?: boolean; pendingApprovals?: number; live?: boolean; created?: string; lastMessageAt?: string | null }[];
   /** The tab states come from the cache or a checkpoint, not the live runtime. */
   fromCache?: boolean;
   /** The workspace has a session with a tab, for a caller that does not pass `tabs`. */
   agentRan?: boolean;
+  /** Verified agent activity time, used to order recovery after a launch failure. */
+  agentActivityAt?: number;
 }
 
-/**
- * Whether a failed first task still needs the reader. A failed launch starts
- * no session, so any session the workspace has, or a turn its runtime
- * reports, came after it: the workspace works, and the failure is history
- * rather than something to recover from (#499).
- */
-export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<ActivityInput, "tabs" | "agentRan"> = {}): boolean {
-  if (input.agentRan || input.tabs?.length) return false;
-  const runtime = item.workspace.runtimeActivity;
-  return !(runtime?.online && (runtime.activeTurns > 0 || runtime.pendingApprovals > 0));
-}
+export { launchFailureStands } from "@/lib/cloudAttention";
 
 const idle = (label: string, tone: RowTone, lastKnown = false): CloudActivity => ({ label, tone, status: "idle", lastKnown });
 
@@ -66,10 +60,10 @@ export function deriveCloudActivity(item: CloudWorkspaceListItem, input: Activit
   if (deletion(item) === "running") return idle("Deleting", "changing");
   if (archiving(item)) return idle("Archiving", "changing");
   if (state === "destroyed") return idle("Deleted", "archived");
-  if (state === "archived") return idle("Archived", "archived");
+  if (state === "archived" && deletion(item) !== "failed") return idle("Archived", "archived");
   // 2
   const phase = phaseOf(item);
-  if (state === "attention-required" || (launch && phase === "failed" && launchFailureStands(item, input)) || deletion(item) === "failed" || input.connection === "updateRequired") {
+  if (resolveCloudAttention(item, input)) {
     return idle("Needs attention", "attention");
   }
   // 3

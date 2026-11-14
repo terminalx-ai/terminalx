@@ -128,55 +128,114 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         Ok(plaintext) => plaintext,
         Err(category) => return finish(agents, lease, "rejected", Some(category), json!({})),
     };
-    let receipt = judge(agents, lease, id, &plaintext);
+    // The actor's role now: stamped by the API at lease time and narrowed
+    // by the runtime's latest member list (contract §21.4-21.5).
+    let command = Command {
+        kind: &lease.kind,
+        tab_id: &lease.tab_id,
+        client_command_id: id,
+        actor_id: &lease.actor.user_id,
+        leases: true,
+        access: agents.actor_access(&lease.actor),
+        plaintext: &plaintext,
+    };
+    match decide(agents, &command, || agents.receipts.applying(id)) {
+        Decided::Refused((outcome, category, extra)) | Decided::Applied((outcome, category, extra)) => finish(agents, lease, outcome, category, extra),
+        // Without the durable mark the outcome could not be proven later,
+        // so the agent was not touched: definitely not applied.
+        Decided::MarkFailed => Receipt { outcome: "rejected".into(), category: Some("receipt-store-failed".into()), result_iv: None, result_ciphertext: None },
+    }
+}
+
+/// One agent command, as the mailbox leases it or a live call of
+/// `agent-commands/1` names it (docs/MACHINES.md, decision 3). Both mean the
+/// same: one decision and one application per id, made here.
+pub struct Command<'a> {
+    /// `send`, `steer`, `stop` or `permission-decision`.
+    pub kind: &'a str,
+    pub tab_id: &'a str,
+    pub client_command_id: &'a str,
+    /// Who sent it: their tab lease, their queued follow-up, their uploads.
+    pub actor_id: &'a str,
+    /// Whether the tab's driver lease (PRO-30) applies: a mailbox actor is
+    /// a person, while a live connection with none (a paired computer on a
+    /// machine, which serves no leases) neither holds nor waits for one.
+    pub leases: bool,
+    /// What they may do now.
+    pub access: crate::remote::collab::Access,
+    /// The command's body: `text`, `images` and settings for a send or
+    /// steer, `requestId` with `optionId` or `answers` for a decision.
+    pub plaintext: &'a Value,
+}
+
+/// `(outcome, category, extra)`: `applied` or `rejected`, why, and what the
+/// receipt says besides.
+pub type Applied = (&'static str, Option<&'static str>, Value);
+
+pub enum Decided {
+    /// Refused before anything was marked: nothing reached the agent.
+    Refused(Applied),
+    /// The durable mark could not be written: nothing reached the agent.
+    MarkFailed,
+    /// Marked, then applied (or rejected while applying).
+    Applied(Applied),
+}
+
+/// Decide a command that has no receipt yet and apply it. `mark` writes the
+/// durable `applying` record and runs only once every check has passed,
+/// right before the agent is touched.
+pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow::Result<()>) -> Decided {
+    let decided = judge(agents, command, mark);
     // A message that was refused is never typed: the images its sender
     // uploaded for it are done with (PRO-22). Only their own: naming someone
     // else's upload in a refused message does not remove it.
-    if receipt.outcome == "rejected" && lease.kind == "send" {
-        if let Some(ids) = attachments::named(&plaintext) {
-            agents.attachments.remove_owned(&lease.actor.user_id, &ids);
+    let rejected = match &decided {
+        Decided::Refused((outcome, ..)) | Decided::Applied((outcome, ..)) => *outcome == "rejected",
+        Decided::MarkFailed => true,
+    };
+    if rejected && command.kind == "send" {
+        if let Some(ids) = attachments::named(command.plaintext) {
+            agents.attachments.remove_owned(command.actor_id, &ids);
         }
     }
-    receipt
+    decided
 }
 
-/// Decide and apply a readable command that has no receipt yet.
-fn judge(agents: &CloudAgents, lease: &Lease, id: &str, plaintext: &Value) -> Receipt {
-    let Some(tab) = agents.tab(&lease.tab_id) else {
-        return finish(agents, lease, "rejected", Some("tab-unknown"), json!({}));
+fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow::Result<()>) -> Decided {
+    let refused = |category: &'static str, extra: Value| Decided::Refused(("rejected", Some(category), extra));
+    let Some(tab) = agents.tab(command.tab_id) else {
+        return refused("tab-unknown", json!({}));
     };
-    // The actor's role now: stamped by the API at lease time and narrowed
-    // by the runtime's latest member list (contract §21.4-21.5).
-    let access = agents.actor_access(&lease.actor);
-    let allowed = match lease.kind.as_str() {
+    let access = command.access;
+    let allowed = match command.kind {
         "permission-decision" => access.can_approve,
         _ => access.can_drive(),
     };
     if !allowed {
-        return finish(agents, lease, "rejected", Some("forbidden"), json!({}));
+        return refused("forbidden", json!({}));
     }
     // Competing input is serialized by the tab's driver lease: nobody else
     // sends, steers or stops (managers may stop) while it is held, and an
     // applied send or steer claims it (below). Whether a turn ran is read
     // before this command starts one: only a lease live then counts.
-    let busy_before = agents.ops.busy(&tab.session_id, &lease.tab_id);
-    if let (Some(collab), "send" | "steer" | "stop") = (agents.collab(), lease.kind.as_str()) {
+    let busy_before = agents.ops.busy(&tab.session_id, command.tab_id);
+    if let (Some(collab), true, "send" | "steer" | "stop") = (agents.collab(), command.leases, command.kind) {
         let busy = busy_before;
         let held = collab
-            .held_by_other(&lease.tab_id, &lease.actor.user_id, now_ms(), busy)
-            .filter(|_| !(lease.kind == "stop" && access.role == Role::Manager));
+            .held_by_other(command.tab_id, command.actor_id, now_ms(), busy)
+            .filter(|_| !(command.kind == "stop" && access.role == Role::Manager));
         if let Some(held) = held {
-            return finish(agents, lease, "rejected", Some("lease-held"), json!({ "holderId": held.holder_id }));
+            return refused("lease-held", json!({ "holderId": held.holder_id }));
         }
     }
     // The CLI runs a slash command, a `!` shell command or an `@/path`
     // mention by itself, and each can change or get around the same
     // settings: from a plain driver only the harmless ones go through
     // (PRO-88). Refused before the applying mark: nothing reached the agent.
-    if matches!(lease.kind.as_str(), "send" | "steer") {
-        let text = plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+    if matches!(command.kind, "send" | "steer") {
+        let text = command.plaintext.get("text").and_then(Value::as_str).unwrap_or("");
         if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
-            return finish(agents, lease, "rejected", Some(refusal.category()), json!({ "command": refusal.command, "message": refusal.message() }));
+            return refused(refusal.category(), json!({ "command": refusal.command, "message": refusal.message() }));
         }
     }
     // A steer goes into the running turn, where the session's own queue
@@ -184,26 +243,24 @@ fn judge(agents: &CloudAgents, lease: &Lease, id: &str, plaintext: &Value) -> Re
     // or `!` command would still run after its sender lost the right to send
     // it. It is not queued at all, whoever sends it (a `send` waits in the
     // follow-up queue, which is re-checked).
-    if lease.kind == "steer" && busy_before && slash::is_command(plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
-        return finish(agents, lease, "rejected", Some(slash::NOT_QUEUED_CATEGORY), json!({ "message": slash::NOT_QUEUED_MESSAGE }));
+    if command.kind == "steer" && busy_before && slash::is_command(command.plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+        return refused(slash::NOT_QUEUED_CATEGORY, json!({ "message": slash::NOT_QUEUED_MESSAGE }));
     }
-    if let Err(error) = agents.receipts.applying(id) {
-        // Without the durable mark the outcome could not be proven later,
-        // so the agent is not touched: definitely not applied.
-        log::error!("record applying {id}: {error:#}");
-        return Receipt { outcome: "rejected".into(), category: Some("receipt-store-failed".into()), result_iv: None, result_ciphertext: None };
+    if let Err(error) = mark() {
+        log::error!("record applying {}: {error:#}", command.client_command_id);
+        return Decided::MarkFailed;
     }
     // Model, effort and permission mode change what the agent may do on its
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
     let may_configure = access.can_configure();
-    let (outcome, category, extra) = apply(agents, lease, &tab.session_id, plaintext, may_configure);
+    let (outcome, category, extra) = apply(agents, command, &tab.session_id, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
-    if let (Some(collab), "applied", "send" | "steer") = (agents.collab(), outcome, lease.kind.as_str()) {
-        let _ = collab.claim(&lease.tab_id, &lease.actor.user_id, now_ms(), busy_before, false);
+    if let (Some(collab), true, "applied", "send" | "steer") = (agents.collab(), command.leases, outcome, command.kind) {
+        let _ = collab.claim(command.tab_id, command.actor_id, now_ms(), busy_before, false);
     }
-    finish(agents, lease, outcome, category, extra)
+    Decided::Applied((outcome, category, extra))
 }
 
 fn decrypt(agents: &CloudAgents, lease: &Lease) -> Result<Value, &'static str> {
@@ -224,10 +281,9 @@ fn decrypt(agents: &CloudAgents, lease: &Lease) -> Result<Value, &'static str> {
     crypto::parse_v1(&bytes).map_err(|_| "payload-invalid")
 }
 
-type Applied = (&'static str, Option<&'static str>, Value);
-
-fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Value, may_configure: bool) -> Applied {
-    let tab_id = lease.tab_id.as_str();
+fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configure: bool) -> Applied {
+    let tab_id = command.tab_id;
+    let plaintext = command.plaintext;
     let ops = &agents.ops;
     // A message is text, images, or both (as a local tab's composer sends).
     let text = |with_images: bool| -> Option<String> {
@@ -235,20 +291,20 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
         ((with_images || !text.trim().is_empty()) && text.len() <= MAX_TEXT).then(|| text.to_string())
     };
     let failed = |error: anyhow::Error| -> Applied {
-        log::warn!("apply {} {}: {error:#}", lease.kind, lease.client_command_id);
+        log::warn!("apply {} {}: {error:#}", command.kind, command.client_command_id);
         ("rejected", Some("apply-failed"), json!({ "message": crate::remote::protocol::redact(&format!("{error:#}")) }))
     };
-    let result = match lease.kind.as_str() {
+    let result = match command.kind {
         "send" | "steer" => {
             // Images ride with a prompt, never with a steer into a running turn.
             let image_ids = match attachments::named(plaintext) {
-                Some(ids) if ids.is_empty() || lease.kind == "send" => ids,
+                Some(ids) if ids.is_empty() || command.kind == "send" => ids,
                 _ => return ("rejected", Some("payload-invalid"), json!({})),
             };
             let Some(text) = text(!image_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
             // Uploaded by the sender, in full, before the message: checked
             // before anything about the tab changes.
-            let images = match agents.attachments.load(&lease.actor.user_id, &image_ids) {
+            let images = match agents.attachments.load(command.actor_id, &image_ids) {
                 Ok(images) => images,
                 Err(_) => {
                     return (
@@ -264,7 +320,7 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
             };
             let settings_ignored = !settings.is_empty() && !may_configure;
             if settings_ignored {
-                log::warn!("{} {}: settings ignored, the actor may not configure the tab", lease.kind, lease.client_command_id);
+                log::warn!("{} {}: settings ignored, the actor may not configure the tab", command.kind, command.client_command_id);
             } else if !settings.is_empty() {
                 if let Some(model) = &settings.model {
                     let Some(tab) = agents.tab(tab_id) else { return failed(anyhow::anyhow!("no such tab")) };
@@ -282,13 +338,13 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
                 }
                 extra
             };
-            let queue = lease.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
+            let queue = command.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
             if queue {
                 let follow_up = FollowUp {
-                    client_command_id: lease.client_command_id.clone(),
+                    client_command_id: command.client_command_id.to_string(),
                     session_id: session_id.to_string(),
                     text,
-                    actor_id: lease.actor.user_id.clone(),
+                    actor_id: command.actor_id.to_string(),
                     images: image_ids,
                 };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {

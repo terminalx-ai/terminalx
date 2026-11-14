@@ -2,11 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type CloudWorkspaceConnection } from "@/lib/api";
+import { api, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
 import { resetCloudTerminals } from "@/lib/cloudTerminals";
 import { resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
 import { ExecutionLocation, WorkspaceView, describe as describeConnection, describeWorkspace } from "./CloudWorkspaceView";
+import { CloudWorkspaceAttention } from "./CloudWorkspaceAttention";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { cloudAgentApi } from "@/lib/cloudAgentApi";
+import { resetCloudAgents } from "@/lib/cloudAgents";
+import { refreshHarnesses } from "@/lib/sessions";
+import { setPrefs } from "@/lib/prefs";
 
 /** Input handlers of every xterm made, so a test can type into one. */
 const typed: ((data: string) => void)[] = [];
@@ -39,20 +45,36 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 132, rows: 40 }; } } }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { onContextLoss() {} dispose() {} } }));
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
-vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
 // The agent tabs have their own tests (CloudAgents.test.tsx); here only what the view hands them.
 const agentViews = vi.hoisted(() => [] as Record<string, unknown>[]);
-vi.mock("./CloudAgents", () => ({
-  CloudAgentsView: (props: Record<string, unknown>) => {
+const integration = vi.hoisted(() => ({ realAgents: false }));
+vi.mock("./CloudAgents", async (original) => {
+  const actual = await original<typeof import("./CloudAgents")>();
+  return { CloudAgentsView: (props: React.ComponentProps<typeof actual.CloudAgentsView>) => {
     agentViews.push(props);
+    if (integration.realAgents) return <actual.CloudAgentsView {...props} />;
     return <div data-testid="cloud-agents-stub" />;
+  } };
+});
+vi.mock("@/lib/cloudAgentApi", async (original) => ({
+  ...await original<typeof import("@/lib/cloudAgentApi")>(),
+  cloudAgentApi: {
+    cacheLoad: vi.fn(async () => ({ tabs: {} })),
+    cacheSave: vi.fn(async () => undefined),
+    checkpoints: vi.fn(async () => []),
+    outbox: vi.fn(async () => []),
+    outboxSync: vi.fn(async () => []),
+    enqueue: vi.fn(),
   },
 }));
 vi.mock("@/lib/api", () => ({
   api: {
     cloudWorkspaceShares: vi.fn(),
+    listHarnesses: vi.fn(async () => [{ id: "codex", name: "Codex", available: true }]),
   },
   pty: {},
+  agent: { listModels: vi.fn(async () => []) },
   closeWorkspaceConnection: vi.fn(),
   workspaceTargetKey: (target: { kind: string; organizationId?: string; workspaceId?: string }) =>
     target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`,
@@ -109,6 +131,10 @@ const client = {
   call: vi.fn(async (method: string, _params?: unknown): Promise<unknown> => (method === "collab.state" ? collabState : {})),
   mutate: vi.fn(async () => ({})),
   subscribeSession: vi.fn(async () => () => undefined),
+  listAgentTabs: vi.fn(async () => []),
+  listRuntimeAgents: vi.fn(async () => []),
+  hasCapability: vi.fn(() => false),
+  createAgentTab: vi.fn(),
 };
 const fakeConnection = (workspaceId: string) =>
   ({
@@ -136,6 +162,7 @@ const connectedState = (fields: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  integration.realAgents = false;
   stateListeners.clear();
   notificationListeners.clear();
   client.connection = { state: "idle" };
@@ -154,6 +181,7 @@ afterEach(() => {
   resetCloudTerminals();
   resetCollab();
   resetPeople();
+  resetCloudAgents();
 });
 
 /** The view as `CloudWorkspaceMain` hosts it: a header naming where commands run, and the connection's state handed down. */
@@ -296,8 +324,8 @@ describe("the list's state line", () => {
 
   it("puts what is happening to the workspace ahead of the launch phase, in words", () => {
     expect(describeWorkspace(row("suspended", { launch: launch("authenticating-runtime") }))).toBe("Stopped");
-    expect(describeWorkspace(row("attention-required", { launch: launch("authenticating-runtime") }))).toBe("Needs attention");
-    expect(describeWorkspace(row("attention-required"))).toBe("Needs attention");
+    expect(describeWorkspace(row("attention-required", { launch: launch("authenticating-runtime") }))).toBe("Needs attention: The workspace needs attention. Open it to inspect its runtime and provider state.");
+    expect(describeWorkspace(row("attention-required"))).toBe("Needs attention: The workspace needs attention. Open it to inspect its runtime and provider state.");
     // PRO-52: a stopped Boat delete reads the same in the row's tooltip and the main view as on its own line, never a raw code.
     const stopped = (fields: object, provider = "box") => describeWorkspace(row("attention-required", { provider }, { id: "op", action: "delete", state: "failed", ...fields }));
     expect(stopped({ errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" })).toBe(
@@ -513,4 +541,48 @@ describe("what the view tells the agent pane about a wake", () => {
     rerender(<Stopped connection={connection} waking={false} />);
     expect(handed().waking).toBe(false);
   });
+});
+
+it("opens the existing agent-start view on recovery without sending a prompt or waking the workspace", async () => {
+  const opened = { connection: fakeConnection("recovery"), name: "Recovery", provider: "box", workspaceState: "ready" };
+  const { rerender } = render(<WorkspaceView opened={opened} state={connectedState() as never} />);
+  expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("false");
+  rerender(<WorkspaceView opened={opened} state={connectedState() as never} agentRequest={1} />);
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("true"));
+  expect(agentViews.at(-1)).toMatchObject({ active: true, scope: { organizationId: "org-1", workspaceId: "recovery" } });
+  expect(opened.connection.activate).not.toHaveBeenCalled();
+  expect(client.mutate).not.toHaveBeenCalled();
+});
+
+it("reaches the supported agent-start path from recovery and starts once without replaying the first prompt", async () => {
+  integration.realAgents = true;
+  await refreshHarnesses();
+  setPrefs({ lastAgent: "codex", lastModel: {}, lastEffort: {}, lastMode: "manual" });
+  const connection = fakeConnection("recovery-start");
+  const state = connectedState();
+  client.connection = state;
+  let finish!: (value: { sessionId: string; tabId: string }) => void;
+  client.createAgentTab.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const row = { workspace: { id: "recovery-start", orgId: "org-1", state: "ready", launch: { state: "failed", phase: "failed", category: "runtime-interrupted", timings: { failedAt: 10 } } }, latestOperation: null } as unknown as CloudWorkspaceListItem;
+  function Recovery() {
+    const [request, setRequest] = useState(0);
+    return <TooltipProvider>
+      <CloudWorkspaceAttention item={row} onOpenSession={() => setRequest((value) => value + 1)} />
+      <WorkspaceView opened={{ connection, name: "Recovery", provider: "box", workspaceState: "ready" }} state={state as never} agentRequest={request} />
+    </TooltipProvider>;
+  }
+  const { unmount } = render(<Recovery />);
+  fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("true"));
+  expect(client.createAgentTab).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "New agent tab" }));
+  const start = screen.getByRole("button", { name: "Start agent" });
+  fireEvent.click(start);
+  fireEvent.click(start);
+  expect(client.createAgentTab).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ agent: "codex", mode: "manual" }));
+  expect(client.createAgentTab.mock.calls[0][0]).not.toHaveProperty("prompt");
+  expect(cloudAgentApi.enqueue).not.toHaveBeenCalled();
+  expect(connection.activate).not.toHaveBeenCalled();
+  unmount();
+  await act(async () => finish({ sessionId: "recovered-session", tabId: "recovered-tab" }));
 });
