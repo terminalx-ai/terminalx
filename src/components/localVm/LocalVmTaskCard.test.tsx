@@ -5,9 +5,9 @@ import { environment, task } from "./localVm.testSupport";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, fs: {}, errorMessage: (error: unknown) => String(error) }));
 vi.mock("./useLocalVmState", () => ({ reconcileLocalVmState: vi.fn() }));
-import { artifactHref, LocalVmTaskCard } from "./LocalVmTaskCard";
+import { artifactHref, LocalVmTaskCard, TAKEOVER_CONFIRMATION } from "./LocalVmTaskCard";
 const calls = (method: string) => mocks.invoke.mock.calls.filter(([, args]) => args.method === method);
-beforeEach(() => { mocks.invoke.mockReset(); mocks.invoke.mockResolvedValue(null); });
+beforeEach(() => { mocks.invoke.mockReset(); mocks.invoke.mockResolvedValue(null); Object.assign(TAKEOVER_CONFIRMATION, { attempts: 3, intervalMs: 1 }); });
 afterEach(cleanup);
 
 describe("durable local VM task actions", () => {
@@ -37,6 +37,14 @@ describe("durable local VM task actions", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Abandon task" }));
     await waitFor(() => expect(calls("task.abandon")).toHaveLength(1));
     expect(calls("task.abandon")[0][1].params).toEqual({ target: task().target, confirm: true });
+  });
+
+  it("offers Cancel for a shell-only Linux task too (review 2)", async () => {
+    const shell = task({ input: { ...task().input, desktop: false } });
+    render(<LocalVmTaskCard task={shell} destinationRoot="/project" readOnly={false} />);
+    expect(screen.queryByRole("button", { name: "Take over desktop…" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel task" }));
+    await waitFor(() => expect(calls("task.cancel")).toHaveLength(1));
   });
 
   it("states when no readable task progress has been received", () => {
@@ -85,6 +93,25 @@ describe("durable local VM task actions", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Stop task and take over" }));
     await screen.findByText(/Retained history has not confirmed the stopped task and manual desktop hold/);
     expect(calls("environment.desktop")).toHaveLength(0);
+  });
+
+  it("waits for the supervisor to retain a confirmed takeover before opening the desktop (review 2)", async () => {
+    const record = task();
+    let polls = 0;
+    mocks.invoke.mockImplementation(async (_command, { method }) => {
+      if (method === "state") {
+        polls += 1;
+        return { environments: { env: { ...environment, manualControl: true } }, tasks: { task: { ...record, status: polls < 3 ? "canceling" : "canceled" } } };
+      }
+      if (method === "environment.desktop") return { opened: true };
+      return { ready: true, manualControl: true, task: { ...record, status: "canceled" } };
+    });
+    render(<LocalVmTaskCard task={record} destinationRoot="/project" readOnly={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Take over desktop…" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Stop task and take over" }));
+    await waitFor(() => expect(calls("environment.desktop")).toHaveLength(1));
+    expect(polls).toBe(3);
+    expect(screen.queryByText(/Retained history has not confirmed/)).toBeNull();
   });
 
   it("keeps manual control through viewer closure and explicitly returns queued work without resuming the canceled task", async () => {
