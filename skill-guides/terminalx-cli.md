@@ -98,6 +98,7 @@ terminalx status --json
 terminalx projects list --json
 terminalx sessions list [--project <project> | --quick] [--archived] --json
 terminalx sessions list --worktree <path-or-name> [--project <project>] --json
+terminalx sessions list --children-of <session> --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -110,6 +111,44 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 `--quick`. Each entry carries `archived`, and `autoArchived` when the app archived it for
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
+
+### Sessions a session started (`parent`)
+
+```text
+terminalx sessions list --children-of <session> --json
+terminalx sessions stop --children-of <session> --json
+```
+
+A session started with `sessions create` from inside another session records that session as
+its `parent`: `{"sessionId": …, "tabId": …}`, the session and the tab the command ran in.
+`sessions create` returns it as `parent`, and `sessions list` and `sessions show` carry it on
+the entry. A session nobody else started has no `parent` field. The field is a record of who
+started whom and nothing more: it gives the parent no hold over the session and changes no
+permission. Archiving or deleting the parent leaves the sessions it started, and their
+`parent`, exactly as they are, so a `parent` may name a session that no longer exists.
+
+`sessions list --children-of <session>` returns exactly the sessions that session started
+(its workers), in every project and worktree, quick chats and archived ones included; for
+that reason it does not combine with `--project`, `--worktree`, `--quick`, `--archived` or
+`--cloud`. Only direct children are listed: a worker's own workers are listed under the
+worker. The result has:
+
+- `parent`: the lead's `sessionId` and `title`, and `exists` (`false` once it was deleted;
+  name a deleted lead by its full id).
+- `workers`: one row per session, with `sessionId`, `title`, `kind`, `tabId`, `agent`,
+  `status`, `model`, `effort`, `running`, `worktree` (its name; `null` on the project's own
+  checkout), `path`, `branch`, `archived`, `created` and `parent`. `status`, `model` and
+  `effort` are those of the session's own agent; `running` says whether any of its agents has
+  a live process.
+- `sessions`: the same sessions as full entries.
+
+`sessions stop --children-of <session>` stops every running agent of those sessions, as Stop
+in the app does: the agent's process ends, the conversation stays, and its next prompt
+resumes it. Nothing is deleted or archived, the lead itself is not stopped, and a terminal or
+an agent a person started by hand in one is left running. The result lists `stopped` (each
+with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the rest are still
+stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
+you are, or were asked to manage.
 
 ### Archive sessions
 
@@ -132,6 +171,21 @@ pull request is open. A new message to an archived session brings it back; so do
 `unarchive`. Archive only what the person asked to tidy; do not archive a session you are
 working in, or another agent's.
 
+### Set a session’s manual status
+
+```text
+terminalx sessions status <session> --status backlog|in_progress|in_review|done|canceled --json
+```
+
+This sets the session’s workflow status, independent of its agent’s activity. Unset or
+unrecognized stored values display in Backlog. The change is stored in the session index and reaches
+all windows and paired phones. Sessions sharing a branch keep their own statuses.
+Done and Canceled do not archive the session or stop its agent. The result includes
+`session.manualStatus`; `sessions list` and `sessions show` include it when set.
+Manual status does not exempt a session from idle archiving or reset its last-message
+clock. In progress and In review sessions still follow the configured idle limit;
+Show archived brings archived sessions back into view.
+
 ### Start a session
 
 Keep work in the current conversation by default. Create another session only when the
@@ -151,6 +205,7 @@ terminalx sessions create \
   --prompt <text> \
   [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -179,9 +234,17 @@ terminalx sessions create --project <project> --agent codex --prompt "Fix the ti
 terminalx sessions rename <session> --title "#203 ready for review" --json
 ```
 
-Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`, and
-`path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
-its title without changing its worktree name.
+Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`,
+`path`, and `parent`, alongside the full `session` and prompt delivery `outcome`. Renaming a
+session changes its title without changing its worktree name.
+
+`parent` is the session that started this one (see "Sessions a session started" above). Run
+from inside a TerminalX session, `sessions create` records that session and tab without being
+told; run from any other shell it records none, and `parent` is `null`. `--parent <session>`
+records the named session instead, whoever runs the command; one that matches no session
+fails with `parent_not_found` before anything is created. `--no-parent` records none. The two
+flags are mutually exclusive, and both also apply to `--quick` and `--issue` sessions. A cloud
+session records no parent: `--parent` is refused there.
 
 ### Experimental Codex connection (new local sessions only)
 
@@ -234,6 +297,7 @@ terminalx sessions create --quick \
   --agent <claude|codex> \
   --prompt <text> \
   [--title <text>] [--cwd <directory>] \
+  [--parent <session> | --no-parent] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
 ```
@@ -310,6 +374,42 @@ still reports that `recovery`.
 
 The safe polling loop is: capture the largest `seq` from `read`, `wait`, then `read --since`
 that sequence. Do not scrape terminal escape sequences.
+
+#### Wait on several sessions
+
+```text
+terminalx wait <session-or-tab>... [--any|--all] [--timeout <seconds>] --json
+```
+
+With several targets, one call waits on all of them. `--any`, the default, returns as soon as
+one target stops, asks for a decision or fails. `--all` returns when every target has. Either
+returns at the timeout. The result lists every target, in the order given:
+
+```json
+{"mode": "any", "timedOut": false, "targets": [
+  {"target": "s1", "sessionId": "…", "tabId": "…", "state": "stopped", "reason": "stop", "status": "completed", "changed": true},
+  {"target": "s2", "sessionId": "…", "tabId": "…", "state": "running", "status": "in_progress", "changed": false}
+]}
+```
+
+- `state` is `running`, `stopped`, `needsPermission`, `failed` or `timedOut`. `timedOut` is a
+  target still running when the timeout passed; top-level `timedOut` says whether it did.
+- `reason` is the single-target reason behind a settled state: `stop` or `stopped` for
+  `stopped`, `permission` or `terminal` for `needsPermission`, `recovery` for `failed` (with
+  `recovery` naming the error). It is absent for `running` and `timedOut`.
+- `changed` is true when the target's state differs from when the call began. Read those
+  targets; the others are as you last saw them.
+
+A target that has already settled when the call begins is reported at once and is not waited
+on, so nothing that ended between two calls is missed. To loop on `--any`, handle the targets
+it reports as settled, then leave them out of the next call (or send them more work first):
+a call that still names one returns at once. `--all` returns only while every target is
+settled, so a target waiting on a decision holds it until the timeout unless someone answers;
+use `--any` to react to requests.
+
+One target with neither flag gives the single-target result above. Pass `--any` or `--all`
+with one target to get the list. A target that names no session fails the call before any
+waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
 
 ### Permissions
 
@@ -469,12 +569,42 @@ The response carries `pipeline` (or `null`, with the reason in `pipelineNote`, w
 has the pipeline turned off or the session is not on a branch of its own).
 
 ```text
+terminalx pipelines start <existing-session-or-author-tab> [--adopt-pr] \
+  [--auto-merge|--no-auto-merge] [--resolve-conflicts|--no-resolve-conflicts] --json
+terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`start` (`attach` is an alias) activates Autopilot in an existing local session. A session
+selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the
+session, conversation, checkout and branch. No new author is created. The project must allow
+pipelines and the checkout must be on a non-base branch; experimental stdio tabs are refused.
+With no existing pipeline, launch switches take the project's issue/session defaults unless
+specified. Repeating the command returns the same pipeline and does not resend the author brief
+or change its switches. Use the switch commands below to change an existing pipeline.
+
+Use `--adopt-pr` when the branch already has an open PR. TerminalX verifies the clean checkout
+matches that PR's branch and exact head before attaching it. It never pushes, rewrites history,
+edits the PR body or creates a replacement PR during adoption. The original author yields its
+turn; TerminalX then independently reviews the same PR, with the existing review, security,
+local-check and CI gates. Prior reviews are not imported as a fabricated TerminalX verdict.
+An existing pipeline at Work with no PR can adopt too; one already attached to a PR is returned
+unchanged. Reviewer/resolver tabs cannot take over as author. A stopped pipeline needs `resume`.
+
+Without `--adopt-pr`, a new pipeline sends its handoff brief to the original author once (queued
+when busy). The response includes `pipeline` and `authorBrief`; inspect its state/note if delivery
+fails. An existing open PR is reused later when the author reports completion. After attaching
+from the author tab, finish the turn so review can proceed. These commands need no UI grant and
+never authorize human-only confirmations, review extensions or security overrides.
+
+For explicitly authorized operation of the visible session controls, use
+`terminalx computer self-ui` as documented in `terminalx skills get computer-use`. Its expiring
+grant names one session, tab, main window and control allowlist. Raw self-app screenshots,
+accessibility trees and coordinate/keyboard actions remain protected.
 
 `<pipeline>` is a pipeline id or its unique prefix, the issue (`433`, `ENG-42`; the newest
 pipeline when an issue has several), or the author session's id. When more than one project
@@ -555,7 +685,8 @@ open, `terminalx computer` actions answer `confirmation_pending`: only the perso
 Do not try to work around any of this, and do not answer it for them: ask the person.
 
 What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
-TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
+TerminalX's raw computer use protects its own windows (`own_app_protected`). The scoped
+`computer self-ui` route exposes approved session controls only, never confirmations. On
 macOS this version's helper serves only the app itself: an agent that talks to it directly, or
 starts its own copy of it, is refused. It does not stop a hostile program that drives the
 screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
@@ -640,7 +771,8 @@ request an explicit complete guide; the embedded guide is complete either way.
 
 The built-in browser is TerminalX's own Chromium, opened as a headed window the reader can see
 and take over, with tabs scoped to TerminalX workspaces. It is not the reader's Chrome or
-Safari and not TerminalX's own app chrome; for those use a desktop-control tool, not these
+Safari or TerminalX's own app chrome. Use desktop computer use for Safari, and scoped
+`computer self-ui` for approved TerminalX session controls, rather than these
 commands. Tabs and cookies persist in a browser profile under `$TERMINALX_HOME/browser`, so a
 login survives across commands and sessions.
 
@@ -759,6 +891,8 @@ JSON failures have this shape:
   it receives the new launch environment.
 - `not_found`: refresh the relevant list and use an id from the result.
 - `ambiguous_selector`: use the full id or exact project path.
+- `parent_not_found`: `sessions create --parent` named a session the app does not have.
+  Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   updateProject: vi.fn(),
   environmentList: vi.fn(async (_project: string | null) => []),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
+  preview: vi.fn(),
 }));
 vi.mock("@/lib/sessions", async (original) => {
   const actual = await original<typeof import("@/lib/sessions")>();
@@ -20,7 +21,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
-  return { ...actual, experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) } };
+  return { ...actual, api: { ...actual.api, repositoryFilesPreview: mocks.preview }, experimental: { ...actual.experimental, settings: vi.fn(async () => ({ nativeCodex: false })) } };
 });
 vi.mock("@/lib/localEnvironment", async (original) => {
   const actual = await original<typeof import("@/lib/localEnvironment")>();
@@ -30,6 +31,10 @@ const { SettingsPage } = await import("./SettingsPage");
 
 beforeEach(() => {
   mocks.updateProject.mockReset().mockResolvedValue(undefined);
+  mocks.preview.mockReset().mockImplementation(async (path, patterns) => ({
+    rootPath: path, workspacesPath: `${path}/.raccoon/worktrees`, fromIncludeFile: false,
+    patterns: patterns.map((pattern: string) => ({ pattern, matches: [".env.local"], error: null })),
+  }));
   mocks.environmentList.mockClear();
   mocks.projects = [
     { path: "/repos/one", name: "One", kind: "git" },
@@ -126,4 +131,32 @@ it("opens a Scripts row link on its repository's page and focuses its registered
   expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
   expect(document.activeElement).toBe(row);
   expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("folder repositories have no file-copy navigation", () => {
+  render(<SettingsPage initialTab="repositories.mergedCleanup" initialProjectPath="/notes" onBack={vi.fn()} />);
+  expect(screen.queryByRole("navigation", { name: "Repository settings" })).toBeNull();
+});
+
+it("opens registered repository paths and files, retains drafts within a repository, and isolates them across repositories", async () => {
+  const view = render(<SettingsPage initialTab="repositories.workspacesPath" initialProjectPath="/repos/one" onBack={vi.fn()} />);
+  const group = within(screen.getByRole("navigation", { name: "Repository settings" }));
+  const workspace = await screen.findByText("/repos/one/.raccoon/worktrees");
+  expect(document.activeElement).toBe(workspace.closest('[data-setting-id="repositories.workspacesPath"]'));
+  expect(group.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+  fireEvent.click(group.getByRole("button", { name: "Files to copy" }));
+  const textarea = screen.getByRole("textbox", { name: "Glob patterns (one per line)" });
+  fireEvent.change(textarea, { target: { value: ".env*" } });
+  await screen.findByText(".env.local");
+  expect(view.container.querySelector('[data-setting-id="repositories.filesToCopy"]')?.getAttribute("data-setting-instance")).toBe("/repos/one");
+  fireEvent.click(group.getByRole("button", { name: "General" }));
+  fireEvent.click(group.getByRole("button", { name: "Files to copy" }));
+  expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe(".env*");
+  view.rerender(<SettingsPage initialTab="repositories.filesToCopy" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-current")).toBe("page");
+  const row = view.container.querySelector('[data-setting-id="repositories.filesToCopy"]');
+  expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
+  expect(document.activeElement).toBe(row);
+  expect((screen.getByRole("textbox", { name: "Glob patterns (one per line)" }) as HTMLTextAreaElement).value).toBe("");
+  expect(group.getAllByRole("button", { name: "Files to copy" }).map((button) => button.getAttribute("aria-current"))).toEqual(["page"]);
 });

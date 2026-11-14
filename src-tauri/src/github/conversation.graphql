@@ -1,0 +1,39 @@
+query PullRequestConversation($owner: String!, $name: String!, $number: Int!,
+  $reviews: String, $requests: String, $threads: String, $timeline: String,
+  $readReviews: Boolean! = true, $readRequests: Boolean! = true,
+  $readThreads: Boolean! = true, $readTimeline: Boolean! = true) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      url title body state author { login } viewerCanUpdate
+      reviews(first: 100, after: $reviews) @include(if: $readReviews) {
+        nodes { id state submittedAt author { login __typename } }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviewRequests(first: 100, after: $requests) @include(if: $readRequests) {
+        nodes { requestedReviewer {
+          __typename
+          ... on User { login }
+          ... on Bot { login }
+          ... on Team { slug organization { login } }
+        } }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviewThreads(first: 100, after: $threads) @include(if: $readThreads) {
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+      timelineItems(first: 100, after: $timeline,
+        itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT]) @include(if: $readTimeline) {
+        nodes {
+          __typename
+          ... on IssueComment { id body createdAt url author { login } }
+          ... on PullRequestReview { id body submittedAt state url author { login } }
+          ... on PullRequestCommit { id commit { oid messageHeadline committedDate url author { name user { login } } } }
+          ... on HeadRefForcePushedEvent { id createdAt actor { login } beforeCommit { oid } afterCommit { oid } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}

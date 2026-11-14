@@ -1,3 +1,4 @@
+import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -37,6 +38,7 @@ import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
+import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -536,6 +538,7 @@ export const api = {
   setMachineName: (name: string | null) => invoke<MachineName>("set_machine_name", { name }),
 
   // projects
+  repositoryFilesPreview: (path: string, patterns?: string[], snapshot?: string) => invoke<RepositoryFilesPreview>("repository_files_preview", { path, patterns, snapshot }),
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
   chatsDir: () => invoke<string>("chats_dir"),
@@ -633,6 +636,7 @@ export const api = {
    * doing (#718). `keep`: what this window shows. Resolves to the ids archived; the windows hear of each as usual.
    */
   archiveIdleSessions: (keep: string[]) => invoke<string[]>("archive_idle_sessions", { keep }),
+  setSessionStatus: (sessionId: string, status: import("@/types/session").ManualStatus) => invoke<void>("set_session_status", { sessionId, status }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
   /** Delete one session; its workspace and every other session stay. */
@@ -2163,6 +2167,11 @@ export interface PrAssociation {
 }
 
 export const gh = {
+  conversation: (url: string): PrConversationAccess => ({
+    read: () => invoke("pr_conversation", { url }),
+    act: (action) => invoke("pr_conversation_action", { url, action }),
+    search: (query) => invoke("pr_reviewer_search", { url, query }),
+  }),
   checkLog: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<CheckLog>("pr_check_log", { cwd, prUrl, checkUrl, failed }),
   rerunCheck: (cwd: string, prUrl: string, checkUrl: string, failed: boolean) => invoke<void>("pr_check_rerun", { cwd, prUrl, checkUrl, failed }),
   fixAttachment: (sessionId: string, tabId: string, prUrl: string) => invoke<{ path: string; truncated: boolean }>("pr_check_fix_attachment", { sessionId, tabId, prUrl }),

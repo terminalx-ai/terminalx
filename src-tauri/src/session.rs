@@ -1778,6 +1778,8 @@ impl SessionManager {
         let string = |key: &str| params[key].as_str().with_context(|| format!("{key} is required"));
         let started = |pipeline| serde_json::json!({"pipeline":pipeline,"authorBrief":crate::issue_pipeline::prompts::author_brief()});
         Ok(match method {
+            "attach" => started(engine::start_existing(&host, string("sessionId")?, string("tabId")?, params["autoMerge"].as_bool(), params["resolveConflicts"].as_bool(), true, crate::issue_pipeline::SwitchActor::Person)?),
+            "startAgent" => started(engine::start_existing(&host, string("sessionId")?, string("tabId")?, params["autoMerge"].as_bool(), params["resolveConflicts"].as_bool(), params["adoptPr"].as_bool().unwrap_or(false), crate::issue_pipeline::SwitchActor::SelfUi { session_id: params["caller"]["session"].as_str().map(str::to_owned), tab_id: params["caller"]["tab"].as_str().map(str::to_owned) })?),
             "start" => started(engine::start(&host,string("sessionId")?,string("tabId")?,params["autoMerge"].as_bool(),None)?),
             "continue" => engine::continue_launch(&host,string("sessionId")?,string("tabId")?,&serde_json::from_value(params["options"].clone())?)?.map(started).unwrap_or(serde_json::Value::Null),
             "autoMerge" => serde_json::to_value(engine::set_auto_merge(&host,string("id")?,params["value"].as_bool().context("value is required")?)?)?,
@@ -2205,6 +2207,19 @@ impl SessionManager {
             queued: held || !rt.queued.is_empty(),
             running: rt.child.is_some() || pane_running,
         }
+    }
+
+    /// Put a tab where `wait` reads it, as its agent would: for tests of
+    /// what waits on several tabs.
+    #[cfg(test)]
+    pub(crate) fn set_wait_state_for_tests(&self, session_id: &str, tab_id: &str, status: TabStatus, asks: bool) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let mut rt = runtime.lock().unwrap();
+        rt.pending.clear();
+        if asks {
+            rt.pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: serde_json::json!({}), suggestions: Vec::new() });
+        }
+        self.set_display_status(&mut rt, status);
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
