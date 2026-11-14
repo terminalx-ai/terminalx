@@ -327,6 +327,31 @@ impl EarlyExit {
     }
 }
 
+/// How long closing a tab waits for its agent to exit before it gives up
+/// and leaves the tab open (PRO-291).
+pub const CLOSE_WAIT_SECS: u64 = 10;
+
+/// Why a tab is still open after its close: its agent did not exit in time.
+pub fn close_timed_out(agent: &str) -> String {
+    format!("{agent} didn't stop within {CLOSE_WAIT_SECS} seconds")
+}
+
+/// Whether a stop's error says the agent's exit was never confirmed, the
+/// words every stop path uses for it.
+pub fn exit_unconfirmed(message: &str) -> bool {
+    message.contains("exit could not be confirmed")
+}
+
+/// What a new tab whose agent exited while starting says (PRO-291), by the
+/// program's own name (`claude`, `codex`): the reason on the first line, and the agent's own last line, when it left
+/// one, on the second. The app shows the two apart.
+pub fn startup_failure(agent: &str, exit: &EarlyExit) -> String {
+    match &exit.detail {
+        Some(detail) => format!("{agent} exited while starting\n{detail}"),
+        None => format!("{agent} exited while starting"),
+    }
+}
+
 /// How long the session watcher waits before it says anything about a turn.
 #[derive(Debug, Clone, Copy)]
 pub struct Patience {
@@ -556,6 +581,30 @@ mod tests {
             assert!(matches!(p, Payload::Error { message, .. } if message == expected.message()));
         }
     }
+
+    #[test]
+    fn a_startup_failure_says_why_on_one_line_and_the_agents_words_on_the_next() {
+        let exit = EarlyExit::read(b"Welcome\r\n\x1b[31mError: ~/.claude/settings.json line 14: Unexpected token }\x1b[0m\r\n");
+        let text = startup_failure("Claude Code", &exit);
+        let (reason, detail) = text.split_once('\n').expect("two lines");
+        assert_eq!(reason, "Claude Code exited while starting");
+        assert!(detail.contains("settings.json line 14: Unexpected token }"), "{detail}");
+        // An exit that printed nothing gives the reason alone.
+        assert_eq!(startup_failure("Codex", &EarlyExit::default()), "Codex exited while starting");
+        // The agent's words are redacted as every detail is.
+        let secret = startup_failure("Codex", &EarlyExit::said("error: OPENAI_API_KEY=sk-abc123def is invalid"));
+        assert!(!secret.contains("sk-abc123def"), "{secret}");
+    }
+
+    #[test]
+    fn a_close_that_timed_out_names_the_agent_and_the_wait() {
+        assert_eq!(close_timed_out("Codex"), "Codex didn't stop within 10 seconds");
+        for said in ["Local process exit could not be confirmed. Retry Stop before resuming.", "Agent exit could not be confirmed. Its conversation stayed in its original folder."] {
+            assert!(exit_unconfirmed(said), "{said}");
+        }
+        assert!(!exit_unconfirmed("Stop is already in progress."));
+        assert!(!exit_unconfirmed("tab not found"));
+    }
 }
 
 #[cfg(test)]
@@ -575,7 +624,7 @@ mod lifecycle_tests {
     #[test]
     fn unconfirmed_withdrawal_does_not_restore_a_legacy_unsent_claim() {
         let events = vec![
-            event(Payload::UserMessage { author: None, text: "possibly delivered".into(), images: vec![], baseline: None, queued: true, cwd: None }),
+            event(Payload::UserMessage { author: None, text: "possibly delivered".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }),
             event(Payload::PromptWithdrawn { prompt_seq: 1, unconfirmed: true }),
             event(Payload::Recovery { kind: Some(RecoveryKind::Unsent) }),
         ];
@@ -588,7 +637,7 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), Some(RecoveryKind::Capacity));
         events.push(event(Payload::Recovery { kind: None }));
         assert_eq!(from_history(&events), None);
-        events.push(event(Payload::UserMessage { author: None, text: "Continue".into(), images: vec![], baseline: None, queued: false, cwd: None }));
+        events.push(event(Payload::UserMessage { author: None, text: "Continue".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None }));
         assert_eq!(from_history(&events), Some(RecoveryKind::Disconnected));
         events.push(event(Payload::Status { text: SESSION_CLOSED_MESSAGE.into() }));
         assert_eq!(from_history(&events), None);
@@ -602,7 +651,7 @@ mod lifecycle_tests {
         let moved_on = Payload::Conversation { id: Some("c2".into()), harness: "codex".into(), resumed: false };
         let lapsed = event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true });
         assert_eq!(from_history(&[lapsed.clone(), event(moved_on.clone())]), None);
-        let unfinished = event(Payload::UserMessage { author: None, text: "p".into(), images: vec![], baseline: None, queued: false, cwd: None });
+        let unfinished = event(Payload::UserMessage { author: None, text: "p".into(), images: vec![], files: Vec::new(), baseline: None, queued: false, cwd: None });
         assert_eq!(from_history(std::slice::from_ref(&unfinished)), Some(RecoveryKind::Disconnected));
         assert_eq!(from_history(&[unfinished, event(moved_on.clone())]), None);
         // What goes wrong in the new one is its own.

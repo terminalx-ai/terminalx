@@ -119,11 +119,15 @@ pub fn save(tab: &mut TabEntry, conversation: Option<String>, target: Option<Tar
     Ok(selection)
 }
 
-pub fn launch_args(session_id:&str, tab: &TabEntry, appends_prompt: bool) -> Result<String> {
+/// The desktop tools a new agent of `tab` starts with: the computer the tab
+/// chose, or, with none chosen, the Local VM while it runs, as before
+/// computers could be chosen. A choice that no longer holds fails the launch.
+pub fn launch_args(session_id: &str, tab: &TabEntry) -> Result<crate::container_vm::VmLaunch> {
     match selected(tab)?.target {
-        Some(target @ Target::MacosGuest {..}) => crate::local_vm::attachment::launch_args(session_id,tab,&target,appends_prompt),
-        Some(target) => crate::container_vm::launch_selected(&target, &tab.harness, appends_prompt),
-        None => Ok(String::new()),
+        #[cfg(unix)]
+        Some(target @ Target::MacosGuest { .. }) => crate::local_vm::attachment::launch_args(session_id, tab, &target),
+        Some(target) => { let _ = session_id; crate::container_vm::launch_selected(&target, &tab.harness) }
+        None => Ok(crate::container_vm::launch_args(&tab.harness)),
     }
 }
 
@@ -185,7 +189,7 @@ mod tests {
     #[test]
     fn selection_reopens_exact_identity_and_refuses_corruption_or_conversation_change() {
         let mut tab: TabEntry = serde_json::from_value(json!({"id":"tab","harness":"codex","created":"now","unrelated":"kept"})).unwrap();
-        assert!(launch_args("session", &tab, false).unwrap().is_empty());
+        assert!(selected(&tab).unwrap().target.is_none());
         let target = Target::LinuxContainer { runtime: Runtime::Podman, id: "a".repeat(64) };
         save(&mut tab, None, Some(target.clone())).unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -195,12 +199,12 @@ mod tests {
         assert_eq!(selected(&reopened).unwrap().target, Some(target));
         assert_eq!(reopened.unknown["unrelated"], "kept");
         reopened.follow.conversation = Some("next".into());
-        assert!(launch_args("session", &reopened, false).is_err());
+        assert!(launch_args("session", &reopened).is_err());
         assert!(save(&mut reopened, None, None).is_err());
         save(&mut reopened, Some("next".into()), None).unwrap();
-        assert!(launch_args("session", &reopened, false).unwrap().is_empty());
+        assert!(selected(&reopened).unwrap().target.is_none());
         reopened.unknown.insert(SELECTION.into(), json!({"version":999,"target":null,"conversation":"next"}));
-        assert!(launch_args("session", &reopened, false).is_err());
+        assert!(launch_args("session", &reopened).is_err());
     }
 
     #[test]

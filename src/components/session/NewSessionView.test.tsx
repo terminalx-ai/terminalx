@@ -78,10 +78,11 @@ beforeEach(() => {
   dragDropListener.mockReset();
   dragDropListener.mockResolvedValue(vi.fn());
   invoke.mockReset();
-  invoke.mockImplementation(async (cmd: string) => {
+  invoke.mockImplementation(async (cmd: string, args: { paths: string[] }) => {
     if (cmd === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
     if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
     if (cmd === "create_session") return created;
+    if (cmd === "inspect_attachments") return inspected(args.paths);
     if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
     throw new Error(`unexpected command ${cmd}`);
   });
@@ -108,6 +109,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** What the runtime finds at picked or dropped paths: a small PNG, unless the name says otherwise. */
+function inspected(paths: string[]) {
+  return paths.map((path) => {
+    const name = path.split("/").pop()!;
+    return { path, name, size: 3, mediaType: name.endsWith(".png") ? "image/png" : "text/plain" };
+  });
+}
+
 function renderView(onCreated = vi.fn()) {
   const utils = render(<NewSessionView onCreated={onCreated} useWorktree={false} onUseWorktreeChange={vi.fn()} />);
   return { ...utils, onCreated };
@@ -116,25 +125,26 @@ function renderView(onCreated = vi.fn()) {
 describe("new session attachments", () => {
   it("retains the draft and attachment when fresh login preflight refuses creation, then sends once after login", async () => {
     let signedIn = true;
-    invoke.mockImplementation(async (cmd: string) => {
+    invoke.mockImplementation(async (cmd: string, args: { paths: string[] }) => {
       if (cmd === "check_agent_readiness") return { state: signedIn ? "ready" : "signed_out", checkedAt: "2026-10-26T14:00:00Z", version: "1.0.0" };
       if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
       if (cmd === "create_session") return created;
-      if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
+      if (cmd === "inspect_attachments") return inspected(args.paths);
+    if (cmd === "read_image_file") return { name: "shot.png", mediaType: "image/png", data: "AQID" };
       throw new Error(`unexpected command ${cmd}`);
     });
     openDialog.mockResolvedValue(["/tmp/shot.png"]);
     const { onCreated } = renderView();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this task" } });
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-    await screen.findByAltText("shot.png");
+    await screen.findByTitle("shot.png");
     const start = screen.getByRole("button", { name: "Create" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     signedIn = false;
     fireEvent.click(start);
     await screen.findByText(/Your draft is kept and no session has been created/);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep this task");
-    expect(screen.getByAltText("shot.png")).toBeTruthy();
+    expect(screen.getByTitle("shot.png")).toBeTruthy();
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
     expect(onCreated).not.toHaveBeenCalled();
     signedIn = true;
@@ -167,7 +177,7 @@ describe("new session attachments", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
 
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith("read_image_file", { path: "/tmp/shot.png" });
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
 
@@ -175,7 +185,27 @@ describe("new session attachments", () => {
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "", [{ mediaType: "image/png", data: "AQID", name: "shot.png" }]));
     expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({ projectPath: project.path, title: "" }) }));
-    expect(screen.queryByAltText("shot.png")).toBeNull();
+    expect(screen.queryByTitle("shot.png")).toBeNull();
+  });
+
+  it("hands a picked file that is not an image to onCreated, to be stored once the session exists (PRO-290)", async () => {
+    openDialog.mockResolvedValue(["/tmp/notes.md", "/tmp/shot.png"]);
+    const { onCreated } = renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(await screen.findByTitle("notes.md")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("2 attached");
+    const start = screen.getByRole("button", { name: "Create" });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      "session-1", "tab-1", "",
+      [{ mediaType: "image/png", data: "AQID", name: "shot.png" }],
+      [{ name: "notes.md", path: "/tmp/notes.md" }],
+    ));
+    // Nothing is stored before the session exists: the shell stores them on its first send.
+    expect(invoke.mock.calls.some(([cmd]) => cmd === "store_attachments")).toBe(false);
+    expect(screen.queryByTitle("notes.md")).toBeNull();
   });
 
   it("attaches a pasted image", async () => {
@@ -185,7 +215,7 @@ describe("new session attachments", () => {
 
     fireEvent.paste(frame, { clipboardData: { files: [image] } });
 
-    expect(await screen.findByAltText("paste.png")).toBeTruthy();
+    expect(await screen.findByTitle("paste.png")).toBeTruthy();
   });
 
   it("shows the drop target and attaches a file dropped on the window", async () => {
@@ -194,11 +224,11 @@ describe("new session attachments", () => {
     const onDrag = dragDropListener.mock.calls[0][0] as (e: { payload: { type: string; paths?: string[] } }) => Promise<void>;
 
     await onDrag({ payload: { type: "enter" } });
-    expect(await screen.findByText("Drop images to attach, other files to mention")).toBeTruthy();
+    expect(await screen.findByText("Drop files to attach")).toBeTruthy();
 
     await onDrag({ payload: { type: "drop", paths: ["/tmp/shot.png"] } });
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText("Drop images to attach, other files to mention")).toBeNull());
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Drop files to attach")).toBeNull());
   });
 });
 
@@ -649,5 +679,105 @@ describe("what the new-session view says about the project and the agents (PRO-2
     renderView();
     await waitFor(() => expect(screen.getAllByTestId("agent-signed-in").map((node) => node.textContent)).toEqual(["Claude signed in"]));
     expect(screen.getByText("Nothing starts until you press Create.")).toBeTruthy();
+  });
+});
+
+const { noteExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+const { useRunViewShown, showRunView } = await import("@/lib/orchestration");
+const { PLAN_A_RUN_PROMPT } = await import("@/lib/orchestrateStart");
+
+describe("Orchestrate (PRO-337)", () => {
+  const RunShown = () => <output data-testid="run-shown">{String(useRunViewShown("session-1"))}</output>;
+  const runsOn = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: on });
+
+  beforeEach(() => {
+    resetExperimentalSettingsForTests();
+    showRunView("session-1", false);
+  });
+  afterEach(() => resetExperimentalSettingsForTests());
+
+  it("is offered beside Create for a local git project only while Orchestration runs is on", async () => {
+    runsOn(true);
+    const first = render(<NewSessionView />);
+    expect(screen.getByRole("button", { name: "Orchestrate" })).toBeTruthy();
+    first.unmount();
+
+    runsOn(false);
+    const off = render(<NewSessionView />);
+    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
+    off.unmount();
+
+    // A folder has no git to give workers worktrees; a chat and the compact window lead nothing.
+    runsOn(true);
+    project.kind = "folder";
+    const folder = render(<NewSessionView />);
+    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    folder.unmount();
+    project.kind = "git";
+    const quick = render(<NewSessionView quick />);
+    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    quick.unmount();
+    render(<NewSessionView compact />);
+    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+  });
+
+  it("starts the session Create would, marked to ask first, with the plan-a-run request last, on its Run tab", async () => {
+    runsOn(true);
+    const starts: { req: Record<string, unknown>; prompt: string }[] = [];
+    for (const button of ["Create", "Orchestrate"]) {
+      invoke.mockClear();
+      const onCreated = vi.fn();
+      const view = render(<><NewSessionView onCreated={onCreated} useWorktree={false} onUseWorktreeChange={vi.fn()} /><RunShown /></>);
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "Improve the parser" } });
+      await waitFor(() => expect(screen.getByRole("button", { name: button }).hasAttribute("disabled")).toBe(false));
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+      const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
+      starts.push({ req: args.req, prompt: onCreated.mock.calls[0][2] });
+      expect(screen.getByTestId("run-shown").textContent).toBe(String(button === "Orchestrate"));
+      view.unmount();
+    }
+    const [plain, orchestrated] = starts;
+    expect(plain.req.orchestrate).toBeUndefined();
+    expect(orchestrated.req).toEqual({ ...plain.req, orchestrate: true });
+    expect(plain.prompt).toBe("Improve the parser");
+    expect(orchestrated.prompt).toBe(`Improve the parser\n\n${PLAN_A_RUN_PROMPT}`);
+  });
+
+  it("orchestrates an issue picked in Start from…, the request after the issue and the pipeline's brief", async () => {
+    runsOn(true);
+    Element.prototype.scrollIntoView = vi.fn();
+    const issue = {
+      provider: "github", id: "700", identifier: "#700", number: 700, title: "Split the settings reads",
+      url: "https://example.test/issues/700", state: "OPEN", stateType: "open", labels: [], updatedAt: "2026-11-01T00:00:00Z", body: "Move every read to the typed store.",
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
+      if (command === "preview_workspace_name") return "700-split-the-settings-reads";
+      if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+      if (command === "list_branches") return [];
+      if (command === "issues_list") return [issue];
+      if (command === "issue_comments") return { comments: [], nextCursor: null };
+      if (command === "create_session") return created;
+      if (command === "issue_pipeline_start") return { pipeline: { id: "p1", resolveConflicts: false }, authorBrief: "HANDOFF BRIEF" };
+      if (command === "issue_pipeline_set_resolve_conflicts") return { id: "p1", resolveConflicts: true };
+      throw new Error(`Unexpected command ${command}`);
+    });
+    const onCreated = vi.fn();
+    render(<><NewSessionView onCreated={onCreated} /><RunShown /></>);
+    fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Issues" }), { button: 0 });
+    fireEvent.click(await screen.findByRole("option", { name: /Split the settings reads/ }));
+    await screen.findByTestId("picked-issue");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Orchestrate" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Orchestrate" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ orchestrate: true, useWorktree: true, worktreeName: "700-split-the-settings-reads" }) });
+    const prompt: string = onCreated.mock.calls[0][2];
+    expect(prompt).toContain("Move every read to the typed store.");
+    expect(prompt.indexOf("Move every read")).toBeLessThan(prompt.indexOf("HANDOFF BRIEF"));
+    expect(prompt.endsWith(`HANDOFF BRIEF\n\n${PLAN_A_RUN_PROMPT}`)).toBe(true);
+    expect(screen.getByTestId("run-shown").textContent).toBe("true");
   });
 });

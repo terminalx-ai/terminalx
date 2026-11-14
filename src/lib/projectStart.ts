@@ -136,7 +136,7 @@ export async function chooseTemplateFolder(): Promise<string | null> {
 
 const templateSettingsListeners = new Set<() => void>();
 
-/** Ask the app shell to open Settings › Projects, where the reader's own templates are added. */
+/** Ask the app shell to open Settings › Project templates, where the reader's own templates are added. */
 export function requestTemplateSettings() {
   for (const listener of [...templateSettingsListeners]) listener();
 }

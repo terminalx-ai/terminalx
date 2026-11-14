@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, X } from "@/icons";
+import { ChevronDown, ChevronRight, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, Unplug, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openPr } from "@/lib/editors";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { prErrorKind } from "@/lib/prErrors";
 import { AddRemote, CommandDetails, GitError, GitHubSetup } from "./GitRecovery";
 import { prIdentity, sessionPrs, type SessionPr } from "@/lib/sessionPrs";
+import { onPrLinksChanged, unlinkPr } from "@/lib/prLinks";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -24,6 +26,7 @@ import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, w
 import { NextLine } from "./NextStep";
 import { PrConversation, useDocumentVisible } from "./PrConversation";
 import { ReviewThreads } from "./ReviewThreads";
+import { noteSessionPrs } from "@/lib/reviewThreads";
 
 type WorkspaceCleanup = {
   projectPath: string;
@@ -146,6 +149,8 @@ export function PrPanel({
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => { setLoginSource(null); }, [source]);
+  // A pull request linked or unlinked from the session's menu shows at once.
+  useEffect(() => sessionId ? onPrLinksChanged((changed) => { if (changed === sessionId) setTick((t) => t + 1); }) : undefined, [sessionId]);
 
   useEffect(() => {
     // Returning from browser authentication must not unmount the login PTY.
@@ -194,6 +199,8 @@ export function PrPanel({
       .then(([{ pullRequests, workStatus, landedWork }, workspaceCheck]) => {
         if (cancelled) return;
         setRows(pullRequests.rows);
+        // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
+        if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
         setLoadedSelection(selection);
         setStatus(workStatus);
         setLanded(landedWork);
@@ -302,6 +309,16 @@ export function PrPanel({
   // refresh read again; this old action cannot initiate unscoped reconciliation.
   }, false);
 
+  /** Only a link made with "Link pull request…" (PRO-294) is undone; a PR the session opened stays. */
+  const unlink = (row: SessionPr): (() => void) | undefined => {
+    const association = row.association;
+    if (selectedPr || !sessionId || !association?.linked) return undefined;
+    return () => void act("unlink", async () => {
+      await unlinkPr(sessionId, association.url);
+      return `Unlinked #${association.number}. Its checks and review are no longer shown here.`;
+    });
+  };
+
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>
     void act("merge", () => row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method)).then((done) => {
@@ -327,7 +344,9 @@ export function PrPanel({
     const pr = row.pr!;
     openPr(sessionId ?? `checkout:${cwd}`, cwd, row.association ?? { url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
   } : undefined;
-  const open = prs.filter((p) => p.state === "OPEN");
+  // The session's own pull requests: one linked from another branch (PRO-294) is only shown here, and says nothing of whether this branch is done.
+  const ownWork = (row: SessionPr) => row.current || !row.association?.linked;
+  const open = visibleRows.filter((row) => ownWork(row) && row.pr?.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
   const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
@@ -351,10 +370,10 @@ export function PrPanel({
           </Button>
         </div>
       )}
-      {error && inline && errorFrom === "load" ? (
+      {error && inline && errorFrom === "load" && !prErrorKind(error) ? (
         // Not reaching GitHub is no fault of the reader's: said once, quietly, the detail on hover.
         <p className="px-4 text-[11px] text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
-      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} />)}
+      ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
@@ -385,11 +404,12 @@ export function PrPanel({
           setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
         }} />;
         const ready = mergeReadiness(pr);
-        const reviews = <ReviewThreads source={source} url={pr.url} sessionId={sessionId} active={active} prState={pr.state} />;
+        const reviews = <ReviewThreads source={source} url={pr.url} number={pr.number} sessionId={sessionId} active={active} prState={pr.state} />;
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
-          onFix={onFixErrors && pr.state === "OPEN" ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
-        if (inline) return <div key={row.identity}><InlinePr reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
+          onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+        const onUnlink = unlink(row);
+        if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -413,12 +433,14 @@ export function PrPanel({
                 <X className="mt-0.5 size-4 shrink-0 text-destructive" />
               )}
               {openInTab && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button></WithTooltip>}
+              {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={!!working} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
               <div className="min-w-0 flex-1">
                 <button type="button" onClick={() => void openUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
                   <span className="truncate">{pr.title}</span>
                   <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
                 </button>
                 <div className="text-[11px] text-faint">
+                  {row.association?.linked && <LinkedTag />}
                   #{pr.number} · {pr.state === "OPEN" ? (pr.isDraft ? "Draft" : "Open") : pr.state === "MERGED" ? "Merged" : "Closed"} · {pr.url.replace(/^https:\/\//, "").replace(/\/pull\/\d+\/?$/, "")}
                   <br /><span className="font-mono">{pr.head}</span> into <span className="font-mono">{pr.base}</span> · <span className="text-add">+{pr.additions}</span>{" "}
                   <span className="text-destructive">−{pr.deletions}</span>
@@ -565,7 +587,16 @@ function reviewLabel(decision: string): string {
  * number and state, its checks folded into a count (unfolded when one fails),
  * then, unless the branch has a step first, what to do with it now.
  */
-function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen }: { onOpen?: () => void; pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
+/** Said of a pull request linked by hand from another branch (PRO-294). */
+function LinkedTag() {
+  return (
+    <span className="mr-1 rounded bg-muted px-1.5 text-[10.5px] text-muted-foreground" title="Linked to this session. Its checks and review show here; Push still goes to this session's branch." data-testid="pr-linked">
+      Linked
+    </span>
+  );
+}
+
+function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen, onUnlink, unlinkDisabled = false }: { onOpen?: () => void; onUnlink?: () => void; unlinkDisabled?: boolean; pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
   const failing = pr.checks.filter(isFailingCheck).length;
   const [checksOpen, setChecksOpen] = useState(failing > 0);
   useEffect(() => {
@@ -590,7 +621,9 @@ function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen }: { onOpe
           <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
         </button>
         {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
+        {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={unlinkDisabled} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
         <span className="shrink-0 text-[11px] text-faint">
+          {onUnlink && <LinkedTag />}
           #{pr.number} · {state}
         </span>
       </div>

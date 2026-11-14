@@ -97,7 +97,7 @@ fn repository_copy_settings_and_scripts_survive_independent_updates() {
     let _home = crate::store::temp_home();
     let repo = repo();
     let project = projects::add(repo.path().to_str().unwrap()).unwrap();
-    let scripts = projects::RepositoryScripts { setup: "echo setup".into(), archive: "echo archive".into() };
+    let scripts = projects::RepositoryScripts { setup: "echo setup".into(), archive: "echo archive".into(), archive_timeout_minutes: None };
     projects::update(&project.path, projects::ProjectPatch { scripts: Some(scripts.clone()), ..Default::default() }).unwrap();
     projects::update(&project.path, projects::ProjectPatch {
         repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env*"]) }),
@@ -535,4 +535,39 @@ fn git_eligibility_uses_the_bound_source_after_an_ancestor_swap() {
     // Resolving aliases is allowed before binding. Once resolved, binding must
     // refuse a newly substituted symlink in any component, not just the leaf.
     assert!(safe_open::Directory::open_resolved(&resolved).is_err());
+}
+
+#[test]
+fn patterns_that_match_nothing_say_why() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    write(repo.path(), ".env", "private");
+    // Tracked although it matches .gitignore.
+    write(repo.path(), ".env.tracked", "x");
+    git::run(repo.path(), &["add", "-f", ".env.tracked"]).unwrap();
+    // Negated, so untracked but not ignored.
+    write(repo.path(), ".gitignore", ".env*\n!.env.keep\nconfig/local/\ncache/\n");
+    write(repo.path(), ".env.keep", "kept");
+    let result = preview(repo.path(), Some(&patterns(&[".env", ".env.tracked", ".env.keep", "nothing/**", "["])), None).unwrap();
+    let reasons: Vec<_> = result.patterns.iter().map(|p| p.reason.as_deref()).collect();
+    assert_eq!(reasons[0], None);
+    assert!(reasons[1].unwrap().contains("only tracked files"));
+    assert!(reasons[2].unwrap().contains("negation"));
+    assert_eq!(reasons[3], Some("No file matches this pattern"));
+    assert!(reasons[4].unwrap().contains("invalid"));
+    assert!(result.patterns[4].error.is_some());
+}
+
+#[test]
+fn copy_report_names_the_first_copied_file() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    projects::update(&project.path, projects::ProjectPatch { repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env*"]) }), ..Default::default() }).unwrap();
+    write(repo.path(), ".env.local", "a");
+    write(repo.path(), ".env.two", "b");
+    let worktree = git::create_worktree(repo.path(), "first-copied", Some("main")).unwrap();
+    let report = worktree.worktree_base.unwrap().file_copy.unwrap();
+    assert_eq!(report.copied_count, 2);
+    assert_eq!(report.first_copied.as_deref(), Some(".env.local"));
 }

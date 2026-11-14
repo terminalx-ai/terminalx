@@ -155,7 +155,13 @@ describe("where a pipeline stands", () => {
     expect(forward(pipeline({ state: "needsYou" }))).toEqual({ action: "advance", label: "Open pull request" });
     expect(forward(pipeline({ stage: "pullRequest", state: "needsYou" }))).toEqual({ action: "advance", label: "Try again" });
     expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "noVerdict" } }))).toEqual({ action: "advance", label: "Review again" });
-    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "advance", label: "Review once more" });
+    expect(forward(pipeline({ stage: "review", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // At the merge stage too: an advance there only looks again and stops on the limit again.
+    expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "roundLimit" } }))).toEqual({ action: "review", label: "Review once more" });
+    // The final review passed and the branch moved with commits of their own (#947): one more review.
+    const moved = pipelineActions(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "movedAfterFinalReview", reviewed: C1, head: "2222222", rounds: 3 } }));
+    expect(moved.primary).toEqual({ action: "review", label: "Review the new head once more" });
+    expect(moved.secondary.map((button) => button.action)).toEqual(["refresh", "stop"]);
     expect(forward(pipeline({ stage: "address", state: "needsYou" }))).toEqual({ action: "advance", label: "Review the changes" });
     expect(forward(pipeline({ stage: "merge", state: "needsYou", reason: { kind: "checksFailed" } }))).toEqual({ action: "advance", label: "Check again" });
     // A head nobody reviewed is fixed by a review, not by looking again.
@@ -260,7 +266,7 @@ describe("a pipeline as the app stores it", () => {
       ["address", "done", null],
       ["merge", "pending", null],
     ]);
-    expect(pipelineActions(fixture).primary).toEqual({ action: "advance", label: "Review once more" });
+    expect(pipelineActions(fixture).primary).toEqual({ action: "review", label: "Review once more" });
     expect(pipelineForIssue([fixture], "/repo", "https://github.com/acme/widgets/issues/433")).toBe(fixture);
     expect(pipelineForSession([fixture], "reviewer-1")?.role).toBe("reviewer");
     expect(fixture.verdict?.findings.map((finding) => [finding.severity, finding.security, finding.file ?? null, finding.line ?? null])).toEqual([
@@ -286,6 +292,7 @@ describe("a pipeline as the app stores it", () => {
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
       "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks", "reviewPendingSince", "releasing", "answered",
+      "mergeCheck",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);
@@ -454,5 +461,33 @@ describe("what a check's state and time are said as", () => {
       { name: "test", state: "success" }, { name: "docs", state: "skipped" }, { name: "lint", state: "failure" },
     ], ["build", "test", "docs", "e2e"]);
     expect(counts).toEqual({ total: 4, passed: 2, failed: ["build"], waiting: 1 });
+  });
+});
+
+describe("what a helper is doing (PRO-331)", () => {
+  it("says which review round runs, what the resolver does, and what the pipeline waits for", async () => {
+    const { helperActivity } = await import("./issuePipeline");
+    expect(helperActivity([pipeline({ state: "working", stage: "review", round: 2, maxRounds: 3 })], "author")).toBe("Review 2 of 3 running");
+    expect(helperActivity([pipeline({ state: "working", stage: "resolve", pr: { number: 1, url: "u", base: "main" } })], "author")).toBe("Resolving conflicts with main");
+    expect(helperActivity([pipeline({ state: "waiting", stage: "merge", note: "Waiting for checks to pass." })], "author")).toBe("Waiting for checks");
+  });
+
+  it("says nothing while the author works, or once the pipeline stopped or ended, or for another session", async () => {
+    const { helperActivity } = await import("./issuePipeline");
+    expect(helperActivity([pipeline({ state: "working", stage: "address" })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "needsYou", stage: "review" })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "working", stage: "review", answered: { kind: "x" } })], "author")).toBeNull();
+    expect(helperActivity([pipeline({ state: "working", stage: "review" })], "someone-else")).toBeNull();
+  });
+});
+
+describe("legacy reviewer sessions (PRO-331)", () => {
+  it("folds a separate reviewer session of the author's worktree, and no other", async () => {
+    const { legacyReviewerSessions } = await import("./issuePipeline");
+    const sessions = [{ id: "author", cwd: "/wt/a" }, { id: "rev", cwd: "/wt/a/" }, { id: "elsewhere", cwd: "/wt/b" }];
+    expect([...legacyReviewerSessions([pipeline({ reviewer: { sessionId: "rev", tabId: "t" } })], sessions)]).toEqual([["rev", "author"]]);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "elsewhere", tabId: "t" } })], sessions).size).toBe(0);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "author", tabId: "t2" } })], sessions).size).toBe(0);
+    expect(legacyReviewerSessions([pipeline({ reviewer: { sessionId: "gone", tabId: "t" } })], sessions).size).toBe(0);
   });
 });

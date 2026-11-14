@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { GitHubConnectionStatus } from "@/lib/api";
@@ -29,6 +29,7 @@ beforeEach(() => {
       case "git_has_remote": return remote;
       case "work_status": return { isRepo: true, branch: "feature", upstream: null, ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 1, head: "abc", dirty: false };
       case "working_changes": return ["abc", []];
+      case "working_change_sets": return ["abc", "index", [], []];
       case "pr_list": return [];
       case "git_add_remote": case "gh_create_repository": remote = true; return;
       case "git_push": if (pushFailure) throw pushFailure; return "";
@@ -193,14 +194,15 @@ describe("local Git recovery", () => {
   it("keeps file review controls while adding a remote, then allows an explicit push", async () => {
     remote = false;
     const original = backend.invoke.getMockImplementation()!;
-    backend.invoke.mockImplementation((command, args) => command === "working_changes" ? Promise.resolve(["abc", [
+    backend.invoke.mockImplementation((command, args) => command === "working_change_sets" ? Promise.resolve(["abc", "index", [], [
       { path: "src/recovery.ts", status: "modified", additions: 1, deletions: 0 },
       { path: "README.md", status: "modified", additions: 1, deletions: 0 },
     ]]) : original(command, args));
     repo();
     await screen.findByTitle("Modified · src/recovery.ts");
-    fireEvent.click(screen.getByRole("radio", { name: "Folders" }));
-    fireEvent.change(screen.getByRole("searchbox", { name: "Filter changed files" }), { target: { value: "recovery" } });
+    const unstaged = within(screen.getByRole("region", { name: "Unstaged" }));
+    fireEvent.click(unstaged.getByRole("radio", { name: "Folders" }));
+    fireEvent.change(unstaged.getByRole("searchbox", { name: "Filter changed files" }), { target: { value: "recovery" } });
     expect(screen.queryByRole("button", { name: /README.md/ })).toBeNull();
     expect(screen.getByRole("checkbox", { name: "Viewed src/recovery.ts" })).toHaveProperty("disabled", true);
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
@@ -212,8 +214,8 @@ describe("local Git recovery", () => {
     await screen.findByText("Remote added. Push when you’re ready.");
     expect(backend.invoke).toHaveBeenCalledWith("git_add_remote", { cwd, url: "https://github.com/owner/repo.git" });
     expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
-    expect(screen.getByRole("searchbox", { name: "Filter changed files" })).toHaveProperty("value", "recovery");
-    expect(screen.getByRole("radio", { name: "Folders" }).getAttribute("aria-checked")).toBe("true");
+    expect(unstaged.getByRole("searchbox", { name: "Filter changed files" })).toHaveProperty("value", "recovery");
+    expect(unstaged.getByRole("radio", { name: "Folders" }).getAttribute("aria-checked")).toBe("true");
     expect(await screen.findByTitle("Modified · src/recovery.ts")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     await waitFor(() => expect(backend.invoke).toHaveBeenCalledWith("git_push", { cwd }));
@@ -263,5 +265,27 @@ describe("local Git recovery", () => {
     await act(async () => finish(false));
     expect(screen.queryByRole("textbox", { name: "Remote URL" })).toBeNull();
     expect(backend.invoke.mock.calls.some(([command]) => command === "git_push")).toBe(false);
+  });
+});
+
+describe("PR load failures by cause", () => {
+  afterEach(cleanup);
+  it("names access, timeout and offline, with their actions", async () => {
+    const { GitError } = await import("./GitRecovery");
+    const retry = vi.fn();
+    const connect = vi.fn();
+    const view = render(<GitError details="HTTP 403: Resource not accessible by integration" onConnect={connect} onRetry={retry} />);
+    expect(screen.getByText("GitHub access required")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(connect).toHaveBeenCalled();
+    view.rerender(<GitError details="gh pr view: call did not answer" onRetry={retry} />);
+    expect(screen.getByText("Couldn't refresh PR info")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalled();
+    view.rerender(<GitError details="error connecting to api.github.com" />);
+    expect(screen.getByText("You're offline")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    view.rerender(<GitError details="HTTP 403" operation="push" />);
+    expect(screen.queryByText("GitHub access required")).toBeNull();
   });
 });

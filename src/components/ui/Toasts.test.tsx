@@ -4,7 +4,8 @@ import type { SessionEntry } from "@/types/session";
 import type { IssuePipeline } from "@/types/issuePipeline";
 
 const { openCloudSession } = vi.hoisted(() => ({ openCloudSession: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (..._args: unknown[]): Promise<unknown> => []) }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-notification", () => ({
   isPermissionGranted: vi.fn(async () => true),
   requestPermission: vi.fn(),
@@ -20,6 +21,7 @@ const { dismissNotice, notePipelineState, noteSessionStarted, noteStatusChange, 
 const { getSessionStore, openIssues, upsertSession } = await import("@/lib/sessions");
 const { NoticeForeground, useNoticeDeferral } = await import("@/lib/noticeDeferral");
 const { Dialog, DialogContent, DialogTitle } = await import("./dialog");
+const { dismissError, getErrorToasts, showError } = await import("@/lib/errorToasts");
 
 const session: SessionEntry = {
   id: "started-session", projectPath: "/repo", cwd: "/repo/worktree", title: "#785 Stay on Issues",
@@ -39,6 +41,7 @@ afterEach(() => {
   cleanup(); // Release any decision before clearing its retained notices.
   const { result } = renderHook(useNotices);
   act(() => result.current.forEach((notice) => dismissNotice(notice.id)));
+  act(() => getErrorToasts().forEach((toast) => dismissError(toast.id)));
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -195,4 +198,129 @@ it("replaces a start when its issue pipeline needs the reader", () => {
   expect(screen.getAllByRole("status")).toHaveLength(1);
   expect(screen.getByRole("status").textContent).toContain("#785 needs you");
   expect(screen.queryByText("Session started")).toBeNull();
+});
+
+it("shows setting-link toasts beside the other notices", async () => {
+  const { forgetSettingToasts, showSettingEnabled } = await import("@/lib/settingsToasts");
+  render(<Toasts />);
+  act(() => { showSettingEnabled("general.sounds", "Sounds"); });
+  const toast = screen.getByRole("status", { name: "Turned on Sounds" });
+  expect(within(toast).getByRole("button", { name: "Open setting" })).toBeTruthy();
+  act(forgetSettingToasts);
+  expect(screen.queryByRole("status", { name: "Turned on Sounds" })).toBeNull();
+});
+
+it("keeps an error until it is closed, stacked under the notices, and copies its whole text", async () => {
+  render(<Toasts />);
+  act(() => {
+    noteSessionStarted(session.id, "started-tab", "codex", "#785 Stay on Issues");
+    showError("Couldn't move “Notarize release builds” to Release", new Error("database is locked (SQLITE_BUSY)"));
+    showError("Couldn't pin “web”", "locked");
+  });
+  act(() => vi.advanceTimersByTime(30_000));
+  expect(screen.queryByRole("status")).toBeNull();
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(2);
+  expect(alerts[0].textContent).toContain("Something went wrong");
+  expect(alerts[0].textContent).toContain("Couldn't move “Notarize release builds” to Release: database is locked (SQLITE_BUSY)");
+  expect(within(alerts[0]).getByText("database is locked (SQLITE_BUSY)").className).toContain("font-mono");
+
+  invoke.mockClear();
+  await act(async () => fireEvent.click(within(alerts[0]).getByRole("button", { name: "Copy error" })));
+  expect(invoke).toHaveBeenCalledWith("copy_text", { text: "Couldn't move “Notarize release builds” to Release: database is locked (SQLITE_BUSY)" });
+  expect(within(alerts[0]).getByRole("button", { name: "Copied" })).toBeTruthy();
+  act(() => vi.advanceTimersByTime(2000));
+  expect(within(alerts[0]).getByRole("button", { name: "Copy error" })).toBeTruthy();
+  expect(screen.getAllByRole("alert")).toHaveLength(2);
+});
+
+it("shows a success on the same card with a check mark, read out politely, and no Copy error (PRO-234)", () => {
+  render(<Toasts />);
+  act(() => {
+    showError("Aisha's comment on src/seats.ts · lines 3–5 · PR #14", undefined, {
+      title: "Thread resolved on GitHub", tone: "success",
+      actions: [{ label: "View on GitHub", keepOpen: true, run: () => undefined }],
+    });
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  const toast = screen.getByRole("status", { name: "Thread resolved on GitHub" });
+  expect(toast.dataset.toastTone).toBe("success");
+  expect(within(toast).getByRole("button", { name: "View on GitHub" })).toBeTruthy();
+  expect(within(toast).queryByRole("button", { name: "Copy error" })).toBeNull();
+  expect(toast.textContent).toContain("Aisha's comment on src/seats.ts · lines 3–5 · PR #14.");
+});
+
+it("says when the copy failed", async () => {
+  render(<Toasts />);
+  act(() => { showError("Couldn't pin “web”", "locked"); });
+  invoke.mockRejectedValueOnce(new Error("no clipboard"));
+  const writeText = vi.fn(async () => { throw new Error("denied"); });
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy error" })));
+  expect(screen.getByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+});
+
+it("closes an error by its button or by Escape, and counts a repeat instead of stacking it", () => {
+  render(<Toasts />);
+  act(() => {
+    showError("Couldn't pin “web”", "locked");
+    showError("Couldn't archive “web”", "locked");
+    showError("Couldn't pin “web”", "locked");
+  });
+  const alerts = screen.getAllByRole("alert");
+  expect(alerts).toHaveLength(2);
+  expect(within(alerts[1]).getByLabelText("2 times")).toBeTruthy();
+  const close = within(alerts[1]).getByRole("button", { name: "Close" });
+  close.focus();
+  fireEvent.keyDown(close, { key: "Escape" });
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("shows a failure's own heading, its body apart, and its actions beside Copy error (PRO-291)", async () => {
+  vi.useRealTimers();
+  const retry = vi.fn(async () => true);
+  const open = vi.fn(async () => undefined);
+  render(<Toasts />);
+  act(() => {
+    showError("", "~/.claude/settings.json line 14: Unexpected token }", {
+      title: "Couldn't open a new Claude Code tab: claude exited while starting",
+      actions: [{ label: "Try again", icon: "retry", run: retry }, { label: "Open settings.json", keepOpen: true, run: open }],
+    });
+  });
+  const alert = screen.getByRole("alert");
+  expect(within(alert).getByText("Couldn't open a new Claude Code tab: claude exited while starting")).toBeTruthy();
+  expect(alert.textContent).not.toContain("Something went wrong");
+  expect(within(alert).getByText("~/.claude/settings.json line 14: Unexpected token }").className).toContain("font-mono");
+  expect(within(alert).getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Open settings.json", "Copy error", ""]);
+
+  await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Open settings.json" })));
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("alert")).toBeTruthy();
+  await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Try again" })));
+  expect(retry).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("shows why dropped files were not all attached (PRO-290): the limit as a warning, a reserved name as refused, each dismissable", async () => {
+  const { announceAdmission, resetAttachmentNotices, TIMEOUT_MS } = await import("@/lib/attachmentNotices");
+  const { admit } = await import("@/lib/attachmentRules");
+  resetAttachmentNotices();
+  const offered = [...Array.from({ length: 9 }, (_, i) => ({ name: `trace-${i}.log` })), { name: "terminalx.json" }, ...Array.from({ length: 5 }, (_, i) => ({ name: `extra-${i}.log` }))];
+  render(<Toasts />);
+  act(() => announceAdmission(offered.length, admit(0, offered), "dropped"));
+  const limit = document.querySelector<HTMLElement>('[data-attachment-notice="limit"]')!;
+  const refused = document.querySelector<HTMLElement>('[data-attachment-notice="refused"]')!;
+  expect(within(limit).getByText("Only the first 10 files were attached")).toBeTruthy();
+  expect(within(limit).getByText("You dropped 15 files. 4 weren’t added; send them in another message.")).toBeTruthy();
+  expect(limit.querySelector("svg")!.getAttribute("class")).toContain("text-warning");
+  expect(within(refused).getByText("terminalx.json is a name TerminalX uses for session files")).toBeTruthy();
+  expect(within(refused).getByText("Rename it, for example to terminalx.copy.json, and attach it again.")).toBeTruthy();
+  expect(refused.querySelector("svg")!.getAttribute("class")).toContain("text-destructive");
+  fireEvent.click(within(refused).getByRole("button", { name: "Dismiss" }));
+  expect(document.querySelector('[data-attachment-notice="refused"]')).toBeNull();
+  // The other closes by itself; the composer's summary line keeps the count meanwhile.
+  act(() => vi.advanceTimersByTime(TIMEOUT_MS));
+  expect(document.querySelector("[data-attachment-notice]")).toBeNull();
 });

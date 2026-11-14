@@ -52,7 +52,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy }: {
   const finishEdit = async (save: boolean) => {
     if (!editing || locked || changing.current) return;
     const item = queue.items.find(item => item.id === editing.id);
-    if (save && (!item || (!editing.text.trim() && !item.images.length))) return;
+    if (save && (!item || (!editing.text.trim() && !item.images.length && !item.files?.length))) return;
     if (save && !await change({ type: "edit", id: editing.id, text: editing.text })) return;
     if (editing.resume) await change({ type: "pause", paused: false });
     setEditing(null);
@@ -92,11 +92,11 @@ export function HeldQueueTray({ queue, onChange, disabled, busy }: {
                   }}
                   disabled={locked} className="min-h-16 w-full resize-y rounded border border-hairline bg-background p-2 text-sm" />
                 <div className="mt-1 flex gap-1">
-                  <Button size="xs" disabled={locked || (!editing.text.trim() && !item.images.length)} onClick={() => void finishEdit(true)}>Save</Button>
+                  <Button size="xs" disabled={locked || (!editing.text.trim() && !item.images.length && !item.files?.length)} onClick={() => void finishEdit(true)}>Save</Button>
                   <Button size="xs" variant="ghost" disabled={locked} onClick={() => void finishEdit(false)}>Cancel</Button>
                 </div>
-              </> : <p className="whitespace-pre-wrap break-words text-sm">{item.text || "Image attachment"}</p>}
-              {item.images.length > 0 && <p className="mt-1 text-faint">{item.images.map(image => image.name ?? "Image").join(", ")}</p>}
+              </> : <p className="whitespace-pre-wrap break-words text-sm">{item.text || (item.images.length ? "Image attachment" : "Attached files")}</p>}
+              {(item.images.length > 0 || !!item.files?.length) && <p className="mt-1 text-faint">{[...item.images.map(image => image.name ?? "Image"), ...(item.files ?? []).map(file => file.name)].join(", ")}</p>}
               <div className="mt-1 flex flex-wrap items-center gap-1">
                 <Button size="xs" variant="ghost" disabled={locked || !!editing} onClick={() => void change({ type: "sendNow", id: item.id })}>Send now</Button>
                 <Button size="icon-sm" variant="ghost" aria-label={`Edit follow-up ${index + 1}`} title="Edit (pauses the queue while editing)" disabled={locked || !!editing || !!queue.next} onClick={e => {

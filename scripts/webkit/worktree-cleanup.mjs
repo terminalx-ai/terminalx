@@ -144,7 +144,7 @@ for (const width of [960, 720]) {
 for (const width of [1100, 760]) {
   const page = await open(browser, server.url, { cloud: false, localProjects: 3, localSession: true }, { width, height: 720 });
   const rail = await sidebar(page);
-  await openConversation(page, "claude tab");
+  await openConversation(page, "Local long session");
   await tab(page, "gemini tab").click();
   await page.locator('[role="tabpanel"]:not([aria-hidden="true"]) [data-composer-box]').waitFor();
   await page.evaluate(stub);

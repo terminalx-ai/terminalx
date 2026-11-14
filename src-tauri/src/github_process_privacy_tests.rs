@@ -13,14 +13,47 @@ fn privacy_covers_identity_and_issue_entry_points() {
     for managed in [false, true] {
         for child in ["privacy_entry_points_child", "privacy_transport_entry_points_child"] {
             let root = tempfile::tempdir().unwrap();
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
                 .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-                .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+                .env("TERMINALX_HOME", root.path().canonicalize().unwrap());
+            let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(300));
+            assert!(!timed_out, "policy={managed}/{child} exceeded 300 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }
     }
+}
+
+fn fixture_output(command: &mut Command, timeout: Duration) -> (std::process::Output, bool) {
+    // Files retain diagnostics without a full pipe blocking the child, or a
+    // descendant holding a pipe open after the child has been killed.
+    let stdout = tempfile::NamedTempFile::new().unwrap();
+    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let mut child = command.stdin(std::process::Stdio::null())
+        .stdout(stdout.reopen().unwrap()).stderr(stderr.reopen().unwrap()).spawn().unwrap();
+    let deadline = Instant::now() + timeout;
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait().unwrap() { break (status, false); }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill timed-out privacy fixture");
+            break (child.wait().expect("reap timed-out privacy fixture"), true);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    (std::process::Output {
+        status,
+        stdout: std::fs::read(stdout.path()).unwrap(),
+        stderr: std::fs::read(stderr.path()).unwrap(),
+    }, timed_out)
+}
+
+#[test]
+fn privacy_fixture_timeout_kills_and_reaps_child() {
+    use std::os::unix::process::ExitStatusExt;
+    let (output, timed_out) = fixture_output(Command::new("/bin/sleep").arg("30"), Duration::from_millis(100));
+    assert!(timed_out);
+    assert_eq!(output.status.signal(), Some(libc::SIGKILL));
 }
 
 #[test]
@@ -569,6 +602,7 @@ fn fresh_fixture(root: &Path) -> FetchFixture {
         title: Some("Fetch privacy".into()), use_worktree: true, base_ref: Some("main".into()),
         worktree_name: Some("privacy-fetch".into()), on_main: false, issue: None, automation: None, cwd: None,
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     }).unwrap();
     std::fs::write(root.join("real-fetch"), "").unwrap();
     FetchFixture { seed, project, worktree: entry.cwd.into(), session: entry.id }

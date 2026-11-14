@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { recordRecentFile } from "@/lib/recentFiles";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
@@ -44,7 +45,22 @@ interface EditorBase {
   jump?: { line: number; col?: number; nonce: number };
 }
 
-export interface FileEditorEntry extends EditorBase { kind: FileKind }
+export interface FileEditorEntry extends EditorBase {
+  kind: FileKind;
+  /**
+   * A file attached to a sent message (PRO-290, screen 03.22): read-only,
+   * with Copy and Download in place of Save. `root` is the session's
+   * attachments folder, `rel` is `<folder>/<name>`.
+   */
+  attachment?: AttachmentInfo;
+}
+
+export interface AttachmentInfo {
+  /** The absolute stored path (`FileRef.path`). */
+  path: string;
+  /** When the message carrying it was sent (its `messageTs`), for "on your message · HH:MM". */
+  sentAt?: string;
+}
 export type DiffMode = "diff" | "entire" | "preview" | "edit";
 export interface DiffEditorEntry extends EditorBase {
   kind: "diff";
@@ -61,10 +77,37 @@ export interface DiffEditorEntry extends EditorBase {
   };
 }
 export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
-export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry;
-export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry;
+/** A conflicted file of a merge in progress, resolved one conflict at a time (PRO-293). */
+export interface ConflictEditorEntry extends EditorBase {
+  kind: "conflict";
+  conflict: {
+    /** The merge it was opened for: HEAD and the commit being merged. Another merge is not this tab's. */
+    head: string;
+    mergeHead: string;
+    /** Conflicts left in the file at the latest read, for the tab's title. */
+    conflicts: number;
+  };
+}
+/**
+ * A file attached to a sent message (PRO-290, screen 03.22), open in a centre
+ * tab of its session beside the agent tabs, like a diff or a pull request.
+ * `media` is how its content is drawn (text in the editor, or a media surface).
+ */
+export interface AttachmentEditorEntry extends EditorBase {
+  kind: "attachment";
+  media: FileKind;
+  attachment: AttachmentInfo;
+}
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
 export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
-  return entry.kind === "diff" || entry.kind === "pr";
+  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
+}
+
+/** An attachment tab as the file surfaces draw it: a read-only file with the attachment toolbar. */
+export function attachmentFile(entry: AttachmentEditorEntry): FileEditorEntry {
+  const { media, ...rest } = entry;
+  return { ...rest, kind: media };
 }
 
 const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
@@ -72,7 +115,7 @@ const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
 /** Persist only locators, never snapshot contents, PR bodies or unsaved buffers. */
 export function serializeReviewTabs(value: Pick<State, "editors" | "active" | "collapsed">): string {
   return JSON.stringify({
-    editors: value.editors.filter((e) => e.kind === "diff" || e.kind === "pr").map((e) => ({ ...e, dirty: false, jump: undefined })),
+    editors: value.editors.filter(isReviewEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
     active: value.active,
     collapsed: value.collapsed,
   });
@@ -99,6 +142,14 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined });
+      } else if (e.kind === "attachment" && ["text", "image", "audio", "video"].includes(e.media) && typeof e.attachment?.path === "string"
+        && reviewPath(e.root, e.rel) && e.attachment.path === `${e.root}/${e.rel}` && (e.attachment.sentAt === undefined || typeof e.attachment.sentAt === "string")) {
+        editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
+          dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: "attachment", media: e.media, attachment: { path: e.attachment.path, ...(e.attachment.sentAt ? { sentAt: e.attachment.sentAt } : {}) } });
+      } else if (e.kind === "conflict" && reviewPath(e.root, e.rel) && e.conflict && isCommit(e.conflict.head) && isCommit(e.conflict.mergeHead)
+        && Number.isSafeInteger(e.conflict.conflicts) && e.conflict.conflicts >= 0) {
+        const { head, mergeHead, conflicts } = e.conflict;
+        editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", name: conflictTabName(e.rel, conflicts), conflict: { head, mergeHead, conflicts } });
       }
     }
     const active: State["active"] = {};
@@ -110,6 +161,8 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
     return { editors, active, collapsed };
   } catch { return empty; }
 }
+
+const isCommit = (value: unknown) => typeof value === "string" && /^[0-9a-f]{7,64}$/i.test(value);
 
 /** Which region took the last click or focus, so ⌘W closes the right thing. */
 export type Region = "chat" | "editor";
@@ -161,7 +214,8 @@ let nonce = 0;
  * reader wants a line, which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
-  const existing = state.editors.find((e) => e.kind !== "diff" && e.kind !== "pr" && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  recordRecentFile(source ?? `local:${root}`, rel);
+  const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
   const selected = getTerminalState().selected[sessionId];
   if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   const kind = fileKind(rel);
@@ -191,6 +245,35 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
   return id;
+}
+
+/**
+ * Open (or focus) a file attached to a sent message (PRO-290) in a centre
+ * tab of its session. Stored at `…/attachments/<session>/<folder>/<name>`:
+ * the tab hangs off the session's attachments folder with `<folder>/<name>`
+ * as its path, so two files of one name sent in different messages are two
+ * tabs. Images, audio and video open in the media surfaces; markdown in
+ * Preview. Opening it again focuses the tab it already has.
+ */
+export function openAttachment(sessionId: string, file: { path: string; name: string }, sentAt?: string, workspaceRoot?: string) {
+  const parts = file.path.split("/");
+  if (parts.length < 4 || !file.path.startsWith("/") || parts.includes("..")) throw new Error("This attachment's path is not a stored file.");
+  const root = parts.slice(0, -2).join("/");
+  const rel = parts.slice(-2).join("/");
+  const entry: AttachmentEditorEntry = {
+    id: JSON.stringify([sessionId, "attachment", file.path]),
+    sessionId,
+    workspaceRoot: workspaceRoot ?? root,
+    root,
+    rel,
+    name: file.name || fileName(rel),
+    dirty: false,
+    kind: "attachment",
+    media: fileKind(rel),
+    viewMode: isMarkdown(rel) ? "preview" : "source",
+    attachment: { path: file.path, ...(sentAt ? { sentAt } : {}) },
+  };
+  return openReview(entry);
 }
 
 export function openReview(entry: ReviewEditorEntry) {
@@ -226,6 +309,34 @@ export function openDiff(sessionId: string, root: string, rel: string, diff: Omi
 export function openPr(sessionId: string, root: string, pr: PrAssociation) {
   const id = JSON.stringify([sessionId, root, "pr", pr.url.toLowerCase().replace(/\/$/, "")]);
   return openReview({ id, sessionId, root, workspaceRoot: root, rel: pr.url, name: `PR #${pr.number}`, kind: "pr", dirty: false, viewMode: "source", pr });
+}
+
+/** A conflict tab's title: the file's name and what is left to resolve in it. */
+export function conflictTabName(rel: string, conflicts: number): string {
+  return `${fileName(rel)} · ${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}`;
+}
+
+/**
+ * Open (or focus) a conflicted file of the merge in progress in a centre tab.
+ * One tab per file: reopening it for a newer merge points it at that merge.
+ */
+export function openConflict(sessionId: string, root: string, rel: string, merge: { head: string; mergeHead: string }, conflicts: number) {
+  const path = reviewPath(root, rel);
+  if (!path) throw new Error("This file is outside the repository.");
+  const id = JSON.stringify([sessionId, root, "conflict", path]);
+  const conflict = { head: merge.head, mergeHead: merge.mergeHead, conflicts };
+  const existing = state.editors.find((e) => e.id === id);
+  if (existing?.kind === "conflict" && (existing.conflict.head !== merge.head || existing.conflict.mergeHead !== merge.mergeHead)) {
+    set({ editors: state.editors.map((e) => e.id === id && e.kind === "conflict" ? { ...e, name: conflictTabName(path, conflicts), conflict } : e) });
+  }
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel: path, name: conflictTabName(path, conflicts), kind: "conflict", dirty: false, viewMode: "source", conflict });
+}
+
+/** The conflict tab read its file again: its title follows what is left. */
+export function setConflictCount(id: string, conflicts: number) {
+  const entry = state.editors.find((e) => e.id === id);
+  if (entry?.kind !== "conflict" || entry.conflict.conflicts === conflicts) return;
+  set({ editors: state.editors.map((e) => e.id === id && e.kind === "conflict" ? { ...e, name: conflictTabName(e.rel, conflicts), conflict: { ...e.conflict, conflicts } } : e) });
 }
 
 export async function setDiffMode(id: string, mode: DiffMode) {
@@ -320,18 +431,18 @@ export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved
 
 export function setEditorDirty(id: string, dirty: boolean) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty) return;
+  if (!e || (e.kind !== "text" && e.kind !== "diff") || e.dirty === dirty || (e.kind === "text" && e.attachment && dirty)) return;
   set({ editors: state.editors.map((x) => (x.id === id ? { ...x, dirty } : x)) });
 }
 
 export function setViewMode(id: string, viewMode: ViewMode) {
-  set({ editors: state.editors.map((x) => (x.id === id && x.kind === "text" ? { ...x, viewMode } : x)) });
+  set({ editors: state.editors.map((x) => (x.id === id && (x.kind === "text" || (x.kind === "attachment" && x.media === "text")) ? { ...x, viewMode } : x)) });
 }
 
 /** Flip preview and source for a markdown editor; other files stay as source. */
 export function toggleViewMode(id: string) {
   const e = state.editors.find((x) => x.id === id);
-  if (!e || e.kind !== "text" || !isMarkdown(e.rel)) return;
+  if (!e || (e.kind !== "text" && !(e.kind === "attachment" && e.media === "text")) || !isMarkdown(e.rel)) return;
   setViewMode(id, e.viewMode === "preview" ? "source" : "preview");
 }
 

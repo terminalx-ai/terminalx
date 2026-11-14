@@ -139,7 +139,7 @@ export function useTerminalDrop({
 export function TerminalDropHint({ drop }: { drop: TerminalDrop }) {
   if (drop.hint) {
     return (
-      <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-2xl bg-composer/80 px-6 text-center text-sm text-muted-foreground ring-2 ring-accent/60">
+      <div className="pointer-events-none absolute inset-1 z-20 flex items-center justify-center rounded-2xl bg-composer px-6 text-center text-sm text-muted-foreground ring-2 ring-accent/60">
         {drop.hint}
       </div>
     );

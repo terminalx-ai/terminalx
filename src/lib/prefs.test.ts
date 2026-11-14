@@ -23,6 +23,16 @@ describe("organization display preferences", () => {
   });
 });
 
+describe("commit message generation preference (PRO-266)", () => {
+  it("requires opt-in and remembers it", async () => {
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().writeCommitMessagesWithAgent).toBe(false);
+    setPrefs({ writeCommitMessagesWithAgent: true });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().writeCommitMessagesWithAgent).toBe(true);
+  });
+});
+
 describe("permission mode preferences (PRO-162)", () => {
   it("starts a fresh profile in Ask every time", async () => {
     const { getPrefs } = await import("./prefs");
@@ -464,5 +474,18 @@ describe("dashboard preferences", () => {
   it("recovers from malformed dashboard preferences", async () => {
     localStorage.setItem("raccoon.prefs", JSON.stringify({ dashboard: { view: "unknown", sort: null, hiddenColumns: ["branch", "branch", 12] } }));
     expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch"] });
+  });
+});
+
+describe("reset chat file choice (PRO-261)", () => {
+  it("starts unchecked, remembers the choice across a restart and ignores a malformed value", async () => {
+    const prefs = await import("./prefs");
+    expect(prefs.getPrefs().resetFiles).toBe(false);
+    prefs.setPrefs({ resetFiles: true });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().resetFiles).toBe(true);
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ resetFiles: "yes" }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().resetFiles).toBe(false);
   });
 });

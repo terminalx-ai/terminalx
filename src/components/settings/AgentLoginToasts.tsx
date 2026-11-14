@@ -26,7 +26,7 @@ function AgentLoginToast({ notice }: { notice: AgentLoginNotice }) {
       setRestarting(false);
     }
   };
-  return <div role="status" aria-label={notice.title} className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-(--surface-card) p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
+  return <div role="status" aria-label={notice.title} className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm text-card-foreground shadow-surface hairline animate-fade-in">
     <Icon className={cn("mt-0.5 size-4 shrink-0", notice.kind === "removed" ? "text-muted-foreground" : "text-add")} />
     <div className="min-w-0 flex-1">
       <div className="font-medium">{notice.title}</div>

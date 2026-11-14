@@ -3,6 +3,9 @@
 // engine. The machine script, each repository's setup, the versions and a
 // recipe's results must stay readable and inside the Settings column at the
 // narrow window width, and looking at any of it must start nothing.
+// PRO-144: the local Environment pages too: Personal and a repository's
+// variables with their sources, documented variables and the Add sheet's
+// Keychain switch, inside the column and without overlapping controls.
 import { launch, open, report, serve } from "./harness.mjs";
 
 const at = Date.UTC(2026, 9, 1);
@@ -164,8 +167,84 @@ try {
     }, { outside: layout.outside, overlaps: layout.overlaps, calls: calls.filter((command) => command.startsWith("organization_environment")) });
     await page.close();
   }
+  failed += await localEnvironment();
 } finally {
   await browser.close();
   server.close();
 }
 process.exit(failed ? 1 : 0);
+
+async function localEnvironment() {
+  let failures = 0;
+  const rows = {
+    user: [
+      { name: "ANTHROPIC_API_KEY", scope: "user", overridden: false },
+      { name: "NODE_OPTIONS", scope: "user", overridden: false, secret: false, value: "--max-old-space-size=8192" },
+      { name: "DATABASE_URL", scope: "user", overridden: false, secret: false, value: "postgres://localhost:5432/dev", overriddenIn: ["/repos/p0/.git"] },
+    ],
+    "/repos/p0": [
+      { name: "ANTHROPIC_API_KEY", scope: "user", overridden: false },
+      { name: "DATABASE_URL", scope: "user", overridden: true, secret: false, value: "postgres://localhost:5432/dev" },
+      { name: "DATABASE_URL", scope: "repository", overridden: false, secret: false, value: "postgres://localhost:5432/a_database_with_a_rather_long_name_dev" },
+      { name: "STRIPE_SECRET_KEY_FOR_THE_STAGING_ACCOUNT", scope: "repository", overridden: false },
+      { name: "VITE_RELAY_URL", scope: "repositoryShared", overridden: false, secret: false },
+    ],
+  };
+  for (const width of [960, 720]) {
+    const page = await open(browser, server.url, { cloud: false, localProjects: 2 }, { width, height: 900 });
+    await page.evaluate((rows) => {
+      window.__LOCAL_ENVIRONMENT_CALLS__ = [];
+      const answers = window.__PW_STUB__.answers;
+      const log = (command, answer) => (args) => { window.__LOCAL_ENVIRONMENT_CALLS__.push(command); return answer(args); };
+      answers.environment_list = log("environment_list", ({ projectPath }) => structuredClone(rows[projectPath ?? "user"] ?? []));
+      answers.environment_save = log("environment_save", () => true);
+      answers.environment_reveal = log("environment_reveal", () => "hidden");
+    }, rows);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Environment", exact: true }).click();
+    await page.getByRole("button", { name: "Reveal ANTHROPIC_API_KEY" }).first().waitFor();
+    await page.getByRole("combobox", { name: "Scope" }).selectOption("/repos/p0");
+    const repository = page.getByRole("region", { name: "Environment of local-0" });
+    await repository.getByRole("button", { name: "Reveal STRIPE_SECRET_KEY_FOR_THE_STAGING_ACCOUNT" }).waitFor();
+    await repository.getByText(/^Documented variables/).click();
+    const measure = (locator) => locator.evaluate((root) => {
+      const main = root.closest('[role="main"]') ?? document.body;
+      const bounds = root.getBoundingClientRect();
+      const outside = [...root.querySelectorAll("button, input, textarea, select, table, [role=switch], li")].filter((element) => {
+        const box = element.getBoundingClientRect();
+        return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
+      }).map((element) => `${element.tagName}:${(element.getAttribute("aria-label") ?? element.textContent ?? "").slice(0, 40)}`);
+      const boxes = [...root.querySelectorAll("button, [role=switch], td")].map((element) => ({ label: element.getAttribute("aria-label") ?? element.textContent, box: element.getBoundingClientRect() })).filter(({ box }) => box.width > 0);
+      const overlaps = [];
+      for (let a = 0; a < boxes.length; a++)
+        for (let b = a + 1; b < boxes.length; b++) {
+          const one = boxes[a].box, two = boxes[b].box;
+          const nested = (one.left <= two.left && one.right >= two.right && one.top <= two.top && one.bottom >= two.bottom) || (two.left <= one.left && two.right >= one.right && two.top <= one.top && two.bottom >= one.bottom);
+          if (!nested && one.left < two.right - 1 && two.left < one.right - 1 && one.top < two.bottom - 1 && two.top < one.bottom - 1) overlaps.push([boxes[a].label, boxes[b].label]);
+        }
+      return { noPageOverflow: main.scrollWidth <= main.clientWidth + 1, outside, overlaps, text: root.textContent };
+    });
+    const layout = await measure(repository);
+    await repository.screenshot({ path: `/tmp/pro-144-repository-environment-${width}.png` });
+    await repository.getByRole("button", { name: "Paste variables" }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByLabel("Variables").fill("SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP");
+    const keychain = sheet.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" });
+    const sheetLayout = await measure(sheet);
+    await sheet.screenshot({ path: `/tmp/pro-144-add-variables-${width}.png` });
+    const calls = await page.evaluate(() => window.__LOCAL_ENVIRONMENT_CALLS__);
+    failures += report(`local environment pages at ${width}px`, {
+      "the repository page does not widen the Settings column": layout.noPageOverflow,
+      "every control and row stays inside the repository page": layout.outside.length === 0,
+      "no two controls or cells overlap on the repository page": layout.overlaps.length === 0,
+      "the column reads Applies to, with each source": /Applies to/.test(layout.text) && /from Personal/.test(layout.text) && /overrides Personal/.test(layout.text) && /This project/.test(layout.text) && /\.terminalx\/settings\.json/.test(layout.text),
+      "documented variables say where each is set": /Documented variables \(13\)/.test(layout.text) && /Set in Personal/.test(layout.text) && /Not set/.test(layout.text),
+      "the Add sheet's Keychain switch is on by default": (await keychain.getAttribute("aria-checked")) === "true",
+      "the Add sheet stays inside itself with no overlaps": sheetLayout.outside.length === 0 && sheetLayout.overlaps.length === 0,
+      "the sheet marks the secret-looking value and the bad line": /SENTRY_AUTH_TOKENsecret/.test(sheetLayout.text) && /Line 3:/.test(sheetLayout.text),
+      "looking reveals and saves nothing": !calls.includes("environment_reveal") && !calls.includes("environment_save"),
+    }, { outside: [...layout.outside, ...sheetLayout.outside], overlaps: [...layout.overlaps, ...sheetLayout.overlaps], calls });
+    await page.close();
+  }
+  return failures;
+}

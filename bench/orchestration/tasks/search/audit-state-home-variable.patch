@@ -1,0 +1,85 @@
+diff --git a/bench-answer.txt b/bench-answer.txt
+new file mode 100644
+--- /dev/null
++++ b/bench-answer.txt
+@@ -0,0 +1,23 @@
++CONTRIBUTING.md
++README.md
++SECURITY.md
++docs/ACCOUNTS.md
++docs/MEDIA-VIEWERS.md
++docs/MOBILE.md
++docs/MULTIPLAYER.md
++docs/PLAN.md
++docs/PTY-FIRST.md
++docs/RELEASING.md
++docs/STAR-REMINDER.md
++docs/STATS-USAGE.md
++docs/screenshots/issue-136/README.md
++skill-guides/terminalx-cli.md
++src-tauri/src/browser/environment.rs
++src-tauri/src/browser/mod.rs
++src-tauri/src/control.rs
++src-tauri/src/harness/codex/home.rs
++src-tauri/src/hooks.rs
++src-tauri/src/lib.rs
++src-tauri/src/stats/mod.rs
++src-tauri/src/store/mod.rs
++src-tauri/src/transcription/download.rs
+diff --git a/.bench-check/audit-state-home-variable.mjs b/.bench-check/audit-state-home-variable.mjs
+new file mode 100644
+--- /dev/null
++++ b/.bench-check/audit-state-home-variable.mjs
+@@ -0,0 +1,52 @@
++// Outcome check for the orchestration benchmark task audit-state-home-variable
++// (docs/ORCHESTRATION-BENCH.md). Reads the agent's answer from bench-answer.txt,
++// one repository-relative path per line, and compares it to the files the
++// real change had to touch. Exit 0 means solved.
++
++import { existsSync, readFileSync } from "node:fs";
++
++const ANSWER = "bench-answer.txt";
++const MIN_RECALL = 0.9;
++const MIN_PRECISION = 0.9;
++const TRUTH = new Set([
++  "CONTRIBUTING.md",
++  "README.md",
++  "SECURITY.md",
++  "docs/ACCOUNTS.md",
++  "docs/MEDIA-VIEWERS.md",
++  "docs/MOBILE.md",
++  "docs/MULTIPLAYER.md",
++  "docs/PLAN.md",
++  "docs/PTY-FIRST.md",
++  "docs/RELEASING.md",
++  "docs/STAR-REMINDER.md",
++  "docs/STATS-USAGE.md",
++  "docs/screenshots/issue-136/README.md",
++  "skill-guides/terminalx-cli.md",
++  "src-tauri/src/browser/environment.rs",
++  "src-tauri/src/browser/mod.rs",
++  "src-tauri/src/control.rs",
++  "src-tauri/src/harness/codex/home.rs",
++  "src-tauri/src/hooks.rs",
++  "src-tauri/src/lib.rs",
++  "src-tauri/src/stats/mod.rs",
++  "src-tauri/src/store/mod.rs",
++  "src-tauri/src/transcription/download.rs",
++]);
++
++if (!existsSync(ANSWER)) {
++  console.log(`no ${ANSWER} at the repository root`);
++  process.exit(1);
++}
++// Forgiving about form: bullets, backticks, a leading ./ and a :line suffix are dropped.
++const listed = new Set(
++  readFileSync(ANSWER, "utf8")
++    .split(/\r?\n/)
++    .map((line) => line.trim().replace(/^[-*]\s+/, "").replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/:\d+(:\d+)?$/, "").trim())
++    .filter((line) => line && !line.startsWith("#")),
++);
++const found = [...listed].filter((path) => TRUTH.has(path)).length;
++const recall = found / TRUTH.size;
++const precision = listed.size ? found / listed.size : 0;
++console.log(`listed ${listed.size}, ${found} of ${TRUTH.size} right: recall ${recall.toFixed(2)} (need ${MIN_RECALL}), precision ${precision.toFixed(2)} (need ${MIN_PRECISION})`);
++process.exit(recall >= MIN_RECALL && precision >= MIN_PRECISION ? 0 : 1);

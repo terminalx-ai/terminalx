@@ -128,6 +128,25 @@ describe("merged workspace action", () => {
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
   });
 
+  it("still says the branch merged while a pull request linked from another branch is open (PRO-294)", async () => {
+    mockBackend(cleanMerged);
+    const backend = mocks.invoke.getMockImplementation()!;
+    const linked: PullRequest = { ...mergedPr, number: 70, title: "Someone else's work", url: "https://example.test/pull/70", head: "elsewhere", state: "OPEN", mergeable: "MERGEABLE",
+      checks: [{ name: "CI", state: "failure", url: "https://github.com/acme/api/actions/runs/1/job/2", actions: { runId: 1, jobId: 2 } }] };
+    mocks.invoke.mockImplementation(async (command: string, args: { url?: string }) => {
+      if (command === "pr_associations") return [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, scope: { kind: "local", cwd } }, { url: linked.url, number: linked.number, head: linked.head, scope: { kind: "local", cwd }, linked: true }];
+      if (command === "pr_details") return args.url === linked.url ? linked : mergedPr;
+      return backend(command, args);
+    });
+    const onFixErrors = vi.fn(async () => {});
+    render(<PrPanel cwd={cwd} sessionId="author" branch={mergedPr.head} active busy={false} onSettle={() => {}} onFixErrors={onFixErrors} workspace={{ projectPath, onDelete: vi.fn() }} />);
+    await screen.findByText("Someone else's work");
+    expect(await screen.findByText("This branch has been merged.")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Delete workspace" })).toBeTruthy();
+    // Its failing checks are shown, but not sent to this session's agent to fix.
+    expect(screen.queryByRole("button", { name: /Fix errors/ })).toBeNull();
+  });
+
   it.each([
     ["has uncommitted changes", { ...cleanMerged, uncommitted: 1 }],
     ["has unpushed commits", { ...cleanMerged, unpushed: 1 }],
@@ -242,6 +261,53 @@ describe("session PR history", () => {
     await screen.findByText("Follow-up work");
     expect(screen.getByRole("button", { name: "Create pull request" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
+  });
+
+  it("shows a pull request linked from another branch with its checks, and can unlink it (PRO-294)", async () => {
+    let linked = true;
+    mocks.invoke.mockImplementation(async (command: string, args: { url?: string; sessionKey?: string }) => {
+      if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "pr_associations") return linked ? [{ ...association(followup), linked: true }] : [];
+      if (command === "work_status") return workStatus("raccoon/approval-diff", 1);
+      if (command === "pr_list") return [];
+      if (command === "pr_details") return { ...followup, checks: [{ name: "Follow-up CI", state: "success" }] };
+      if (command === "pr_unlink") {
+        expect(args).toEqual({ sessionKey: "author", url: followup.url });
+        linked = false;
+        return [];
+      }
+      throw Error(command);
+    });
+    render(<PrPanel cwd={cwd} sessionId="author" branch="raccoon/approval-diff" active busy={false} />);
+    await screen.findByText("Follow-up work");
+    expect(screen.getByTestId("pr-linked").textContent).toBe("Linked");
+    // Its checks are read from the linked PR, not the session's branch.
+    expect(await screen.findByText("Follow-up CI")).toBeTruthy();
+    expect(mocks.invoke).toHaveBeenCalledWith("pr_details", { cwd, number: followup.number, url: followup.url });
+    // Creating a PR for the session's own branch is still offered: the link does not replace it.
+    expect(screen.getByRole("button", { name: "Create pull request" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: `Unlink #${followup.number}` }));
+    await waitFor(() => expect(screen.queryByText("Follow-up work")).toBeNull());
+    expect(screen.getByRole("status").textContent).toContain(`Unlinked #${followup.number}.`);
+  });
+
+  it("offers no Unlink for a pull request the session opened itself", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "gh_available") return true;
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "pr_associations") return [association(followup)];
+      if (command === "work_status") return workStatus("followup", 1);
+      if (command === "pr_list") return [followup];
+      if (command === "pr_details") return followup;
+      throw Error(command);
+    });
+    render(<PrPanel cwd={cwd} sessionId="author" branch="followup" active busy={false} />);
+    await screen.findByText("Follow-up work");
+    expect(screen.queryByTestId("pr-linked")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Unlink/ })).toBeNull();
   });
 
   it("keeps an unavailable association visible and blocks cleanup when its state is unknown", async () => {
@@ -481,8 +547,9 @@ it.each(["panel", "inline", "centre"])("loads review threads for the selected PR
     throw Error(command);
   });
   render(<PrPanel cwd={cwd} sessionId="author" branch={pr.head} selectedPr={surface === "centre" ? association(pr) : undefined} active busy={false} inline={surface === "inline"} />);
-  fireEvent.click(await screen.findByRole("button", { name: /^▸ Review threads/ }));
+  // Read as soon as the PR is shown: its counts lead the Checks section (PRO-234).
   await screen.findByText("No review threads.");
+  expect(screen.getByTestId("review-thread-counts").textContent).toBe("0 open · 0 resolved");
   expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
 });
 
@@ -653,4 +720,19 @@ it.each([false, true])("respects cloud write permission for queue actions (canWr
     await waitFor(() => expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo: "app", number: followup.number, method: "queue" }));
   } else expect(mutate).not.toHaveBeenCalled();
   expect(mocks.invoke).not.toHaveBeenCalledWith("pr_merge", expect.anything());
+});
+
+describe("PrPanel load failure states", () => {
+  afterEach(cleanup);
+  it("names an offline failure instead of the raw error", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "gh_connection_status") return { state: "connected", details: null };
+      if (command === "git_has_remote") return true;
+      if (command === "work_status") throw "error connecting to api.github.com";
+      return null;
+    });
+    render(<PrPanel cwd={cwd} branch="feature" busy={false} active />);
+    expect(await screen.findByText("You're offline")).toBeTruthy();
+    expect(screen.queryByText("Could not complete Git operation")).toBeNull();
+  });
 });

@@ -733,15 +733,15 @@ fn shown_work(sessions: &[SessionEntry], status: &Value, shells: &[crate::pty::S
     let tabs = status["runningTabs"].as_array().context("The TerminalX runtime did not say what it is running.")?;
     let mut work: Vec<String> = tabs.iter().filter(|tab| matches!(tab["status"].as_str(), Some("in_progress" | "waiting"))).map(|tab| named(sessions, &Work {
         kind: WorkKind::Turn, session_id: tab["sessionId"].as_str().map(str::to_owned), tab_id: tab["tabId"].as_str().map(str::to_owned),
-        harness: tab["harness"].as_str().map(str::to_owned), title: None,
+        harness: tab["harness"].as_str().map(str::to_owned), title: None, pane: None,
     })).collect();
     work.extend(shells.iter().filter(|shell| !shell.exited).map(|shell| named(sessions, &Work {
-        kind: WorkKind::Terminal, session_id: Some(shell.session_id.clone()), tab_id: None, harness: None, title: shell.title.clone(),
+        kind: WorkKind::Terminal, session_id: Some(shell.session_id.clone()), tab_id: None, harness: None, title: shell.title.clone(), pane: None,
     })));
     let runtime: u32 = status["pid"].as_u64().and_then(|pid| pid.try_into().ok()).context("The TerminalX runtime did not say its process.")?;
     let agents = table.iter().filter(|process| process.parent == runtime && !super::idle::is_shell(process));
     if agents.into_iter().any(|agent| super::idle::working(table, agent.pid)) {
-        work.push(named(sessions, &Work { kind: WorkKind::Processes, session_id: None, tab_id: None, harness: None, title: None }));
+        work.push(named(sessions, &Work { kind: WorkKind::Processes, session_id: None, tab_id: None, harness: None, title: None, pane: None }));
     }
     Ok(work)
 }
@@ -1248,7 +1248,7 @@ mod tests {
     /// An agent driven over its standard input and output, which a handover
     /// cannot carry.
     fn stdio(session: &str, tab: &str) -> Work {
-        Work { kind: WorkKind::Turn, session_id: Some(session.into()), tab_id: Some(tab.into()), harness: Some("gemini".into()), title: None }
+        Work { kind: WorkKind::Turn, session_id: Some(session.into()), tab_id: Some(tab.into()), harness: Some("gemini".into()), title: None, pane: None }
     }
 
     /// #766: Update now was chosen, listing what it stops: the relaunched app
@@ -1381,7 +1381,7 @@ mod tests {
     fn work_is_named_by_what_it_is_and_where() {
         let sessions = sessions();
         let work = |kind, session: Option<&str>, tab: Option<&str>, harness: Option<&str>, title: Option<&str>| named(&sessions, &Work {
-            kind, session_id: session.map(str::to_owned), tab_id: tab.map(str::to_owned), harness: harness.map(str::to_owned), title: title.map(str::to_owned),
+            kind, session_id: session.map(str::to_owned), tab_id: tab.map(str::to_owned), harness: harness.map(str::to_owned), title: title.map(str::to_owned), pane: None,
         });
         let claude = crate::harness::display_name("claude");
         let codex = crate::harness::display_name("codex");

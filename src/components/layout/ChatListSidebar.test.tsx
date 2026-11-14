@@ -133,6 +133,11 @@ describe("chatPreview", () => {
     expect(chatPreview(chat, undefined, { name: "web", branch: null })).toEqual({ text: "web", tone: "place" });
     expect(chatPreview(chat, undefined, null)).toEqual({ text: "New chat", tone: "place" });
   });
+
+  it("says what a helper tab is doing while one works, then goes back to the place (PRO-331)", () => {
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, "Review 2 of 3 running")).toEqual({ text: "Review 2 of 3 running", tone: "helper" });
+    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, null)).toEqual({ text: "web · main", tone: "place" });
+  });
 });
 
 describe("a project's mark", () => {
@@ -209,7 +214,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });

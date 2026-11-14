@@ -21,6 +21,7 @@ import { isUnread } from "@/lib/dashboard";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
 import { addProject, conversationTitle, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
+import { helperActivity, legacyReviewerSessions, useIssuePipelines } from "@/lib/issuePipeline";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
 import { openRenameSession } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
@@ -40,7 +41,7 @@ import { CloudOrganizations } from "./CloudOrganizations";
 import { conversationTime } from "@/lib/messageActivity";
 
 import { useSidebarOrder } from "@/lib/sidebarOrder";
-import { SortableStatusGroups, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
+import { SortableStatusGroups, SidebarDragScope, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
@@ -53,7 +54,10 @@ export function chatPreview(
   session: SessionEntry,
   summary: ReturnType<Summaries["get"]>,
   place: { name: string; branch: string | null } | null,
-): { text: string; tone: "waiting" | "said" | "place" } {
+  /** What a pipeline's helper tab is doing; it takes the line while it works. */
+  helper?: string | null,
+): { text: string; tone: "waiting" | "said" | "place" | "helper" } {
+  if (helper) return { text: helper, tone: "helper" };
   if (place) return { text: place.branch ? `${place.name} · ${place.branch}` : place.name, tone: "place" };
   if (summary?.waitingOn) return { text: summary.waitingOn, tone: "waiting" };
   const said = summary?.lastReply ?? summary?.lastPrompt;
@@ -79,12 +83,17 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
   const showArchived = store.showArchived && filter.filter === "all";
   // Unread or Needs you: only the conversations that pass, and the open one.
+  // One row per session: a pipeline's reviewer that was opened as a session of its own folds under its author's (PRO-331).
+  const pipelines = useIssuePipelines();
+  const folded = useMemo(() => legacyReviewerSessions(pipelines, store.sessions), [pipelines, store.sessions]);
+  const rows = useMemo(() => (folded.size ? store.sessions.filter((session) => !folded.has(session.id)) : store.sessions), [folded, store.sessions]);
+  const selectedRow = store.selectedSessionId ? (folded.get(store.selectedSessionId) ?? store.selectedSessionId) : null;
   const conversations = useMemo(
-    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived, sidebarSort, order),
-    [filter, store.sessions, store.selectedSessionId, showArchived, sidebarSort, order],
+    () => orderConversations(filter.active ? rows.filter((session) => filter.shows(session.id)) : rows, selectedRow, showArchived, sidebarSort, order),
+    [filter, rows, selectedRow, showArchived, sidebarSort, order],
   );
   // Show archived (#718): the archived ones, under a fold of their own at the end.
-  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions.filter((session) => filter.shows(session.id)), sidebarSort, order) : []), [showArchived, store.sessions, filter, sidebarSort, order]);
+  const archived = useMemo(() => (showArchived ? archivedConversations(rows.filter((session) => filter.shows(session.id)), sidebarSort, order) : []), [showArchived, rows, filter, sidebarSort, order]);
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
@@ -99,7 +108,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
     <ChatRow
       key={session.id}
       session={session}
-      selected={store.selectedSessionId === session.id}
+      selected={selectedRow === session.id}
       link={conversationLink(session, store.projects, chatsPath, store.workspaces)}
       summaries={summaries}
       showAgent={showAgents}
@@ -129,6 +138,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       <SidebarOrderError />
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
+        {/* One drag scope: sessions move between the sections and the main list (PRO-174). */}
+        <SidebarDragScope>
         <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={sidebarLayout === "status"} renderSession={(session) => chatRow(session)} />
         {conversations.length === 0 && archived.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
@@ -161,6 +172,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             )}
           </ul>
         )}
+        </SidebarDragScope>
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
         <DevelopmentSection />
       </nav>
@@ -214,7 +226,8 @@ function ChatRow({
   const summary = summaries.get(session.id);
   // A branch goes by the label the reader gave it, as on the project list.
   const branchName = link?.branch ? (link.project?.branchLabels?.[link.branch] ?? link.branch) : null;
-  const preview = chatPreview(session, summary, link ? { name: link.name, branch: branchName } : null);
+  const helper = helperActivity(useIssuePipelines(), session.id);
+  const preview = chatPreview(session, summary, link ? { name: link.name, branch: branchName } : null, helper);
   const rename = () => openRenameSession(session.id);
   // The last thing said stays within reach, on hover.
   const said = (summary?.waitingOn ?? summary?.lastReply ?? summary?.lastPrompt)?.replace(/\s+/g, " ").trim();
@@ -256,7 +269,7 @@ function ChatRow({
               </span>
               <span className="flex min-w-0 items-center gap-2">
                 {draft ? <DraftPreview text={draft} /> : (
-                  <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : "text-faint")} data-testid="chat-preview">
+                  <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : preview.tone === "helper" ? "text-info" : "text-faint")} data-testid="chat-preview">
                     {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
                     <span className="truncate">{preview.text}</span>
                   </span>

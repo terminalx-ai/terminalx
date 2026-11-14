@@ -1,4 +1,5 @@
 import { RunStrip } from "@/components/orchestration/RunStrip";
+import { RunPill, RunViewHint } from "@/components/orchestration/RunPill";
 import { RunView } from "@/components/orchestration/RunView";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
@@ -7,7 +8,8 @@ import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, Smartphone, SquareTerminal } from "@/icons";
+import { openPairPhone } from "@/lib/pairing";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -73,6 +75,7 @@ import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
 import { SessionCost } from "./SessionCost";
+import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -769,6 +772,12 @@ export function SessionView({
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
               20px in a 40px-wide button (32px when the header is tight); one beside a label (Share) stays at the label's scale. */}
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
+            {/* A lead's run in a word (18.01, 18.03): it needs you, or how many workers run. Opens the Run view. */}
+            {runOffered && <RunPill run={run} onOpen={() => showRunView(session.id, true)} />}
+            {/* The keys that open the Run view (Go → Run View), while this session leads a run (18.01). */}
+            {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
+            {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
+            {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={session.id} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
@@ -828,7 +837,7 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
-        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} onChange={(shown) => showRunView(session.id, shown)} />}
+        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
         {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (
@@ -842,6 +851,7 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
+        {local && !cloud && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
           <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
@@ -1001,7 +1011,7 @@ export function SessionView({
         )
       ) : (
         <>
-          <QuickOpen sessionId={session.id} root={session.cwd} />
+          <QuickOpen sessionId={session.id} root={session.cwd} branch={session.branch} />
           <ProjectSearch sessionId={session.id} root={session.cwd} />
         </>
       )}
@@ -1059,6 +1069,10 @@ function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session:
               </DropdownMenuItem>
             </>
           )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => openPairPhone()}>
+            <Smartphone /> Pair a phone…
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </>

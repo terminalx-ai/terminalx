@@ -190,6 +190,16 @@ pub fn identity(path: &Path, runtime: Runtime) -> Result<(Target, bool)> {
     inspect_identity(path, runtime, CONTAINER, Duration::from_secs(3))
 }
 
+/// The Local VM's own container, as `terminalx vm call|tools|screenshot`
+/// reach it without `--target`.
+pub fn default_target() -> Result<Target> {
+    let path = runtime().context("Docker or Podman is not installed")?;
+    let kind = match runtime_name(&path).as_str() { "podman" => Runtime::Podman, _ => Runtime::Docker };
+    let (target, running) = identity(&path, kind).context("The Local VM has not been created; run `terminalx vm start`")?;
+    if !running { bail!("The Local VM is stopped; run `terminalx vm start`"); }
+    Ok(target)
+}
+
 pub(crate) fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Result<()> {
     target.require(Capability::AttachedDesktop)?;
     let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
@@ -462,42 +472,95 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. The agent, shell and project files remain on the host; only desktop tools use this selected container. Use it for desktop or browser actions; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
+/// What an agent with the Local VM's tools is told (Claude Code only).
+const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. Use it whenever a task needs a VM, a desktop or a browser to check UI visually; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
+/// The same, for a tab that chose one exact container.
+const SELECTED_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. The agent, shell and project files remain on the host; only desktop tools use this selected container. Use it for desktop or browser actions; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
 
-/// What a new agent session's command line gains while the VM is on: the VM's
-/// driver as an MCP server named `computer`. A stale selection fails launch;
-/// it must not silently start an agent with a different desktop.
-pub fn launch_selected(target: &Target, harness: &str, appends_prompt: bool) -> Result<String> {
+/// What a new agent gains while the VM is on, when its tab has chosen no
+/// other computer: on its command line, the VM's driver as an MCP server
+/// named `computer` (`args`), and for Claude Code a note saying how to reach
+/// this machine's dev servers from it (`note`), which the launch joins with
+/// its other appended prompts, since Claude Code honours one
+/// `--append-system-prompt`. Empty while it is off, and for a container that
+/// is enrolled as a task environment, whose desktop is leased to its tasks.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VmLaunch {
+    pub args: String,
+    pub note: Option<&'static str>,
+}
+
+pub fn launch_args(harness: &str) -> VmLaunch {
+    if !load().enabled {
+        return VmLaunch::default();
+    }
+    let Some(path) = runtime() else { return VmLaunch::default() };
+    // Asked on every agent launch: a runtime that hangs costs it seconds, not the usual wait.
+    if container_running_within(&path, Duration::from_secs(3)) != Some(true) {
+        return VmLaunch::default();
+    }
+    #[cfg(unix)]
+    if leased_to_tasks(&path) {
+        return VmLaunch::default();
+    }
+    VmLaunch { args: agent_args(harness, &path.to_string_lossy()), note: agent_note(harness) }
+}
+
+/// Whether the VM's container is enrolled as a task environment: its desktop
+/// then goes only to a tab that chose it, through that environment's lease.
+#[cfg(unix)]
+fn leased_to_tasks(path: &Path) -> bool {
+    let Ok(root) = crate::local_vm::host::root() else { return false };
+    if !root.join("journal.json").exists() { return false; }
+    let kind = match runtime_name(path).as_str() { "podman" => Runtime::Podman, _ => Runtime::Docker };
+    let Ok((target, _)) = identity(path, kind) else { return false };
+    // A journal that cannot be read cannot show the container is free.
+    crate::local_vm::journal::Journal::open_existing(&root).and_then(|journal| journal.read()).map_or(true, |state| {
+        state.environments.values().any(|env| env.deleted_at.is_none() && env.transport.container().as_ref() == Some(&target))
+    })
+}
+
+/// The note an agent of `harness` is given while the VM is on.
+pub fn agent_note(harness: &str) -> Option<&'static str> {
+    (harness == "claude").then_some(AGENT_NOTE)
+}
+
+/// What a tab that chose one exact container gains: the same server, through
+/// a proxy that holds that container's lease while the agent runs. A stale
+/// selection fails launch; it must not silently start an agent with a
+/// different desktop.
+pub fn launch_selected(target: &Target, harness: &str) -> Result<VmLaunch> {
     if !matches!(harness, "claude" | "codex") { bail!("This agent does not support attached desktop tools"); }
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
+    let note = (harness == "claude").then_some(SELECTED_NOTE);
     #[cfg(unix)]
     {
         let _ = (path, id);
         let executable = std::env::current_exe()?;
         let serialized = serde_json::to_string(target)?;
         let home = crate::store::root()?;
-        Ok(mcp_args(harness, &executable.to_string_lossy(), &["container-computer-stdio", &serialized, &home.to_string_lossy()], appends_prompt, AGENT_NOTE))
+        Ok(VmLaunch { args: mcp_args(harness, &executable.to_string_lossy(), &["container-computer-stdio", &serialized, &home.to_string_lossy()]), note })
     }
     #[cfg(not(unix))]
-    Ok(agent_args(harness, &path.to_string_lossy(), id, appends_prompt))
+    Ok(VmLaunch { args: mcp_args(harness, &path.to_string_lossy(), &driver_args(id)), note })
 }
 
-#[cfg(any(test, not(unix)))]
-pub fn agent_args(harness: &str, runtime: &str, id: &str, appends_prompt: bool) -> String {
-    let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"];
-    mcp_args(harness, runtime, &args, appends_prompt, AGENT_NOTE)
+/// `docker exec` of the driver's MCP server in `container`.
+fn driver_args(container: &str) -> [&str; 9] {
+    ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", container, "cua-driver", "mcp"]
 }
 
-pub(crate) fn mcp_args(harness: &str, runtime: &str, args: &[&str], appends_prompt: bool, agent_note: &str) -> String {
+pub fn agent_args(harness: &str, runtime: &str) -> String {
+    mcp_args(harness, runtime, &driver_args(CONTAINER))
+}
+
+/// `command args` as an MCP server named `computer` on `harness`'s command line.
+pub(crate) fn mcp_args(harness: &str, runtime: &str, args: &[&str]) -> String {
     match harness {
         "claude" => {
             let config = serde_json::json!({ "mcpServers": { "computer": { "command": runtime, "args": args } } });
-            let mut out = format!(" --mcp-config {}", shell_quote(&config.to_string()));
-            if !appends_prompt {
-                out.push_str(&format!(" --append-system-prompt {}", shell_quote(agent_note)));
-            }
-            out
+            format!(" --mcp-config {}", shell_quote(&config.to_string()))
         }
         "codex" => {
             let mut table = toml::map::Map::new();
@@ -597,16 +660,20 @@ mod tests {
 
     #[test]
     fn agents_get_the_driver_as_an_mcp_server_named_computer() {
-        let claude = agent_args("claude", "/opt/homebrew/bin/docker", &"a".repeat(64), false);
+        let claude = agent_args("claude", "/opt/homebrew/bin/docker");
         assert!(claude.starts_with(" --mcp-config '{\"mcpServers\":{\"computer\":{\"args\":[\"exec\",\"-i\""), "{claude}");
         assert!(claude.contains("\"command\":\"/opt/homebrew/bin/docker\""));
-        assert!(claude.contains("--append-system-prompt") && claude.contains("host.docker.internal"));
-        // A prompt the workspace already appends is not doubled.
-        assert!(!agent_args("claude", "docker", &"a".repeat(64), true).contains("--append-system-prompt"));
-        let codex = agent_args("codex", "/usr/local/bin/docker", &"a".repeat(64), false);
+        // The note is joined with the launch's other prompts, never a flag of its own.
+        assert!(!claude.contains("--append-system-prompt"));
+        assert!(agent_note("claude").is_some_and(|note| note.contains("host.docker.internal")));
+        assert_eq!(agent_note("codex"), None);
+        let codex = agent_args("codex", "/usr/local/bin/docker");
         assert!(codex.starts_with(" -c 'mcp_servers.computer={"), "{codex}");
-        assert!(codex.contains(&"a".repeat(64)) && codex.contains("\"cua-driver\""));
-        assert_eq!(agent_args("opencode", "docker", &"a".repeat(64), false), "");
+        assert!(codex.contains("\"terminalx-computer\"") && codex.contains("\"cua-driver\""));
+        assert_eq!(agent_args("opencode", "docker"), "");
+        // A chosen container is reached by its exact id, never by name.
+        let selected = mcp_args("codex", "/usr/local/bin/docker", &driver_args(&"a".repeat(64)));
+        assert!(selected.contains(&"a".repeat(64)) && !selected.contains(CONTAINER));
     }
 
     #[cfg(unix)]
@@ -630,7 +697,7 @@ mod tests {
         fixture(&old, true, "1");
         validate_at(&executable, &target, Duration::from_secs(30)).unwrap();
         for harness in ["claude", "codex"] {
-            let command = agent_args(harness, executable.to_str().unwrap(), &old, false);
+            let command = mcp_args(harness, executable.to_str().unwrap(), &driver_args(&old));
             assert!(command.contains(&old));
             assert!(!command.contains(CONTAINER));
         }
@@ -655,9 +722,10 @@ mod tests {
         let viewer = up.viewer.expect("viewer");
         assert_eq!(viewer.password.len(), 8);
         assert!(std::net::TcpStream::connect(("127.0.0.1", viewer.port)).is_ok());
+        assert!(launch_args("claude").args.contains("cua-driver"));
         let docker = runtime().unwrap();
         let (target, _) = identity(&docker, Runtime::Docker).unwrap();
-        assert!(launch_selected(&target, "claude", false).unwrap().contains("container-computer-stdio"));
+        assert!(launch_selected(&target, "claude").unwrap().args.contains("container-computer-stdio"));
         // What an agent's CLI runs, spoken to as MCP.
         let docker = runtime().unwrap();
         let mut child = Command::new(&docker)
@@ -695,7 +763,8 @@ mod tests {
         assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
         let down = stop().expect("stop");
         assert_eq!(down.state, VmState::Stopped);
-        assert!(launch_selected(&target, "claude", false).is_err());
+        assert_eq!(launch_args("claude"), VmLaunch::default());
+        assert!(launch_selected(&target, "claude").is_err());
         reset().expect("reset");
     }
 }

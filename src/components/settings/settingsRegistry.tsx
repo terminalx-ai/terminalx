@@ -1,6 +1,11 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
-import { SettingRow } from "@/components/ui/controls";
+import type { SettingRow } from "@/components/ui/controls";
+import { cn } from "@/lib/cn";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
+import { setPrefs } from "@/lib/prefs";
+import { SettingRowActions } from "./SettingRowActions";
+import { userFileKeys } from "@/lib/settingSources";
+import { UserFileRowAccessory } from "./SettingSources";
 
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
@@ -8,7 +13,8 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
 
-export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Repositories", "Admin", "More"] as const;
+// PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
+export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 export const SETTINGS_SECTIONS = {
   account: { title: "Account", group: "Personal", entry: "account.identity" },
@@ -21,8 +27,8 @@ export const SETTINGS_SECTIONS = {
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  projects: { title: "Projects", group: "Repositories", entry: "projects.templates" },
-  repositories: { title: "Repositories", group: "Repositories", entry: "repositories.rootPath" },
+  projects: { title: "Project templates", group: "Projects", entry: "projects.templates" },
+  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath" },
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
   shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
@@ -48,6 +54,21 @@ interface SettingDefinition {
   layout?: "row" | "content";
   /** Some existing rows have no visible help text; metadata remains searchable. */
   hideDescription?: boolean;
+  /**
+   * A setting link with `?enable=1` may turn this row on from outside the app
+   * (PRO-127). `enable` calls the row's existing setter. Only reversible,
+   * local, non-secret on/off switches belong here: never one that widens
+   * permissions or approvals, a bypass or auto mode, computer use, cloud or
+   * network sharing, the account, or an Experimental switch.
+   */
+  linkable?: { enable: () => Promise<void> };
+  /**
+   * The Experimental switch this row is behind. While it is off the row is
+   * not shown on its page, so Settings search and ⌘K must not offer it either
+   * (lib/settingsSections.ts `settingOffered`). A whole section behind a
+   * switch is `settingsSectionOffered`'s.
+   */
+  requires?: "orchestratorRuns";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -57,12 +78,31 @@ export interface SettingRegistration extends SettingDefinition {
  * adapters supply live controls and (only when needed) a status-dependent description.
  * Content rows retain the native structure of editors, lists and organization sections. */
 function defineSetting<const T extends SettingDefinition>(definition: T): T & SettingRegistration {
+  // A row kept in the user file shows "Your value" and its row menu beside its title (PRO-140).
+  const keys = userFileKeys(definition.storage.location);
+  const accessory = keys.length ? <UserFileRowAccessory keys={keys} title={definition.title} /> : undefined;
   return { ...definition, render: ({ children, instance, ...props }) => {
     const anchor = { "data-setting-id": definition.id, "data-setting-instance": instance, tabIndex: -1 };
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
-    return <div {...anchor} className="min-w-0 outline-none"><SettingRow label={definition.title} description={definition.hideDescription ? undefined : definition.description} control={null} {...props} /></div>;
+    // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
+    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id } = props;
+    return <div {...anchor} className="group/setting min-w-0 outline-none">
+      <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
+        <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
+              <span id={id} className="min-w-0">{label}</span>
+              {accessory}
+              <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
+            </div>
+            {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
+          </div>
+          <div className={cn(stacked ? "" : "shrink-0")}>{control}</div>
+        </div>
+      </div>
+    </div>;
   } };
 }
 
@@ -184,13 +224,13 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "appearance.mode", section: "appearance", title: "Mode",
     description: "System follows macOS and switches with it.",
-    searchTerms: ["appearance", "mode"], scope: "user",
+    searchTerms: ["appearance", "mode", "dark", "light", "dark mode", "light mode", "system"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),
   defineSetting({
     id: "appearance.textSize", section: "appearance", title: "Text size",
     description: "Scales the transcript and composer. Chrome stays the same size.",
-    searchTerms: ["appearance", "text", "size"], scope: "user",
+    searchTerms: ["appearance", "text", "size", "font", "font size", "zoom", "bigger", "smaller"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.fontScale" },
   }),
   defineSetting({
@@ -272,6 +312,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/devices.json" }, layout: "content",
   }),
   defineSetting({
+    id: "environment.variables", section: "environment", title: "Environment variables",
+    description: "Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.",
+    searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
+    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names and revisions)" }, layout: "content",
+  }),
+  defineSetting({
     id: "experimental.nativeCodex", section: "experimental", title: "Native Codex",
     description: NATIVE_CODEX_DESCRIPTION,
     searchTerms: ["experimental", "native", "codex"], scope: "user",
@@ -291,21 +337,81 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
-    description: "Show the plan and wait for Approve. Off: a lead starts its workers as soon as its plan is stored.",
+    description: "Show the plan and wait for Approve. Off, the workers start at once.",
     searchTerms: ["orchestrator", "run", "approve", "approval", "plan", "ask", "lead", "workers"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.requireApproval" },
   }),
   defineSetting({
+    id: "orchestrator.workersPerRun", section: "orchestrator", title: "Workers at once, per run",
+    description: "The rest wait in a queue and start as workers finish.",
+    searchTerms: ["orchestrator", "workers", "limit", "queue", "concurrent", "parallel", "at once", "run"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workersPerRun" },
+  }),
+  defineSetting({
+    id: "orchestrator.workersAtOnce", section: "orchestrator", title: "Workers at once, whole app",
+    description: "Across every run. Sessions you start by hand are not counted.",
+    searchTerms: ["orchestrator", "workers", "limit", "queue", "concurrent", "app", "machine", "at once"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workersAtOnce" },
+  }),
+  defineSetting({
     id: "orchestrator.pieceLimit", section: "orchestrator", title: "Pieces per run, at most",
-    description: "A larger plan is refused, and the lead is told the limit. From 1 to 50.",
+    description: "A larger plan is refused, and the lead is told the limit.",
     searchTerms: ["orchestrator", "pieces", "limit", "plan", "workers", "most"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.pieceLimit" },
   }),
   defineSetting({
     id: "orchestrator.workerMode", section: "orchestrator", title: "Workers run in",
-    description: "The permission mode a worker starts in unless its piece names another. Push, merge and deploy stay blocked by deny rules in every mode.",
+    description: "Push, merge and deploy stay blocked by deny rules in every mode.",
     searchTerms: ["orchestrator", "workers", "permissions", "mode", "bypass", "deny", "rules"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.workerMode" },
+  }),
+  defineSetting({
+    id: "orchestrator.triesPerPiece", section: "orchestrator", title: "Tries per piece",
+    description: "Retry, raise effort, then move up a model. From 1 to 6.",
+    searchTerms: ["orchestrator", "tries", "attempts", "retry", "retries", "escalate", "ladder", "piece", "effort", "model"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.triesPerPiece" },
+  }),
+  defineSetting({
+    id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",
+    description: "Dollars spent on an API key; then the run pauses and asks you.",
+    searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money", "no limit", "unlimited"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetDollars" },
+  }),
+  defineSetting({
+    id: "orchestrator.budgetPoints", section: "orchestrator", title: "Budget per run, subscription",
+    description: "Points of a usage window one run may use.",
+    searchTerms: ["orchestrator", "budget", "points", "subscription", "usage", "window", "plan", "limit", "no limit", "unlimited", "tokens"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.budgetPoints" },
+  }),
+  defineSetting({
+    id: "orchestrator.windowCeiling", section: "orchestrator", title: "Pause when a window passes",
+    description: "Whoever used it; the run goes on after the reset.",
+    searchTerms: ["orchestrator", "window", "usage", "ceiling", "pause", "percent", "subscription", "reset", "off", "no limit"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.windowCeiling" },
+  }),
+  defineSetting({
+    id: "orchestrator.stallMinutes", section: "orchestrator", title: "Mark a worker stalled after",
+    description: "No tool call, file change or command. A long build is not a stall.",
+    searchTerms: ["orchestrator", "stall", "stalled", "idle", "stuck", "worker", "minutes", "timeout"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.stallMinutes" },
+  }),
+  defineSetting({
+    id: "orchestrator.effortCeiling", section: "orchestrator", title: "Raise effort no higher than",
+    description: "Past this, the next model up is tried.",
+    searchTerms: ["orchestrator", "effort", "ceiling", "maximum", "raise", "escalate", "ladder", "retry", "model", "tokens"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.effortCeiling" },
+  }),
+  defineSetting({
+    id: "orchestrator.reviewDiffLines", section: "orchestrator", title: "A verifier reads a diff over",
+    description: "Changed lines. A result this size or smaller whose commands pass is accepted without a model; a larger one is read by a verifier session first. From 1 to 100000.",
+    searchTerms: ["orchestrator", "verify", "verifier", "review", "diff", "lines", "threshold", "check", "tokens"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reviewDiffLines" },
+  }),
+  defineSetting({
+    id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",
+    description: "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
+    searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.routing" }, layout: "content",
   }),
   defineSetting({
     id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
@@ -342,6 +448,8 @@ export const SETTINGS_ROWS = [
     description: "A short tone when a session finishes or asks for you. Silent while another app has focus; the desktop notification makes its own noise there.",
     searchTerms: ["general", "sounds"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.sounds" },
+    // Linkable: an in-app tone on this Mac; off again with the same switch.
+    linkable: { enable: async () => setPrefs({ sounds: true }) },
   }),
   defineSetting({
     id: "general.animations", section: "general", title: "Pixel raccoon",
@@ -360,6 +468,8 @@ export const SETTINGS_ROWS = [
     description: "Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it.",
     searchTerms: ["general", "show", "files", "changed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.turnChanges" },
+    // Linkable: shows local diff stats under a turn; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ turnChanges: true }) },
   }),
   defineSetting({
     id: "general.fixErrorsInstructions", section: "general", title: "Fix errors instructions",
@@ -372,6 +482,8 @@ export const SETTINGS_ROWS = [
     description: "A mark for each of your prompts down the right edge of a conversation. Hover one to read it, click to go back to it.",
     searchTerms: ["general", "prompt", "map"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.promptMap" },
+    // Linkable: marks for your own prompts in the conversation; display only, off again with the same switch.
+    linkable: { enable: async () => setPrefs({ promptMap: true }) },
   }),
   defineSetting({
     id: "general.autocorrect", section: "general", title: "Autocorrect",
@@ -438,10 +550,6 @@ export const SETTINGS_ROWS = [
     description: "Set up a local Cua VM and run selected tasks in it.",
     searchTerms: ["local", "vms", "vm", "virtual", "machine", "cua", "lume", "macos", "linux", "guest", "tasks"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime: $TERMINALX_HOME/local-vm/journal.json" }, layout: "content",
-    id: "environment.variables", section: "environment", title: "Environment variables",
-    description: "Variables for new local agent and shell tabs. Repository values override user values. All values are stored in Keychain on this Mac.",
-    searchTerms: ["environment", "variables", "env", "dotenv", "secrets", "keychain", "repository", "overrides", "import"], scope: "user",
-    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names and revisions)" }, layout: "content",
   }),
   defineSetting({
     id: "organizations.sidebar", section: "organizations", title: "Organizations in sidebar",
@@ -547,20 +655,26 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.rootPath", section: "repositories", title: "Root path",
-    description: "Reveal or copy the repository's root path.",
-    searchTerms: ["repositories", "general", "root", "path"], scope: "repository",
+    description: "Reveal or copy the project's root path.",
+    searchTerms: ["repositories", "projects", "general", "root", "path"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.path" }, layout: "content",
   }),
   defineSetting({
-    id: "repositories.workspacesPath", section: "repositories", title: "Workspaces path",
-    description: "Reveal or copy the directory used for new workspaces.",
-    searchTerms: ["repositories", "general", "workspaces", "worktrees", "path"], scope: "repository",
+    id: "repositories.workspacesPath", section: "repositories", title: "Worktree folder",
+    description: "Reveal or copy the folder new workspaces are created in.",
+    searchTerms: ["repositories", "projects", "general", "workspaces path", "workspaces", "worktrees", "folder", "path"], scope: "repository",
     storage: { kind: "action", location: "Repository worktree directory" }, layout: "content",
   }),
   defineSetting({
+    id: "repositories.sparseCheckout", section: "repositories", title: "Check out only some folders",
+    description: "New workspaces check out only the folders you pick. Useful in a large repository. Existing workspaces are unaffected.",
+    searchTerms: ["repositories", "general", "sparse", "checkout", "folders", "cone", "large", "monorepo", "partial"], scope: "repository",
+    storage: { kind: "file", location: ".terminalx/settings.json#sparseCheckout" }, layout: "content",
+  }),
+  defineSetting({
     id: "repositories.filesToCopy", section: "repositories", title: "Files to copy",
-    description: "Copy matching ignored, untracked files into new workspaces.",
-    searchTerms: ["repositories", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
+    description: "Copy matching ignored, untracked files into new workspaces. On the project's General page.",
+    searchTerms: ["repositories", "projects", "general", "files", "copy", "ignored", "globs", "worktreeinclude", "env"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects.repositorySettings.filesToCopy; repository .worktreeinclude overrides" }, layout: "content",
   }),
   defineSetting({
@@ -571,15 +685,34 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "repositories.orchestrator", section: "repositories", title: "Orchestrator",
-    description: "Override for this repository whether a run asks first, how many pieces it may have, and the mode its workers run in.",
-    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions"], scope: "repository",
+    description: "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
+    searchTerms: ["repositories", "orchestrator", "runs", "approval", "pieces", "workers", "permissions", "routing", "model", "effort", "tier", "budget", "points", "dollars", "window"], scope: "repository",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.projects" }, layout: "content",
+    requires: "orchestratorRuns",
   }),
   defineSetting({
     id: "repositories.scripts", section: "repositories", title: "Scripts",
-    description: "Save setup and archive scripts for this repository on this computer.",
-    searchTerms: ["repository", "setup", "archive", "scripts", "hooks"], scope: "repository",
-    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts" }, layout: "content",
+    description: "Setup and archive scripts for this repository, saved on this computer or read from its trusted .terminalx/settings.json.",
+    searchTerms: ["repository", "setup", "archive", "scripts", "hooks", "timeout", "trust", "override"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].scripts; .terminalx/settings*.json#setupScript,archiveScript,archiveTimeoutMinutes" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.actions", section: "repositories", title: "Actions",
+    description: "Commands this project's sessions can run, in order: name, command, run after setup.",
+    searchTerms: ["repository", "actions", "run", "commands", "dev server", "tests"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].actions" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.previewUrls", section: "repositories", title: "Preview URLs",
+    description: "Addresses to open for this project's sessions; $PORT and $PORT_n use the session's ports. On the project's General page.",
+    searchTerms: ["repository", "projects", "general", "preview", "urls", "localhost", "port", "browser"], scope: "repository",
+    storage: { kind: "file", location: "$TERMINALX_HOME/projects.json#projects[].previewUrls" }, layout: "content",
+  }),
+  defineSetting({
+    id: "repositories.environment", section: "repositories", title: "Environment",
+    description: "Environment variables for this repository's agents and shells, and the ones its settings file documents.",
+    searchTerms: ["repository", "environment", "variables", "env", "secrets", "keychain", "dotenv"], scope: "repository",
+    storage: { kind: "system", location: "macOS Keychain (values); $TERMINALX_HOME/environment.json (names, repository scope)" }, layout: "content",
   }),
   defineSetting({
     id: "shortcuts.systemWide", section: "shortcuts", title: "System-wide shortcut",
@@ -809,7 +942,7 @@ export const SETTINGS_ROWS = [
   }),
   ...SHORTCUT_ACTIONS.map((action) => defineSetting({
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
-    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys"],
+    description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys", "hotkeys", "key bindings", "shortcut"],
     scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
   } as const)),
 ] as const;
@@ -818,6 +951,10 @@ const byId = new Map<string, SettingRegistration>(SETTINGS_ROWS.map((row) => [ro
 if (byId.size !== SETTINGS_ROWS.length) throw new Error("Duplicate settings row id");
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }
+/** Whether a section has rows that show "Your value" (rows kept in the user file, drawn as rows). */
+export function sectionShowsUserValues(section: SettingsSection): boolean {
+  return settingsInSection(section).some((row) => row.layout !== "content" && userFileKeys(row.storage.location).length > 0);
+}
 type ContentSettingId = Extract<(typeof SETTINGS_ROWS)[number], { layout: "content" }>["id"];
 type RegisteredProps = Omit<RowProps, "children" | "control"> & (
   | { setting: ContentSettingId; children: ReactElement; control?: never }

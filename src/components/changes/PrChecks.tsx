@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { ArrowUpRight, Check, ChevronRight, CircleAlert, CircleDot, CircleX, ExternalLink, Loader2, X } from "@/icons";
+import { ArrowUpRight, Check, ChevronRight, CircleAlert, CircleDot, CircleX, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { CheckLog, PrCheck, PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { AnsiLog, plainLog } from "./AnsiLog";
+import { addThreadsToChat, githubAuthorName, githubReviewLocation, refreshThreads, requestThreadJump, threadCounts, threadInitials, type ReviewThread, type ThreadView } from "@/lib/reviewThreads";
 
 const checkKey = (check: PrCheck, index: number) => `${check.name}\0${check.url ?? ""}\0${index}`;
 
@@ -188,5 +189,63 @@ export function Deployments({ pr }: { pr: PullRequest }) {
         {url && <button type="button" onClick={() => void openUrl(url)} title={url} className="min-w-0 truncate text-faint hover:underline">{url}</button>}
       </div>;
     })}
+  </section>;
+}
+
+const threadLine = (thread: ReviewThread) => {
+  const line = thread.isOutdated || thread.line == null ? thread.originalLine : thread.line;
+  return `${thread.path.split("/").pop()}${line == null ? "" : `:${line}`}`;
+};
+const threadSnippet = (thread: ReviewThread) => thread.comments[0]?.body.split("\n").map((line) => line.trim()).find(Boolean) ?? "";
+
+/**
+ * The PR's review threads in the Checks section (PRO-234, design 05.14): open
+ * and resolved counts, every open one into the chat at once, and a row per
+ * thread that opens its place in the Changes diff.
+ */
+export function ReviewThreadList({ workspace, view }: { workspace: string; view: ThreadView }) {
+  const [notice, setNotice] = useState<string | null>(null);
+  const threads = view.snapshot?.threads ?? [];
+  const counts = threadCounts(threads);
+  const open = threads.filter((thread) => !thread.isResolved);
+  const tabId = view.pr.tabId;
+  return <section aria-label="Review threads" data-testid="review-threads" className="mt-1 flex min-w-0 flex-col gap-1 text-xs">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <h4 className="shrink-0 text-[11px] font-medium text-muted-foreground">Review threads</h4>
+      {view.snapshot && <span data-testid="review-thread-counts" className="min-w-0 text-[11px] text-faint">{counts.open} open · {counts.resolved} resolved</span>}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+        {view.pr.state === "OPEN" && counts.open > 0 && <Button size="xs" variant="secondary" disabled={!tabId} title={tabId ? undefined : "Open an agent tab to add threads to its chat"} onClick={() => {
+          const { added, omitted } = addThreadsToChat(tabId!, open, view.pr.url);
+          setNotice(omitted
+            ? `Added the first ${added} of ${open.length} open threads to the chat draft. Add the rest once these are done.`
+            : `Added ${added} open ${added === 1 ? "thread" : "threads"} to the chat draft.`);
+        }}>Add all {counts.open} to chat</Button>}
+        <Button size="icon-xs" variant="ghost" aria-label="Refresh threads" title="Refresh threads" disabled={view.loading || !!view.working} onClick={() => void refreshThreads(workspace, view.pr.url, true)}>
+          <RefreshCw className={cn(view.loading && "animate-spin")} />
+        </Button>
+      </span>
+    </div>
+    {/* Said quietly, like an unreachable GitHub: the checks' own alerts and notices stay the ones read out. */}
+    {view.loading && !view.snapshot && <p className="text-[11px] text-faint">Loading review threads…</p>}
+    {view.error && <p data-testid="review-threads-error" className="break-words text-[11px] text-destructive">Could not refresh review threads: {view.error}</p>}
+    {!view.error && view.snapshot && threads.length === 0 && <p className="text-[11px] text-faint">No review threads.</p>}
+    {threads.length > 0 && <ul className="flex min-w-0 flex-col" aria-label="Threads">
+      {threads.map((thread) => <li key={thread.id} className="min-w-0">
+        <button type="button" aria-label={`Go to review thread ${githubReviewLocation(thread)}`} title={thread.path}
+          onClick={() => { setNotice(null); void requestThreadJump(workspace, thread).then((shown) => { if (!shown) setNotice(`${thread.path} is not in the Changes diff.`); }); }}
+          className="flex w-full min-w-0 items-start gap-2 rounded-md px-1 py-1 text-left hover:bg-veil">
+          <span aria-hidden className="mt-px flex size-4 shrink-0 items-center justify-center rounded-full bg-veil-strong text-[8px] font-semibold text-muted-foreground">{threadInitials(githubAuthorName(thread.comments[0]))}</span>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="flex min-w-0 items-baseline gap-2">
+              <span className={cn("min-w-0 truncate font-mono text-[11px]", thread.isResolved ? "text-faint" : "text-foreground")}>{threadLine(thread)}</span>
+              {thread.isResolved && <span className="shrink-0 text-[10px] text-add">Resolved</span>}
+              {thread.isOutdated && <span className="shrink-0 text-[10px] text-warning">Outdated</span>}
+            </span>
+            <span className="min-w-0 truncate text-[11px] text-faint">{threadSnippet(thread)}</span>
+          </span>
+        </button>
+      </li>)}
+    </ul>}
+    {notice && <p aria-live="polite" className="text-[11px] text-muted-foreground">{notice}</p>}
   </section>;
 }

@@ -17,6 +17,8 @@ export interface SendingMessage {
   text: string;
   /** Thumbnails of the images it carries. */
   images: { url: string; name?: string }[];
+  /** The other files it carries (PRO-290), by name, for the chips on the message drawn as sending. Absent when there are none. */
+  files?: { name: string }[];
   /** When Send was pressed, by this window's clock (milliseconds since the epoch). */
   pressedAt: number;
   /** The tab's newest event when Send was pressed: the message's own comes after it. */

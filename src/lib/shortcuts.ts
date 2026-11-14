@@ -71,6 +71,9 @@ const ACTIONS = [
   { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
+  // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
+  // (18.01) drew ⌘⇧R, but that is Automations; ⌘⇧O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
+  { id: "app.runView", label: "Run view", group: "App", keys: ["mod+shift+o"], menu: { section: "go", order: 2.5, label: "Run View" } },
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
@@ -79,6 +82,9 @@ const ACTIONS = [
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
+  // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
+  { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },
   { id: "git.commitPush", label: "Commit and push", group: "Session", keys: ["mod+shift+y"] },
   { id: "git.pull", label: "Pull latest", group: "Session", keys: ["mod+shift+l"] },
   // Main's "Fix failing CI checks" owns mod+shift+x: defaults are claimed first-listed-first,
@@ -121,6 +127,7 @@ const ACTIONS = [
   { id: "files.replace", label: "Replace in project", group: "Files", keys: ["mod+shift+h"] },
   { id: "files.find", label: "Find in the focused chat, file or terminal", group: "Files", keys: ["mod+f"] },
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
+  { id: "files.copyContents", label: "Copy the open file's contents", group: "Files", keys: ["mod+alt+c"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
   // Handled by the Issues view, while the focus is in it and not in a text field.

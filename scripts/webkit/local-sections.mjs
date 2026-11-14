@@ -28,6 +28,7 @@ const extra = (layout) => `(() => {
     if (edit.kind === 'rename') target.name = edit.name.trim();
     if (edit.kind === 'emoji') target.emoji = edit.emoji;
     if (edit.kind === 'delete') state.sections = state.sections.filter((section) => section.id !== edit.id);
+    if (window.__PW_FAIL_MOVE__ && edit.kind === 'move') throw new Error('The sidebar changed on another device');
     if (edit.kind === 'reorder') { const at = state.sections.indexOf(target); [state.sections[at], state.sections[at + edit.by]] = [state.sections[at + edit.by], target]; }
     if (edit.kind === 'move') for (const section of state.sections) { section.sessions = section.sessions.filter((id) => !edit.sessionIds.includes(id)); if (section.id === edit.sectionId) section.sessions.push(...edit.sessionIds); }
     state = { ...state, revision: state.revision + 1 };
@@ -36,6 +37,25 @@ const extra = (layout) => `(() => {
     return structuredClone(state);
   };
 })();`;
+
+// A real pointer drag through dnd-kit's PointerSensor, as sidebar-order.mjs does it. hold() stops short of the drop.
+const hold = async (page, from, to) => {
+  const start = await from.boundingBox();
+  const end = await to.boundingBox();
+  assert.ok(start && end);
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2 + 8, { steps: 2 });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  const target = await to.boundingBox();
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 20 });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+};
+const drag = async (page, from, to) => {
+  await hold(page, from, to);
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+};
 
 const server = await serve();
 let browser;
@@ -54,7 +74,7 @@ try {
       await page.getByRole("menuitem", { name: action, exact: true }).click();
     };
     await section("Release").getByText("Prepare release notes", { exact: true }).waitFor();
-    await section("Bugs").getByText(/Move sessions here/).waitFor();
+    await section("Bugs").getByText("Drag sessions here", { exact: true }).waitFor();
     assert.equal(await page.locator('[data-row-sessions~="one"]').count(), 1);
     assert.equal(await page.locator('[data-row-sessions~="two"]').count(), 1);
     if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}.png` });
@@ -102,6 +122,52 @@ try {
     await section("Fixes").waitFor({ state: "detached" });
     assert.equal(await page.locator('[data-row-sessions~="one"]').count(), 1);
     assert.equal(await page.evaluate(() => window.__PW_STUB__.answers.list_sessions.filter((session) => !session.archived).length), 3);
+    // PRO-174: drag sessions between sections and the main list, and drag section headers.
+    // Now: Release (empty), Refactor (empty), Retries [two]; one and three in the main list.
+    const ids = () => page.locator('[data-local-section]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-local-section')));
+    const inSection = (id) => page.locator(`[data-local-section] [data-row-sessions~="${id}"]`).count();
+    await drag(page, section("Retries").getByText("Fix retry handling", { exact: true }), section("Release").getByText("Drag sessions here", { exact: true }));
+    await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
+    assert.equal(await section("Retries").getByText("Drag sessions here", { exact: true }).count(), 1, "the emptied section shows its drop target");
+    {
+      // From the main list into a section's header, then back out to the main list. In the simple layout the
+      // project tree is outside the sections' drag scope and reaches them through SidebarSort's bridge.
+      await hold(page, page.locator('[data-row-sessions~="three"]'), section("Retries").getByRole("button", { name: "Retries", exact: true }));
+      await page.locator('[data-local-section="' + (await section("Retries").getAttribute('data-local-section')) + '"][data-drop-over]').waitFor();
+      assert.equal(await page.locator('[data-drop-over]').count(), 1, "only the section under the pointer is lit");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-in.png` });
+      await page.mouse.up();
+      const held = section("Retries").locator('[data-row-sessions~="three"]');
+      await held.waitFor();
+      const start = await held.boundingBox();
+      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2 + 8, { steps: 2 });
+      const back = page.locator('[data-main-drop-target]');
+      await back.waitFor();
+      assert.equal(await back.textContent(), "Drop here to move to the main list");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-out.png` });
+      const end = await back.boundingBox();
+      await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 20 });
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      await page.mouse.up();
+      await page.waitForFunction(() => !document.querySelector('[data-local-section] [data-row-sessions~="three"]') && document.querySelector('[data-row-sessions~="three"]'));
+      assert.equal(await back.count(), 0);
+    }
+    // A section header drags the section: Retries goes above Release.
+    assert.equal((await ids())[0], 'release');
+    const last = (await ids()).at(-1);
+    await drag(page, section("Retries").getByRole("button", { name: "Retries", exact: true }), section("Release").getByRole("button", { name: "Release", exact: true }));
+    await page.waitForFunction((id) => document.querySelector('[data-local-section]')?.getAttribute('data-local-section') === id, last);
+    assert.equal(await page.getByRole("button", { name: "Reorder section Release", exact: true }).count(), 1, "headers carry a keyboard grip");
+    // A failed move raises the error toast and leaves the session where it was.
+    await page.evaluate(() => { window.__PW_FAIL_MOVE__ = true; });
+    await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: "Retries", exact: true }));
+    await page.getByText("Something went wrong", { exact: true }).waitFor();
+    await page.getByText("Couldn't move “Fix retry handling” to Retries", { exact: false }).waitFor();
+    await page.evaluate(() => { window.__PW_FAIL_MOVE__ = false; });
+    await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
+    assert.equal(await inSection("two"), 1);
     const overflow = await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1);
     assert.equal(overflow, false);
     assert.deepEqual(errors, []);

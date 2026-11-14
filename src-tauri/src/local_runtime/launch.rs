@@ -661,6 +661,41 @@ mod tests {
         let _ = terminal.wait();
     }
 
+    /// Spawn `command`, retrying while Linux refuses it with ETXTBSY ("Text
+    /// file busy"), as Go's os/exec does. The fixtures exec a copy of this test
+    /// binary they just wrote; another test that forks while that copy's write
+    /// descriptor is open hands the child a duplicate (close-on-exec closes it
+    /// only at the child's exec), and until then the kernel refuses to exec the
+    /// file. The window is short, so a short backoff outlasts it. No lock can
+    /// close it: every other test in this binary forks too.
+    fn spawn_when_not_busy(command: &mut Command) -> std::process::Child {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut delay = Duration::from_millis(5);
+        loop {
+            match command.spawn() {
+                Ok(child) => return child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline => {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_millis(200));
+                }
+                Err(error) => panic!("start the fixture owner: {error}"),
+            }
+        }
+    }
+
+    /// This test binary, installed as the launcher installs a runtime, so it is
+    /// one of `home`'s: written under a temporary name and closed before it is
+    /// renamed into place, so nothing ever runs a copy still being written.
+    fn installed_copy(home: &Path) -> PathBuf {
+        let directory = home.join("runtime/fixture");
+        std::fs::create_dir_all(&directory).unwrap();
+        let installed = directory.join("terminalx-serve");
+        let partial = directory.join("terminalx-serve.partial");
+        std::fs::copy(std::env::current_exe().unwrap(), &partial).unwrap();
+        std::fs::rename(&partial, &installed).unwrap();
+        installed
+    }
+
     /// Start `executable` as the wedged owner of a fresh home, and wait until
     /// it holds the socket. Returns the home, the owner and its terminal's pid.
     fn wedged_owner(fixture: &Path, executable: impl Fn(&Path) -> PathBuf) -> (PathBuf, std::process::Child, libc::pid_t) {
@@ -672,7 +707,7 @@ mod tests {
             .env(OWNER_HOME, &home).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         // SAFETY: as the launcher does: the owner leads a session of its own.
         unsafe { owner.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
-        let mut owner = owner.spawn().unwrap();
+        let mut owner = spawn_when_not_busy(&mut owner);
         let deadline = Instant::now() + Duration::from_secs(30);
         let terminal = loop {
             if let Ok(pid) = std::fs::read_to_string(home.join("terminal.pid")) { break pid.parse().unwrap(); }
@@ -693,14 +728,7 @@ mod tests {
     #[test]
     fn an_unresponsive_owner_is_stopped_with_the_terminals_it_started() {
         let fixture = tempfile::tempdir().unwrap();
-        let (home, mut owner, terminal) = wedged_owner(fixture.path(), |home| {
-            // Installed as the launcher installs a runtime, so it is one of this home's.
-            let installed = home.join("runtime/fixture");
-            std::fs::create_dir_all(&installed).unwrap();
-            let installed = installed.join("terminalx-serve");
-            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
-            installed
-        });
+        let (home, mut owner, terminal) = installed_owner(fixture.path());
         assert_eq!(listener(&home.join("run/hooks.sock")), Some(owner.id() as libc::pid_t));
         assert!(kill_owner(&home).unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -712,13 +740,7 @@ mod tests {
     }
 
     fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
-        wedged_owner(fixture, |home| {
-            let installed = home.join("runtime/fixture");
-            std::fs::create_dir_all(&installed).unwrap();
-            let installed = installed.join("terminalx-serve");
-            std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
-            installed
-        })
+        wedged_owner(fixture, installed_copy)
     }
 
     fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {

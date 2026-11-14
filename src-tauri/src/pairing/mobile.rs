@@ -1869,6 +1869,10 @@ mod tests {
             revoked_at: None,
             installation_id: None,
             created_request_id: None,
+            fingerprint: None,
+            approved_at: None,
+            connection: None,
+            last_seen_transport: None,
         }
     }
 
@@ -2149,6 +2153,7 @@ mod tests {
             Payload::UserMessage { author: None,
                 text: format!("prompt {seq}"),
                 images: Vec::new(),
+                files: Vec::new(),
                 baseline: None,
                 queued: false,
                 cwd: None,

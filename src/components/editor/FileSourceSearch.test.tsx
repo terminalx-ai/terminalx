@@ -6,12 +6,17 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd>{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <kbd>{keys.join("")}</kbd>,
+}));
 
 const { ProjectSearch } = await import("./ProjectSearch");
 const { QuickOpen } = await import("./QuickOpen");
 const { FileTree } = await import("@/components/files/FileTree");
 const { closeAllEditors, getEditors } = await import("@/lib/editors");
+const { keepWholeWords, wholeWordRemoteQuery } = await import("@/lib/workspaceFiles");
 
 function cloudSource(): FileSource & { search: ReturnType<typeof vi.fn>; findFiles: ReturnType<typeof vi.fn>; listDir: ReturnType<typeof vi.fn> } {
   return {
@@ -46,7 +51,7 @@ it("ProjectSearch greps the given source and offers no replace where it cannot r
   chord("f", true);
   fireEvent.change(await screen.findByPlaceholderText("Search in project"), { target: { value: "foo" } });
   await screen.findByText("remote.ts");
-  expect(source.search).toHaveBeenCalledWith({ query: "foo", regex: false, caseSensitive: false, limit: 500, replacement: undefined }, expect.any(AbortSignal));
+  expect(source.search).toHaveBeenCalledWith({ query: "foo", regex: false, caseSensitive: false, wholeWord: false, limit: 500, replacement: undefined }, expect.any(AbortSignal));
   expect(screen.queryByLabelText("Show replace")).toBeNull();
   fireEvent.click(screen.getByText("foo"));
   expect(getEditors().editors[0]).toMatchObject({ rel: "remote.ts", source: "cloud:ws-1" });
@@ -70,4 +75,16 @@ it("FileTree lists the given source", async () => {
   expect(await screen.findByText("remote.ts")).toBeTruthy();
   expect(source.listDir).toHaveBeenCalledWith("");
   await waitFor(() => expect(invoke).not.toHaveBeenCalled());
+});
+
+it("a cloud whole-word search sends a literal as a bounded regex and filters a regex's hits", () => {
+  const q = { regex: false, caseSensitive: false };
+  expect(wholeWordRemoteQuery({ ...q, query: "id" })).toEqual({ query: "\\bid\\b", regex: true });
+  expect(wholeWordRemoteQuery({ ...q, query: "a.b(" })).toEqual({ query: "\\ba\\.b\\(", regex: true });
+  expect(wholeWordRemoteQuery({ ...q, query: "i.", regex: true })).toEqual({ query: "i.", regex: true });
+  const hits = keepWholeWords([
+    { path: "a.ts", line: 1, col: 0, text: "ids id é_id", matches: [[0, 2], [4, 6], [9, 11]], replacements: ["x", "y", "z"] },
+    { path: "b.ts", line: 2, col: 1, text: "xid", matches: [[1, 3]] },
+  ]);
+  expect(hits).toEqual([{ path: "a.ts", line: 1, col: 4, text: "ids id é_id", matches: [[4, 6]], replacements: ["y"] }]);
 });

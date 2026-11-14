@@ -461,12 +461,21 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
     if !results.is_empty() {
         // The CLI records how the call was let through, or not, on the
         // record that carries its result: one record, one call's decision.
-        let safety_check = if results.len() == 1 { super::mapper::safety_check_note(&v["permissionDecision"]) } else { None };
+        let decision = &v["permissionDecision"];
+        let safety_check = if results.len() == 1 { super::mapper::safety_check_note(decision) } else { None };
+        // A read-only command TerminalX ran itself reaches the transcript as
+        // its PermissionRequest hook's rejection (PRO-330). The CLI writes
+        // both the error flag and the deciding hook, so a model cannot make
+        // another result read as one; show it as the command's own result.
+        let ran_by_terminalx = results.len() == 1 && decision["decision"] == "reject" && decision["source"] == "hook" && decision["reasonCode"] == "hook:PermissionRequest";
         for r in results {
-            out.push(Payload::ToolCallCompleted {
-                call_id: r["tool_use_id"].as_str().unwrap_or("").to_string(),
-                result: ToolResult { text: text_of(&r["content"]), is_error: r["is_error"].as_bool().unwrap_or(false), safety_check: safety_check.clone(), ..Default::default() },
-            });
+            let text = text_of(&r["content"]);
+            let is_error = r["is_error"].as_bool().unwrap_or(false);
+            let result = match crate::harness::read_only::ran_result(&text).filter(|_| ran_by_terminalx && is_error) {
+                Some((status, output)) => ToolResult { text: output, is_error: status != 0, exit_code: Some(status), ..Default::default() },
+                None => ToolResult { text, is_error, safety_check: safety_check.clone(), ..Default::default() },
+            };
+            out.push(Payload::ToolCallCompleted { call_id: r["tool_use_id"].as_str().unwrap_or("").to_string(), result });
         }
         return;
     }
@@ -485,8 +494,10 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         }
         return;
     }
-    let text = as_typed(prompt);
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    // The paths of attached files went to the model after the typed text
+    // (PRO-290): the chat shows them as files again.
+    let (text, files) = crate::attachments::split_block(&as_typed(prompt));
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 /// What started a turn when the prompt in a `user` record is not the
@@ -602,8 +613,10 @@ fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
     if prompt.trim().is_empty() || command_output(&prompt) {
         return;
     }
-    let text = as_typed(prompt);
-    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    // The paths of attached files went to the model after the typed text
+    // (PRO-290): the chat shows them as files again.
+    let (text, files) = crate::attachments::split_block(&as_typed(prompt));
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), files, baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
@@ -1423,6 +1436,40 @@ mod tests {
     fn encodes_the_project_folder_like_the_cli() {
         let p = transcript_in(Path::new("/h/.claude/projects"), "/Users/dev/code/ai/raccoon-e2e/.raccoon/worktrees/sly-ochre-hare", "abc");
         assert_eq!(p, Path::new("/h/.claude/projects/-Users-dev-code-ai-raccoon-e2e--raccoon-worktrees-sly-ochre-hare/abc.jsonl"));
+    }
+
+    /// PRO-330: a read-only command TerminalX ran itself is recorded as its
+    /// PermissionRequest hook's rejection, as Claude Code 2.1.322 writes it.
+    /// The row shows the command's own output and status; the same text in
+    /// any other result, which a command or model could print, stays as is.
+    #[test]
+    fn a_command_terminalx_ran_shows_its_own_result() {
+        let report = "TerminalX approved this read-only command and ran it itself, without a shell. Exit status: 1.\nDirectory: /w\nThe CLI shows this as a blocked call because TerminalX answered in its place. The command did run, and this is its result: do not run it again.\n\nOutput:\ngrep: absent\n";
+        let result = |is_error: bool, decision: serde_json::Value| {
+            let record = serde_json::json!({
+                "type": "user", "uuid": "r1", "sourceToolAssistantUUID": "a1",
+                "message": {"role": "user", "content": [{"tool_use_id": "toolu_1", "type": "tool_result", "content": report, "is_error": is_error}]},
+                "toolUseResult": format!("Error: {report}"),
+                "permissionDecision": decision,
+            });
+            let mut out = Vec::new();
+            decode_line(&record.to_string(), &HashSet::new(), &mut out);
+            match out.as_slice() {
+                [Payload::ToolCallCompleted { call_id, result }] if call_id == "toolu_1" => result.clone(),
+                other => panic!("one result: {other:?}"),
+            }
+        };
+        let hook = serde_json::json!({"decision": "reject", "source": "hook", "reasonType": "hook", "reasonCode": "hook:PermissionRequest"});
+        let ran = result(true, hook.clone());
+        assert_eq!((ran.text.as_str(), ran.is_error, ran.exit_code), ("grep: absent\n", true, Some(1)));
+        for (is_error, decision) in [
+            (false, hook),
+            (true, serde_json::json!({"decision": "reject", "source": "user"})),
+            (true, serde_json::json!({"decision": "accept", "source": "config", "reasonType": "classifier"})),
+        ] {
+            let kept = result(is_error, decision.clone());
+            assert_eq!((kept.text.as_str(), kept.exit_code), (report, None), "{decision}");
+        }
     }
 
     /// #775: the CLI records on a result how the call was let through. Its

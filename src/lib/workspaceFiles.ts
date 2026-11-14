@@ -10,7 +10,7 @@ import {
   statRemote,
   writeRemoteFile,
 } from "@terminalx/portable/workspaceFiles";
-import { files, fs, type DirEntry, type FileHit, type ReplaceReport, type ReplaceTarget, type TextSearch } from "@/lib/api";
+import { files, fs, type DirEntry, type FileCount, type FileHit, type FileList, type ReplaceReport, type ReplaceTarget, type TextHit, type TextSearch } from "@/lib/api";
 import type { ChangeStatus } from "@/types/session";
 
 /**
@@ -48,8 +48,14 @@ export interface FileSource {
    * would become (a preview; nothing is written). `limit` caps the hits.
    */
   search?(query: SearchQuery, signal: AbortSignal): Promise<TextSearch>;
-  /** Fuzzy file-name search, best first (Quick Open). */
-  findFiles?(query: string, limit: number): Promise<FileHit[]>;
+  /** Fuzzy file-name search, best first (Quick Open). `includeIgnored` needs `findsIgnored`. */
+  findFiles?(query: string, limit: number, options?: { includeIgnored?: boolean }): Promise<FileHit[]>;
+  /** `findFiles` can search the files Git ignores too. */
+  readonly findsIgnored?: boolean;
+  /** How many files `findFiles` looks through. */
+  countFiles?(options?: { includeIgnored?: boolean }): Promise<FileCount>;
+  /** Every file the tree can show, by the tree's own rules, for the All files filter. */
+  listFiles?(limit?: number): Promise<FileList>;
   /**
    * Rewrite matches in files. Null `targets` walks every searchable file,
    * skipping the paths in `skip`. Local only for now.
@@ -63,6 +69,8 @@ export interface SearchQuery {
   query: string;
   regex: boolean;
   caseSensitive: boolean;
+  /** Only matches that stand as whole words. */
+  wholeWord?: boolean;
   replacement?: string;
   limit?: number;
 }
@@ -72,6 +80,7 @@ export interface ReplaceInput {
   replacement: string;
   regex: boolean;
   caseSensitive: boolean;
+  wholeWord?: boolean;
   targets: ReplaceTarget[] | null;
   skip: string[];
 }
@@ -125,10 +134,47 @@ export function localFileSource(root: string): FileSource {
       const mtime = await fs.mtime(abs(rel));
       return mtime == null ? null : { version: String(mtime) };
     },
-    search: ({ query, regex, caseSensitive, limit, replacement }) => fs.searchText(root, query, regex, caseSensitive, limit, replacement),
-    findFiles: (query, limit) => files.search(root, query, limit),
-    replaceText: ({ query, replacement, regex, caseSensitive, targets, skip }) => fs.replaceText(root, query, replacement, regex, caseSensitive, targets, skip),
+    search: ({ query, regex, caseSensitive, wholeWord, limit, replacement }) => fs.searchText(root, query, regex, caseSensitive, limit, replacement, !!wholeWord),
+    findFiles: (query, limit, options) => files.search(root, query, limit, !!options?.includeIgnored),
+    findsIgnored: true,
+    countFiles: (options) => files.count(root, !!options?.includeIgnored),
+    listFiles: (limit) => files.list(root, limit),
+    replaceText: ({ query, replacement, regex, caseSensitive, wholeWord, targets, skip }) => fs.replaceText(root, query, replacement, regex, caseSensitive, targets, skip, !!wholeWord),
   };
+}
+
+const WORD = /[\p{L}\p{N}_]/u;
+const isWord = (c: string | undefined) => !!c && WORD.test(c);
+
+/**
+ * The cloud runtime's search speaks literal and regex only, so a whole-word
+ * literal goes as a regex with `\b` on each edge that is a word character,
+ * the pattern the local backend builds. A whole-word regex goes as typed and
+ * its hits are filtered by `keepWholeWords`.
+ */
+export function wholeWordRemoteQuery(query: SearchQuery): { query: string; regex: boolean } {
+  if (query.regex || !query.query) return { query: query.query, regex: query.regex };
+  const chars = [...query.query];
+  const edge = (c: string | undefined) => (isWord(c) ? "\\b" : "");
+  const escaped = query.query.replace(/[\\.+*?()|[\]{}^$]/g, "\\$&");
+  return { query: `${edge(chars[0])}${escaped}${edge(chars[chars.length - 1])}`, regex: true };
+}
+
+/**
+ * Drop the matches that start or end inside a word, and the lines left with
+ * none. Offsets are characters, as hits carry them.
+ */
+export function keepWholeWords(hits: TextHit[]): TextHit[] {
+  const out: TextHit[] = [];
+  for (const h of hits) {
+    const chars = [...h.text];
+    const cuts = (at: number) => isWord(chars[at - 1]) && isWord(chars[at]);
+    const keep = h.matches.map(([s, e]) => e > s && !cuts(s) && !cuts(e));
+    const matches = h.matches.filter((_, i) => keep[i]);
+    if (!matches.length) continue;
+    out.push({ ...h, col: matches[0][0], matches, replacements: h.replacements?.filter((_, i) => keep[i]) });
+  }
+  return out;
 }
 
 /** A request whose workspace was closed or switched away from; its answer is dropped. */
@@ -261,8 +307,11 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       const forward = () => controller.abort();
       signal.addEventListener("abort", forward, { once: true });
       try {
-        const result = await live(searchRemote(client, { query: query.query, regex: query.regex, caseSensitive: query.caseSensitive, maxResults: query.limit ?? 500 }, controller.signal));
-        return { hits: result.hits, files: result.files, capped: result.capped || result.cancelled };
+        const remote = query.wholeWord ? wholeWordRemoteQuery(query) : query;
+        const result = await live(searchRemote(client, { query: remote.query, regex: remote.regex, caseSensitive: query.caseSensitive, maxResults: query.limit ?? 500 }, controller.signal));
+        const hits = query.wholeWord && query.regex ? keepWholeWords(result.hits) : result.hits;
+        const fileCount = hits === result.hits ? result.files : new Set(hits.map((h) => h.path)).size;
+        return { hits, files: fileCount, capped: result.capped || result.cancelled };
       } finally {
         signal.removeEventListener("abort", forward);
         controllers.delete(controller);

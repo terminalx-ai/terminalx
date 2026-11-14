@@ -30,6 +30,8 @@ export interface PipelineVerdict {
   checksNote?: string | null;
   round: number;
   at: string;
+  /** The commit this verdict was given for, when it was carried forward over merges of the base branch to `commit` (#947). */
+  carriedFrom?: string | null;
 }
 
 export interface PipelineSessionRef {
@@ -84,6 +86,8 @@ export interface IssuePipeline {
   round: number;
   maxRounds: number;
   reviewCommit?: string | null;
+  /** While the reviewer checks only what merges of the base changed at `reviewCommit`: the commit whose passing verdict that check carries forward. Not a review round (#947). */
+  mergeCheck?: string | null;
   /** When the reviewer said its own checks were still running; its verdict is waited for a while from then. */
   reviewPendingSince?: string | null;
   verdict?: PipelineVerdict | null;
@@ -176,4 +180,8 @@ export interface IssuePipelineSettings {
   allowNoCi?: boolean;
   localCheckCommand?: string | null;
   localChecksOnly?: boolean;
+  /** The model the reviewer runs on; absent, the author's own. Used when the author's agent offers it. */
+  reviewerModel?: string | null;
+  /** The reviewer's effort; absent, the author's with the author's model, the model's default with a reviewer model. */
+  reviewerEffort?: string | null;
 }

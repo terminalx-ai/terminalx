@@ -43,6 +43,9 @@ export interface Prefs {
   panelTerminalOpen: boolean;
   panelTerminalHeight: number;
   editorPaneWidth: number;
+  /** A file tab's source view (PRO-297): wrap long lines, and draw spaces and tabs. Separate from the diff view's options. */
+  editorWrap: boolean;
+  editorShowWhitespace: boolean;
   updateChannel: "stable" | "beta";
   sounds: boolean;
   animations: boolean;
@@ -51,8 +54,12 @@ export interface Prefs {
   foldToolCalls: boolean;
   /** Under each finished turn, a chip per file it changed with the lines added and removed. */
   turnChanges: boolean;
+  /** Explicit consent to send staged diffs to the selected agent for a commit subject. */
+  writeCommitMessagesWithAgent: boolean;
   /** A mark per prompt down the transcript's right edge: hover to read one, click to go to it. */
   promptMap: boolean;
+  /** "Also reset files" in the Reset chat dialog: the reader's last choice. */
+  resetFiles: boolean;
   /** Appended to the prompt that sends failed CI logs to an agent. */
   fixErrorsInstructions: string;
   /**
@@ -165,6 +172,8 @@ const DEFAULTS: Prefs = {
   panelTerminalOpen: false,
   panelTerminalHeight: 260,
   editorPaneWidth: 520,
+  editorWrap: false,
+  editorShowWhitespace: false,
   updateChannel: "stable",
   sounds: true,
   animations: true,
@@ -173,7 +182,9 @@ const DEFAULTS: Prefs = {
   // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
   foldToolCalls: false,
   turnChanges: true,
+  writeCommitMessagesWithAgent: false,
   promptMap: true,
+  resetFiles: false,
   fixErrorsInstructions: "",
   autocorrect: false,
   followUps: "now",
@@ -293,6 +304,8 @@ function load(legacyOnly = false): Prefs {
     prefs.diffMode = prefs.diffMode === "split" ? "split" : "unified";
     prefs.diffHideWhitespace = prefs.diffHideWhitespace === true;
     prefs.diffWrap = prefs.diffWrap !== false;
+    prefs.editorWrap = prefs.editorWrap === true;
+    prefs.editorShowWhitespace = prefs.editorShowWhitespace === true;
     prefs.diffWrapFiles = prefs.diffWrapFiles && typeof prefs.diffWrapFiles === "object" && !Array.isArray(prefs.diffWrapFiles)
       ? Object.fromEntries(Object.entries(prefs.diffWrapFiles).filter(([, value]) => typeof value === "boolean")) : {};
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
@@ -302,6 +315,7 @@ function load(legacyOnly = false): Prefs {
     // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
     if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};
     if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
+    if (typeof prefs.resetFiles !== "boolean") prefs.resetFiles = false;
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,

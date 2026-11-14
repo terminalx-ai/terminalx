@@ -1,0 +1,53 @@
+{
+  "id": "01a1cf0c-c5b1-76f0-92b1-c36607c5d2df",
+  "ok": true,
+  "result": {
+    "estimate": true,
+    "models": [
+      {
+        "cacheReadTokens": 3170967,
+        "cacheWriteTokens": 113665,
+        "costUsd": 1.0703666999999997,
+        "inputTokens": 60,
+        "model": "claude-sonnet-5-5",
+        "outputTokens": 29849
+      }
+    ],
+    "sessionId": "01a1cef3-9b7b-7242-b2fb-ad6daac74d43",
+    "tabs": [
+      {
+        "agent": "claude",
+        "models": [
+          {
+            "cacheReadTokens": 3170967,
+            "cacheWriteTokens": 113665,
+            "costUsd": 1.0703666999999997,
+            "inputTokens": 60,
+            "model": "claude-sonnet-5-5",
+            "outputTokens": 29849
+          }
+        ],
+        "tabId": "01a1cef3-9b7b-7242-b2fb-ad70af6fc1f2",
+        "title": "Orchestrator: a lead session that splits work",
+        "total": {
+          "cacheReadTokens": 3170967,
+          "cacheWriteTokens": 113665,
+          "costUsd": 1.0703666999999997,
+          "inputTokens": 60,
+          "outputTokens": 29849,
+          "unpricedModels": []
+        },
+        "updated": "2026-11-12T09:18:03.196Z"
+      }
+    ],
+    "title": "PRO-269 Orchestrator: a lead session that splits work across worker sessions",
+    "total": {
+      "cacheReadTokens": 3170967,
+      "cacheWriteTokens": 113665,
+      "costUsd": 1.0703666999999997,
+      "inputTokens": 60,
+      "outputTokens": 29849,
+      "unpricedModels": []
+    }
+  }
+}

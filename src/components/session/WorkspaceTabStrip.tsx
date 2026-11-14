@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, TriangleAlert, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
+import { fileChipIcon } from "@/components/chat/FileChip";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -12,7 +13,8 @@ import { registerHotkey } from "@/lib/hotkeys";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
-import { closePeer, isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { closeTabTelling } from "@/components/session/TabMenu";
+import { isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { tabViewIn } from "@/lib/tabFront";
 import { landingIndex, moveTab } from "@/lib/tabActions";
 import { useTabViews } from "@/lib/tabViews";
@@ -41,7 +43,9 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 
 /** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
-  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} /> : <GitPullRequest className={className} />;
+  if (tab.kind === "review" && tab.editor.kind === "attachment") { const Icon = fileChipIcon(tab.editor.name); return <Icon className={className} />; }
+  if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} />
+    : tab.editor.kind === "conflict" ? <TriangleAlert className={cn(className, "text-warning")} aria-label="Merge conflict" /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
@@ -286,7 +290,7 @@ export function WorkspaceTabStrip({
                   onAuxClick={(event) => {
                     if (event.button !== 1 || readOnlyReason) return;
                     event.preventDefault();
-                    void closePeer(session.id, tab, tabs, selected);
+                    void closeTabTelling(session.id, tab, tabs, selected, label);
                   }}
                   className={cn(
                     "group/tab relative flex h-9 select-none items-center",
@@ -341,7 +345,7 @@ export function WorkspaceTabStrip({
                       type="button"
                       data-tab-close
                       aria-label={`Close ${label}`}
-                      onClick={() => void closePeer(session.id, tab, tabs, selected)}
+                      onClick={() => void closeTabTelling(session.id, tab, tabs, selected, label)}
                       // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
                       // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
                       // narrow tab shows its title instead.

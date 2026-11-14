@@ -243,7 +243,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
       </div>
 
       <footer className="relative z-10 flex justify-center px-4 pb-5 pt-3">
-        <div role="toolbar" aria-label="Image" className="flex items-center gap-0.5 rounded-full bg-neutral-900/90 p-1 text-white/85 shadow-lg ring-1 ring-white/10 backdrop-blur">
+        <div role="toolbar" aria-label="Image" className="flex items-center gap-0.5 rounded-full bg-neutral-900 p-1 text-white/85 shadow-lg ring-1 ring-white/10">
           <Tool label="Zoom out (−)" onClick={() => zoomAt(view.scale / STEP)}><Minus /></Tool>
           <button type="button" onClick={() => fit()} title="Fit to window (0)" className="h-8 min-w-14 rounded-full px-2 text-xs tabular-nums hover:bg-white/10" data-testid="image-viewer-zoom">
             {percent}%
@@ -257,7 +257,7 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
           <Tool label="Copy image" onClick={() => void copy()}><Copy /></Tool>
           {openOutside && <Tool label="Open in default app" onClick={openOutside}><ExternalLink /></Tool>}
         </div>
-        {note && <span role="status" className="absolute bottom-16 rounded-full bg-neutral-900/90 px-3 py-1 text-xs text-white/90 ring-1 ring-white/10">{note}</span>}
+        {note && <span role="status" className="absolute bottom-16 rounded-full bg-neutral-900 px-3 py-1 text-xs text-white/90 ring-1 ring-white/10">{note}</span>}
       </footer>
     </>
   );

@@ -4,12 +4,15 @@
 //! the event sink), so the `terminalx runs` commands and the window's Approve
 //! drive the same one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 
-use super::engine::{EngineError, Host, Lead, Started, WorkerNow};
+use super::budget::Login;
+use super::engine::{self, Activity, Cost, EngineError, Host, Lead, Started, VerifierNow, WorkerNow};
+use super::merge::{Checkouts, Worktree};
+use super::verify::{self, Checked, Checkout, Gate};
 use super::{guard, Piece, Run, SessionRef, RUN_EVENT};
 use crate::session::SessionManager;
 use crate::session_ops::{NewSession, NewTab};
@@ -30,6 +33,48 @@ impl ManagerHost {
     }
 }
 
+/// How often the watcher looks for stalled workers and runs due to resume.
+/// A stall is measured in minutes, so a minute is fine enough.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Above this, a worker's agent is working, whatever its transcript says.
+const BUSY_CPU_PERCENT: f32 = 5.0;
+
+/// Whether the watcher thread runs, and how often it was asked for: a run
+/// that starts while the thread decides to end is not left unwatched.
+static WATCHER: std::sync::Mutex<(bool, u64)> = std::sync::Mutex::new((false, 0));
+
+fn millis(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|at| at.timestamp_millis())
+}
+
+/// What a worker did in its open turn, from its transcript's events.
+pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
+    use crate::events::Payload;
+    let from = events.iter().rposition(|event| matches!(event.payload, Payload::TurnStarted { .. })).unwrap_or(0);
+    let mut activity = Activity::default();
+    let mut open = std::collections::HashSet::new();
+    let mut background = false;
+    for event in &events[from..] {
+        let at = || millis(&event.ts);
+        match &event.payload {
+            Payload::TurnStarted { .. } => activity.last_ms = at(),
+            Payload::ToolCallStarted { call_id, .. } => {
+                open.insert(call_id.clone());
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::ToolCallCompleted { call_id, .. } => {
+                open.remove(call_id);
+                activity.last_ms = at().or(activity.last_ms);
+            }
+            Payload::FileEdits { .. } => activity.last_ms = at().or(activity.last_ms),
+            Payload::BackgroundTasksChanged { tasks } => background = !tasks.is_empty(),
+            _ => {}
+        }
+    }
+    activity.command_running = !open.is_empty() || background;
+    activity
+}
+
 /// The commit a worker's branch is cut from: the lead's branch, or the commit
 /// it has checked out when it is on none.
 fn lead_base(cwd: &Path) -> anyhow::Result<String> {
@@ -42,14 +87,44 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
 impl Host for ManagerHost {
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
-        let agent = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| tab.harness.clone()).unwrap_or_default();
+        let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
         let repository = session.kind == SessionKind::Project && crate::git::is_repo(Path::new(&session.cwd));
-        Ok(Lead { project_path: session.project_path, agent, repository, cwd: session.cwd })
+        let ask_first = session.orchestrate_start();
+        Ok(Lead { project_path: session.project_path, agent, model, repository, cwd: session.cwd, ask_first })
     }
 
     fn worker_agents(&self) -> Vec<String> {
         // A worker is held to a report, and only an agent in its own terminal can be reminded of one.
         crate::harness::offered().into_iter().filter(|agent| agent.available && crate::session::pty_first(&agent.id).is_some()).map(|agent| agent.id).collect()
+    }
+
+    fn models(&self) -> Vec<crate::models::Model> {
+        // As the pickers list them: each agent's CLI was asked once, and the answer is kept.
+        crate::models::list(&self.manager.codex_models(), false)
+    }
+
+    fn worker_cost(&self, worker: &SessionRef) -> Cost {
+        // Read from the worker's transcripts again, as far as they have got (`sessions usage`).
+        match crate::session_usage::refresh_session(&worker.session_id) {
+            Ok((session, _)) => {
+                let (usd, unpriced_models) = crate::session_usage::estimated_cost(&session);
+                let rows: Vec<_> = session.tabs.iter().filter_map(|tab| tab.usage.as_ref()).flat_map(|usage| &usage.models).collect();
+                let output_tokens = (!rows.is_empty()).then(|| crate::session_usage::total(rows).output_tokens);
+                Cost { usd, unpriced_models, output_tokens }
+            }
+            Err(_) => Cost::default(),
+        }
+    }
+
+    fn retry_waits(&self, run_id: &str) {
+        // The next try is a new session in a new worktree: made off the thread that read the
+        // run, which may be a turn ending or a command waiting for its answer.
+        let (host, run) = (self.clone(), run_id.to_string());
+        std::thread::spawn(move || {
+            if let Err(error) = super::engine::start_retries(&host, &run) {
+                log::warn!("start the next try in run {run}: {error}");
+            }
+        });
     }
 
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
@@ -71,11 +146,16 @@ impl Host for ManagerHost {
                 checkout_branch: None,
                 checkout_pr: None,
                 base_ref: Some(base),
-                worktree_name: Some(format!("{}-{}", piece.id, piece.title)),
+                // Each try has a worktree and a branch of its own: the one before it keeps its.
+                worktree_name: Some(match piece.tries.len() {
+                    0 | 1 => format!("{}-{}", piece.id, piece.title),
+                    tries => format!("{}-try{tries}-{}", piece.id, piece.title),
+                }),
                 issue: None,
                 automation: None,
                 cwd: None,
                 tab: Some(NewTab { harness: piece.agent.clone(), transport: AgentTransport::Pty, model: piece.model.clone(), effort: piece.effort.clone(), permission_mode: Some(mode.to_string()) }),
+                orchestrate: false,
             },
             None,
         )
@@ -131,13 +211,107 @@ impl Host for ManagerHost {
             _ => None,
         };
         match status {
-            Some(status) => WorkerNow::Reported { status, result: text("result") },
+            Some(status) => WorkerNow::Reported { status, result: text("result"), report: super::TryReport::of_row(&row) },
             // No report: still on its way, or not coming.
             None if row["reason"] == "working" || row["reminderPending"] == true => WorkerNow::Working,
             // Its brief is on its way into a CLI that is still starting.
             None if row["reason"] == "noTurn" && (view.running || view.queued) => WorkerNow::Working,
+            // Its turn ended, the reminder went out and came to nothing: there is no report to read.
+            None if matches!(row["reason"].as_str(), Some("noBlock" | "malformed" | "noReply")) => WorkerNow::NoReport(text("detail")),
             None => WorkerNow::Stuck(text("detail")),
         }
+    }
+
+    fn check_waits(&self, run_id: &str) {
+        // The gates run the plan's commands: minutes, not a read's worth of time.
+        let (host, run) = (self.clone(), run_id.to_string());
+        let spawned = std::thread::Builder::new().name("run-verify".into()).spawn(move || {
+            if let Err(error) = super::engine::verify(&host, &run) {
+                log::warn!("check the results of run {run}: {error}");
+            }
+        });
+        if let Err(error) = spawned {
+            log::warn!("start the check of run {run_id}: {error}");
+        }
+    }
+
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> Checked {
+        let Ok(session) = index::get(&worker.session_id) else {
+            return Checked::unreadable(Gate::Branch, "The worker's session was deleted, so its worktree cannot be checked.");
+        };
+        let base = match index::get(&run.lead.session_id).context("the lead's session is gone").and_then(|lead| lead_base(Path::new(&lead.cwd))) {
+            Ok(base) => base,
+            Err(error) => return Checked::unreadable(Gate::Scope, format!("The lead's branch could not be read, so there is nothing to compare the result with: {error:#}")),
+        };
+        // The project's own check, the one its pipelines run before a merge.
+        let project_check = crate::store::projects::issue_pipeline_settings(&run.project_path).ok().and_then(|settings| settings.local_check_command);
+        // The mode the worker was started in decides, with the person's approval, whether its commands are run unasked.
+        let commands = verify::may_run_commands(run.approval.is_some(), piece.started_mode.as_deref().unwrap_or_else(|| piece.mode(&run.worker_mode)));
+        let marks = crate::store::root().ok().map(|root| root.join("run-checks"));
+        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
+    }
+
+    fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
+        // A conversation of its own in the worker's session: the same worktree, the worker's
+        // limits, and nothing of the worker's transcript. It starts in a mode that edits nothing.
+        let tab = self.manager.add_tab(&worker.session_id, &NewTab { harness: piece.agent.clone(), transport: AgentTransport::Pty, model: model.to_string(), effort: effort.map(str::to_owned), permission_mode: Some(guard::VERIFIER_MODE.to_string()) })?;
+        let (voters, _) = verify::panel(piece);
+        let title = if voters > 1 { format!("Verifier {number}") } else { "Verifier".to_string() };
+        crate::session_ops::rename_tab_entry(&worker.session_id, &tab.id, Some(title)).map_err(|error| anyhow!("{error}"))?;
+        if let Ok(session) = index::get(&worker.session_id) {
+            self.sink.emit("session_updated", &session);
+        }
+        Ok(SessionRef { session_id: worker.session_id.clone(), tab_id: Some(tab.id) })
+    }
+
+    fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()> {
+        let tab = verifier.tab_id.as_deref().ok_or_else(|| anyhow!("the verifier has no tab"))?;
+        self.manager.send(&verifier.session_id, tab, prompt.to_string(), Vec::new())?;
+        Ok(())
+    }
+
+    fn verifier(&self, verifier: &SessionRef) -> VerifierNow {
+        let Ok(session) = index::get(&verifier.session_id) else { return VerifierNow::Gone };
+        let Some(tab) = verifier.tab_id.as_deref().filter(|tab| session.tab(tab).is_some()) else { return VerifierNow::Gone };
+        let view = self.manager.wait_view(&session.id, tab);
+        match crate::control::open_turn(&view) {
+            Some(worker_report::OpenTurn::Working) => return VerifierNow::Working,
+            Some(worker_report::OpenTurn::Waiting) => return VerifierNow::Stuck("It stopped on a permission request, a question or an error, and gave no verdict.".into()),
+            None => {}
+        }
+        let events = match self.manager.load_events(&session.id, tab) {
+            Ok(events) => events,
+            Err(error) => return VerifierNow::Stuck(format!("Its transcript could not be read: {error:#}")),
+        };
+        match crate::issue_pipeline::host::last_reply(&events) {
+            Some((_, reply)) => VerifierNow::Replied(reply),
+            // Its prompt is on its way into a CLI that is still starting.
+            None if view.running || view.queued => VerifierNow::Working,
+            None => VerifierNow::Stuck("It ended without a reply.".into()),
+        }
+    }
+
+    fn check_reset(&self, worker: &SessionRef) {
+        if let (Ok(session), Ok(root)) = (index::get(&worker.session_id), crate::store::root()) {
+            verify::forget_clean(&root.join("run-checks"), Path::new(&session.cwd));
+        }
+    }
+
+    fn result_commit(&self, worker: &SessionRef) -> Option<String> {
+        let session = index::get(&worker.session_id).ok()?;
+        crate::git::head_commit(Path::new(&session.cwd))
+    }
+
+    fn verifier_tokens(&self, verifier: &SessionRef) -> Option<verify::Tokens> {
+        let tab_id = verifier.tab_id.as_deref()?;
+        // Read from its transcript again, as far as it has got.
+        if let Err(error) = crate::session_usage::refresh_tab(&verifier.session_id, tab_id) {
+            log::warn!("read what verifier {}/{tab_id} used: {error:#}", verifier.session_id);
+        }
+        let session = index::get(&verifier.session_id).ok()?;
+        let usage = session.tab(tab_id)?.usage.as_ref()?;
+        let total = crate::session_usage::total(&usage.models);
+        Some(verify::Tokens { input: total.input_tokens, output: total.output_tokens, cache_read: total.cache_read_tokens, cache_write: total.cache_write_tokens, cost_usd: total.cost_usd })
     }
 
     fn stop_worker(&self, worker: &SessionRef) -> anyhow::Result<bool> {
@@ -166,5 +340,246 @@ impl Host for ManagerHost {
 
     fn changed(&self, run: &Run) {
         self.sink.emit(RUN_EVENT, &super::engine::shown(run));
+    }
+
+    fn login(&self, agent: &str) -> Login {
+        if crate::agent_keys::uses_saved_key(agent) { Login::ApiKey } else { Login::Subscription }
+    }
+
+    fn windows(&self) -> Vec<crate::status::usage::UsageWindow> {
+        self.manager.usage_windows()
+    }
+
+    fn activity(&self, worker: &SessionRef) -> Activity {
+        let Some(tab) = worker.tab_id.as_deref() else { return Activity::default() };
+        let mut activity = match self.manager.load_events(&worker.session_id, tab) {
+            Ok(events) => activity_of(&events),
+            // Unread is not idle: no stall is called on no evidence.
+            Err(_) => return Activity { command_running: true, ..Activity::default() },
+        };
+        activity.busy = match self.manager.resource_sample() {
+            Ok(sample) => sample.processes.iter().any(|process| process.session_id.as_deref() == Some(worker.session_id.as_str()) && process.tab_id.as_deref() == Some(tab) && process.cpu_percent.is_some_and(|cpu| cpu >= BUSY_CPU_PERCENT)),
+            Err(_) => true,
+        };
+        activity
+    }
+
+    fn fill_later(&self) {
+        let host = self.clone();
+        std::thread::spawn(move || engine::fill_slots(&host));
+    }
+
+    fn watch(&self) {
+        let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+        watcher.1 += 1;
+        if watcher.0 {
+            return;
+        }
+        watcher.0 = true;
+        let host = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(WATCH_EVERY);
+            let asked = WATCHER.lock().unwrap_or_else(|error| error.into_inner()).1;
+            let more = engine::watch(&host);
+            let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
+            if !more && watcher.1 == asked {
+                watcher.0 = false;
+                return;
+            }
+        });
+    }
+
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn lead_head(&self, run: &Run) -> Option<String> {
+        let cwd = self.lead_checkout(run).ok()?;
+        crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).ok().map(|head| head.trim().to_string()).filter(|head| !head.is_empty())
+    }
+
+    fn lead_work(&self, run: &Run, since: &str) -> anyhow::Result<engine::LeadWork> {
+        let cwd = self.lead_checkout(run)?;
+        let head = crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
+        let numbers = crate::git::run(&cwd, &["diff", "--numstat", &format!("{since}..{head}"), "--"])?;
+        let uncommitted = crate::git::run(&cwd, &["status", "--porcelain", "--untracked-files=no", "--"])?.lines().filter(|line| !line.trim().is_empty()).map(|line| line.get(3..).unwrap_or(line).trim().to_string()).collect();
+        Ok(engine::LeadWork { head, changes: verify::numstat(&numbers), uncommitted })
+    }
+
+    fn lead_commands(&self, run: &Run, piece: &Piece, by_lead: bool) -> Result<Vec<verify::CommandRun>, String> {
+        let cwd = self.lead_checkout(run).map_err(|error| format!("{error:#}"))?;
+        // No other writer while they run: the checkout is held as a merge holds it.
+        let _reserved = self.reserve(run, &cwd, by_lead)?;
+        let mut ran = Vec::new();
+        for command in piece.done_checks.iter().filter_map(|check| match check { super::Check::Command { run } => Some(run.as_str()), _ => None }) {
+            let result = verify::run_command(&cwd, command, false, verify::COMMAND_TIMEOUT);
+            let passed = result.passed;
+            ran.push(result);
+            if !passed {
+                break;
+            }
+        }
+        Ok(ran)
+    }
+
+    fn lead_mode(&self, run: &Run) -> Option<String> {
+        Checkouts::lead_mode(self, run)
+    }
+}
+
+impl Checkouts for ManagerHost {
+    fn lead_checkout(&self, run: &Run) -> anyhow::Result<PathBuf> {
+        Ok(PathBuf::from(index::get(&run.lead.session_id).context("the lead's session is gone")?.cwd))
+    }
+
+    fn lead_mode(&self, run: &Run) -> Option<String> {
+        let lead = index::get(&run.lead.session_id).ok()?;
+        let tab = run.lead.tab_id.as_deref().and_then(|tab| lead.tab(tab)).or_else(|| lead.tabs.iter().find(|tab| !tab.is_terminal()))?;
+        Some(tab.permission_mode.clone())
+    }
+
+    fn reserve(&self, run: &Run, cwd: &Path, by_lead: bool) -> Result<Box<dyn std::any::Any + Send>, String> {
+        use crate::issue_pipeline::admission::{self, Kind, Scope};
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let checkout = canonical(cwd);
+        // The lock a prompt is admitted under, and a pipeline reserves a checkout under: what is
+        // found free here cannot be taken before the fence stands.
+        let _admission = admission::lock();
+        let pipelines = crate::issue_pipeline::store::list().map_err(|error| format!("the pipelines could not be read ({error:#})."))?;
+        for pipeline in pipelines.iter().filter(|pipeline| pipeline.checking_locally || pipeline.resolution.is_some()) {
+            let Ok(author) = index::get(&pipeline.author.session_id) else { continue };
+            if canonical(Path::new(&author.cwd)) == checkout {
+                return Err(if pipeline.checking_locally { "TerminalX is running a pipeline's checks in it.".into() } else { "it is reserved for a pipeline's conflict resolver.".into() });
+            }
+        }
+        let sessions = index::load().map_err(|error| format!("the sessions could not be read ({error:#})."))?;
+        // Every conversation that works on this checkout's files, from its top or a folder of it:
+        // the ones the fence closes.
+        for session in sessions.iter().filter(|session| admission::in_working_tree(&checkout, Path::new(&session.cwd))) {
+            for tab in &session.tabs {
+                // The lead's own turn is the one that asked. Named with `--lead`, its tab is not known: none of its agents is waited for.
+                let asking = by_lead && session.id == run.lead.session_id && run.lead.tab_id.as_deref().is_none_or(|lead| lead == tab.id);
+                if asking || tab.is_terminal() {
+                    continue;
+                }
+                if !self.manager.pipeline_idle(&session.id, &tab.id) {
+                    return Err(format!("the conversation \"{}\" is in a turn there.", session.title));
+                }
+            }
+        }
+        Ok(Box::new(admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(&checkout)])))
+    }
+
+    fn project_check(&self, project_path: &str) -> Option<String> {
+        crate::store::projects::issue_pipeline_settings(project_path).ok().and_then(|settings| settings.local_check_command)
+    }
+
+    fn open_prs_into(&self, cwd: &Path, branch: &str) -> Option<Vec<u64>> {
+        // A repository with no remote has no pull request to ask about.
+        if crate::git::run(cwd, &["remote"]).ok()?.trim().is_empty() {
+            return Some(Vec::new());
+        }
+        match crate::github::list_prs(cwd, &["--base", branch, "--state", "open", "--json", "number", "--limit", "20"]) {
+            Ok(prs) => Some(prs.iter().filter_map(|pr| pr["number"].as_u64()).collect()),
+            Err(error) => {
+                // Not a GitHub repository, or gh is missing or signed out: the branch checks on refs still hold.
+                log::info!("open pull requests into {branch} could not be read: {error:#}");
+                None
+            }
+        }
+    }
+
+    fn worktree(&self, worker: &SessionRef) -> Option<Worktree> {
+        let session = index::get(&worker.session_id).ok()?;
+        let path = PathBuf::from(&session.cwd);
+        // A worktree of its own, of this project: never the project's own checkout.
+        if !path.is_dir() || !crate::git::is_own_worktree(&path) || !crate::git::is_worktree_of(Path::new(&session.project_path), &path) || crate::worktree_control::same_folder(&session.cwd, &session.project_path) {
+            return None;
+        }
+        let busy = session.tabs.iter().any(|tab| !tab.is_terminal() && self.manager.is_running(&session.id, &tab.id));
+        Some(Worktree { path, busy })
+    }
+
+    fn remove(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> {
+        let path = worktree.path.to_string_lossy().into_owned();
+        let expected = [worker.session_id.clone()];
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: &run.project_path,
+            path: &path,
+            sessions: crate::session_ops::SessionsFate::Delete,
+            // Never the branch: what was merged is named by it, and what was not is kept by it.
+            delete_branch: false,
+            // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the
+            // lead's branch (or, with the lead gone, in the project's base branch).
+            confirmation: crate::session_ops::Confirmation::Forced,
+            // Only the worker's own session goes: one somebody else opened there keeps the worktree.
+            expected_sessions: Some(&expected),
+            direct: crate::git::DirectDelete::Never,
+            fetch: crate::landed::Fetch::Skip,
+            guard: Some(still_safe),
+            archive: None,
+            archive_failure: None,
+            archive_retry: None,
+            archive_started: None,
+        };
+        crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &|entry| self.manager.stop_session_confirmed(entry).map_err(|error| format!("{error:#}"))).map_err(|error| anyhow!("{error}"))?;
+        Ok(())
+    }
+
+    fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        Host::stop_worker(self, worker)
+    }
+
+    fn changed(&self, run: &Run) {
+        self.sink.emit(RUN_EVENT, &super::engine::shown(run));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activity_of;
+    use crate::events::AgentEvent;
+    use serde_json::json;
+
+    fn event(seq: u64, ts: &str, payload: serde_json::Value) -> AgentEvent {
+        serde_json::from_value(json!({"id": format!("e{seq}"), "sessionId": "w", "tabId": "t", "harness": "claude", "seq": seq, "ts": ts, "payload": payload})).unwrap()
+    }
+
+    fn ms(ts: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap().timestamp_millis()
+    }
+
+    #[test]
+    fn a_command_still_running_is_work_and_the_last_tool_call_or_edit_is_the_last_activity() {
+        let started = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_started", "callId": id, "name": "Bash", "toolType": "shell", "input": {"command": "cargo build"}}));
+        let done = |seq, ts, id: &str| event(seq, ts, json!({"type": "tool_call_completed", "callId": id, "result": {"text": "ok"}}));
+        // An earlier turn's open call does not count: only the open turn's.
+        let earlier = vec![
+            event(1, "2026-11-11T09:00:00Z", json!({"type": "turn_started"})),
+            started(2, "2026-11-11T09:00:01Z", "old"),
+            event(3, "2026-11-11T10:00:00Z", json!({"type": "turn_started"})),
+        ];
+        let idle = activity_of(&earlier);
+        assert_eq!((idle.last_ms, idle.command_running), (Some(ms("2026-11-11T10:00:00Z")), false));
+
+        // A ten-minute build: its call has not returned.
+        let mut building = earlier.clone();
+        building.push(started(4, "2026-11-11T10:01:00Z", "build"));
+        let activity = activity_of(&building);
+        assert!(activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:01:00Z")));
+
+        // It returned, and a file was edited after: that edit is the last activity.
+        building.push(done(5, "2026-11-11T10:11:00Z", "build"));
+        building.push(event(6, "2026-11-11T10:12:30Z", json!({"type": "file_edits", "edits": []})));
+        let activity = activity_of(&building);
+        assert!(!activity.command_running);
+        assert_eq!(activity.last_ms, Some(ms("2026-11-11T10:12:30Z")));
+
+        // A background task of its counts as a command running.
+        building.push(event(7, "2026-11-11T10:13:00Z", json!({"type": "background_tasks_changed", "tasks": [{"id": "b1", "label": "npm test"}]})));
+        assert!(activity_of(&building).command_running);
+        building.push(event(8, "2026-11-11T10:20:00Z", json!({"type": "background_tasks_changed", "tasks": []})));
+        assert!(!activity_of(&building).command_running);
     }
 }

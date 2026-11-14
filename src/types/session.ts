@@ -1,4 +1,5 @@
 import type { RepositorySettings, WorktreeCopyReport } from "@/types/repositorySettings";
+import type { RepositoryAction, RepositoryPreviewUrl } from "@/lib/repositoryActions";
 import type { ManualStatus } from "@terminalx/portable/manualStatus";
 export type { ManualStatus } from "@terminalx/portable/manualStatus";
 import type { AutomationRef } from "@/types/automations";
@@ -27,6 +28,9 @@ export interface TabEntry {
   providerSessionId?: string | null;
   resetLogId?: string;
   resetBackupId?: string;
+  /** After a reset: the turn it went back to, and how many files "Also reset files" restored. */
+  resetTurn?: number;
+  resetFilesRestored?: number;
   /**
    * How the app reaches the agent. Absent is its CLI in the tab's terminal.
    * An experimental Codex connection has no terminal: opening the terminal
@@ -184,6 +188,8 @@ export interface SessionEntry {
   kind?: SessionKind;
   /** Absent for a session no other session started. */
   parent?: SessionParent | null;
+  /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
+  orchestrateStart?: boolean;
   /**
    * The session's project. A quick chat has none: this is then its scratch
    * directory under the TerminalX home, which is in no project list. Ask
@@ -224,6 +230,8 @@ export interface SessionEntry {
 export interface RepositoryScripts {
   setup: string;
   archive: string;
+  /** Absent means the default, 5 minutes. One of the Scripts page's choices. */
+  archiveTimeoutMinutes?: number | null;
 }
 
 export interface Project {
@@ -244,6 +252,10 @@ export interface Project {
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
   scripts?: RepositoryScripts | null;
+  /** Run-menu actions, in saved order. Absent is none. Saved with the `actions` patch. */
+  actions?: RepositoryAction[];
+  /** Templates with $PORT / $PORT_n, in saved order. Absent is none. Saved with the `previewUrls` patch. */
+  previewUrls?: RepositoryPreviewUrl[];
   repositorySettings?: RepositorySettings;
 }
 
@@ -260,6 +272,10 @@ export interface ProjectPatch {
   /** Set one branch's label; null or blank clears it. */
   branchLabel?: { branch: string; label: string | null };
   repositorySettings?: RepositorySettings;
+  /** Replaces the saved actions; [] clears them. Leaves the hooks alone. */
+  actions?: RepositoryAction[];
+  /** Replaces the saved preview URLs; [] clears them. Leaves the hooks alone. */
+  previewUrls?: RepositoryPreviewUrl[];
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */
@@ -356,7 +372,62 @@ export interface UnfinishedMerge {
   changedHere: string[];
   /** Uncommitted paths exactly as Git merged them. */
   fromBase: string[];
+  /** The branch HEAD is on (`raccoon/teams-billing`); null when detached. */
+  branch: string | null;
+  /** For each path in `conflicted`, how many conflict-marker blocks it holds now (0 for a binary or delete conflict). */
+  conflictCounts: Record<string, number>;
 }
+
+/** Where one side of a conflicted file's text came from (PRO-293). */
+export interface ConflictSide {
+  /** The branch: this checkout's branch for yours, what is being merged for theirs (`origin/main`, or `commit 1a2b3c4d5e`). */
+  branch: string;
+  /** The last commit on this side, since the merge base, that changed the file; null when there is none to read. */
+  commit: {
+    id: string;
+    subject: string;
+    author: string;
+    /** Commit time, Unix seconds. */
+    time: number;
+    /** The pull request the commit names (`… (#209)`, `Merge pull request #209 …`); null when it names none. */
+    pr: number | null;
+  } | null;
+}
+
+/** One `<<<<<<<` … `>>>>>>>` block, as it is on disk now. */
+export interface ConflictHunk {
+  /** Its place among the file's conflicts, from 0. */
+  index: number;
+  /** 1-based line of its `<<<<<<<` marker in the file on disk. */
+  line: number;
+  /** The text between `<<<<<<<` and `|||||||`/`=======`, each line with its line ending. */
+  ours: string;
+  /** The text between `=======` and `>>>>>>>`. */
+  theirs: string;
+  /** The common ancestor's text, when the file was written with diff3 or zdiff3 markers. */
+  base: string | null;
+}
+
+/** The file on disk, cut into the text outside conflicts and the conflicts. */
+export type ConflictSegment =
+  | { kind: "text"; text: string }
+  | { kind: "conflict"; hunk: ConflictHunk };
+
+/** A conflicted file of a merge in progress, as read from disk (PRO-293). */
+export interface ConflictFile {
+  path: string;
+  /** SHA-256 of the bytes read. A write is refused when the file no longer has them. */
+  version: string;
+  segments: ConflictSegment[];
+  /** How many conflict hunks `segments` holds. */
+  conflicts: number;
+  ours: ConflictSide;
+  theirs: ConflictSide;
+  /** Why the file cannot be resolved hunk by hunk (binary, deleted on one side); null when it can. */
+  unsupported: string | null;
+}
+
+export type ConflictChoice = "ours" | "theirs" | "both";
 
 export interface WorkspaceDisposition {
   exists: boolean;

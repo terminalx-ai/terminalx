@@ -3,11 +3,10 @@
 // with only the native boundary replaced by the durable fixture below.
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
-import { webkit } from 'playwright';
-import { open, openConversation, serve, tab } from './harness.mjs';
+import { launch, open, openConversation, serve, tab } from './harness.mjs';
 
 const server = await serve();
-const browser = await webkit.launch({ headless: true });
+const browser = await launch({ headless: true });
 const errors = [];
 const extra = `
 localStorage.setItem('raccoon.prefs', JSON.stringify({panelOpen:true, panelWidth:540}));
@@ -41,7 +40,7 @@ a.send_to_tab=()=>({queued:false,events:[]});
 try {
  const page = await open(browser, server.url, {cloud:false,localProjects:1,localSession:true}, {width:1500,height:1000}, {extra});
  page.on('pageerror', error=>errors.push(String(error)));
- await openConversation(page,'claude tab');
+ await openConversation(page, 'Local long session');
  await tab(page,'gemini tab').click();
  await page.getByRole('button',{name:'Branch',exact:true}).click();
  await page.getByRole('tab',{name:'Changes',exact:true}).click();
@@ -130,7 +129,7 @@ try {
  await page.screenshot({path:output+'/review-split.png'});
  // Reopen the page with persisted notes from the fixture, just like a store reload.
  await page.reload();
- await openConversation(page,'claude tab');
+ await openConversation(page, 'Local long session');
  await tab(page,'gemini tab').click();
  await page.getByRole('button',{name:'Branch',exact:true}).click();
  await page.getByRole('tab',{name:'Changes',exact:true}).click();

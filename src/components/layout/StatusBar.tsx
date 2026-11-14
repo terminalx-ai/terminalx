@@ -215,14 +215,13 @@ function ResourceCluster({ narrow }: { narrow: boolean }) {
           </button>
         </PopoverPrimitive.Trigger>
         <PopoverPrimitive.Portal>
-          {/* Keep the dense process list opaque even in macOS glass mode. */}
           <PopoverPrimitive.Content
             side="top"
             align="end"
             sideOffset={5}
             data-status-context-exempt
             onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
-            className="z-(--z-menu) w-[26rem] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+            className="z-(--z-menu) w-[26rem] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
           >
             <div className="mb-2.5 flex items-center gap-2">
               <div>
@@ -721,7 +720,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           data-usage-popover
           data-status-context-exempt
           onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
-          className="relative z-(--z-menu) w-[380px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
+          className="relative z-(--z-menu) w-[380px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
           <div className="flex items-center gap-2 px-1 pb-3">
             <div className="min-w-0 flex-1">
@@ -881,7 +880,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
             />
           ) : null}
           <Dialog open={resetConfirmOpen} onOpenChange={setResetConfirmOpen}>
-            <DialogContent width="max-w-[26rem]" className="bg-(--surface-card)" data-status-context-exempt>
+            <DialogContent width="max-w-[26rem]" data-status-context-exempt>
               <DialogHeader>
                 <DialogTitle>Reset Codex limits?</DialogTitle>
                 <DialogDescription>
@@ -946,7 +945,7 @@ function AgentUsageDetail({
   const stuck = (refresh?.refused ?? []).filter((refused) => refused.reason !== "olderObservation"
     && windows.some((window) => window.key === refused.key && window.updatedAt <= answeredAt));
   return (
-    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
+    <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
         <AgentMark id={agent} className="size-4 text-muted-foreground" decorative brand />
         <span className="text-[13px] font-medium">{agentName(agent)}</span>

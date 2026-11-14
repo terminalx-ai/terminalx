@@ -1,5 +1,7 @@
 //! Local environment overrides. The index contains names and opaque revisions,
-//! never values (nor hashes of values). Each revision is one Keychain item.
+//! never Keychain values (nor hashes of values). Each revision is one Keychain
+//! item. Values the user chose to store plainly (PRO-144: they do not look like
+//! secrets, or the Keychain switch was off) live in the index's `plain` map.
 //! A transaction switches the index only after the new item is safely stored.
 //! No repository file is evaluated or trusted implicitly.
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,8 +20,15 @@ type Index = BTreeMap<String, Scope>;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct Scope {
+    /// Names held in this revision's Keychain item.
     names: BTreeSet<String>,
     revision: String,
+    /// Values kept outside the Keychain, by the user's choice when saving.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    plain: Values,
+    /// Fields a newer build wrote, kept as they are so saving here never drops them.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,14 +63,48 @@ impl Launch {
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     name: String,
+    /// "user" or "repository" (this store), or the repository file layer the
+    /// name comes from: "repositoryShared", "repositoryLocal" or "managed".
     scope: &'static str,
     overridden: bool,
+    /// Whether the value is in the Keychain. File values are never sent here.
+    secret: bool,
+    /// Only a value the user chose to store plainly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    /// For a Personal variable: the Git common directories of the
+    /// repositories whose own variable of this name overrides it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    overridden_in: Vec<String>,
 }
 
 #[derive(Deserialize)]
 pub struct Input {
     pub name: String,
     pub value: String,
+    /// Keep the value in the Keychain. Older callers never sent it: Keychain.
+    #[serde(default = "keychain_by_default")]
+    pub secret: bool,
+}
+
+fn keychain_by_default() -> bool {
+    true
+}
+
+/// Both kinds of value of one scope. A name is in at most one of them.
+#[derive(Default)]
+struct Entries {
+    secret: Values,
+    plain: Values,
+}
+
+impl Entries {
+    fn remove(&mut self, name: &str) -> bool {
+        self.secret.remove(name).is_some() | self.plain.remove(name).is_some()
+    }
+    fn contains(&self, name: &str) -> bool {
+        self.secret.contains_key(name) || self.plain.contains_key(name)
+    }
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -184,21 +227,34 @@ impl Store<'_> {
         Ok(values)
     }
 
+    #[cfg(test)]
     fn change(&self, key: &str, update: impl Fn(&mut Values) -> Result<()>) -> Result<()> {
+        self.change_entries(key, |entries| update(&mut entries.secret))
+    }
+
+    fn change_entries(&self, key: &str, update: impl Fn(&mut Entries) -> Result<()>) -> Result<()> {
         // Keychain may wait on OS consent. All reads, writes and deletes happen
         // outside the file lock; only the compare-and-swap of metadata is locked.
         for _ in 0..16 {
             let old = self.index()?.get(key).cloned();
-            let mut values = match self.values(old.as_ref()) {
+            let secret = match self.values(old.as_ref()) {
                 Ok(values) => values,
                 Err(_) if self.index()?.get(key) != old.as_ref() => continue,
                 Err(error) => return Err(error),
             };
-            update(&mut values)?;
-            validate_values(&values)?;
+            let mut entries = Entries { secret, plain: old.as_ref().map(|scope| scope.plain.clone()).unwrap_or_default() };
+            update(&mut entries)?;
+            let Entries { secret: values, plain } = entries;
+            ensure!(
+                !values.keys().any(|name| plain.contains_key(name)),
+                "A variable with this name already exists in this scope."
+            );
+            validate_values(&values.iter().chain(&plain).map(|(k, v)| (k.clone(), v.clone())).collect())?;
             let scope = Scope {
                 names: values.keys().cloned().collect(),
                 revision: uuid::Uuid::new_v4().to_string(),
+                plain,
+                extra: old.as_ref().map(|scope| scope.extra.clone()).unwrap_or_default(),
             };
             if !values.is_empty() {
                 self.secrets
@@ -242,19 +298,17 @@ impl Store<'_> {
             previous.is_none() || inputs.len() == 1,
             "Edit one variable at a time."
         );
-        self.change(key, |values| {
+        self.change_entries(key, |entries| {
             if let Some(previous) = previous {
-                ensure!(
-                    values.remove(previous).is_some(),
-                    "Variable no longer exists."
-                );
+                ensure!(entries.remove(previous), "Variable no longer exists.");
             }
-            for Input { name, value } in &inputs {
+            for Input { name, value, secret } in &inputs {
                 validate_name(name)?;
                 ensure!(
-                    !values.contains_key(name),
+                    !entries.contains(name),
                     "A variable with this name already exists in this scope."
                 );
+                let values = if *secret { &mut entries.secret } else { &mut entries.plain };
                 values.insert(name.clone(), value.clone());
             }
             Ok(())
@@ -381,9 +435,13 @@ impl Cache {
         let mut stamp = stamp(index, repository);
         let mut values = Values::new();
         for key in std::iter::once(USER).chain(stamp.repository.as_deref()) {
-            let Some(scope) = index.get(key).filter(|scope| !scope.names.is_empty()) else {
+            let Some(scope) = index.get(key) else {
                 continue;
             };
+            values.extend(scope.plain.clone());
+            if scope.names.is_empty() {
+                continue;
+            }
             match self
                 .scopes
                 .get(key)
@@ -529,10 +587,10 @@ pub fn launch(cwd: &str) -> Result<Launch> {
     let cache = cache().lock().unwrap();
     let mut launch = cache.resolve(index.as_ref().ok(), repo.clone());
     drop(cache);
-    let local_names = repo.as_ref().and_then(|key| index.as_ref().ok()?.get(key)).map(|scope| &scope.names);
+    let local_names: Option<BTreeSet<String>> = repo.as_ref().and_then(|key| index.as_ref().ok()?.get(key)).map(|scope| scope.names.iter().chain(scope.plain.keys()).cloned().collect());
     let repository = super::configuration::repository(Path::new(cwd)).ok();
     let resolution = super::configuration::Store::current()?.resolve(repository.as_ref())?;
-    apply_configuration(&mut launch, resolution, local_names)?;
+    apply_configuration(&mut launch, resolution, local_names.as_ref())?;
     Ok(launch)
 }
 
@@ -620,34 +678,97 @@ fn check_unattended(ready: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
-    let key = scope_key(project)?;
-    let index = store()?.index()?;
-    let own = index.get(&key);
+/// This store's rows for one scope: inherited Personal names first (in a
+/// repository), then the scope's own. Values only for plainly stored ones.
+fn rows(index: &Index, key: &str) -> Vec<Row> {
+    let row = |name: &String, scope: &'static str, plain: Option<&String>| Row {
+        name: name.clone(),
+        scope,
+        overridden: false,
+        secret: plain.is_none(),
+        value: plain.cloned(),
+        overridden_in: Vec::new(),
+    };
+    let own = index.get(key);
+    let has = |scope: &Scope, name: &String| scope.names.contains(name) || scope.plain.contains_key(name);
     let mut rows = Vec::new();
+    let add = |scope: &Scope, label: &'static str| {
+        let mut own_rows: Vec<Row> = scope.names.iter().map(|name| row(name, label, None))
+            .chain(scope.plain.iter().map(|(name, value)| row(name, label, Some(value)))).collect();
+        own_rows.sort_by(|a, b| a.name.cmp(&b.name));
+        own_rows
+    };
     if key != USER {
         if let Some(user) = index.get(USER) {
-            rows.extend(user.names.iter().map(|name| Row {
-                name: name.clone(),
-                scope: "user",
-                overridden: own.is_some_and(|s| s.names.contains(name)),
+            rows.extend(add(user, "user").into_iter().map(|mut row| {
+                row.overridden = own.is_some_and(|own| has(own, &row.name));
+                row
             }));
         }
     }
-    if let Some(own) = own {
-        rows.extend(own.names.iter().map(|name| Row {
-            name: name.clone(),
-            scope: if key == USER { "user" } else { "repository" },
-            overridden: false,
+    if let Some(scope) = own {
+        rows.extend(add(scope, if key == USER { "user" } else { "repository" }).into_iter().map(|mut row| {
+            if key == USER {
+                row.overridden_in = index.iter()
+                    .filter(|(other, scope)| other.as_str() != USER && has(scope, &row.name))
+                    .filter_map(|(other, _)| other.strip_prefix("repository:").map(String::from))
+                    .collect();
+            }
+            row
         }));
+    }
+    rows
+}
+
+/// Merge the repository files' (and managed policy's) environment names, as
+/// Layered configuration lists them, with the same precedence as a launch:
+/// this store's repository variables override the shared file only; the local
+/// file and managed policy override everything here. File values stay out.
+fn merge_file_rows(rows: &mut Vec<Row>, resolution: &super::configuration::Resolution) {
+    use super::configuration::Layer;
+    for (key, resolved) in &resolution.values {
+        let Some(name) = key.strip_prefix("environment.") else { continue };
+        let scope = match resolved.source {
+            Layer::RepositoryShared => "repositoryShared",
+            Layer::RepositoryLocal => "repositoryLocal",
+            Layer::Managed => "managed",
+            _ => continue,
+        };
+        let local = rows.iter().any(|row| row.scope == "repository" && row.name == name);
+        for row in rows.iter_mut().filter(|row| row.name == name) {
+            if row.scope == "user" || scope != "repositoryShared" {
+                row.overridden = true;
+            }
+        }
+        rows.push(Row {
+            name: name.into(),
+            scope,
+            overridden: scope == "repositoryShared" && local,
+            secret: false,
+            value: None,
+            overridden_in: Vec::new(),
+        });
+    }
+}
+
+fn private_rows(project: Option<&str>) -> Result<Vec<Row>> {
+    let key = scope_key(project)?;
+    Ok(rows(&store()?.index()?, &key))
+}
+
+pub fn list(project: Option<&str>) -> Result<Vec<Row>> {
+    let mut rows = private_rows(project)?;
+    // Best effort: an unreadable repository file must not hide private rows;
+    // Layered configuration reports why it is unreadable.
+    if let Ok(resolution) = super::configuration::resolve(project) {
+        merge_file_rows(&mut rows, &resolution);
     }
     Ok(rows)
 }
 
-
 pub(super) fn configuration_sources(project: Option<&str>, values: &mut BTreeMap<String, super::configuration::ResolvedValue>) -> Result<()> {
     use super::configuration::{Layer, ResolvedValue};
-    for row in list(project)? {
+    for row in private_rows(project)? {
         let key = format!("environment.{}", row.name);
         let local = row.scope == "repository";
         if values.get(&key).is_none_or(|value| local && matches!(value.source, Layer::User | Layer::RepositoryShared)) {
@@ -663,6 +784,9 @@ pub fn reveal(project: Option<&str>, name: &str) -> Result<String> {
     let store = store()?;
     let index = store.index()?;
     let scope = index.get(&key).context("Variable no longer exists.")?;
+    if let Some(value) = scope.plain.get(name) {
+        return Ok(value.clone());
+    }
     store
         .snapshot(&key, &scope.revision)?
         .values
@@ -687,8 +811,8 @@ pub fn save(project: Option<&str>, inputs: Vec<Input>, previous: Option<&str>) -
 pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
     refuse_managed_names(project, std::iter::once(name))?;
     validate_name(name)?;
-    store()?.change(&scope_key(project)?, |values| {
-        ensure!(values.remove(name).is_some(), "Variable no longer exists.");
+    store()?.change_entries(&scope_key(project)?, |entries| {
+        ensure!(entries.remove(name), "Variable no longer exists.");
         Ok(())
     })
 }
@@ -723,6 +847,10 @@ pub fn read_env_file(project: &str, path: &str) -> Result<String> {
     );
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("The .env file must be UTF-8 text."))
 }
+
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1045,6 +1173,7 @@ mod tests {
         let input = |name: &str| Input {
             name: name.into(),
             value: "secret".into(),
+            secret: true,
         };
         store
             .save(

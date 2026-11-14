@@ -50,9 +50,10 @@ export function moveRepositoryEntry<T extends { id: string }>(entries: readonly 
 export type ExpandedPreviewUrl = { url: string; error?: never } | { url?: never; error: string };
 
 /**
- * $PORT and $PORT_1 mean the first port; $PORT_n is one-based. The caller
- * supplies the active session's allocated ports; there is no guessed localhost
- * port or cloud forwarding here. Omitting ports validates a template only.
+ * $PORT is the session's first port and $PORT_1..$PORT_9 the ports after it
+ * (PRO-363: a block of 10, so $PORT_1 is the second). The caller supplies the
+ * active session's allocated ports; there is no guessed localhost port or cloud
+ * forwarding here. Omitting ports validates a template only.
  */
 function resolvePreviewUrl(template: string, ports?: readonly number[]): ExpandedPreviewUrl {
   const input = template.trim();
@@ -61,15 +62,15 @@ function resolvePreviewUrl(template: string, ports?: readonly number[]): Expande
   if (/[\s\u0000-\u001f\u007f\\]/u.test(input)) return { error: "Use a URL without spaces or backslashes." };
   let error: string | undefined;
   const expanded = input.replace(/\$PORT[A-Za-z0-9_]*/g, (token) => {
-    if (!/^\$PORT(?:_[1-9]\d*)?$/.test(token)) {
+    if (/^\$PORT_[1-9]\d+$/.test(token)) {
+      error = "A workspace has 10 ports: use $PORT, then $PORT_1 to $PORT_9.";
+      return token;
+    }
+    if (!/^\$PORT(?:_[1-9])?$/.test(token)) {
       error = "Use $PORT or $PORT_n, with n starting at 1.";
       return token;
     }
-    const index = token === "$PORT" ? 0 : Number(token.slice(6)) - 1;
-    if (!Number.isSafeInteger(index)) {
-      error = "The port number is too large.";
-      return token;
-    }
+    const index = token === "$PORT" ? 0 : Number(token.slice(6));
     const port = ports === undefined ? 3000 : ports[index];
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       error = `No allocated port is available for ${token}.`;

@@ -34,6 +34,17 @@ export interface ImageRef {
   name?: string;
 }
 
+/**
+ * A file attached to a message (PRO-290), stored in the session's attachments
+ * folder. `path` is absolute; the agent is handed it in the prompt it receives.
+ */
+export interface FileRef {
+  path: string;
+  name: string;
+  mediaType?: string;
+  size?: number;
+}
+
 export type ToolType =
   | "shell"
   | "file_read"
@@ -122,7 +133,7 @@ export type Delta =
 
 export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "unsent" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
-export interface HeldFollowUp { id: string; text: string; images: ImageRef[] }
+export interface HeldFollowUp { id: string; text: string; images: ImageRef[]; files?: FileRef[] }
 export interface HeldQueue {
   items: HeldFollowUp[];
   paused: boolean;
@@ -164,6 +175,8 @@ export type Payload =
       author?: { userId: string; displayName: string };
       text: string;
       images?: ImageRef[];
+      /** Files attached to the message besides its images (PRO-290). */
+      files?: FileRef[];
       baseline?: string;
       queued: boolean;
       cwd?: string;

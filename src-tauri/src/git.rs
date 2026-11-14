@@ -414,6 +414,38 @@ pub fn snapshot_tree(cwd: &Path) -> Result<String> {
     snapshot_tree_including(cwd, &[])
 }
 
+/// Return staged and unstaged changes. During a conflict, keep the checkout
+/// reviewable by comparing HEAD with a temporary snapshot of the worktree;
+/// Git cannot write a tree from an index containing unmerged entries.
+pub fn working_change_sets(
+    cwd: &Path,
+    hide_whitespace: bool,
+) -> Result<(String, String, Vec<ChangedFile>, Vec<ChangedFile>)> {
+    let head = head_tree(cwd)?;
+    if !run(cwd, &["ls-files", "-u", "--"])?.is_empty() {
+        let worktree = snapshot_tree(cwd)?;
+        let changes = if head == worktree {
+            Vec::new()
+        } else {
+            changes_between_options(cwd, &head, Some(&worktree), hide_whitespace)?
+        };
+        return Ok((head.clone(), head, Vec::new(), changes));
+    }
+    let index = run(cwd, &["write-tree"])?.trim().to_string();
+    let worktree = snapshot_tree(cwd)?;
+    let staged = if head == index {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &head, Some(&index), hide_whitespace)?
+    };
+    let unstaged = if index == worktree {
+        Vec::new()
+    } else {
+        changes_between_options(cwd, &index, Some(&worktree), hide_whitespace)?
+    };
+    Ok((head, index, staged, unstaged))
+}
+
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
 fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
     let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
@@ -886,8 +918,9 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
+    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
@@ -910,9 +943,11 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         bail!("bad branch name");
     }
     let path = worktree_path(project, name);
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
+    let sparse = sparse.as_deref();
     std::fs::create_dir_all(worktree_root(project))?;
     let local = if branch_exists(project, branch) {
-        add_checkout(project, &path, &[branch], branch)?;
+        add_checkout(project, &path, &[branch], branch, sparse)?;
         branch.to_string()
     } else {
         let remote = format!("refs/remotes/{branch}");
@@ -921,9 +956,9 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         }
         let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
         if branch_exists(project, &local) {
-            add_checkout(project, &path, &[&local], &local)?;
+            add_checkout(project, &path, &[&local], &local, sparse)?;
         } else {
-            run(project, &["worktree", "add", "--track", "-b", &local, arg(&path)?, branch])?;
+            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local), true)?;
         }
         local
     };
@@ -945,14 +980,16 @@ pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<C
     checkout_pr_worktree_with(project, name, number, crate::github::checkout_pr)
 }
 
-fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
+pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
     if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
     let branch = worktree_branch_for(project, name)?;
     if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
     let path = worktree_path(project, name);
     if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
+    let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    run(project, &["worktree", "add", "--detach", arg(&path)?, "HEAD"])?;
+    // Narrowed before the PR's branch is checked out, which then keeps to the same folders.
+    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
     // Before the file copy below: it refuses to stage inside an unignored folder.
     ensure_worktree_dir_ignored(project);
     let result = (|| {
@@ -974,11 +1011,35 @@ fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: 
     result
 }
 
+/// `git worktree add` with `args` (its options, the path and the commit).
+/// With `sparse`, the repository's `sparseCheckout` folders, the new
+/// worktree checks out only those folders and the root files: it is added
+/// without a checkout, narrowed in its own configuration, then checked out,
+/// so the primary checkout and other worktrees are left as they are. One that
+/// cannot be narrowed is removed again, with the branch `-b` made for it (`created`).
+/// Without `hooks`, the repository's checkout hooks do not run (a restore).
+pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: Option<&[String]>, created: Option<&str>, hooks: bool) -> Result<()> {
+    let mut command = if hooks { vec![] } else { vec!["-c", "core.hooksPath=/dev/null"] };
+    command.extend(["worktree", "add"]);
+    if sparse.is_some() { command.push("--no-checkout"); }
+    command.extend_from_slice(args);
+    run(project, &command)?;
+    let Some(folders) = sparse else { return Ok(()) };
+    if let Err(error) = crate::sparse_checkout::populate(path, folders, hooks) {
+        // Only the checkout made just now, which has never hosted a session.
+        if run(project, &["worktree", "remove", "--force", arg(path)?]).is_ok() {
+            if let Some(branch) = created { let _ = run(project, &["branch", "-D", branch]); }
+        }
+        bail!("Could not check out only the chosen folders: {error:#}");
+    }
+    Ok(())
+}
+
 /// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
-fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
-    let mut args = vec!["worktree", "add", arg(path)?];
+fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse: Option<&[String]>) -> Result<()> {
+    let mut args = vec![arg(path)?];
     args.extend_from_slice(rest);
-    run(project, &args).map(|_| ()).map_err(|e| {
+    worktree_add(project, &args, path, sparse, None, true).map_err(|e| {
         let text = e.to_string();
         if text.contains("already checked out") || text.contains("already used by worktree") {
             anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")
@@ -1467,6 +1528,272 @@ pub fn commit_all(cwd: &Path, message: &str, paths: Option<&[String]>) -> Result
     Ok(head_commit(cwd).unwrap_or_default())
 }
 
+/// Commit the explicit index when it has changes; otherwise preserve the
+/// repository panel's historical add-all behavior.
+pub fn commit_staged_or_all(cwd: &Path, message: &str) -> Result<String> {
+    let staged = match raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--"]) {
+        Some((0, _)) => false,
+        Some((1, _)) => true,
+        _ => bail!("Could not inspect the Git index before committing."),
+    };
+    if staged {
+        run(cwd, &["commit", "-m", message])?;
+        return Ok(head_commit(cwd).unwrap_or_default());
+    }
+    commit_all(cwd, message, None)
+}
+
+/// Add paths to the index without changing their working-tree contents.
+pub fn stage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to stage.");
+    anyhow::ensure!(run(cwd, &["ls-files", "-u", "--"])?.is_empty(), "Resolve merge conflicts before staging files.");
+    let mut args = vec!["--literal-pathspecs", "add", "-A", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+/// Remove paths from the index while preserving every working-tree edit.
+pub fn unstage_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "Select at least one file to unstage.");
+    let mut args = vec!["--literal-pathspecs", "reset", "-q", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run(cwd, &args).map(|_| ())
+}
+
+pub fn unstage_all(cwd: &Path) -> Result<()> {
+    run(cwd, &["reset", "-q"]).map(|_| ())
+}
+
+/// Apply one hunk from Git's own working-tree or cached diff. The patch is
+/// generated here so callers cannot redirect it to another path. `reverse`
+/// removes a selected cached hunk; neither operation touches the worktree.
+pub fn apply_hunk(
+    cwd: &Path,
+    path: &str,
+    old_path: Option<&str>,
+    index: usize,
+    reverse: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    if !reverse && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let staged_old = raw(cwd, &["diff", "--cached", "--quiet", "--exit-code", "--", old]);
+            anyhow::ensure!(matches!(staged_old, Some((0, _))), "Unstage existing changes to the original file before staging rename hunks.");
+            let before = hunk_diff(cwd, path, old_path, false)?;
+            let count = hunk_starts(&before).len();
+            anyhow::ensure!(index < count, "That hunk is no longer available. Refresh the diff and try again.");
+            stage_paths(cwd, &[old.to_string(), path.to_string()])?;
+            let result = (|| {
+                let diff = hunk_diff(cwd, path, old_path, true)?;
+                let staged_count = hunk_starts(&diff).len();
+                anyhow::ensure!(index < staged_count, "That hunk is no longer available. Refresh the diff and try again.");
+                for other in (0..staged_count).rev().filter(|other| *other != index) {
+                    apply_patch(cwd, &hunk_patch(&diff, other)?, true)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if let Err(rollback_error) = unstage_paths(cwd, &[old.to_string(), path.to_string()]) {
+                    bail!("Could not finish staging this rename hunk ({error}); the worktree is unchanged, but unstage {path} and {old} to restore the index: {rollback_error}");
+                }
+                return Err(error);
+            }
+            return Ok(());
+        }
+    }
+    let diff = hunk_diff(cwd, path, old_path, reverse)?;
+    apply_patch(cwd, &hunk_patch(&diff, index)?, reverse)
+}
+
+fn hunk_starts(diff: &str) -> Vec<usize> {
+    let mut starts: Vec<usize> = diff.match_indices("\n@@ -").map(|(i, _)| i + 1).collect();
+    if diff.starts_with("@@ -") {
+        starts.insert(0, 0);
+    }
+    starts
+}
+
+fn hunk_patch(diff: &str, index: usize) -> Result<String> {
+    let starts = hunk_starts(diff);
+    let header_end = starts.first().copied().ok_or_else(|| anyhow!("This file has no text hunks to apply."))?;
+    let selected = starts.get(index).ok_or_else(|| anyhow!("That hunk is no longer available. Refresh the diff and try again."))?;
+    let end = starts.get(index + 1).copied().unwrap_or(diff.len());
+    let patch = format!("{}{}", &diff[..header_end], &diff[*selected..end]);
+    Ok(keep_rename_path_for_hunk(&patch))
+}
+
+/// Apply a selected rename hunk as a content edit at the destination path.
+/// Keeping Git's rename metadata would move the whole file on reverse apply.
+fn keep_rename_path_for_hunk(patch: &str) -> String {
+    let Some(plus) = patch.lines().find(|line| {
+        line.starts_with("+++ b/") || line.starts_with("+++ \"b/")
+    }) else {
+        return patch.to_string();
+    };
+    if !patch.lines().any(|line| line.starts_with("rename from ")) {
+        return patch.to_string();
+    }
+    let new_path = &plus[4..];
+    let old_path = if let Some(stripped) = new_path.strip_prefix("\"b/") {
+        format!("\"a/{stripped}")
+    } else {
+        format!("a/{}", new_path.strip_prefix("b/").unwrap_or(new_path))
+    };
+    let mut lines = Vec::new();
+    for (i, line) in patch.lines().enumerate() {
+        match i {
+            0 => lines.push(format!("diff --git {old_path} {new_path}")),
+            _ if line.starts_with("similarity index ") || line.starts_with("rename from ") || line.starts_with("rename to ") => continue,
+            _ if line.starts_with("--- a/") || line.starts_with("--- \"a/") => lines.push(format!("--- {old_path}")),
+            _ if line.starts_with("+++ b/") || line.starts_with("+++ \"b/") => lines.push(format!("+++ {new_path}")),
+            _ => lines.push(line.to_string()),
+        }
+    }
+    lines.join("\n") + if patch.ends_with('\n') { "\n" } else { "" }
+}
+
+fn apply_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut command = git();
+    let args: &[&str] = if reverse {
+        &["apply", "--cached", "--reverse", "--recount", "--"]
+    } else {
+        &["apply", "--cached", "--recount", "--"]
+    };
+    command
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Git input unavailable"))?;
+    let write_result = stdin.write_all(patch.as_bytes());
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    write_result?;
+    if !output.status.success() {
+        bail!(
+            "git apply: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn hunk_count(cwd: &Path, path: &str, old_path: Option<&str>, staged: bool) -> Result<usize> {
+    anyhow::ensure!(
+        !path.is_empty() && !path.contains('\0'),
+        "Invalid file path."
+    );
+    let diff = hunk_diff(cwd, path, old_path, staged)?;
+    Ok(hunk_starts(&diff).len())
+}
+
+fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Result<String> {
+    if !cached && !path_is_tracked(cwd, path) {
+        if let Some(old) = old_path {
+            let index = run(cwd, &["write-tree"])?.trim().to_string();
+            let previous = run(cwd, &["show", &format!("{index}:{old}")])?;
+            let temp = tempfile::tempdir()?;
+            let baseline = temp.path().join("baseline");
+            std::fs::write(&baseline, previous)?;
+            let output = git()
+                .current_dir(cwd)
+                .args([
+                    "--literal-pathspecs", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color",
+                    "--unified=3", "--", baseline.to_str().ok_or_else(|| anyhow!("Invalid temporary path"))?, path,
+                ])
+                .output()?;
+            anyhow::ensure!(matches!(output.status.code(), Some(0 | 1)), "git diff could not read the renamed file: {}", String::from_utf8_lossy(&output.stderr).trim());
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+        "--unified=3",
+    ];
+    if cached {
+        args.push("--cached");
+    }
+    args.push("--");
+    if let Some(old) = old_path {
+        args.push(old);
+    }
+    args.push(path);
+    let diff = run(cwd, &args)?;
+    if !diff.is_empty() || cached {
+        return Ok(diff);
+    }
+    // Git's ordinary diff omits untracked files. Build their patch from /dev/null;
+    // this still lets `git apply --cached` select only one hunk.
+    let tracked = path_is_tracked(cwd, path);
+    if tracked {
+        return Ok(diff);
+    }
+    use std::process::Stdio;
+    let output = git()
+        .current_dir(cwd)
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--unified=3",
+            "--",
+            "/dev/null",
+            path,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    anyhow::ensure!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "git diff could not read the untracked file: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn path_is_tracked(cwd: &Path, path: &str) -> bool {
+    raw(cwd, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).is_some_and(|(code, _)| code == 0)
+}
+
+pub fn staged_diff(cwd: &Path, limit: usize) -> Result<String> {
+    let diff = run(
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--",
+            ".",
+        ],
+    )?;
+    anyhow::ensure!(
+        !diff.trim().is_empty(),
+        "Stage changes before generating a commit message."
+    );
+    anyhow::ensure!(
+        diff.len() <= limit,
+        "The staged diff is too large to send for a commit message. Stage a smaller selection."
+    );
+    Ok(diff)
+}
+
 pub fn push(cwd: &Path) -> Result<String> {
     let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
@@ -1525,6 +1852,26 @@ pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
         run(cwd, &["checkout", name])?;
     }
     Ok(())
+}
+
+/// Put a checkout on a detached HEAD onto a new branch at the commit it is on
+/// (PRO-295), named `name` under the project's branch prefix as a new
+/// worktree's branch is: nobody has named it yet, so it reads as a drawn name
+/// until it is renamed. Uncommitted work stays where it is. Refused when the
+/// checkout is already on a branch, has no commit, or the branch exists.
+pub fn branch_here(project: &Path, cwd: &Path, name: &str) -> Result<String> {
+    if let Some(branch) = current_branch(cwd) {
+        bail!("This checkout is already on {branch}.");
+    }
+    if head_commit(cwd).is_none() {
+        bail!("This checkout has no commit to make a branch at.");
+    }
+    let branch = worktree_branch_for(project, name)?;
+    if branch.starts_with('-') || branch_exists(cwd, &branch) {
+        bail!("A branch named {branch} already exists.");
+    }
+    run(cwd, &["checkout", "-b", &branch])?;
+    Ok(branch)
 }
 
 /// This person's Git identity (`user.name`, `user.email` from their global
@@ -1608,6 +1955,187 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn staging_one_hunk_preserves_other_worktree_edits_and_commit_uses_only_index() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "fixture", None).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("a.txt"), &changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(
+            run(p, &["diff", "--cached", "--numstat", "--", "a.txt"])
+                .unwrap()
+                .trim(),
+            "1\t1\ta.txt"
+        );
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        commit_staged_or_all(p, "only first hunk").unwrap();
+        let committed = run(p, &["show", "HEAD:a.txt"]).unwrap();
+        assert!(committed.contains("changed 2"));
+        assert!(committed.contains("line 22"));
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        apply_hunk(p, "a.txt", None, 0, true).unwrap();
+        assert!(run(p, &["diff", "--cached", "--quiet", "--"]).is_ok());
+        assert!(std::fs::read_to_string(p.join("a.txt"))
+            .unwrap()
+            .contains("changed 22"));
+    }
+
+    #[test]
+    fn hunk_patches_support_untracked_and_renamed_files() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\n")).collect::<String>();
+        let new_file = (1..=24).map(|n| format!("new {n}\n")).collect::<String>();
+        std::fs::write(
+            p.join("fresh.txt"),
+            new_file
+                .replace("new 2\n", "changed 2\n")
+                .replace("new 22\n", "changed 22\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            hunk_count(p, "fresh.txt", None, false).unwrap(),
+            1,
+            "an untracked file is one all-additions hunk"
+        );
+        apply_hunk(p, "fresh.txt", None, 0, false).unwrap();
+        assert!(
+            run(p, &["diff", "--cached", "--name-only", "--", "fresh.txt"])
+                .unwrap()
+                .contains("fresh.txt")
+        );
+        unstage_all(p).unwrap();
+
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "rename fixture", None).unwrap();
+        std::fs::rename(p.join("a.txt"), p.join("renamed.txt")).unwrap();
+        let changed = original
+            .replace("line 2\n", "changed 2\n")
+            .replace("line 22\n", "changed 22\n");
+        std::fs::write(p.join("renamed.txt"), changed).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), false).unwrap(),
+            2
+        );
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, false).unwrap();
+        assert_eq!(
+            hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(),
+            1
+        );
+        assert_rename_is_staged(p);
+
+        unstage_all(p).unwrap();
+        stage_paths(p, &["a.txt".into(), "renamed.txt".into()]).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 2);
+        apply_hunk(p, "renamed.txt", Some("a.txt"), 0, true).unwrap();
+        assert_eq!(hunk_count(p, "renamed.txt", Some("a.txt"), true).unwrap(), 1);
+        assert_rename_is_staged(p);
+        assert!(p.join("renamed.txt").exists());
+        assert!(!p.join("a.txt").exists());
+    }
+
+    fn assert_rename_is_staged(cwd: &Path) {
+        let status = run(cwd, &["diff", "--cached", "--name-status", "-M", "--"]).unwrap();
+        let fields: Vec<_> = status.trim().split('\t').collect();
+        assert_eq!(fields.len(), 3, "expected one staged rename, got {status:?}");
+        assert!(fields[0].starts_with('R'), "expected rename status, got {status:?}");
+        assert_eq!(&fields[1..], ["a.txt", "renamed.txt"]);
+    }
+
+    #[test]
+    fn hunk_boundaries_only_match_line_starts() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=32).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "hunk boundary fixture", None).unwrap();
+        let changed = original.replace("line 2\n", "see @@ -1,2 +1,2 @@ here\n").replace("line 30\n", "changed 30\n");
+        std::fs::write(p.join("a.txt"), changed).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn hunk_staging_handles_missing_final_newline_and_crlf() {
+        let dir = repo();
+        let p = dir.path();
+        let original = (1..=24).map(|n| format!("line {n}\r\n")).collect::<String>();
+        std::fs::write(p.join("a.txt"), &original).unwrap();
+        commit_all(p, "crlf fixture", None).unwrap();
+        let changed = original.replace("line 2\r\n", "changed 2\r\n").replace("line 24\r\n", "changed final");
+        std::fs::write(p.join("a.txt"), changed.as_bytes()).unwrap();
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 2);
+        apply_hunk(p, "a.txt", None, 1, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+        assert!(run(p, &["diff", "--cached", "--", "a.txt"]).unwrap().contains("\\ No newline at end of file"));
+        assert_eq!(hunk_count(p, "a.txt", None, false).unwrap(), 1);
+        unstage_all(p).unwrap();
+        apply_hunk(p, "a.txt", None, 0, false).unwrap();
+        assert_eq!(run(p, &["diff", "--cached", "--numstat", "--", "a.txt"]).unwrap().trim(), "1\t1\ta.txt");
+    }
+
+    #[test]
+    fn working_change_sets_keep_conflicted_worktree_reviewable() {
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "base\n").unwrap();
+        commit_all(p, "conflict base", None).unwrap();
+        run(p, &["checkout", "-qb", "other"]).unwrap();
+        std::fs::write(p.join("a.txt"), "theirs\n").unwrap();
+        commit_all(p, "theirs", None).unwrap();
+        run(p, &["checkout", "main"]).unwrap();
+        std::fs::write(p.join("a.txt"), "ours\n").unwrap();
+        commit_all(p, "ours", None).unwrap();
+        assert!(run(p, &["merge", "other"]).is_err());
+
+        assert!(!run(p, &["ls-files", "-u", "--"]).unwrap().is_empty());
+        let (_, index, staged, unstaged) = working_change_sets(p, false).unwrap();
+        assert!(!index.is_empty());
+        assert!(staged.is_empty());
+        assert!(unstaged.iter().any(|file| file.path == "a.txt"));
+    }
+
+
+    #[test]
+    fn a_branch_here_is_made_at_the_detached_commit_and_checked_out() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let project = dir.path();
+        std::fs::write(project.join("b.txt"), "two\n").unwrap();
+        run(project, &["add", "."]).unwrap();
+        run(project, &["commit", "-qm", "second"]).unwrap();
+        let detached = run(project, &["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+        run(project, &["checkout", "-q", "--detach", &detached]).unwrap();
+        std::fs::write(project.join("a.txt"), "edited, not committed\n").unwrap();
+        assert!(current_branch(project).is_none());
+
+        let branch = branch_here(project, project, "calm-moss-robin").unwrap();
+        assert_eq!(branch, worktree_branch_for(project, "calm-moss-robin").unwrap());
+        assert_eq!(current_branch(project).as_deref(), Some(branch.as_str()));
+        // At the commit it was detached at, not main's tip, with the uncommitted edit kept.
+        assert_eq!(run(project, &["rev-parse", "HEAD"]).unwrap().trim(), detached);
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "edited, not committed\n");
+
+        // On a branch now, so there is nothing to make; and a name already a branch is never taken over.
+        assert!(branch_here(project, project, "tidy-sage-wren").unwrap_err().to_string().contains("already on"));
+        run(project, &["checkout", "-q", "--detach", "main"]).unwrap();
+        assert!(branch_here(project, project, "calm-moss-robin").unwrap_err().to_string().contains("already exists"));
+        assert_eq!(run(project, &["rev-parse", &branch]).unwrap().trim(), detached);
+        assert!(current_branch(project).is_none());
     }
 
     #[test]

@@ -4,11 +4,14 @@ import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
-import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
+import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
-import { onOrchestratorSettingsRequest } from "@/lib/orchestration";
+import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { ProjectAddedNotice } from "@/components/ui/ProjectAddedNotice";
-import { PanelLeft, PanelRight } from "@/icons";
+import { AlertCircle, PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -34,14 +37,16 @@ import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
-import { agent, type ImageInput } from "@/lib/api";
-import { loadModels } from "@/lib/models";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { sendFirstMessage } from "@/lib/sessionBackend";
+import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
+import { NotificationsOffCard } from "@/components/ui/NotificationsOffCard";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
@@ -71,6 +76,8 @@ import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
+import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
+import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
@@ -157,9 +164,9 @@ export function AppShell() {
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
-  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
-    void agent
-      .send(sessionId, tabId, text, images)
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
+    // Files attached on the new-session screen are stored now that the session exists (PRO-290).
+    void sendFirstMessage(sessionId, tabId, text, images, files)
       .then((out) => out.events.forEach(applyEvent))
       .catch((e) => console.error("first send failed", e));
   }, []);
@@ -176,6 +183,12 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  // A setting's row (PRO-127): a toast's Open setting, and a terminalx://settings/<row-id> link from
+  // another app, which focuses the app on that row (Settings scrolls to it and highlights it). A link
+  // naming no row opens Settings at its default page.
+  useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
+  const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
+  useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   useEffect(() => onProjectSettingsRequest((projectPath) => {
     setSettingsTab("repositories.scripts");
@@ -190,8 +203,10 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }), []);
-  // "Add your own templates in Settings › Projects", from Create a project.
+  // "Add your own templates in Settings › Project templates", from Create a project.
   useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
+  // The empty model picker's way out: Settings › Agents, where the agent's sign-in is checked.
+  useEffect(() => onAgentSettingsRequest(() => openSettings("agents")), [openSettings]);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
@@ -264,6 +279,15 @@ export function AppShell() {
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
+  // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
+  // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
+  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
+  useShortcut("app.runView", () => {
+    if (!selected || !selectedRun) return;
+    setSettingsOpen(false);
+    showRunView(selected.id, true);
+  });
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
@@ -271,11 +295,14 @@ export function AppShell() {
       {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
           and its send button. Toasts and close-undo notices, which answer what was just done there, stay below. */}
       <div className="pointer-events-none fixed top-22 right-4 z-(--z-toast) flex max-h-[calc(100dvh-8rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+        {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
+        <NotificationsOffCard />
         <MergedCleanupNotices />
       </div>
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
         <Toasts />
+        <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
@@ -294,6 +321,8 @@ export function AppShell() {
       <WorkspaceRestoreDialog />
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
+      <PairPhoneDialogHost />
+      <ConnectedBar />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
@@ -519,4 +548,14 @@ function UnselectedWorkspace({
       {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );
+}
+
+/** "No setting matches that link": a terminalx://settings link named a row this app has not got (PRO-127). */
+function UnknownSettingLinkToast() {
+  const notice = useUnknownSettingLink();
+  if (!notice) return null;
+  return <div role="status" aria-label={notice.message} className="pointer-events-auto flex min-h-10 items-center gap-2 rounded-lg bg-popover px-3 py-2 text-[12.5px] text-card-foreground shadow-surface hairline animate-fade-in">
+    <AlertCircle className="size-3.5 shrink-0 text-warning" />
+    <span className="min-w-0">{notice.message}</span>
+  </div>;
 }

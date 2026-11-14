@@ -7,7 +7,7 @@ fn change(rig: &Rig, change: Change) -> SendOutcome {
 }
 fn queue(rig: &Rig) -> Queue { rig.rt().lock().unwrap().held_queue.clone() }
 fn enqueue(rig: &Rig, text: &str) {
-    change(rig, Change::Enqueue { text: text.into(), images: Vec::new(), send_now: false });
+    change(rig, Change::Enqueue { text: text.into(), images: Vec::new(), files: Vec::new(), send_now: false });
 }
 fn hook(rig: &Rig, event: &str, payload: Value) {
     let rt = rig.rt();
@@ -165,7 +165,7 @@ fn edits_reorder_delete_pause_and_attachments_survive_reloading_the_tab_log() {
     change(&rig, Change::Edit { id: items[0].id.clone(), text: "corrected".into() });
     change(&rig, Change::Move { id: items[2].id.clone(), before_id: Some(items[0].id.clone()) });
     change(&rig, Change::Delete { id: items[1].id.clone() });
-    change(&rig, Change::Enqueue { text: "look".into(), images: vec![ImageInput { media_type: "image/png".into(), data: "aW1hZ2U=".into(), name: Some("shot.png".into()) }], send_now: false });
+    change(&rig, Change::Enqueue { text: "look".into(), images: vec![ImageInput { media_type: "image/png".into(), data: "aW1hZ2U=".into(), name: Some("shot.png".into()) }], files: Vec::new(), send_now: false });
     let path = store::log_path(SESSION, TAB).unwrap();
     let restored = Queue::restore(&path).unwrap();
     assert_eq!(restored, queue(&rig));
@@ -219,7 +219,7 @@ fn a_claim_interrupted_by_restart_is_retained_and_paused_but_a_logged_send_is_no
     let restored = Queue::restore(&path).unwrap();
     assert_eq!(restored.items.len(), 1);
     assert!(restored.paused && restored.sending.is_none() && restored.next.is_none());
-    rig.manager.publish(&mut rig.rt().lock().unwrap(), Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, baseline: None, cwd: None }, None);
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, files: Vec::new(), baseline: None, cwd: None }, None);
     assert!(Queue::restore(&path).unwrap().items.is_empty());
 }
 
@@ -249,7 +249,7 @@ fn reading_history_during_a_delivery_does_not_write_the_consumed_item_back() {
     let mut claimed = queue(&rig);
     claimed.sending = Some(claimed.items[0].id.clone());
     rig.manager.save_held(&mut rig.rt().lock().unwrap(), claimed).unwrap();
-    rig.manager.publish(&mut rig.rt().lock().unwrap(), Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, baseline: None, cwd: None }, None);
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, files: Vec::new(), baseline: None, cwd: None }, None);
     let events = rig.manager.load_events(SESSION, TAB).unwrap();
     assert!(Queue::replay(&events).items.is_empty());
     assert!(Queue::restore(&store::log_path(SESSION, TAB).unwrap()).unwrap().items.is_empty());
@@ -301,6 +301,7 @@ fn a_fresh_idle_prompt_sends_despite_a_paused_queue_or_recovery() {
         let outcome = change(&rig, Change::Enqueue {
             text: "fresh idle message".into(),
             images: vec![ImageInput { media_type: "image/png".into(), data: "aW1hZ2U=".into(), name: Some("shot.png".into()) }],
+            files: Vec::new(),
             send_now: false,
         });
         assert!(!outcome.queued, "idle send with {recovery:?}");
@@ -326,7 +327,7 @@ fn an_idle_send_that_meets_a_new_terminal_turn_is_held_at_the_final_send_lock() 
     let rig = started();
     let admission = crate::issue_pipeline::admission::lock_for(SESSION, TAB);
     let outcome = rig.manager.send_admitted(&admission, SESSION, TAB,
-        PromptText { hold_if_busy: Some(false), mobile: None, shared_connection: None, author: None,
+        PromptText { files: Vec::new(), hold_if_busy: Some(false), mobile: None, shared_connection: None, author: None,
             agent: "arrived during turn".into(), display: "arrived during turn".into() },
         Vec::new(), None, crate::recovery_log::Origin::Composer).unwrap();
     assert!(outcome.queued);
@@ -444,4 +445,22 @@ fn archive_uses_live_membership_and_invalidates_unopened_log_membership_after_an
     assert!(!rig.manager.has_held_queue(SESSION, TAB).unwrap());
     rig.manager.tabs.lock().unwrap().remove(&key_of(SESSION, TAB));
     assert!(!rig.manager.has_held_queue(SESSION, TAB).unwrap());
+}
+
+/// PRO-290: the same text sent without the claimed follow-up's files is not
+/// that follow-up's delivery; with them it is.
+#[test]
+fn a_claimed_follow_up_with_files_is_matched_on_its_files_too() {
+    let rig = started();
+    enqueue(&rig, "next");
+    let mut claimed = queue(&rig);
+    let file = FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None };
+    claimed.items[0].files = vec![file.clone()];
+    claimed.sending = Some(claimed.items[0].id.clone());
+    rig.manager.save_held(&mut rig.rt().lock().unwrap(), claimed).unwrap();
+    let message = |files: Vec<FileRef>| Payload::UserMessage { text: "next".into(), author: None, images: Vec::new(), queued: false, files, baseline: None, cwd: None };
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), message(Vec::new()), None);
+    assert_eq!(Queue::replay(&rig.manager.load_events(SESSION, TAB).unwrap()).items.len(), 1, "a message without the files is another send");
+    rig.manager.publish(&mut rig.rt().lock().unwrap(), message(vec![file]), None);
+    assert!(Queue::replay(&rig.manager.load_events(SESSION, TAB).unwrap()).items.is_empty(), "the delivery with its files consumes it");
 }

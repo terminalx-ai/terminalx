@@ -936,10 +936,15 @@ impl Guest {
         let entry = crate::session_ops::create_quick_chat_blocking(
             self.sink.as_ref(),
             crate::session_ops::NewQuickChat {
+                section_id: None,
+                parent: None,
                 title: Some(format!("Guest task {}", record.task.target.task_id)),
                 cwd: Some(record.task.guest_cwd.clone()),
                 tab: Some(crate::session_ops::NewTab {
                     harness: record.task.input.harness.clone(),
+                    // The guest binds its provider on the terminal launch path
+                    // (`launch_config`), so a worker is always a terminal agent.
+                    transport: crate::store::index::AgentTransport::Pty,
                     model: record.task.input.model.clone(),
                     effort: record.task.input.effort.clone(),
                     permission_mode: Some(record.task.input.permission_mode.clone()),
@@ -2489,10 +2494,7 @@ pub fn launch_config(
 ) -> Result<crate::cloud_config::LaunchConfig> {
     let path = crate::store::root()?.join(STATE);
     if !path.try_exists()? {
-        return Ok(crate::cloud_config::LaunchConfig {
-            env: vec![],
-            args: String::new(),
-        });
+        return Ok(crate::cloud_config::LaunchConfig::default());
     }
     let state: State = serde_json::from_slice(&fs::read(path)?)?;
     let (base, identity) = installed_identity()?;
@@ -2558,6 +2560,7 @@ fn shell_launch_config(identity: &Identity, harness: &str) -> Result<crate::clou
         // A nonempty, explicit empty table prevents the shared launch hook
         // from probing/attaching a host container or inheriting its desktop.
         args: " -c 'mcp_servers={}'".into(),
+        prompt: None,
     })
 }
 
@@ -2596,7 +2599,7 @@ fn task_launch_config(
         }
         _ => bail!("Unsupported guest harness"),
     };
-    Ok(crate::cloud_config::LaunchConfig { env, args })
+    Ok(crate::cloud_config::LaunchConfig { env, args, prompt: None })
 }
 
 /// Used by the guest desktop MCP before every observation/action. The lease
@@ -4892,10 +4895,13 @@ mod tests {
         let entry = crate::session_ops::create_quick_chat_blocking(
             guest.sink.as_ref(),
             crate::session_ops::NewQuickChat {
+                section_id: None,
+                parent: None,
                 title: Some("Real PTY output retention".into()),
                 cwd: Some(task.guest_cwd.clone()),
                 tab: Some(crate::session_ops::NewTab {
                     harness: "codex".into(),
+                    transport: crate::store::index::AgentTransport::Pty,
                     model: String::new(),
                     effort: None,
                     permission_mode: Some("bypassPermissions".into()),

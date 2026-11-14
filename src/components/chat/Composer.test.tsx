@@ -43,6 +43,7 @@ const { sendShortcut } = await import("@/lib/shortcuts");
 const { resetComposerHistory, sentMessages } = await import("./useComposerHistory");
 const { buildTranscript } = await import("@/lib/transcript");
 const { RECOVERY_PROMPT } = await import("@/lib/recovery");
+const { resetAttachmentNotices, useAttachmentNotices } = await import("@/lib/attachmentNotices");
 
 const tab: TabEntry = {
   id: "tab-1",
@@ -59,8 +60,25 @@ function TestComposer({ onSend, cwd, setupRunning = false }: { cwd?: string; onS
   return <Composer cwd={cwd} tab={tab} busy={false} setupRunning={setupRunning} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
 }
 
+const MEDIA: Record<string, string> = { png: "image/png", webp: "image/webp", txt: "text/plain", md: "text/markdown", json: "application/json", log: "text/plain" };
+/** What the runtime finds at a path: a name without an extension is a folder, which is never attached. */
+function factsOf(path: string) {
+  const name = path.split("/").pop()!;
+  const ext = name.includes(".") ? name.split(".").pop()! : null;
+  return ext ? { path, name, size: 3, mediaType: MEDIA[ext] ?? "application/octet-stream" } : { path, name, size: 0, unreadable: true };
+}
+/** The runtime answering for picked and dropped paths: `inspect_attachments` first, then `read_image_file` for an image. */
+function nativeFiles(read: (path: string) => unknown = (path) => ({ name: path.split("/").pop(), mediaType: "image/png", data: "AQID" })) {
+  invoke.mockImplementation(async (command: string, args: { paths?: string[]; path?: string } = {}) => {
+    if (command === "inspect_attachments") return args.paths!.map(factsOf);
+    if (command === "read_image_file") return read(args.path!);
+    return [];
+  });
+}
+
 beforeEach(() => {
   resetComposerHistory();
+  resetAttachmentNotices();
   dragDropListener.mockResolvedValue(vi.fn());
   invoke.mockReset();
   openDialog.mockReset();
@@ -167,14 +185,15 @@ describe("composer height", () => {
 describe("composer attachments", () => {
   it("selects files from the attach icon", async () => {
     openDialog.mockResolvedValue(["/tmp/proof.png"]);
-    invoke.mockResolvedValue({ name: "proof.png", mediaType: "image/png", data: "AQID" });
+    nativeFiles();
     const onSend = vi.fn();
     render(<TestComposer onSend={onSend} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
 
-    expect(await screen.findByAltText("proof.png")).toBeTruthy();
+    expect(await screen.findByTitle("proof.png")).toBeTruthy();
     expect(openDialog).toHaveBeenCalledWith({ multiple: true, title: "Attach files" });
+    expect(invoke).toHaveBeenCalledWith("inspect_attachments", { paths: ["/tmp/proof.png"] });
     expect(invoke).toHaveBeenCalledWith("read_image_file", { path: "/tmp/proof.png" });
   });
 
@@ -186,11 +205,11 @@ describe("composer attachments", () => {
 
     fireEvent.change(input, { target: { files: [image] } });
 
-    expect(await screen.findByAltText("raccoon.png")).toBeTruthy();
+    expect(await screen.findByTitle("raccoon.png")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("", [expect.objectContaining({ name: "raccoon.png", mediaType: "image/png" })]));
-    expect(screen.queryByAltText("raccoon.png")).toBeNull();
+    expect(screen.queryByTitle("raccoon.png")).toBeNull();
     expect(input.value).toBe("");
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview");
   });
@@ -203,11 +222,11 @@ describe("composer attachments", () => {
 
     fireEvent.drop(dropTarget, { dataTransfer: { files: [image], types: ["Files"] } });
 
-    expect(await screen.findByAltText("drop.webp")).toBeTruthy();
+    expect(await screen.findByTitle("drop.webp")).toBeTruthy();
   });
 
-  it("a file dropped from this computer is mentioned to a local agent, and left alone for a cloud one", async () => {
-    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? null : []));
+  it("a file dropped from this computer attaches for a local agent, a folder is mentioned, and a cloud agent takes images only", async () => {
+    nativeFiles((path) => (path.endsWith(".png") ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : null));
     let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
     let listening = 0;
     dragDropListener.mockImplementation(async (listener: typeof drop) => {
@@ -222,8 +241,13 @@ describe("composer attachments", () => {
     const view = render(<Dropped remote={false} />);
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
     await waitFor(() => expect(listening).toBeGreaterThan(0));
-    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
-    expect(box.value).toBe("@/Users/me/notes.txt ");
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop files to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt", "/Users/me/project"] } }));
+    expect(await screen.findByTitle("notes.txt")).toBeTruthy();
+    // The folder is not a file to attach: the agent is pointed at it by its path, as before.
+    expect(box.value).toBe("@/Users/me/project ");
+    expect(screen.queryByTitle("project")).toBeNull();
     expect(screen.queryByTestId("attach-notice")).toBeNull();
     view.unmount();
     listening = 0;
@@ -235,13 +259,15 @@ describe("composer attachments", () => {
     expect(screen.getByText("Drop images to attach")).toBeTruthy();
     await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
     expect(cloudBox.value).toBe("");
+    expect(screen.queryByTitle("notes.txt")).toBeNull();
     // It says why, instead of ignoring the file without a word (an over-5 MB image reads the same way).
     expect(screen.getByTestId("attach-notice").textContent).toBe("notes.txt was not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.");
     // The next image attached clears it.
-    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : []));
     await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/shot.png"] } }));
     expect(screen.queryByTestId("attach-notice")).toBeNull();
-    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+    expect(await screen.findByTitle("shot.png")).toBeTruthy();
+    // A cloud tab is never asked to store anything.
+    expect(invoke.mock.calls.filter(([command]) => command === "inspect_attachments")).toHaveLength(1);
   });
 
   it("hands over the very same image when a failed send is tried again", async () => {
@@ -253,7 +279,7 @@ describe("composer attachments", () => {
     const { container } = render(<TestComposer onSend={onSend} />);
     const image = new File([new Uint8Array([1, 2, 3])], "retry.png", { type: "image/png" });
     fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files: [image], types: ["Files"] } });
-    await screen.findByAltText("retry.png");
+    await screen.findByTitle("retry.png");
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
     await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
@@ -268,12 +294,12 @@ describe("composer attachments", () => {
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const image = new File([new Uint8Array([7, 8, 9])], "retry.png", { type: "image/png" });
     fireEvent.change(input, { target: { files: [image] } });
-    expect(await screen.findByAltText("retry.png")).toBeTruthy();
+    expect(await screen.findByTitle("retry.png")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
-    expect(screen.getByAltText("retry.png")).toBeTruthy();
+    expect(screen.getByTitle("retry.png")).toBeTruthy();
     expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:preview");
   });
 });
@@ -1209,21 +1235,21 @@ describe("pending send acknowledgment", () => {
 it("sets an image aside while it is sent, and puts the very same image back when the send is refused", async () => {
   let refuse!: (error: Error) => void;
   openDialog.mockResolvedValueOnce(["/tmp/first.png"]);
-  invoke.mockImplementation(async () => ({ name: "first.png", mediaType: "image/png", data: "AQID" }));
+  nativeFiles(() => ({ name: "first.png", mediaType: "image/png", data: "AQID" }));
   const onSend = vi.fn()
     .mockImplementationOnce(() => new Promise<void>((_, reject) => { refuse = reject; }))
     .mockImplementationOnce(async () => {});
   render(<TestComposer onSend={onSend} />);
   fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-  await screen.findByAltText("first.png");
+  await screen.findByTitle("first.png");
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
-  expect(screen.queryByAltText("first.png")).toBeNull();
+  expect(screen.queryByTitle("first.png")).toBeNull();
   await act(async () => refuse(new Error("delivery uncertain")));
-  expect(screen.getByAltText("first.png")).toBeTruthy();
+  expect(screen.getByTitle("first.png")).toBeTruthy();
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
   const [first, again] = (onSend.mock.calls as unknown as [string, object[]][]).map(([, images]) => images);
   expect(again[0]).toBe(first[0]);
-  expect(screen.queryByAltText("first.png")).toBeNull();
+  expect(screen.queryByTitle("first.png")).toBeNull();
 });
 
 it("retains an image added while an earlier image is being sent", async () => {
@@ -1231,17 +1257,17 @@ it("retains an image added while an earlier image is being sent", async () => {
   let imageId = 0;
   vi.mocked(crypto.randomUUID).mockImplementation(() => `image-${++imageId}` as ReturnType<typeof crypto.randomUUID>);
   openDialog.mockResolvedValueOnce(["/tmp/first.png"]).mockResolvedValueOnce(["/tmp/next.png"]);
-  invoke.mockImplementation(async (_command, { path }) => ({ name: path.endsWith("first.png") ? "first.png" : "next.png", mediaType: "image/png", data: "AQID" }));
+  nativeFiles((path) => ({ name: path.endsWith("first.png") ? "first.png" : "next.png", mediaType: "image/png", data: "AQID" }));
   const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
   render(<TestComposer onSend={onSend} />);
   fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-  await screen.findByAltText("first.png");
+  await screen.findByTitle("first.png");
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
-  await screen.findByAltText("next.png");
+  await screen.findByTitle("next.png");
   await act(async () => accept());
-  expect(screen.queryByAltText("first.png")).toBeNull();
-  expect(screen.getByAltText("next.png")).toBeTruthy();
+  expect(screen.queryByTitle("first.png")).toBeNull();
+  expect(screen.getByTitle("next.png")).toBeTruthy();
   expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
 });
 
@@ -1375,4 +1401,122 @@ it("compacts from the ring through the CLI send path while keeping the draft", a
   view.rerender(<Composer {...props} busy />);
   fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
   expect((await screen.findByRole("button", { name: "Compact now" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+describe("attaching any file (PRO-290)", () => {
+  const file = (name: string, type = "text/plain", bytes: Uint8Array = new Uint8Array([1, 2, 3])) => new File([bytes], name, { type });
+  const dropOn = (container: HTMLElement, files: File[]) =>
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files, types: ["Files"] } });
+  const chips = () => screen.queryAllByTestId("file-chip");
+  const sentChips = () => chips().filter((chip) => !chip.hasAttribute("data-refused"));
+  /** Nine traces, the reserved name, then six more: 10 attached, 1 refused, 4 not added (screen 03.23). */
+  const fifteen = () => [
+    ...Array.from({ length: 9 }, (_, i) => file(`trace-${i + 1}.log`)),
+    file("terminalx.json", "application/json"),
+    ...Array.from({ length: 5 }, (_, i) => file(`extra-${i + 1}.log`)),
+  ];
+
+  it("attaches the first 10 of 15 dropped files, says how many were not added, and toasts the limit", async () => {
+    const onSend = vi.fn();
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const notices = renderHook(() => useAttachmentNotices());
+    dropOn(container, fifteen());
+    await waitFor(() => expect(chips()).toHaveLength(11));
+    expect(sentChips()).toHaveLength(10);
+    expect(sentChips().map((chip) => chip.textContent)).toEqual([...Array.from({ length: 9 }, (_, i) => `trace-${i + 1}.log`), "extra-1.log"]);
+    const summary = screen.getByTestId("attachment-summary");
+    expect(summary.textContent).toBe("10 attached · 1 refused · 4 not added");
+    expect(within(summary).getByText("1 refused").className).toContain("text-destructive");
+    expect(within(summary).getByText("4 not added").className).toContain("text-warning");
+    expect(notices.result.current.find((n) => n.kind === "limit")).toMatchObject({
+      title: "Only the first 10 files were attached",
+      body: "You dropped 15 files. 4 weren’t added; send them in another message.",
+    });
+    // The count is the last offer's: removing a chip clears it.
+    fireEvent.click(screen.getByRole("button", { name: "Remove trace-1.log" }));
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("9 attached · 1 refused");
+  });
+
+  it("shows a reserved name as a red chip marked 'reserved name', toasts its name, and never sends it", async () => {
+    const onSend = vi.fn();
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const notices = renderHook(() => useAttachmentNotices());
+    dropOn(container, [file("terminalx.json", "application/json")]);
+    const refused = await waitFor(() => {
+      const chip = chips().find((c) => c.hasAttribute("data-refused"));
+      expect(chip).toBeTruthy();
+      return chip!;
+    });
+    expect(refused.textContent).toBe("terminalx.jsonreserved name");
+    expect(within(refused).getByText("reserved name").className).toContain("text-destructive");
+    expect(refused.className).toContain("border-destructive");
+    expect(notices.result.current).toEqual([expect.objectContaining({
+      kind: "refused",
+      title: "terminalx.json is a name TerminalX uses for session files",
+      body: "Rename it, for example to terminalx.copy.json, and attach it again.",
+    })]);
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("0 attached · 1 refused");
+    // A refused chip alone is no message.
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+
+    dropOn(container, [file("notes.md", "text/markdown")]);
+    await screen.findByTitle("notes.md");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    const [, , , files] = onSend.mock.calls[0] as [string, unknown[], boolean, { name: string }[]];
+    expect(files.map((f) => f.name)).toEqual(["notes.md"]);
+    // Once the message has gone, the chip that was refused for it goes too.
+    await waitFor(() => expect(chips()).toHaveLength(0));
+  });
+
+  it("sends a file that is not an image, and an image over 5 MB, as files beside the images", async () => {
+    const onSend = vi.fn();
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const pending = renderHook(() => useComposerSend("tab-1"));
+    onSend.mockImplementation(() => {
+      // The message drawn as sending lists its files by name.
+      expect(pending.result.current.pending?.message?.files).toEqual([{ name: "notes.md" }, { name: "huge.png" }]);
+    });
+    dropOn(container, [file("notes.md", "text/markdown"), file("shot.png", "image/png"), file("huge.png", "image/png", new Uint8Array(5 * 1024 * 1024 + 1))]);
+    await waitFor(() => expect(chips()).toHaveLength(3));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    const [text, images, alternate, files] = onSend.mock.calls[0] as [string, { name?: string }[], boolean, { name: string; data?: string; mediaType?: string; path?: string }[]];
+    expect(text).toBe("");
+    expect(alternate).toBe(false);
+    expect(images).toEqual([{ name: "shot.png", mediaType: "image/png", data: "AQID" }]);
+    expect(files[0]).toEqual({ name: "notes.md", data: "AQID", mediaType: "text/markdown" });
+    expect(files[1]).toMatchObject({ name: "huge.png", mediaType: "image/png" });
+    expect(files[1].data!.length).toBeGreaterThan(5 * 1024 * 1024);
+  });
+
+  it("attaches a picked path that is not an image by its path, for the store to copy", async () => {
+    openDialog.mockResolvedValue(["/Users/me/report.json"]);
+    nativeFiles();
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    expect(await screen.findByTitle("report.json")).toBeTruthy();
+    expect(invoke.mock.calls.some(([command]) => command === "read_image_file")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("", [], false, [{ name: "report.json", path: "/Users/me/report.json" }]));
+  });
+
+  it("puts the very same files back when the send fails, and sends them again", async () => {
+    const onSend = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(undefined);
+    const { container } = render(<TestComposer onSend={onSend} />);
+    dropOn(container, [file("notes.md", "text/markdown"), file("shot.png", "image/png")]);
+    await waitFor(() => expect(chips()).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    // Back above the draft, in their order.
+    await waitFor(() => expect(chips().map((chip) => chip.textContent)).toEqual(["notes.md", "shot.png"]));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    const [first, again] = onSend.mock.calls as [string, object[], boolean, object[]][];
+    expect(again[3][0]).toBe(first[3][0]);
+    expect(again[1][0]).toBe(first[1][0]);
+    await waitFor(() => expect(chips()).toHaveLength(0));
+  });
 });

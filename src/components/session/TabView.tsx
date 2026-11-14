@@ -3,7 +3,7 @@ import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
+import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
@@ -102,6 +102,16 @@ function endedAt(iso: string): string {
   if (Number.isNaN(at.getTime())) return "";
   const today = new Date().toDateString() === at.toDateString();
   return at.toLocaleString(undefined, today ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** What the backend saves on a tab after a chat reset (session_reset.rs). */
+type ResetTab = TabEntry & { resetTurn?: number; resetFilesRestored?: number };
+
+/** "Reset to turn 2 · 3 files restored" */
+export function resetNotice(tab: TabEntry): string {
+  const { resetTurn, resetFilesRestored } = tab as ResetTab;
+  const reset = typeof resetTurn === "number" ? `Reset to turn ${resetTurn}` : "Chat reset";
+  return typeof resetFilesRestored === "number" ? `${reset} · ${resetFilesRestored} ${resetFilesRestored === 1 ? "file" : "files"} restored` : reset;
 }
 
 export function TabView({
@@ -328,7 +338,7 @@ export function TabView({
     if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
   }, [backend, tab.id]);
   const send = useCallback(
-    async (text: string, images: ImageInput[], alternate = false) => {
+    async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
@@ -341,11 +351,14 @@ export function TabView({
       const pressedAt = Date.now();
       let drawnAt: number | undefined;
       afterPaint(() => { drawnAt = Date.now(); });
-      const route = followUpRoute(followUps, alternate);
+      // A held follow-up's files (PRO-290) are stored now and held by reference, like a sent message's.
+      const route = files?.length && !backend.storeFiles ? "now" : followUpRoute(followUps, alternate);
       try {
-        const out = backend.changeHeldQueue && route !== "now"
-          ? await backend.changeHeldQueue(tab.id, { type: "enqueue", text, images, sendNow: route === "interrupt" })
-          : await (local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
+        const held = backend.changeHeldQueue && route !== "now";
+        const stored = held && files?.length && backend.storeFiles ? await backend.storeFiles(files) : undefined;
+        const out = held
+          ? await backend.changeHeldQueue!(tab.id, { type: "enqueue", text, images, ...(stored?.length ? { files: stored } : {}), sendNow: route === "interrupt" })
+          : await (files?.length ? backend.send(tab.id, text, images, { pressedAt, files }) : local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
         const answeredAt = Date.now();
         for (const ev of out.events) applyEvent(ev);
         if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
@@ -937,10 +950,12 @@ export function TabView({
     </div>}
     {permissionNotice && <p role="status" className="shrink-0 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">{permissionNotice}</p>}
     {terminalMode && banner("top")}
-    {canReset && tab.resetBackupId && !live && <div className="border-b border-hairline px-4 py-2 text-xs">
-      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo last chat reset</Button>
+    {canReset && tab.resetBackupId && !live && <div role="status" className="flex items-center gap-2 border-b border-hairline px-4 py-2 text-xs text-muted-foreground">
+      <span>{resetNotice(tab)}</span>
+      <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
-    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} onClose={() => setResetTarget(null)} onWarning={setError} />}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq}
+      filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {
         dialogShown.end("submitted");

@@ -626,8 +626,13 @@ impl ControlService {
         // The Local VM (`container_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
         if let Some(action) = command.strip_prefix("vm.") {
             let vm_error = |error: anyhow::Error| ControlError::new("vm_failed", format!("{error:#}"), Some("See `terminalx skills get local-vm`.".to_string()));
+            // `--target` names one exact computer from `vm inventory`; without
+            // it, the Local VM's own container, as before targets existed.
             let selected: Option<crate::computer_targets::Target> = if matches!(action, "call" | "tools" | "screenshot") {
-                Some(serde_json::from_value(params["target"].clone()).map_err(|_| ControlError::invalid("An exact --target from computer.inventory is required; no container was selected"))?)
+                Some(match params.get("target").filter(|target| !target.is_null()) {
+                    Some(target) => serde_json::from_value(target.clone()).map_err(|_| ControlError::invalid("--target must be an exact computer identity from `terminalx vm inventory`; no container was selected"))?,
+                    None => crate::container_vm::default_target().map_err(vm_error)?,
+                })
             } else { None };
             let result = match action {
                 "inventory" => crate::computer_targets::inventory().map(|inventory| json!(inventory)).map_err(vm_error),
@@ -830,8 +835,8 @@ impl ControlService {
             "pipelines.start" | "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             // A run's workers are sessions of a project on this computer, each in a worktree of its own:
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
-            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
+            "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -847,8 +852,8 @@ impl ControlService {
         // The session the command runs in, when it runs in one the app knows.
         let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
-        if matches!(command, "runs.create" | "runs.start" | "runs.stop") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
-            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start or stop a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge, steer or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
         }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
@@ -859,7 +864,9 @@ impl ControlService {
             let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
             let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
             let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
-            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval}));
+            // Said where the lead reads it: a piece whose tier has no installed model, and what it runs on instead.
+            let notes: Vec<Value> = run.pieces.iter().filter_map(|piece| Some(json!({"piece": piece.id, "note": piece.model_note.as_deref()?}))).collect();
+            return Ok(json!({"run": engine::shown(&run), "approvalRequired": run.state == crate::orchestration::RunState::AwaitingApproval, "notes": notes}));
         }
         if command == "runs.list" {
             let lead = optional_string(&params, "lead").map(|selector| resolve_session(&selector)).transpose()?;
@@ -874,6 +881,8 @@ impl ControlService {
                 .collect::<Result<_, _>>()?;
             return Ok(json!({"runs": runs}));
         }
+        // A worker does not judge a piece, its own or another's: that is its lead's, and TerminalX's.
+        let from_worker = caller.as_ref().is_some_and(|caller| caller.run_worker());
         let run = match optional_string(&params, "run") {
             Some(selector) => {
                 let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
@@ -892,6 +901,75 @@ impl ControlService {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
                 Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+            }
+            "runs.checkFailed" => {
+                if from_worker {
+                    return Err(ControlError::new("not_the_lead", "A run's worker does not report a done-check as failed. Say what does not hold in your own report: `partial` or `failed`.", None::<String>));
+                }
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece whose done-check failed."))?;
+                let output = params["output"].as_str().unwrap_or_default();
+                let failed = engine::check_failed(&host, &run.id, &piece, output).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&failed.run), "piece": failed.piece, "retried": failed.retried, "blocked": failed.blocked, "failed": failed.failed}))
+            }
+            // Git work TerminalX does itself: every accepted piece into the lead's branch, in
+            // dependency order, the integration check after each. It pushes nothing.
+            "runs.merge" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let mut options = crate::orchestration::merge::Options::new(engine::By::Cli);
+                // Only the lead's own conversation is not waited for: its turn is the one asking.
+                // A command from any other session waits for the lead's turn like everyone's.
+                options.from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str())
+                    && run.lead.tab_id.as_deref().is_none_or(|tab| params["caller"]["tab"].as_str() == Some(tab));
+                options.skip = params["skip"].as_array().into_iter().flatten().filter_map(|piece| piece.as_str().map(str::to_owned)).collect();
+                options.recheck = params["recheck"].as_bool().unwrap_or(false);
+                let merged = crate::orchestration::merge::merge(&host, &run.id, &options).map_err(ControlError::of_run)?;
+                let mut value = serde_json::to_value(&merged).map_err(ControlError::internal)?;
+                value["run"] = engine::shown(&merged.run);
+                Ok(value)
+            }
+            "runs.sendBack" => {
+                self.manager.accepting_work().map_err(ControlError::internal)?;
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece to send back to its worker."))?;
+                let sent = engine::send_back(&host, &run.id, &piece).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&sent.run), "piece": sent.piece, "freshWorker": sent.fresh_worker, "blocked": sent.blocked, "failed": sent.failed}))
+            }
+            // A blocked piece (PRO-361), as the Run view's four actions do it.
+            "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" => {
+                let piece = optional_string(&params, "piece").ok_or_else(|| ControlError::invalid("Name the piece."))?;
+                match command {
+                    "runs.takeOver" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&run), "piece": piece}))
+                    }
+                    "runs.finish" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str());
+                        let finished = engine::finish(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&finished.run), "piece": finished.piece, "commit": finished.commit, "checks": finished.checks}))
+                    }
+                    "runs.widen" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                        let widened = engine::widen(&host, &run.id, &piece, &own, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&widened.run), "piece": widened.piece, "added": widened.added, "started": widened.started, "failed": widened.failed}))
+                    }
+                    "runs.note" => {
+                        self.manager.accepting_work().map_err(ControlError::internal)?;
+                        let text = params["text"].as_str().unwrap_or_default();
+                        let run = engine::note(&host, &run.id, &piece, text, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&run), "piece": piece}))
+                    }
+                    _ => {
+                        let skipped = engine::skip(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
+                        Ok(json!({"run": engine::shown(&skipped.run), "skipped": skipped.skipped}))
+                    }
+                }
+            }
+            "runs.cleanup" => {
+                let cleaned = crate::orchestration::merge::cleanup(&host, &run.id, params["confirmed"].as_bool().unwrap_or(false)).map_err(ControlError::of_run)?;
+                Ok(json!({"run": engine::shown(&cleaned.run), "removed": cleaned.removed, "refused": cleaned.refused}))
             }
             "runs.stop" => {
                 let stop = engine::stop(&host, &run.id, engine::By::Cli).map_err(ControlError::of_run)?;
@@ -1211,6 +1289,7 @@ impl ControlService {
                         automation: None,
                         cwd: None,
                         tab: Some(first_tab),
+                        orchestrate: false,
                     },
                     p.name.as_deref(),
                 )
@@ -1453,12 +1532,62 @@ impl ControlService {
     fn wait_children(&self, mut params: Value) -> Result<Value, ControlError> {
         let mode = optional_string(&params, "mode").unwrap_or_else(|| "any".into());
         let listed = self.sessions_children(json!({"childrenOf": required_string(&params, "childrenOf")?}))?;
+        // A lead whose run is under way waits on the run, not on each worker's turn.
+        if let Some(run) = listed["parent"]["sessionId"].as_str().and_then(|lead| crate::orchestration::store::open_for_lead(lead).ok().flatten()).filter(|run| run.state == crate::orchestration::RunState::Running) {
+            return self.wait_run(&run.id, &mode, &params);
+        }
         let workers: Vec<Value> = listed["sessions"].as_array().into_iter().flatten().map(|session| session["id"].clone()).collect();
         if workers.is_empty() {
             return Ok(json!({"mode": mode, "timedOut": false, "targets": [], "reason": "nothing to wait for: that session started no sessions"}));
         }
         params["targets"] = json!(workers);
         self.wait_many(params)
+    }
+
+    /// `wait --children-of` for a lead whose orchestration run is under way
+    /// (PRO-278): it returns when the run has something for the lead
+    /// (`orchestration::engine::wake`), not each time a worker's turn ends. A
+    /// worker's `done` is checked by the app first, and a result that fails a
+    /// check goes back to a fresh worker without the lead, so a run costs its
+    /// lead about one turn for each piece settled.
+    ///
+    /// The stored run is what is watched: a worker's or a verifier's turn
+    /// ending and the gates finishing each write it. It is brought up to date
+    /// from the transcripts now and then as well, for a worker that stopped
+    /// on a request nobody answered, which ends no turn.
+    fn wait_run(&self, run_id: &str, mode: &str, params: &Value) -> Result<Value, ControlError> {
+        use crate::orchestration::{engine, host::ManagerHost, store};
+        if !matches!(mode, "any" | "all") {
+            return Err(ControlError::invalid(format!("mode takes any or all, not {mode}.")));
+        }
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        let timeout = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600).min(86_400);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
+        let _resumable = crate::hooks::resumable();
+        // What the lead last saw is at least this old: a piece settled since then wakes it at once
+        // only through `ready` or the run's end, which a missed change always shows up as.
+        let began = engine::refreshed(&host, run_id).map_err(ControlError::of_run)?;
+        let mut read = Instant::now();
+        loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
+            let now = if read.elapsed() >= Duration::from_secs(5) {
+                read = Instant::now();
+                engine::refreshed(&host, run_id).map_err(ControlError::of_run)?
+            } else {
+                store::get(run_id).map_err(ControlError::internal)?
+            };
+            let timed_out = Instant::now() >= deadline;
+            if let Some(mut woken) = engine::wake(&began, &now, mode == "all").or_else(|| timed_out.then(|| json!({"run": now.id, "state": now.state, "why": [], "ready": [], "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": false, "note": piece.note})).collect::<Vec<_>>()}))) {
+                woken["mode"] = json!(mode);
+                woken["timedOut"] = json!(timed_out && woken["why"].as_array().is_none_or(|why| why.is_empty()));
+                // No tab is listed: the run is what was waited on. `runs show` has each worker.
+                woken["targets"] = json!([]);
+                return Ok(woken);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `wait` on several tabs at once (PRO-271). `any` returns as soon as one
@@ -1597,7 +1726,8 @@ impl ControlService {
             if let Some(named) = &named {
                 check_named(named, &held)?;
             }
-            let preview = self.worktree_delete_preview(&project, worktree.clone(), &held);
+            let orphans = self.worktree_delete_orphans(&project, &held)?;
+            let preview = self.worktree_delete_preview(&project, worktree.clone(), &held).with_orphans(orphans);
             if dry_run {
                 return serde_json::to_value(preview).map_err(ControlError::internal);
             }
@@ -1621,16 +1751,20 @@ impl ControlService {
             Some(named) => Some(check_named(named, &held_now()?)?),
             None => None,
         };
-        let stop = |session: &crate::store::index::SessionEntry| {
-            self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
-        };
-        #[cfg(feature = "desktop")]
-        let browser_key = crate::browser::control::canonical(&worktree.path);
+        // A lead's worktree: its run is cleaned up first, while the lead's
+        // session and checkout are still there to measure the workers
+        // against, so none is left a top-level row without a lead.
         // The same check as every other way of removing a workspace. One
         // that is not clean and merged is removed only with `--force`, which
         // is the CLI's second confirmation. A directory git cannot remove is
         // reported, never deleted directly: the CLI showed nothing of it.
         let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+        self.worktree_delete_clean_up_runs(&project, &worktree, &held_now()?, force)?;
+        let stop = |session: &crate::store::index::SessionEntry| {
+            self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
+        };
+        #[cfg(feature = "desktop")]
+        let browser_key = crate::browser::control::canonical(&worktree.path);
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &project.path,
             path: &worktree.path,
@@ -1664,6 +1798,134 @@ impl ControlService {
         let (entries, removal, strays) = (removed.sessions, removed.removal, removed.strays);
         let removed = crate::worktree_control::summaries(&entries, &project.path);
         Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch, "strayProcesses": strays}))
+    }
+
+    /// The workers that deleting the sessions in `held` would leave without
+    /// their lead: each worker, in a session outside `held`, of every run a
+    /// session in `held` leads. Each says why the run's cleanup would not
+    /// remove it, when it would not.
+    fn worktree_delete_orphans(&self, project: &Project, held: &[SessionEntry]) -> Result<Vec<crate::worktree_control::Orphan>, ControlError> {
+        use crate::orchestration::{host::ManagerHost, merge, store};
+        let held_ids: std::collections::BTreeSet<&str> = held.iter().map(|session| session.id.as_str()).collect();
+        let runs: Vec<_> = store::list().map_err(ControlError::internal)?.into_iter().filter(|run| held_ids.contains(run.lead.session_id.as_str())).collect();
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
+        let mut orphans = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for run in runs {
+            // What the run's cleanup would do, asked without --yes: it removes nothing then.
+            let mut verdicts: std::collections::HashMap<String, (Option<String>, String)> = std::collections::HashMap::new();
+            let mut failed = None;
+            match merge::cleanup(&host, &run.id, false) {
+                Err(error) if error.code == "confirmation_required" => {
+                    for (list, going) in [("wouldRemove", true), ("wouldRefuse", false)] {
+                        for fate in error.details[list].as_array().into_iter().flatten() {
+                            let (Some(session), Some(worktree)) = (fate["session"].as_str(), fate["worktree"].as_str()) else { continue };
+                            let reason = if going { None } else { Some(fate["reason"].as_str().unwrap_or("The run's cleanup would leave it.").to_string()) };
+                            verdicts.insert(session.to_string(), (reason, worktree.to_string()));
+                        }
+                    }
+                }
+                Err(error) => failed = Some(format!("The run's cleanup cannot run now: {}", error.message)),
+                Ok(_) => {}
+            }
+            for piece in &run.pieces {
+                for (index, attempt) in piece.tries.iter().enumerate() {
+                    let Some(worker) = attempt.worker.as_ref() else { continue };
+                    if held_ids.contains(worker.session_id.as_str()) || seen.contains(&worker.session_id) {
+                        continue;
+                    }
+                    // Gone already: nothing is left behind.
+                    let Some(session) = sessions.iter().find(|session| session.id == worker.session_id) else { continue };
+                    seen.push(worker.session_id.clone());
+                    let (blocked, worktree) = match verdicts.get(&worker.session_id) {
+                        Some((reason, worktree)) => (failed.clone().or_else(|| reason.clone()), Some(worktree.clone())),
+                        // No worktree of its own (removed already, sessions kept on purpose, or never one):
+                        // the run's cleanup has nothing to remove and does not block the delete, which
+                        // leaves the session as it is. Only a cleanup that cannot run blocks.
+                        None => (failed.clone(), None),
+                    };
+                    orphans.push(crate::worktree_control::Orphan {
+                        run: run.id.clone(),
+                        piece: piece.id.clone(),
+                        attempt: index + 1,
+                        session: crate::worktree_control::WorktreeSession::of(session, &project.path),
+                        worktree,
+                        blocked,
+                    });
+                }
+            }
+        }
+        Ok(orphans)
+    }
+
+    /// Before a lead's worktree goes, its runs' workers go: each run is
+    /// cleaned up when every worker it would leave can be removed. Otherwise,
+    /// or when the cleanup leaves one, nothing more is removed and the
+    /// workers that block the delete are named. Without `force`, a lead's
+    /// worktree that is not clean and merged is refused here, before any
+    /// worker goes: the delete would stop there, and nothing may be removed
+    /// by a delete that stops.
+    fn worktree_delete_clean_up_runs(&self, project: &Project, worktree: &crate::workspaces::Workspace, held: &[SessionEntry], force: bool) -> Result<(), ControlError> {
+        use crate::worktree_control::{orphan_listing, orphan_runs, orphans_recovery};
+        let orphans = self.worktree_delete_orphans(project, held)?;
+        if orphans.is_empty() {
+            return Ok(());
+        }
+        let refuse = |orphans: &[crate::worktree_control::Orphan], cleaned: &[String]| {
+            let blocking: Vec<_> = orphans.iter().filter(|orphan| orphan.blocked.is_some()).cloned().collect();
+            let blocking = if blocking.is_empty() { orphans.to_vec() } else { blocking };
+            let done = if cleaned.is_empty() { String::new() } else { format!(" The cleanup of run {} removed what it could first.", cleaned.join(", ")) };
+            let mut error = ControlError::new(
+                "workers_would_be_orphaned",
+                format!(
+                    "Worktree {} holds the lead of run {}. Deleting it would leave {} without a lead, so nothing of this worktree was removed.{done}\n{}",
+                    worktree.name,
+                    orphan_runs(orphans).join(", "),
+                    if blocking.len() == 1 { "this worker".to_string() } else { format!("these {} workers", blocking.len()) },
+                    orphan_listing(&blocking),
+                ),
+                Some(orphans_recovery(&blocking, &worktree.name)),
+            );
+            error.details = Some(json!({"orphans": blocking}));
+            error
+        };
+        if orphans.iter().any(|orphan| orphan.blocked.is_some()) {
+            return Err(refuse(&orphans, &[]));
+        }
+        if !force {
+            let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
+            if !landed.safe {
+                let losses = if landed.losses.is_empty() { "It is not known to be clean and merged.".to_string() } else { landed.losses.join("\n") };
+                return Err(ControlError::new(
+                    "needs_force",
+                    format!(
+                        "{}. Worktree {} holds the lead of run {}, and is not clean and merged, so nothing was removed, its workers included.\n{losses}",
+                        crate::session_ops::NEEDS_CONFIRMATION,
+                        worktree.name,
+                        orphan_runs(&orphans).join(", "),
+                    ),
+                    Some("Nothing was removed. Repeat with --force only if losing this work is intended; the run's cleanup then removes its workers first.".into()),
+                ));
+            }
+        }
+        let host = crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone());
+        let mut cleaned = Vec::new();
+        for run in orphan_runs(&orphans) {
+            crate::orchestration::merge::cleanup(&host, &run, true).map_err(ControlError::of_run)?;
+            cleaned.push(run);
+        }
+        // What the cleanup could not remove after all (a worker that wrote
+        // something in its last moment) still blocks the delete.
+        let left: Vec<_> = self.worktree_delete_orphans(project, held)?.into_iter().filter(|orphan| !orphan.keeps_session()).collect();
+        if !left.is_empty() {
+            return Err(refuse(&left, &cleaned));
+        }
+        Ok(())
     }
 
     /// What deleting `worktree` would do: the sessions it holds, with what
@@ -2413,9 +2675,9 @@ mod tests {
         assert!(service.execute("local_vm.request",select(missing),"test").is_err());
         let read = json!({"method":"computer.selection","params":params});
         assert_eq!(service.execute("local_vm.request",read,"test").unwrap()["version"], 1);
-        // Unbound legacy CLI calls and incompatible OS targets fail before probing Docker/Podman.
+        // Malformed and incompatible OS targets fail before probing Docker/Podman.
         for command in ["vm.call", "vm.tools", "vm.screenshot"] {
-            assert!(service.execute(command,json!({}),"test").is_err());
+            assert!(service.execute(command,json!({"target":"terminalx-computer"}),"test").is_err());
             assert!(service.execute(command,json!({"target":{"kind":"macosGuest","environmentId":"guest","generation":"g"}}),"test").is_err());
         }
     }
@@ -2715,6 +2977,170 @@ mod tests {
         assert_eq!((of(&foreign.id)["title"].clone(), of(&foreign.id)["project"].clone()), (json!("Another project's"), json!(other.path)));
         assert_eq!((of(&quick.id)["title"].clone(), of(&quick.id)["project"].clone()), (json!("Quick look"), Value::Null));
         assert!(index::load().unwrap().iter().all(|s| !everyone.contains(&s.id)));
+    }
+
+    /// PRO-364: a lead in its own worktree, and a worker per entry of
+    /// `merged`, each in a worktree of its own with one commit, which the lead
+    /// has merged into its branch when the entry is true. The run is done.
+    fn lead_with_workers(project: &Project, merged: &[bool]) -> (SessionEntry, Vec<SessionEntry>, String) {
+        let new = |title: &str| crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "title": title, "useWorktree": true, "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let lead = new("the lead");
+        let mut workers = Vec::new();
+        let mut pieces = Vec::new();
+        for (index, merged) in merged.iter().enumerate() {
+            let piece = format!("p{index}");
+            let worker = new(&format!("worker {piece}"));
+            let cwd = Path::new(&worker.cwd);
+            std::fs::write(cwd.join(format!("{piece}.txt")), "work\n").unwrap();
+            crate::git::run(cwd, &["add", "."]).unwrap();
+            crate::git::run(cwd, &["commit", "-q", "-m", &format!("Work of {piece}")]).unwrap();
+            let commit = crate::git::run(cwd, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+            if *merged {
+                crate::git::run(Path::new(&lead.cwd), &["merge", "-q", "--no-ff", "-m", &format!("Merge {piece}"), &commit]).unwrap();
+            }
+            let at = json!({"sessionId": worker.id, "tabId": worker.tabs[0].id});
+            pieces.push(json!({
+                "id": piece, "title": format!("Piece {piece}"), "brief": {"goal": "a goal"}, "owns": [format!("{piece}.txt")], "dependsOn": [],
+                "doneChecks": [{"type": "command", "run": "true"}], "agent": "claude", "state": "done", "worker": at,
+                "tries": [{"step": "first", "worker": at, "outcome": "done",
+                    "verification": {"gates": [], "facts": {"files": [format!("{piece}.txt")], "changedLines": 1, "commit": commit}, "outcome": "passed"}}],
+            }));
+            workers.push(worker);
+        }
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "run-of-the-lead", "lead": {"sessionId": lead.id, "tabId": lead.tabs[0].id}, "projectPath": project.path, "goal": "Bring the pieces together",
+            "state": "done", "pieces": pieces, "workerMode": "bypassPermissions", "approval": {"at": "2026-11-12T09:00:00Z"},
+            "created": "2026-11-12T09:00:00Z", "modified": "2026-11-12T09:00:00Z",
+        })).unwrap();
+        crate::orchestration::store::insert(&run).unwrap();
+        (lead, workers, run.id)
+    }
+
+    /// PRO-364: deleting a lead's worktree runs its run's cleanup first, so
+    /// its workers do not stay behind as top-level rows without a lead.
+    #[test]
+    fn worktree_delete_of_a_leads_worktree_removes_its_merged_clean_workers_first() {
+        let _home = crate::store::temp_home();
+        let repo = git_repo();
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let (lead, workers, run) = lead_with_workers(&project, &[true, true]);
+        let name = lead.worktree_name.clone().unwrap();
+        let (service, _sink) = headless_service();
+        let worker_ids: std::collections::BTreeSet<String> = workers.iter().map(|w| w.id.clone()).collect();
+
+        // The preview lists the two workers the delete would otherwise orphan, and that nothing blocks it.
+        let preview = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name, "dryRun": true}), "r1").unwrap();
+        assert_eq!(ids(&preview["sessions"]), std::collections::BTreeSet::from([lead.id.clone()]), "only the lead is in its worktree");
+        let orphans = preview["orphans"].as_array().unwrap();
+        assert_eq!(orphans.iter().map(|o| o["session"]["id"].as_str().unwrap().to_string()).collect::<std::collections::BTreeSet<_>>(), worker_ids);
+        assert!(orphans.iter().all(|o| o["run"] == run.as_str() && o.get("blocked").is_none() && o["worktree"].is_string()), "{orphans:?}");
+        let asked = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name}), "r2").unwrap_err();
+        assert_eq!(asked.code, "confirmation_required");
+        for expected in ["holds the lead of run run-of-the-lead", "worker p0", "worker p1", "the run's cleanup removes each of them"] {
+            assert!(asked.message.contains(expected), "{expected}: {}", asked.message);
+        }
+        assert!(workers.iter().all(|w| Path::new(&w.cwd).is_dir()), "a preview removes nothing");
+
+        // Confirmed without --force: the lead's worktree cannot be verified as merged (no remote),
+        // so the delete stops, and stops before any worker goes.
+        let unforced = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "sessions": [lead.id],
+        }), "r2b").unwrap_err();
+        assert_eq!(unforced.code, "needs_force", "{}", unforced.message);
+        assert!(unforced.message.contains("its workers included"), "{}", unforced.message);
+        assert!(Path::new(&lead.cwd).is_dir() && workers.iter().all(|w| Path::new(&w.cwd).is_dir()), "a delete that stops removes no worker");
+        let still: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(worker_ids.is_subset(&still) && still.contains(&lead.id), "{still:?}");
+
+        let branches: Vec<String> = workers.iter().map(|w| crate::git::run(Path::new(&w.cwd), &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap().trim().to_string()).collect();
+        // Confirmed: the workers go first, worktree and session, then the lead's worktree.
+        let deleted = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [lead.id],
+        }), "r3").unwrap();
+        assert_eq!(ids(&deleted["removedSessions"]), std::collections::BTreeSet::from([lead.id.clone()]));
+        assert!(!Path::new(&lead.cwd).exists());
+        assert!(workers.iter().all(|w| !Path::new(&w.cwd).exists()), "each worker's worktree is removed");
+        let left: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(left.is_disjoint(&worker_ids) && !left.contains(&lead.id), "no worker is left as a top-level row: {left:?}");
+        // Their branches stay.
+        for branch in &branches {
+            assert!(crate::git::run(repo.path(), &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")]).is_ok(), "{branch}");
+        }
+    }
+
+    /// PRO-364: a worker the run's cleanup would not remove keeps the lead's
+    /// worktree: the delete names it, with what to do, and removes nothing.
+    #[test]
+    fn worktree_delete_of_a_leads_worktree_with_an_unmerged_worker_lists_it_and_refuses() {
+        let _home = crate::store::temp_home();
+        let repo = git_repo();
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let (lead, workers, run) = lead_with_workers(&project, &[true, false]);
+        let name = lead.worktree_name.clone().unwrap();
+        let (service, _sink) = headless_service();
+        let untouched = || {
+            assert!(Path::new(&lead.cwd).is_dir(), "the lead's worktree stays");
+            assert!(workers.iter().all(|w| Path::new(&w.cwd).is_dir()), "every worker's worktree stays");
+            let left: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+            assert!(workers.iter().chain([&lead]).all(|s| left.contains(&s.id)), "every session stays");
+        };
+
+        let preview = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name, "dryRun": true}), "r1").unwrap();
+        let orphans = preview["orphans"].as_array().unwrap();
+        let of = |id: &str| orphans.iter().find(|o| o["session"]["id"] == id).unwrap().clone();
+        assert!(of(&workers[0].id).get("blocked").is_none());
+        assert!(of(&workers[1].id)["blocked"].as_str().unwrap().contains("1 commit that is not in"), "{:?}", of(&workers[1].id));
+        untouched();
+
+        let refused = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [lead.id],
+        }), "r2").unwrap_err();
+        assert_eq!(refused.code, "workers_would_be_orphaned");
+        for expected in [format!("holds the lead of run {run}"), "worker p1".to_string(), workers[1].id.clone(), workers[1].cwd.clone()] {
+            assert!(refused.message.contains(&expected), "{expected}: {}", refused.message);
+        }
+        assert!(!refused.message.contains("worker p0"), "only the one that blocks is named: {}", refused.message);
+        let recovery = refused.recovery.unwrap();
+        assert!(recovery.contains(&format!("terminalx runs cleanup {run}")) && recovery.contains("terminalx worktrees delete"), "{recovery}");
+        assert_eq!(refused.details.unwrap()["orphans"].as_array().unwrap().len(), 1);
+        untouched();
+    }
+
+    /// PRO-364 review: a worker whose worktree is already gone (removed with
+    /// its session kept) has nothing for the run's cleanup to remove. It does
+    /// not keep the lead's worktree from being deleted, and its session is
+    /// left as it is.
+    #[test]
+    fn worktree_delete_of_a_leads_worktree_is_not_blocked_by_a_worker_without_a_worktree() {
+        let _home = crate::store::temp_home();
+        let repo = git_repo();
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let (lead, workers, _run) = lead_with_workers(&project, &[true, true]);
+        let name = lead.worktree_name.clone().unwrap();
+        let (service, _sink) = headless_service();
+        // The second worker's worktree goes, its session stays.
+        crate::git::run(repo.path(), &["worktree", "remove", "--force", &workers[1].cwd]).unwrap();
+        assert!(!Path::new(&workers[1].cwd).exists());
+
+        let preview = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name, "dryRun": true}), "r1").unwrap();
+        let orphans = preview["orphans"].as_array().unwrap();
+        let of = |id: &str| orphans.iter().find(|o| o["session"]["id"] == id).unwrap().clone();
+        assert!(of(&workers[0].id).get("blocked").is_none() && of(&workers[0].id)["worktree"].is_string());
+        assert!(of(&workers[1].id).get("blocked").is_none() && of(&workers[1].id).get("worktree").is_none(), "{:?}", of(&workers[1].id));
+        let asked = service.execute("worktrees.delete", json!({"project": project.path, "worktree": name}), "r2").unwrap_err();
+        assert_eq!(asked.code, "confirmation_required", "{}", asked.message);
+        assert!(asked.message.contains("its session stays as it is") && asked.message.contains("no worktree left to remove"), "{}", asked.message);
+
+        let deleted = service.execute("worktrees.delete", json!({
+            "project": project.path, "worktree": name, "confirmed": true, "force": true, "sessions": [lead.id],
+        }), "r3").unwrap();
+        assert_eq!(ids(&deleted["removedSessions"]), std::collections::BTreeSet::from([lead.id.clone()]));
+        assert!(!Path::new(&lead.cwd).exists() && !Path::new(&workers[0].cwd).exists(), "the lead and the worker that has a worktree go");
+        let left: std::collections::BTreeSet<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(!left.contains(&workers[0].id) && !left.contains(&lead.id));
+        assert!(left.contains(&workers[1].id), "the session of the worker without a worktree is left as it is");
     }
 
     /// #719: a session that names its project through a symlink is one of

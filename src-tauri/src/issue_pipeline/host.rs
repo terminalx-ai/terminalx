@@ -63,6 +63,7 @@ impl LocalHost {
         let to = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
         crate::worker_report::turn_completed(final_message, || self.manager.load_events(session_id, tab_id), |prompt| Host::send(self, &to, prompt));
         // A run's worker: its piece follows what it just reported.
+        // A try that fell short is followed by the next without anything more from here: the read of the run asks its host for that.
         crate::orchestration::engine::worker_turn_ended(&crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone()), session_id);
     }
 
@@ -98,7 +99,7 @@ pub(crate) fn pr_number(url: &str) -> Option<u64> {
 
 /// A transcript's last finished turn: when it ended, and its reply (the
 /// turn's final text, else its last message). A subagent's turns are not the tab's.
-fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
+pub(crate) fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
     use crate::events::{Payload, TurnStatus};
     let end = events.iter().rposition(|event| event.subagent.is_none() && matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }))?;
     let at = DateTime::parse_from_rfc3339(&events[end].ts).ok()?.with_timezone(&Utc);
@@ -243,12 +244,11 @@ fn remote_head(cwd: &Path, url: &str, branch: &str) -> Result<Option<String>> {
     }))
 }
 
-/// `required`: GitHub asks for the merge, the branch behind or in conflict,
-/// whatever `git merge-tree` says. The two can differ: with more than one
-/// merge base, git merges the bases into one first and GitHub does not.
-fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+/// The base branch's commit as the remote has it now, fetched: the pull
+/// request's base repository when there is a pull request, `origin` when not.
+fn fetch_base(cwd: &Path, base: &str, pr: Option<&PrSnapshot>) -> Result<String> {
     let _request = crate::github_process::scope();
-    let base_commit = if let Some(pr) = pr {
+    Ok(if let Some(pr) = pr {
         if pr.base != base { bail!("The requested base branch does not match the pull request."); }
         let url = crate::github::base_fetch_destination(cwd, pr)?;
         let commit = remote_head(cwd, &url, base)?.context("The pull request's base branch is missing from its repository.")?;
@@ -261,7 +261,22 @@ fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: O
         crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
         let base_ref = format!("refs/remotes/origin/{base}");
         crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string()
-    };
+    })
+}
+
+/// Whether the commits after `reviewed` only merge the pull request's base,
+/// against the base as GitHub has it now (#947).
+fn base_merges(cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+    let base_commit = fetch_base(cwd, &pr.base, Some(pr))?;
+    super::carry::classify(cwd, &base_commit, reviewed, head)
+}
+
+/// `required`: GitHub asks for the merge, the branch behind or in conflict,
+/// whatever `git merge-tree` says. The two can differ: with more than one
+/// merge base, git merges the bases into one first and GitHub does not.
+fn resolution_needed(cwd: &Path, branch: &str, base: &str, required: bool, pr: Option<&PrSnapshot>) -> Result<Option<super::Resolution>> {
+    let _request = crate::github_process::scope();
+    let base_commit = fetch_base(cwd, base, pr)?;
     let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
     let ahead = crate::git::run(cwd, &["rev-list", "--count", &format!("{base_commit}..{head}")])?;
     let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
@@ -295,6 +310,21 @@ fn push_resolution(cwd: &Path, resolution: &super::Resolution, branch: &str, hea
     let target = format!("{head}:refs/heads/{branch}");
     crate::git::run_within(cwd, &["push", "--", &url, &target], PUSH_TIMEOUT, &|| false)
         .map_err(|error| anyhow!("Pushing the verified resolution failed: {error:?}"))
+}
+
+impl LocalHost {
+    /// A conversation of its own in the author's session, named `title`: no fork, and none
+    /// of the author's transcript. On `chosen`'s model and effort, else the author's.
+    fn open_tab(&self, author: &SessionEntry, tab: &index::TabEntry, title: &str, chosen: Option<(String, Option<String>)>) -> Result<SessionRef> {
+        let (model, effort) = chosen.unwrap_or_else(|| (tab.model.clone(), tab.effort.clone()));
+        let opened = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(), harness: tab.harness.clone(), model, effort, permission_mode: Some(tab.permission_mode.clone()) })?;
+        crate::session_ops::rename_tab_entry(&author.id, &opened.id, Some(title.into())).map_err(anyhow::Error::msg)?;
+        self.sink.emit("session_updated", &index::get(&author.id)?);
+        if let Place::CloudWorkspace { tab_added } = &self.place {
+            tab_added(&opened.id);
+        }
+        Ok(SessionRef { session_id: author.id.clone(), tab_id: opened.id })
+    }
 }
 
 impl Host for LocalHost {
@@ -351,19 +381,23 @@ impl Host for LocalHost {
     /// reused by the engine, including legacy separate sessions.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        let reviewer = self.manager.add_tab(&author.id, &NewTab { transport: Default::default(),
-            harness: tab.harness.clone(), model: tab.model.clone(), effort: tab.effort.clone(), permission_mode: Some(tab.permission_mode.clone()),
-        })?;
-        crate::session_ops::rename_tab_entry(&author.id, &reviewer.id, Some("Reviewer".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        if let Place::CloudWorkspace { tab_added } = &self.place {
-            tab_added(&reviewer.id);
-        }
-        Ok(SessionRef { session_id: author.id.clone(), tab_id: reviewer.id })
+        // The project's reviewer model and effort, when it set them: a review need not run on
+        // what the author ran on. The agent's list is read only for a project that chose.
+        let chosen = crate::store::projects::issue_pipeline_settings(&author.project_path).ok().filter(|settings| settings.reviewer_model.is_some() || settings.reviewer_effort.is_some()).map(|settings| {
+            let models = match tab.harness.as_str() {
+                "claude" => crate::harness::claude::models::get(false),
+                "codex" => self.manager.codex_models().get(false),
+                _ => crate::models::catalog(),
+            };
+            settings.reviewer_choice(&tab.harness, &tab.model, tab.effort.as_deref(), &models)
+        });
+        self.open_tab(author, tab, "Reviewer", chosen)
     }
 
     fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
         let cwd = cwd.canonicalize()?;
+        // Closed for work that is no conversation's turn: an orchestration run is being merged into it.
+        if super::admission::closed(&cwd) { return Ok(false); }
         for session in index::load()? {
             if Path::new(&session.cwd).canonicalize().ok().as_ref() != Some(&cwd) { continue; }
             for tab in &session.tabs {
@@ -379,14 +413,17 @@ impl Host for LocalHost {
     }
 
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
-        let resolver = self.open_reviewer(pipeline, author)?;
-        crate::session_ops::rename_tab_entry(&author.id, &resolver.tab_id, Some("Conflict resolver".into())).map_err(anyhow::Error::msg)?;
-        self.sink.emit("session_updated", &index::get(&author.id)?);
-        Ok(resolver)
+        // A resolver writes the merge the author would have: it runs on the author's model.
+        let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
+        self.open_tab(author, tab, "Conflict resolver", None)
     }
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
         verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn base_merges(&self, cwd: &Path, reviewed: &str, head: &str, pr: &PrSnapshot) -> Result<super::carry::Carry> {
+        base_merges(cwd, reviewed, head, pr)
     }
 
     fn abort_merge(&self, cwd: &Path, head: &str, merge_head: &str) -> Result<()> {
@@ -558,6 +595,55 @@ mod tests {
         assert!(author.tab(&reviewer.tab_id).is_some());
         assert!(author.tab("t1").is_some());
         assert!(host.merge(Path::new("/unused"), 1, "merge", "head").unwrap_err().to_string().contains("does not merge"));
+    }
+
+    #[test]
+    fn a_pipeline_with_a_reviewer_model_set_opens_its_reviewer_on_that_model() {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::store::projects::add(repo.path().to_str().unwrap()).unwrap();
+        let author: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": project.path, "cwd": project.path, "title": "Issue",
+            "created": "2026-11-11T00:00:00Z", "modified": "2026-11-11T00:00:00Z",
+            "tabs": [{"id": "t1", "harness": "claude", "model": "opus", "effort": "xhigh", "permissionMode": "bypassPermissions", "created": "2026-11-11T00:00:00Z"}]
+        })).unwrap();
+        index::save(std::slice::from_ref(&author)).unwrap();
+        let pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        let host = LocalHost::new(sink, manager);
+        let set = |model: Option<&str>, effort: Option<&str>| {
+            let settings = IssuePipelineSettings { reviewer_model: model.map(str::to_owned), reviewer_effort: effort.map(str::to_owned), ..Default::default() };
+            crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() }).unwrap();
+        };
+        let opened = |who: SessionRef| {
+            let tab = index::get("author").unwrap().tab(&who.tab_id).cloned().unwrap();
+            (tab.title.clone().unwrap_or_default(), tab.harness.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone())
+        };
+        let on = |title: &str, model: &str, effort: Option<&str>| (title.to_string(), "claude".to_string(), model.to_string(), effort.map(str::to_owned), "bypassPermissions".to_string());
+        // No choice made: the author's model and effort, as before.
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("xhigh")));
+        // The project's reviewer model and effort: the reviewer runs on them, the author's mode kept.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", Some("medium")));
+        // A model with no effort named runs at its own default, not at the author's xhigh.
+        set(Some("sonnet"), None);
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "sonnet", None));
+        // Only an effort: the author's model at that effort.
+        set(None, Some("low"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("low")));
+        // A model the author's agent does not offer cannot be launched: the author's stands.
+        set(Some("gpt-6.1-terra"), Some("medium"));
+        assert_eq!(opened(host.open_reviewer(&pipeline, &author).unwrap()), on("Reviewer", "opus", Some("medium")));
+        // A conflict resolver writes code: it stays on the author's model whatever the reviewer's is.
+        set(Some("sonnet"), Some("medium"));
+        assert_eq!(opened(host.open_resolver(&pipeline, &author).unwrap()), on("Conflict resolver", "opus", Some("xhigh")));
+        // The author's own tab is untouched by any of it.
+        assert_eq!(index::get("author").unwrap().tabs[0], author.tabs[0]);
     }
 
     fn git(cwd: &Path, args: &[&str]) -> String {

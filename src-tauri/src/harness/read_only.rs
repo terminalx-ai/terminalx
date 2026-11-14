@@ -11,6 +11,11 @@ pub const SESSION_OPTION: &str = "terminalx:allow_session";
 #[path = "read_only_security_tests.rs"]
 mod security_tests;
 
+#[path = "read_only_exec.rs"]
+mod exec;
+use exec::Join;
+pub use exec::{ran_result, Approved};
+
 pub fn command<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
     if !matches!(
         tool,
@@ -80,6 +85,21 @@ pub fn reported_scope<'a>(input: &Value, reported: Option<&'a str>) -> Option<&'
 
 /// Session grants authorize the exact command in one directory. Rewrites
 /// are essential: an unchanged allow would also run in an unreported workdir.
+///
+/// The person approved this command for their own shell, so it still runs
+/// there with their startup setup (PRO-330), and so does its directory
+/// check. That check guards against the command running in a workdir the
+/// hook never saw; it cannot guard against the shell itself. Within that
+/// limit it avoids what startup files set up in advance: a shell resolves a
+/// function before any path, quoted or not, so the check and the rejection
+/// use a per-approval random spelling of an absolute path, every word is
+/// quoted (no alias, global alias or keyword applies), and the rejection
+/// runs in a fresh `/bin/sh -c`, which reads no startup file. Startup code
+/// that runs before each command (a DEBUG trap, which can read the command
+/// it precedes and define a function by that name) still defeats it, as it
+/// could any check typed into the shell. Such code already runs with the
+/// person's rights in every shell they open, and the command is one they
+/// approved, so what it gains is only the directory scope.
 pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
     let scope: Value = serde_json::from_str(key).ok()?;
     let cwd = scope.get(2)?.as_str()?;
@@ -87,8 +107,21 @@ pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
         return None;
     }
     let original = command(tool, input)?;
-    let script = format!("if '/bin/test' '.' '-ef' {}; then eval {}; else printf '%s\\n' {} >&2; exit 125; fi",
-        quote(cwd), quote(original), quote("TerminalX blocked a session allowance outside its approved directory. Request a separate one-time approval for this workdir."));
+    let reject = format!(
+        "printf '%s\\n' {} >&2; exit 125",
+        quote("TerminalX blocked a session allowance outside its approved directory. Request a separate one-time approval for this workdir.")
+    );
+    // The subshell fails with 125 when the check fails, so `&&` never
+    // reaches the command; it runs in the outer shell, where a `cd` in it
+    // still moves the provider's working directory as it always did.
+    let script = format!(
+        "({} '.' '-ef' {} || {} '-c' {}) && 'eval' {}",
+        quote(&unpredictable("/bin", "test")),
+        quote(cwd),
+        quote(&unpredictable("/bin", "sh")),
+        quote(&reject),
+        quote(original)
+    );
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"
@@ -118,19 +151,42 @@ pub fn execution_input(input: &Value) -> Value {
     Value::Object(execution)
 }
 
-/// An automatic approval is a replacement input, never permission to run
-/// the original command in an uninspected login-shell environment.
-pub fn approved_input(tool: &str, input: &Value, cwd: Option<&str>) -> Option<Value> {
-    approved_input_in(tool, input, cwd, &Execution::owner())
+/// An automatic approval is never permission for the provider to run the
+/// command, rewritten or not. Its shell has already loaded the user's
+/// startup files, and what they define runs before anything typed into it:
+/// a function named after the quoted absolute path of the first program, a
+/// readonly exported loader variable no assignment prefix can mask, an
+/// xtrace prompt or DEBUG trap (PRO-330). TerminalX runs the vetted programs
+/// itself instead (`Approved::run`) and answers the hook with the result.
+pub fn approved(tool: &str, input: &Value, cwd: Option<&str>) -> Option<Approved> {
+    approved_in(tool, input, cwd, &Execution::owner())
 }
 
-fn approved_input_in(
+/// Git propagates -c settings to its own subprocesses. In addition to
+/// rejecting current gitlinks below, suppress helpers and recursive submodule
+/// displays (including historical links).
+const GIT_OPTIONS: [&str; 12] = [
+    "--no-pager",
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "diff.submodule=short",
+    "-c",
+    "status.submoduleSummary=false",
+    "-c",
+    "log.showSignature=false",
+];
+
+fn approved_in(
     tool: &str,
     input: &Value,
     cwd: Option<&str>,
     execution: &Execution,
-) -> Option<Value> {
-    // The replacement command uses the POSIX shell contract. Other platforms
+) -> Option<Approved> {
+    // The executor uses Unix process groups and signals. Other platforms
     // continue to ask until they have an equivalent controlled executor.
     if !cfg!(unix) {
         return None;
@@ -158,112 +214,61 @@ fn approved_input_in(
     }
     let cwd = cwd.filter(|cwd| Path::new(cwd).is_absolute())?;
     let commands = parse(command(tool, input)?)?;
-    // Keep the checked directory bound to execution, even if the provider
-    // supplies inconsistent metadata or changes it after the hook returns.
-    let mut script = format!("'/bin/test' '.' '-ef' {} || exit 125; ", quote(cwd));
+    // Inspect and run in this one directory, even if its path is replaced.
+    let handle = exec::open_directory(Path::new(cwd))?;
+    let mut lists = Vec::new();
+    let mut pipeline = Vec::new();
+    let mut join = Join::Then;
     for command in commands {
         if !safe_command(&command.words) {
             return None;
         }
         let name = &command.words[0];
-        // Use the same trusted lookup as agent launches, including known
-        // developer install directories when Finder supplied a minimal PATH.
-        let binary = crate::binpath::resolve(name)?;
+        // Use the same trusted directories as agent launches, including known
+        // developer install directories when Finder supplied a minimal PATH,
+        // but never the shell fallback: it would run the user's startup files.
+        let binary = crate::binpath::find(name)?;
         if !binary.is_absolute() {
             return None;
         }
-        if name == "git" && !git_config_is_read_only(&binary, Path::new(cwd), execution) {
+        if name == "git" && !git_config_is_read_only(&binary, &handle, execution) {
             return None;
         }
-        if !script.is_empty() {
-            script.push(' ');
-        }
-        script.push_str(&quote(binary.to_str()?));
+        let mut argv = vec![std::ffi::OsString::from(binary)];
         if name == "rg" {
-            script.push_str(" '--no-config'");
+            argv.push("--no-config".into());
         }
         if name == "git" {
-            // Git propagates -c settings to its own subprocesses. In
-            // addition to rejecting current gitlinks below, suppress helpers
-            // and recursive submodule displays (including historical links).
-            script.push_str(" '--no-pager' '--no-optional-locks' '-c' 'core.fsmonitor=false' '-c' 'submodule.recurse=false' '-c' 'diff.submodule=short' '-c' 'status.submoduleSummary=false' '-c' 'log.showSignature=false'");
+            argv.extend(GIT_OPTIONS.iter().map(Into::into));
         }
-        for word in &command.words[1..] {
-            script.push(' ');
-            script.push_str(&quote(word));
+        argv.extend(command.words[1..].iter().map(Into::into));
+        pipeline.push(argv);
+        if command.next != "|" {
+            lists.push((join, std::mem::take(&mut pipeline)));
+            join = match command.next {
+                "&&" => Join::And,
+                "||" => Join::Or,
+                _ => Join::Then,
+            };
         }
-        script.push(' ');
-        script.push_str(command.next);
     }
-    // The provider's outer shell may have loaded .zshenv, .bashrc, etc.
-    // Clear what those files supplied before invoking our non-login shell.
-    // Quoted absolute paths avoid aliases and PATH lookup; the clean inner
-    // shell does not inherit startup-defined functions.
-    // env -i clears variables only after env itself has loaded. Mask loader
-    // controls with shell assignments first, so startup-file LD_* / DYLD_*
-    // values cannot inject libraries or create loader trace/profile files.
-    // glibc enables LD_TRACE_LOADED_OBJECTS by presence, even when empty:
-    // assigning '' makes env print libraries and exit 0 without running the
-    // directory guard or command. Do not inspect that variable in the outer
-    // shell: even ${name+...} follows a startup-defined Bash nameref and can
-    // execute its array subscript. Cleanup builtins can also be functions.
-    // Instead, probe the same launcher with a clean shell that only exits 9.
-    // A tracing loader returns 0; discard its output and reject that status
-    // using descriptor duplication below, without inspecting any named variable.
-    let mut reset_env = String::new();
-    for key in [
-        "LD_PRELOAD",
-        "LD_AUDIT",
-        "LD_DEBUG",
-        "LD_DEBUG_OUTPUT",
-        "LD_PROFILE",
-        "LD_PROFILE_OUTPUT",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_FRAMEWORK_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-        "DYLD_FALLBACK_FRAMEWORK_PATH",
-        "DYLD_ROOT_PATH",
-        "DYLD_IMAGE_SUFFIX",
-        "DYLD_PRINT_TO_FILE",
-    ] {
-        reset_env.push_str(key);
-        reset_env.push_str("='' ");
+    if !pipeline.is_empty() {
+        return None;
     }
-    reset_env.push_str("LD_LIBRARY_PATH='/usr/lib:/lib' DYLD_LIBRARY_PATH='/usr/lib' GCONV_PATH='/usr/lib/gconv' LC_ALL='C' '/usr/bin/env' '-i'");
-    let mut wrapper = format!("({reset_env} '/bin/sh' '-c' 'exit 9' >'/dev/null'; {reset_env}");
-    for (key, value) in &execution.env {
-        wrapper.push(' ');
-        wrapper.push_str(&quote(&format!("{key}={value}")));
+    Some(Approved::new(cwd.into(), handle, lists, execution.env.clone(), input))
+}
+
+/// A path to `name` in `dir` that a startup file cannot have predefined as a
+/// function: 48 random `.` or empty segments, all resolving to `dir`.
+fn unpredictable(dir: &str, name: &str) -> String {
+    let bits = uuid::Uuid::new_v4().as_u128();
+    let mut path = String::from(dir);
+    for bit in 0..48 {
+        path.push_str(if (bits >> bit) & 1 == 1 { "/." } else { "/" });
     }
-    wrapper.push_str(" '/bin/sh' '-c' ");
-    wrapper.push_str(&quote(&script));
-    // Save stdin on 8, close 0, and open 9 on /dev/null. Duplicating the probe's
-    // status as a descriptor succeeds for 9, but fails for the tracing loader's
-    // 0 before env dispatch. Restore stdin and close every temporary descriptor.
-    // $? is shell-owned status, not a named parameter that startup can turn
-    // into a nameref. It is the only expansion in the outer wrapper.
-    // Quote descriptor operands too: zsh expands global aliases on bare words
-    // such as 0, 8 and -, even when they follow a redirection operator.
-    wrapper.push_str(" 8<&'0' 0<&'-' 9<'/dev/null' 7<&\"$?\" 0<&'8' 7<&'-' 8<&'-' 9<&'-')");
-    // zsh inherits function-style TRAPZERR handlers into subshells. Keep the
-    // entire guarded execution on the conditional side of && so neither a
-    // rejection nor the requested command's failure invokes an outer error
-    // hook. Preserve its status: the right side runs only on success.
-    // Reuse the same masked env launcher with no payload: env -i prints an
-    // empty environment and returns zero. No new command name is resolved.
-    // A shell noop is unsafe here: true/: can be functions, a zero-word
-    // expansion can be a zsh global alias, a bare redirection uses NULLCMD,
-    // and an assignment can follow a startup-defined nameref. Do not wrap
-    // the whole && list in a subshell: its failure would trigger the hook.
-    wrapper.push_str(&format!(" && ({reset_env})"));
-    let mut updated = input.clone();
-    let field = if input.get("command").is_some() {
-        "command"
-    } else {
-        "cmd"
-    };
-    updated[field] = Value::String(wrapper);
-    Some(updated)
+    path.push('/');
+    path.push_str(name);
+    path
 }
 
 struct Execution {
@@ -730,16 +735,16 @@ fn git_args(args: &[String]) -> bool {
     }
 }
 
-fn git_config_is_read_only(binary: &Path, cwd: &Path, execution: &Execution) -> bool {
+fn git_config_is_read_only(binary: &Path, directory: &std::fs::File, execution: &Execution) -> bool {
     // Listing config does not run fsmonitor, diff drivers, pagers or gpg.
     // If any are configured, leave the command to the approval card.
-    // This is exactly the environment of the replacement command, including
-    // HOME and XDG_CONFIG_HOME. Shell startup cannot select another config.
-    let Ok(output) = execution
-        .git(binary)
-        .args(["config", "--null", "--list"])
-        .current_dir(cwd)
-        .output()
+    // This is exactly the environment and directory of the programs TerminalX
+    // runs, including HOME and XDG_CONFIG_HOME. Shell startup cannot select
+    // another config.
+    let mut config = execution.git(binary);
+    config.args(["config", "--null", "--list"]);
+    exec::enter(&mut config, directory);
+    let Ok(output) = config.output()
     else {
         return false;
     };
@@ -749,9 +754,8 @@ fn git_config_is_read_only(binary: &Path, cwd: &Path, execution: &Execution) -> 
     // A parent status/diff can enter a submodule with a separate config.
     // Until each traversal can be inspected reliably, repos with gitlinks
     // ask. Inspect the whole index even when the command starts in a subdir.
-    let Ok(index) = execution
-        .git(binary)
-        .args([
+    let mut index = execution.git(binary);
+    index.args([
             "-c",
             "core.fsmonitor=false",
             "ls-files",
@@ -760,10 +764,9 @@ fn git_config_is_read_only(binary: &Path, cwd: &Path, execution: &Execution) -> 
             "-z",
             "--",
             ":(top)",
-        ])
-        .current_dir(cwd)
-        .output()
-    else {
+        ]);
+    exec::enter(&mut index, directory);
+    let Ok(index) = index.output() else {
         return false;
     };
     index.status.success()
@@ -883,15 +886,18 @@ mod tests {
 
     #[test]
     fn wrappers_and_escalated_or_custom_shell_inputs_ask() {
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            approved_input(
+            approved(
                 "Bash",
                 &serde_json::json!({"command":"pwd; ls"}),
-                Some("/workspace/app")
+                dir.path().to_str()
             )
             .is_some(),
             cfg!(unix)
         );
+        // An approval names a directory that exists, opened to pin it.
+        assert!(approved("Bash", &serde_json::json!({"command":"pwd"}), Some("/nonexistent/terminalx")).is_none());
         for (tool, input) in [
             ("mcp__shell", serde_json::json!({"command":"pwd"})),
             (
@@ -904,7 +910,7 @@ mod tests {
             ),
             ("Bash", serde_json::json!({"command":"pwd", "env":{}})),
         ] {
-            assert!(approved_input(tool, &input, Some("/workspace/app")).is_none());
+            assert!(approved(tool, &input, Some("/workspace/app")).is_none());
         }
     }
 
@@ -928,7 +934,7 @@ mod tests {
             std::fs::write(&config, format!("{original}\n{entry}")).unwrap();
             assert!(!git_config_is_read_only(
                 &which::which("git").unwrap(),
-                dir.path(),
+                &exec::open_directory(dir.path()).unwrap(),
                 &Execution::owner()
             ));
             assert!(!dir.path().join("marker").exists());
@@ -963,8 +969,23 @@ mod tests {
             serde_json::json!({"command":"pwd", "cmd":"rm file"}),
             serde_json::json!({"command":"pwd", "dangerouslyDisableSandbox":true}),
         ] {
-            assert!(approved_input("Bash", &input, Some("/workspace/app")).is_none());
+            assert!(approved("Bash", &input, Some("/workspace/app")).is_none());
         }
+    }
+
+    #[test]
+    fn session_checks_are_spelled_so_startup_cannot_predefine_them() {
+        let (a, b) = (unpredictable("/bin", "test"), unpredictable("/bin", "test"));
+        assert_ne!(a, b);
+        for path in [&a, &b] {
+            assert!(path.starts_with("/bin/") && path.ends_with("/test"), "{path}");
+            assert_eq!(std::fs::canonicalize(path).unwrap(), std::fs::canonicalize("/bin/test").unwrap());
+        }
+        let input = serde_json::json!({"command":"touch note"});
+        let key = session_key("Bash", &input, Some("/workspace/app")).unwrap();
+        let script = session_input("Bash", &input, &key).unwrap()["command"].as_str().unwrap().to_string();
+        assert!(!script.contains("'/bin/test'") && !script.contains("'/bin/sh'"), "{script}");
+        assert!(script.ends_with("&& 'eval' 'touch note'"), "{script}");
     }
 
     #[test]
@@ -1013,7 +1034,7 @@ mod tests {
         );
         for cwd in [None, Some("relative")] {
             let input = serde_json::json!({"command":"pwd"});
-            assert!(approved_input("Bash", &input, cwd).is_none());
+            assert!(approved("Bash", &input, cwd).is_none());
             assert!(session_key("Bash", &input, cwd).is_none());
             assert!(reported_scope(&input, cwd).is_none());
         }

@@ -708,6 +708,18 @@ fn a_denied_codex_command_run_again_is_asked_about_again() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+/// The status and output of a read-only command TerminalX ran itself, from
+/// the hook reply that answers for it in the provider's place.
+fn ran_by_terminalx(reply: &HookReply, kind: CliKind) -> Option<(i32, String)> {
+    let output = &reply.output.as_ref()?["hookSpecificOutput"];
+    let (decision, report) = match kind {
+        CliKind::Codex => (&output["permissionDecision"], &output["permissionDecisionReason"]),
+        CliKind::Claude => (&output["decision"]["behavior"], &output["decision"]["message"]),
+    };
+    assert_eq!(decision, "deny", "only a denial keeps the provider from running it: {output}");
+    crate::harness::read_only::ran_result(report.as_str()?)
+}
+
 fn command_frame(rig: &Rig, gate: &str, command: &str, cwd: &str) -> HookFrame {
     HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
         payload: json!({"cwd": cwd, "tool_name":"Bash", "tool_input":{"command":command}}) }
@@ -762,19 +774,156 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let mut commands = vec!["pwd; ls", "ls; cat file", "cat file | grep -n hello"];
-        if which::which("rg").is_ok() { commands.push("pwd; rg --files"); }
-        for command in commands {
-            let frame = command_frame(&rig, gate, command, "/workspace/app");
-            let updated = crate::harness::read_only::approved_input("Bash", &frame.payload["tool_input"], Some("/workspace/app")).unwrap();
-            let reply = rig.manager.on_hook(frame);
-            assert_eq!(reply.output, Some(if kind == CliKind::Codex { codex::pty::pre_tool_rewrite(updated) } else { claude::pty::permission_decision(true, Some(updated), vec![]) }));
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let app_path = app.to_str().unwrap();
+        let mut commands = vec![
+            ("pwd; ls", format!("{app_path}\nfile\n")),
+            ("ls; cat file", "file\nhello\n".into()),
+            ("cat file | grep -n hello", "1:hello\n".into()),
+        ];
+        if which::which("rg").is_ok() { commands.push(("pwd; rg --files", format!("{app_path}\nfile\n"))); }
+        for (command, expected) in commands {
+            let reply = rig.manager.on_hook(command_frame(&rig, gate, command, app_path));
+            // TerminalX ran it and answers with its result: the provider
+            // is given nothing to run in the user's shell (PRO-330).
+            assert_eq!(ran_by_terminalx(&reply, kind), Some((0, expected)), "{command}");
             assert!(rig.manager.pending_permissions().is_empty());
             assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
         }
         for command in ["pwd; touch file", "ls && rm file", "cat file | curl example.com", "ls > file"] {
             answer_command(&rig, command_frame(&rig, gate, command, "/workspace/app"), "deny", true);
         }
+    }
+}
+
+/// Codex records no item for a call its hook answered, so TerminalX shows
+/// the command it ran as a row of its own, with the command's own result.
+/// Claude's transcript carries the call and its result already.
+#[test]
+#[cfg(unix)]
+fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
+    for kind in [CliKind::Codex, CliKind::Claude] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let mut frame = command_frame(&rig, gate, "grep hello file", app.to_str().unwrap());
+        frame.payload["tool_use_id"] = json!("call_ran");
+        assert_eq!(ran_by_terminalx(&rig.manager.on_hook(frame), kind), Some((0, "hello\n".into())));
+        let events = rig.events();
+        let started = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallStarted { call_id, input, .. } if call_id == "terminalx-ran-call_ran" => Some(input.clone()),
+            _ => None,
+        });
+        let completed = events.iter().find_map(|e| match &e.payload {
+            Payload::ToolCallCompleted { call_id, result } if call_id == "terminalx-ran-call_ran" => Some(result.clone()),
+            _ => None,
+        });
+        if kind == CliKind::Codex {
+            assert_eq!(started, Some(json!({"command":"grep hello file", "cwd": app.to_str().unwrap()})));
+            let completed = completed.expect("the row completes");
+            assert_eq!((completed.text.as_str(), completed.is_error, completed.exit_code), ("hello\n", false, Some(0)));
+        } else {
+            assert!(started.is_none() && completed.is_none(), "Claude's transcript shows the call");
+        }
+    }
+}
+
+/// TerminalX runs discovery outside the provider's sandbox, so a sandbox
+/// that could narrow reads keeps every command on the card (PRO-330
+/// review); the CLI then runs an allowed one inside its sandbox.
+#[test]
+#[cfg(unix)]
+fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
+    for (kind, file, text) in [
+        (CliKind::Claude, ".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
+        (CliKind::Codex, ".codex/config.toml", "[permissions.filesystem]\ndeny_read = [\"~/.ssh\"]\n"),
+    ] {
+        let rig = Rig::in_mode(kind, "manual");
+        let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
+        let project = rig._dir.path().join("project");
+        std::fs::create_dir_all(project.join(file).parent().unwrap()).unwrap();
+        std::fs::write(project.join(file), text).unwrap();
+        // answer_command fails unless the command waits on a card.
+        let reply = answer_command(&rig, command_frame(&rig, gate, "pwd", project.to_str().unwrap()), "allow", true);
+        let output = reply.output.unwrap();
+        match kind {
+            CliKind::Claude => assert_eq!(output["hookSpecificOutput"]["decision"], json!({"behavior":"allow"}), "the CLI runs it, in its sandbox"),
+            CliKind::Codex => assert_eq!(output, json!({}), "the CLI runs it, in its sandbox"),
+        }
+    }
+}
+
+/// The rig's tab as a run's verifier, until dropped: every rig shares its ids.
+struct AsVerifier;
+
+impl AsVerifier {
+    fn noted() -> Self {
+        // Read the runs first, so that noting it is not lost to a later first read.
+        assert!(crate::orchestration::store::is_verifier(SESSION, TAB).is_some(), "the runs are readable");
+        crate::orchestration::store::note_verifier(SESSION, TAB);
+        assert_eq!(crate::orchestration::store::is_verifier(SESSION, TAB), Some(true));
+        Self
+    }
+}
+
+impl Drop for AsVerifier {
+    fn drop(&mut self) {
+        crate::orchestration::store::forget_verifier(SESSION, TAB);
+    }
+}
+
+/// A run's verifier asks at `PreToolUse`, in either agent, and TerminalX runs
+/// its read-only command itself (PRO-330). The answer is in that hook's own
+/// form: Claude Code 2.1.322 ignores one in `PermissionRequest` form ("Hook
+/// returned incorrect event name"), and would then run the command itself.
+/// Where the person has not let read-only commands run unasked, or the
+/// agent's sandbox could narrow what it reads, the command is refused, with
+/// the verifier sent to its file tools, and never left to the agent's shell.
+#[test]
+#[cfg(unix)]
+fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
+        let _verifier = AsVerifier::noted();
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::write(app.join("file"), "hello\n").unwrap();
+        let frame = || command_frame(&rig, "PreToolUse", "cat file", app.to_str().unwrap());
+        let answer = |reply: HookReply| reply.output.expect("the hook is answered")["hookSpecificOutput"].clone();
+
+        let output = answer(rig.manager.on_hook(frame()));
+        assert_eq!((&output["hookEventName"], &output["permissionDecision"]), (&json!("PreToolUse"), &json!("deny")), "{kind:?}: {output}");
+        assert!(output.get("decision").is_none(), "{kind:?}: no PermissionRequest decision in a PreToolUse answer: {output}");
+        let report = output["permissionDecisionReason"].as_str().unwrap();
+        assert_eq!(crate::harness::read_only::ran_result(report), Some((0, "hello\n".into())), "{kind:?}: TerminalX ran it");
+        // Codex's own form, the one its discovery commands are answered in; Claude's PreToolUse is the same.
+        assert_eq!(output, codex::pty::pre_tool_ran(report)["hookSpecificOutput"], "{kind:?}");
+        assert!(rig.manager.pending_permissions().is_empty(), "{kind:?}: nobody is asked for a verifier");
+
+        let refused = |reason: &str| {
+            let output = answer(rig.manager.on_hook(frame()));
+            assert_eq!(output, crate::orchestration::guard::refusal_output(reason)["hookSpecificOutput"], "{kind:?}");
+            assert!(["Read", "Grep", "Glob"].iter().all(|tool| reason.contains(tool)));
+            assert!(rig.manager.pending_permissions().is_empty(), "{kind:?}: refused, not asked");
+        };
+        // Read-only commands off: refused, whatever the sandbox.
+        let mut settings = store::settings::load();
+        settings.agents.read_only_commands = false;
+        store::settings::save(&settings).unwrap();
+        refused(crate::orchestration::guard::NOT_ALLOWED);
+        settings.agents.read_only_commands = true;
+        store::settings::save(&settings).unwrap();
+        // The agent's sandbox could narrow what it reads, in the command's own project: refused.
+        let (file, text) = match kind {
+            CliKind::Claude => (".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
+            CliKind::Codex => (".codex/config.toml", "[permissions.filesystem]\ndeny_read = [\"~/.ssh\"]\n"),
+        };
+        std::fs::create_dir_all(app.join(file).parent().unwrap()).unwrap();
+        std::fs::write(app.join(file), text).unwrap();
+        refused(crate::orchestration::guard::SANDBOXED);
     }
 }
 
@@ -827,8 +976,12 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
         std::process::Command::new("/bin/sh").current_dir(cwd).args(["-c", command]).output().unwrap()
     };
     let discovery = rig.manager.on_hook(codex_0164_frame(&rig, &a, "pwd; cat relative-file | grep hello"));
-    assert!(execute(&discovery, &a).status.success(), "normal Codex discovery must run without a card");
-    assert_eq!(execute(&discovery, &b).status.code(), Some(125), "a session directory must not stand in for another execution workdir");
+    // TerminalX runs discovery itself, only ever in the reported directory,
+    // and says so: Codex's hook leaves out the workdir it would have used.
+    assert_eq!(ran_by_terminalx(&discovery, CliKind::Codex), Some((0, format!("{}\nhello\n", a.display()))), "normal Codex discovery must run without a card");
+    let reason = discovery.output.as_ref().unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.contains("does not tell TerminalX a call's workdir"), "{reason}");
+    assert!(discovery.output.as_ref().unwrap()["hookSpecificOutput"].get("updatedInput").is_none(), "Codex must not run anything in its shell for discovery");
     assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionRequested { .. })));
 
     let first = answer_command(&rig, codex_0164_frame(&rig, &a, "rm relative-file"), crate::harness::read_only::SESSION_OPTION, true);
@@ -861,7 +1014,8 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        assert!(rig.manager.on_hook(command_frame(&rig, gate, "pwd", "/workspace/app")).output.is_some());
+        let app = rig._dir.path().to_str().unwrap();
+        assert_eq!(ran_by_terminalx(&rig.manager.on_hook(command_frame(&rig, gate, "pwd", app)), kind).map(|(status, _)| status), Some(0));
         let mut settings = store::settings::load();
         settings.agents.read_only_commands = false;
         store::settings::save(&settings).unwrap();
@@ -898,7 +1052,8 @@ fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
 #[cfg(unix)]
 fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
-    assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", "/workspace/app")).output.is_some());
+    let app = rig._dir.path().to_str().unwrap();
+    assert_eq!(ran_by_terminalx(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "pwd", app)), CliKind::Codex).map(|(status, _)| status), Some(0));
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
     answer_command(&rig, command_frame(&rig, "PreToolUse", "touch note", "/workspace/app"), crate::harness::read_only::SESSION_OPTION, true);
     assert!(rig.manager.on_hook(command_frame(&rig, "PreToolUse", "touch note", "/workspace/app")).output.is_some());
@@ -969,7 +1124,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1244,7 +1399,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -2955,4 +3110,311 @@ fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns
     // A request no longer open is refused, and answers nothing.
     assert!(rig.manager.respond_permission(SESSION, TAB, &request, "allow").is_err());
     assert_eq!(rig.observer.answered.lock().unwrap().len(), 1);
+}
+
+/// A real PTY exits, but a per-launch inspection failure leaves its ownership
+/// unresolved. Exercise the actual destructive caller, not a model of it.
+#[test]
+fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
+    let mut rig = Rig::new();
+    rig.pane = SessionManager::pane_id(TAB);
+    if let Engine::Cli(cli) = &mut rig.rt.lock().unwrap().engine { cli.pane_id = rig.pane.clone(); }
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "stop retention", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.start_turn();
+    let before = index::get(SESSION).unwrap();
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let pid = rig.manager.terminals.pid(&rig.pane).unwrap();
+    rig.rt.lock().unwrap().child_pid = Some(pid);
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::harness::host::group_or_process_alive(pid) {
+        assert!(Instant::now() < deadline, "fixture leader did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = rig.manager.delete_session(SESSION);
+    let retained = index::get(SESSION);
+    // Clear only the test injection even on the old failing control.
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(result.is_err(), "unconfirmed stop was acknowledged: {result:?}; index retained: {}", retained.is_ok());
+    assert_eq!(retained.unwrap().id, before.id);
+    assert!(rig.transcript.is_file(), "failed deletion removed provider transcript");
+    assert!(rig.rt.lock().unwrap().stopping, "failed stop must keep launch admission closed");
+    rig.manager.delete_session(SESSION).unwrap();
+    assert!(index::get(SESSION).is_err(), "confirmed retry should complete deletion");
+}
+
+#[test]
+fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let first = rig.manager.stop(SESSION, TAB);
+    assert!(first.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{first:?}");
+    assert!(!rig.manager.terminals.is_live(&rig.pane));
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
+    let retry = rig.manager.stop(SESSION, TAB);
+    assert!(retry.is_err(), "retry lost the detached ownership: {retry:?}");
+    assert!(crate::harness::host::is_alive(replacement), "retry targeted the replacement pane");
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(crate::harness::host::is_alive(replacement));
+    assert!(!rig.rt.lock().unwrap().stopping);
+}
+
+#[test]
+fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
+    let rig = Rig::with_live_pane();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "worktreeName": "retained-worktree", "title": "retained", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(std::slice::from_ref(&entry)).unwrap();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = crate::local_runtime::workspaces::execute(&rig.manager, rig.manager.sink.as_ref(), "relocate", json!({"sessionId":SESSION}));
+    assert!(result.is_err(), "relocation acknowledged unresolved ownership: {result:?}");
+    let retained = index::get(SESSION).unwrap();
+    assert_eq!(retained.worktree_name, entry.worktree_name);
+    assert_eq!(retained.cwd, entry.cwd);
+    assert!(rig.transcript.is_file());
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::local_runtime::workspaces::execute(&rig.manager, rig.manager.sink.as_ref(), "relocate", json!({"sessionId":SESSION})).unwrap();
+    assert!(index::get(SESSION).unwrap().worktree_name.is_none());
+}
+
+/// An earlier launch whose exit cannot be confirmed refuses only the start
+/// that found it (#467 review): the tab is not left stopping, and Stop still
+/// finds the launch by its pane and ends it.
+#[test]
+fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let detached = rig.manager.terminals.begin_stop_all(std::slice::from_ref(&rig.pane));
+    assert!(!rig.manager.terminals.is_live(&rig.pane));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let refused = rig.manager.require_prior_cli_exit(&mut rt, &rig.pane);
+        assert!(refused.as_ref().is_err_and(|error| error.to_string().contains("has not exited yet")), "{refused:?}");
+        assert!(!rt.stopping, "the tab is not left stopping");
+    }
+    assert!(!rig.manager.terminals.detached_stops(&rig.pane).is_empty(), "the launch is still owned, for Stop to end");
+    assert!(!detached.is_empty());
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.stop(SESSION, TAB).unwrap();
+    let mut rt = rig.rt.lock().unwrap();
+    assert!(!rt.stopping);
+    rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
+}
+
+/// #467 review: the CLI exits into a #437 shell, whose respawn lets go of
+/// the old process with a terminate that waits up to two seconds for it.
+/// A prompt in that window waits for it and starts the CLI, and the tab is
+/// never left refusing later prompts. One that cannot confirm the old
+/// process's exit refuses just itself.
+#[test]
+fn a_prompt_while_the_exited_cli_is_still_going_neither_locks_the_tab_nor_targets_the_shell() {
+    for confirmable in [true, false] {
+        let mut rig = Rig::new();
+        rig.pane = SessionManager::pane_id(TAB);
+        let program = rig._dir.path().join("claude-fixture");
+        let ran = rig._dir.path().join("claude-fixture.ran");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.ran\"\nIFS= read -r line\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _program = claude::pty::claude_program_for_tests(program);
+        restartable(&rig);
+        let spec = |command| pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command, env: &[] };
+        // The CLI, as Claude Code's TUI does, ignores SIGTERM.
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec(Some("sh -c 'trap \"\" TERM; echo ignoring-term; while :; do sleep 0.1; done'"))).unwrap();
+        let old = rig.manager.terminals.pid(&rig.pane).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !String::from_utf8_lossy(&rig.manager.terminals.read_output(&rig.pane).unwrap_or_default()).contains("ignoring-term") {
+            assert!(Instant::now() < deadline, "the stand-in CLI never started");
+            std::thread::sleep(MOMENT);
+        }
+        let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+        // It exits into a shell in the same terminal (#437).
+        { let mut rt = rig.rt.lock().unwrap(); rig.manager.release_cli(&mut rt); }
+        rig.manager.terminals.respawn(rig.manager.sink.clone(), &rig.pane, spec(None)).unwrap();
+        assert!(crate::harness::host::is_alive(old), "the old process is still going");
+        if !confirmable { failure.store(true, std::sync::atomic::Ordering::SeqCst); }
+        let first = rig.manager.ensure_started(SESSION, TAB);
+        assert!(!rig.rt.lock().unwrap().stopping, "the tab is not left stopping");
+        if confirmable {
+            first.unwrap();
+        } else {
+            assert!(first.is_err(), "the prompt that could not confirm the old process is refused");
+            let errors: Vec<_> = rig.events().into_iter().filter(|event| matches!(event.payload, Payload::Error { .. })).map(|event| serde_json::to_string(&event.payload).unwrap()).collect();
+            assert!(errors.iter().any(|error| error.contains("has not exited yet")), "the chat says why: {errors:?}");
+            failure.store(false, std::sync::atomic::Ordering::SeqCst);
+            rig.manager.ensure_started(SESSION, TAB).expect("a later prompt starts once the old process can be confirmed gone");
+        }
+        assert!(!crate::harness::host::is_alive(old), "the old process was ended before the CLI started");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ran.exists() {
+            assert!(Instant::now() < deadline, "the CLI never started");
+            std::thread::sleep(MOMENT);
+        }
+        rig.manager.ensure_started(SESSION, TAB).expect("a later prompt works");
+        rig.manager.stop(SESSION, TAB).unwrap();
+    }
+}
+
+/// A settings restart admits the tab's settings from the index first.
+fn restartable(rig: &Rig) {
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "restart", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+}
+
+#[test]
+fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
+    for complete_failure in [false, true] {
+        let rig = Rig::with_live_pane();
+        restartable(&rig);
+        let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+        failure.store(true, std::sync::atomic::Ordering::SeqCst);
+        rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig.manager.terminals.is_running(&rig.pane) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        assert!(!rig.manager.terminals.is_live(&rig.pane));
+        if complete_failure {
+            let result = rig.manager.claim_restart_completion(&rig.rt, &work, false);
+            assert!(result.as_ref().is_err_and(|error| error.to_string().contains("exit could not be confirmed")));
+        }
+        let stop = rig.manager.stop(SESSION, TAB);
+        assert!(stop.as_ref().is_err_and(|error| error.to_string().contains("PTY process exit could not be confirmed")), "{stop:?}");
+        assert!(rig.rt.lock().unwrap().stopping);
+        assert!(rig.manager.stopping_ptys.lock().unwrap()[&key_of(SESSION, TAB)].iter()
+            .any(|pane| pane.same_launch(work.process.as_ref().unwrap())));
+        failure.store(false, std::sync::atomic::Ordering::SeqCst);
+        rig.manager.stop(SESSION, TAB).unwrap();
+        assert!(!rig.rt.lock().unwrap().stopping);
+        assert!(!rig.manager.stopping_ptys.lock().unwrap().contains_key(&key_of(SESSION, TAB)));
+        // Explicit Stop cancelled the claim: late completion cannot reopen it.
+        assert!(rig.manager.claim_restart_completion(&rig.rt, &work, true).unwrap().is_none());
+    }
+}
+
+#[test]
+fn restart_completion_retires_only_its_exact_current_handle() {
+    for superseded in [false, true] {
+        let rig = Rig::with_live_pane();
+        restartable(&rig);
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        assert!(work.process.as_ref().unwrap().wait(Duration::from_secs(5)));
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+            cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+            command: Some("sh -c 'read line'"), env: &[],
+        }).unwrap();
+        let successor = rig.manager.terminals.pid(&rig.pane).unwrap();
+        let newer = rig.manager.terminals.pending_stops(&rig.pane);
+        let key = key_of(SESSION, TAB);
+        rig.manager.retain_stopping_ptys(&key, &newer);
+        let successor_claim = Arc::new(tui::Tail::unknown(crate::harness::codex::rollout::decode_line));
+        if superseded { rig.rt.lock().unwrap().restart_claim = Some(successor_claim.clone()); }
+        assert!(rig.manager.claim_restart_completion(&rig.rt, &work, true).unwrap().is_none());
+        {
+            let retained = rig.manager.stopping_ptys.lock().unwrap();
+            assert!(newer.iter().all(|new| retained[&key].iter().any(|pane| pane.same_launch(new))));
+            assert_eq!(retained[&key].iter().any(|pane| pane.same_launch(work.process.as_ref().unwrap())), superseded,
+                "only the applicable claim can retire its exact handle");
+        }
+        if superseded {
+            assert!(rig.rt.lock().unwrap().restart_claim.as_ref().is_some_and(|claim| Arc::ptr_eq(claim, &successor_claim)));
+        }
+        assert!(crate::harness::host::is_alive(successor), "completion must not stop the replacement");
+        rig.manager.stop(SESSION, TAB).unwrap();
+        assert!(!crate::harness::host::is_alive(successor));
+        assert!(!rig.manager.stopping_ptys.lock().unwrap().contains_key(&key));
+    }
+}
+
+#[test]
+fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
+    let rig = Rig::with_live_pane();
+    let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
+    failure.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.manager.terminals.write(&rig.pane, b"exit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let captured = rig.manager.terminals.begin_stop_all(std::slice::from_ref(&rig.pane));
+    let first = pty::StoppingPane::wait_all(&captured, Duration::ZERO);
+    assert!(!first);
+    assert!(SessionManager::settle_pty_wait(&captured, first).unwrap_err().to_string().contains("PTY process exit could not be confirmed"));
+    rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
+        cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+        command: Some("sh -c 'read line'"), env: &[],
+    }).unwrap();
+    let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
+    assert!(SessionManager::settle_pty_wait(&captured, first).is_err(), "a new pane cannot settle the old handle");
+    failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    SessionManager::settle_pty_wait(&captured, first).unwrap();
+    assert!(crate::harness::host::is_alive(replacement), "confirmation must not target the reused pane");
+}
+
+#[test]
+fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
+    let rig = Rig::with_live_pane();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "retained", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    let pid = rig.manager.terminals.pid(&rig.pane).unwrap();
+    rig.rt.lock().unwrap().stop_in_flight = true;
+    let error = rig.manager.stop_all_confirmed().unwrap_err().to_string();
+    assert_eq!(error, "Stop all could not settle every tab: Stop is already in progress.");
+    assert!(!crate::harness::host::is_alive(pid), "the PTY batch itself must have completed");
+    assert!(rig.manager.terminals.owned_groups().is_empty());
+    assert!(rig.rt.lock().unwrap().stop_in_flight, "terminal completion cannot settle another stop operation");
+    assert!(rig.rt.lock().unwrap().stopping);
+    assert!(index::get(SESSION).is_ok(), "failed stop-all must retain session metadata");
 }

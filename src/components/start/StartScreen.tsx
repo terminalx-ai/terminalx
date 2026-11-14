@@ -104,7 +104,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
                 aria-describedby={`start-card-hint-${action.id}`}
                 disabled={busy !== null}
                 onClick={() => void run(action)}
-                className="flex h-28 flex-col justify-between rounded-xl bg-composer glass p-3.5 text-left shadow-surface hairline outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-60"
+                className="flex h-28 flex-col justify-between rounded-xl bg-composer p-3.5 text-left shadow-surface hairline outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-60"
               >
                 {busy === action.id ? <Loader2 aria-hidden className="size-5 animate-spin text-muted-foreground" /> : <Icon aria-hidden className="size-5 text-muted-foreground" />}
                 <span className="min-w-0">
@@ -128,7 +128,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
         )}
 
         {(noAgent || settingUp || signedOut) && (
-          <section aria-label="Set up an agent" data-testid="start-no-agent" className={cn("mt-5 rounded-lg px-3 py-2.5 text-xs", noAgent || signedOut ? "bg-warning/10" : "bg-composer glass hairline")}>
+          <section aria-label="Set up an agent" data-testid="start-no-agent" className={cn("mt-5 rounded-lg px-3 py-2.5 text-xs", noAgent || signedOut ? "bg-warning/10" : "bg-composer hairline")}>
             {noAgent || signedOut ? <div className="flex items-center gap-1.5 font-medium text-warning">
               <CircleAlert className="size-3.5" /> {noAgent ? "No agent is installed" : "No agent is signed in"}
             </div> : <div className="font-medium">Set up an agent</div>}
@@ -161,7 +161,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
       <div
         aria-hidden
         className={cn(
-          "pointer-events-none absolute inset-3 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent/70 bg-background/80 text-sm font-medium transition-opacity",
+          "pointer-events-none absolute inset-3 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent/70 bg-background text-sm font-medium transition-opacity",
           dragging ? "opacity-100" : "opacity-0",
         )}
       >

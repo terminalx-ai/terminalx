@@ -16,7 +16,8 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCo
 
 vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <div>Review diff</div> }));
 vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>Review PR</div> }));
-const { dropEditors, getEditors, openDiff, openPr, setEditorDirty } = await import("@/lib/editors");
+vi.mock("@/components/changes/ConflictView", () => ({ ConflictView: () => <div>Review conflict</div> }));
+const { dropEditors, getEditors, openConflict, openDiff, openPr, setConflictCount, setEditorDirty } = await import("@/lib/editors");
 const { ask } = await import("@tauri-apps/plugin-dialog");
 const { getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
 const { newTab } = await import("@/lib/tabActions");
@@ -65,7 +66,12 @@ beforeEach(async () => {
   backend.calls = [];
 });
 
-afterEach(() => { cleanup(); dropEditors(() => true); });
+afterEach(async () => {
+  cleanup();
+  dropEditors(() => true);
+  const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+  for (const toast of getErrorToasts()) dismissError(toast.id);
+});
 
 describe("the new-tab button", () => {
   it("ends the row of tabs and opens the same menu as before", async () => {
@@ -189,6 +195,45 @@ describe("the tab shortcuts", () => {
     expect(shown()).toBe("Review");
     void shell;
   });
+
+  it("leave a tab whose agent would not stop open, on screen, and say so (PRO-291)", async () => {
+    const { api } = await import("@/lib/api");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const refused = vi.spyOn(api, "removeTab").mockRejectedValueOnce("Claude Code didn't stop within 10 seconds");
+    render(<TabsHarness />);
+    press(composer(), digit(3));
+    press(composer(), { key: "w", code: "KeyW" });
+    await flush();
+    await flush();
+    expect(names()).toContain("Review");
+    expect(shown()).toBe("Review");
+    const [toast] = getErrorToasts();
+    expect(toast).toMatchObject({ title: "Couldn't close the chat. Try again.", action: "Claude Code didn't stop within 10 seconds, so “Review” is still open", key: "close:agent:a3" });
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
+    refused.mockRestore();
+    dismissError(toast.id);
+  });
+});
+
+describe("the local new-tab menu (PRO-291)", () => {
+  it("closes a tab whose agent exited while starting and says why", async () => {
+    const { agent } = await import("@/lib/api");
+    const { dismissError, getErrorToasts } = await import("@/lib/errorToasts");
+    const started = vi.spyOn(agent, "startOnOpen").mockRejectedValueOnce("codex exited while starting\nerror: unexpected argument '--yolo' found");
+    render(<TabsHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+    await flush();
+    await flush();
+    expect(backend.callsOf("add_tab")).toHaveLength(1);
+    expect(backend.callsOf("remove_tab")).toHaveLength(1);
+    expect(getSessionStore().sessions.find((entry) => entry.id === "a")!.tabs.map((tab) => tab.id)).toEqual(["a1", "a2", "a3"]);
+    const [toast] = getErrorToasts();
+    expect(toast).toMatchObject({ title: "Couldn't open a new Codex tab: codex exited while starting", cause: "error: unexpected argument '--yolo' found" });
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
+    started.mockRestore();
+    dismissError(toast.id);
+  });
 });
 
 describe("the cloud new-tab menu's disabled hint", () => {
@@ -228,6 +273,21 @@ describe("review tabs in the workspace row", () => {
   const review = () => screen.queryByRole("tabpanel", { name: /app.ts|PR #12/ });
   const label = (kind: "diff" | "pr") => kind === "diff" ? "app.ts · All changes" : "PR #12";
   const chooseReview = (kind: "diff" | "pr") => fireEvent.click(within(strip()).getByRole("tab", { name: label(kind) }));
+
+  it("names a merge conflict tab by its file and the conflicts left in it, with the warning icon (PRO-293)", () => {
+    render(<TabsHarness reviews />);
+    let id = "";
+    act(() => { id = openConflict("a", FEATURE, "src/billing/seats.ts", { head: "1".repeat(40), mergeHead: "5".repeat(40) }, 2); });
+    const conflict = within(strip()).getByRole("tab", { name: "seats.ts · 2 conflicts" });
+    expect(shown()).toBe("seats.ts · 2 conflicts");
+    expect(conflict.getAttribute("aria-description")).toBe("Merge conflict");
+    const icon = within(conflict).getByLabelText("Merge conflict");
+    expect(icon.getAttribute("class")).toContain("text-warning");
+    expect(screen.getByText("Review conflict")).toBeTruthy();
+    // The count follows the latest read of the file.
+    act(() => setConflictCount(id, 1));
+    expect(within(strip()).getByRole("tab", { name: "seats.ts · 1 conflict" })).toBeTruthy();
+  });
 
   it.each(["diff", "pr"] as const)("clicks select agent, terminal and browser tabs while a %s stays open", async (kind) => {
     render(<TabsHarness reviews />);

@@ -687,7 +687,7 @@ mod tests {
         let f = Fixture::new();
         let project = crate::store::projects::add(f.project.path.as_str()).unwrap();
         let save = |archive: &str| crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         save("echo ran >> \"$TERMINALX_REPO_ROOT/runs\"; case $TERMINALX_BRANCH in *fails*) echo cleanup-failed; exit 7;; esac");
         let success = f.worktree("success");

@@ -18,7 +18,8 @@ import { QuickChatMenuItems, RenameSessionItem } from "@/components/session/Quic
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { SessionView, type SessionChrome } from "@/components/session/SessionView";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
-import { agent, floatingWindow, type ImageInput, type OpenTarget } from "@/lib/api";
+import { floatingWindow, type FileInput, type ImageInput, type OpenTarget } from "@/lib/api";
+import { sendFirstMessage } from "@/lib/sessionBackend";
 import { cn } from "@/lib/cn";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { bootFloating, hideFloatingWindow, saveFloatingSettings, setFloatingSession, useFloating } from "@/lib/floating";
@@ -100,9 +101,9 @@ export function FloatingShell() {
   }, [selectedId, standalone]);
 
   // The first prompt of a new chat is sent once its session exists, as in the main window.
-  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[]) => {
-    void agent
-      .send(sessionId, tabId, text, images)
+  const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
+    // Files attached on the new-session screen are stored now that the session exists (PRO-290).
+    void sendFirstMessage(sessionId, tabId, text, images, files)
       .then((out) => out.events.forEach(applyEvent))
       .catch((e) => console.error("first send failed", e));
   }, []);

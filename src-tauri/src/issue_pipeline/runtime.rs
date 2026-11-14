@@ -143,6 +143,7 @@ mod tests {
             max_rounds: 3,
             review_commit: None,
             review_requested_at: None,
+            merge_check: None,
             review_pending_since: None,
             findings_sent_round: 0,
             verdict: None,

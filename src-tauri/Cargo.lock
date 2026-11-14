@@ -3524,6 +3524,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.1",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -4064,7 +4066,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raccoon"
-version = "0.2.30"
+version = "0.2.32"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4101,6 +4103,7 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-foundation",
  "objc2-speech",
+ "objc2-user-notifications",
  "parking_lot",
  "portable-pty",
  "rand_core 0.6.4",
@@ -5662,6 +5665,7 @@ dependencies = [
  "base64 0.22.1",
  "libc",
  "raccoon",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

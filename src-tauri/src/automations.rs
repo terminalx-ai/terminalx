@@ -182,6 +182,15 @@ pub struct Automation {
     pub session_id: Option<String>,
     #[serde(default)]
     pub reuse_session: bool,
+    /// Archive a run's session when the run completes (#887). Absent in what
+    /// was saved before the switch existed, so those keep their sessions in
+    /// the sidebar until a person turns it on.
+    #[serde(default)]
+    pub archive_on_complete: bool,
+    /// With `archive_on_complete`: leave the newest completed run's session
+    /// in the sidebar and archive the one it replaces.
+    #[serde(default)]
+    pub keep_latest_run_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
     pub schedule: AutomationSchedule,
@@ -226,6 +235,12 @@ pub struct AutomationInput {
     pub session_id: Option<String>,
     #[serde(default)]
     pub reuse_session: bool,
+    /// Off when omitted: an older client saving an automation must not turn
+    /// archiving on or off behind a person's back.
+    #[serde(default)]
+    pub archive_on_complete: bool,
+    #[serde(default)]
+    pub keep_latest_run_visible: bool,
     #[serde(default)]
     pub base_ref: Option<String>,
     pub schedule: AutomationSchedule,
@@ -327,6 +342,8 @@ pub fn definition_from_input(
         workspace: input.workspace,
         session_id: input.session_id,
         reuse_session: input.reuse_session,
+        archive_on_complete: input.archive_on_complete,
+        keep_latest_run_visible: input.keep_latest_run_visible,
         base_ref: input.base_ref,
         schedule: input.schedule,
         precheck: input.precheck,
@@ -865,6 +882,7 @@ fn start_run(
                 }),
                 cwd,
                 tab: Some(run_tab(automation)),
+                orchestrate: false,
             },
         )
         .map_err(anyhow::Error::msg)?;
@@ -1316,8 +1334,50 @@ pub fn complete_from_hook(
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
+        archive_finished_run(app, &run);
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
+        }
+    }
+}
+
+/// The sessions to archive now that `finished` has completed (#887): its own,
+/// or with `keep_latest_run_visible` the one it replaced as the newest
+/// completed run. A run that failed, was stopped or is waiting on a person
+/// never reaches here, and an earlier run of the same kind is left to
+/// whoever brought it back.
+fn sessions_to_archive(automation: &Automation, runs: &[AutomationRun], finished: &AutomationRun) -> Vec<String> {
+    // One long-lived session has nothing to archive. An issue pipeline goes on
+    // in the author's session after its first turn (review, conflicts, merge).
+    let pipeline = automation.pipeline.as_ref().is_some_and(|options| options.auto_merge || options.resolve_conflicts);
+    if !automation.archive_on_complete || automation.reuse_session || pipeline || finished.status != AutomationRunStatus::Completed {
+        return Vec::new();
+    }
+    let Some(own) = finished.session_id.as_deref() else {
+        return Vec::new();
+    };
+    if !automation.keep_latest_run_visible {
+        return vec![own.to_string()];
+    }
+    runs.iter()
+        .filter(|run| run.status == AutomationRunStatus::Completed && run.run_number < finished.run_number)
+        .filter(|run| run.session_id.as_deref().is_some_and(|id| id != own))
+        .max_by_key(|run| run.run_number)
+        .and_then(|run| run.session_id.clone())
+        .into_iter()
+        .collect()
+}
+
+/// Archive what [`sessions_to_archive`] names. A session already gone, or an
+/// index that cannot be written, leaves the run as it ended: it is only housekeeping.
+fn archive_finished_run(app: &impl AutomationHost, finished: &AutomationRun) {
+    let Ok(automation) = automation_store::get(&finished.automation_id) else {
+        return;
+    };
+    let runs = if automation.keep_latest_run_visible { automation_store::list_runs(&automation.id).unwrap_or_default() } else { Vec::new() };
+    for id in sessions_to_archive(&automation, &runs, finished) {
+        if let Err(error) = crate::session_archive::set_archived(app.sink().as_ref(), std::slice::from_ref(&id), true, crate::session_archive::By::Automation) {
+            log::warn!("automation {}: archive run session {id}: {error:#}", automation.id);
         }
     }
 }
@@ -1659,6 +1719,7 @@ pub(crate) fn start_recovered_scheduler(app: impl AutomationHost) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn labels_after_a_report_keep_the_rest_and_ignore_case() {
@@ -1690,6 +1751,8 @@ mod tests {
             workspace: AutomationWorkspace::NewWorktree,
             session_id: None,
             reuse_session: false,
+            archive_on_complete: false,
+            keep_latest_run_visible: false,
             base_ref: None,
             schedule: AutomationSchedule {
                 kind: ScheduleKind::Preset,
@@ -2024,5 +2087,210 @@ mod tests {
         assert_eq!(tab.harness, bypass.harness);
         assert_eq!(tab.model, bypass.model);
         assert_eq!(tab.effort, bypass.effort);
+    }
+
+    // Archiving a completed run's session (#887).
+
+    /// A host with an event sink and no session manager: ending a run needs
+    /// only the first.
+    #[derive(Clone)]
+    struct EndHost(Arc<crate::sink::BroadcastSink>);
+
+    impl AutomationHost for EndHost {
+        fn sink(&self) -> Arc<dyn EventSink> {
+            self.0.clone()
+        }
+        fn sessions(&self) -> Result<crate::session::SessionManager> {
+            bail!("ending a run asks for no session manager")
+        }
+    }
+
+    fn end_host() -> EndHost {
+        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)))
+    }
+
+    /// An automation that archives its runs, saved in the store.
+    fn archiving() -> Automation {
+        let mut value = automation();
+        value.archive_on_complete = true;
+        automation_store::save(std::slice::from_ref(&value)).unwrap();
+        value
+    }
+
+    /// One run of `automation` in a session of its own, still running.
+    fn running_run(automation: &Automation) -> (AutomationRun, String, String) {
+        let run = automation_store::insert_run(new_run(&automation.id, AutomationTrigger::Manual, None, AutomationRunStatus::Running)).unwrap();
+        let session = format!("session-{}", run.run_number);
+        let tab = format!("{session}-tab");
+        let run = automation_store::replace_run(&automation.id, &run.run_id, |value| {
+            value.session_id = Some(session.clone());
+            value.tab_id = Some(tab.clone());
+            Ok(())
+        })
+        .unwrap();
+        let created = index::now();
+        let entry: index::SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": session, "projectPath": "/nonexistent-project", "cwd": "/nonexistent-project",
+            "title": format!("{} · Run {}", automation.name, run.run_number), "created": created, "modified": created,
+            "tabs": [{ "id": tab, "harness": "claude", "created": created }],
+            "automation": { "id": automation.id, "name": automation.name, "runId": run.run_id, "runNumber": run.run_number },
+        }))
+        .unwrap();
+        index::update(|sessions| {
+            sessions.push(entry);
+            Ok(())
+        })
+        .unwrap();
+        (run, session, tab)
+    }
+
+    fn archived(session: &str) -> bool {
+        index::get(session).unwrap().archived
+    }
+
+    fn complete(host: &EndHost, automation: &Automation) -> String {
+        let (_, session, tab) = running_run(automation);
+        complete_from_hook(host, &session, &tab, Some("All clean.".into()));
+        session
+    }
+
+    #[test]
+    fn a_completed_run_leaves_the_sidebar_and_its_history_still_opens_it() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let heard = seen.clone();
+        host.0.listen("session_updated", Box::new(move |payload| heard.lock().unwrap().push(payload.to_string())));
+        let automation = archiving();
+
+        let session = complete(&host, &automation);
+
+        assert!(archived(&session));
+        // Set aside on purpose: the retention that lets go of what the idle sweep archived leaves it be.
+        assert!(!index::get(&session).unwrap().archive.auto_archived);
+        assert_eq!(seen.lock().unwrap().len(), 1, "the windows hear of it once");
+        assert!(seen.lock().unwrap()[0].contains(&session));
+        // The history lists the run, with its session to open, archived or not.
+        let runs = automation_store::list_runs(&automation.id).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].status, runs[0].session_id.as_deref()), (AutomationRunStatus::Completed, Some(session.as_str())));
+        assert_eq!(automation_store::get(&automation.id).unwrap().last_outcome, Some(AutomationRunStatus::Completed));
+    }
+
+    #[test]
+    fn a_failed_run_and_a_run_still_waiting_stay_in_the_sidebar() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+
+        let (_, failed, tab) = running_run(&automation);
+        fail_from_hook(&host, &failed, &tab, "The agent stopped on an error.");
+        assert_eq!(automation_store::get(&automation.id).unwrap().last_outcome, Some(AutomationRunStatus::Failed));
+        assert!(!archived(&failed));
+
+        // Running, or waiting for the person, is not ended: nothing is archived.
+        let (_, waiting, _) = running_run(&automation);
+        assert!(!archived(&waiting));
+        for status in [AutomationRunStatus::Pending, AutomationRunStatus::Running, AutomationRunStatus::Failed, AutomationRunStatus::Cancelled, AutomationRunStatus::TimedOut] {
+            let mut run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+            run.status = status;
+            assert!(sessions_to_archive(&automation, &[], &run).is_empty(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_reused_session_is_never_archived() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let mut automation = automation();
+        automation.archive_on_complete = true;
+        automation.reuse_session = true;
+        automation_store::save(std::slice::from_ref(&automation)).unwrap();
+
+        let session = complete(&host, &automation);
+
+        assert!(!archived(&session), "one long-lived session: the switch does nothing");
+    }
+
+    #[test]
+    fn existing_automations_keep_their_sessions_until_the_switch_is_turned_on() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        // As saved before the switch existed: neither field is there.
+        let mut stored = serde_json::to_value(automation()).unwrap();
+        stored.as_object_mut().unwrap().remove("archiveOnComplete");
+        stored.as_object_mut().unwrap().remove("keepLatestRunVisible");
+        let loaded: Automation = serde_json::from_value(stored).unwrap();
+        assert!(!loaded.archive_on_complete && !loaded.keep_latest_run_visible);
+        automation_store::save(std::slice::from_ref(&loaded)).unwrap();
+        assert!(!archived(&complete(&host, &loaded)));
+
+        // Turned on, the next run's session goes.
+        let mut turned_on = loaded;
+        turned_on.archive_on_complete = true;
+        automation_store::save(std::slice::from_ref(&turned_on)).unwrap();
+        assert!(archived(&complete(&host, &turned_on)));
+    }
+
+    #[test]
+    fn an_input_saves_the_switches_and_an_input_without_them_turns_them_off() {
+        let now = at("2026-09-05T12:00:00Z");
+        let omitted = definition_from_input(automation_input(None, false), None, now).unwrap();
+        assert!(!omitted.archive_on_complete && !omitted.keep_latest_run_visible);
+
+        let mut input = automation_input(None, false);
+        input.archive_on_complete = true;
+        input.keep_latest_run_visible = true;
+        let saved = definition_from_input(input, Some(&omitted), now).unwrap();
+        assert!(saved.archive_on_complete && saved.keep_latest_run_visible);
+        let round_trip: Automation = serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+        assert!(round_trip.archive_on_complete && round_trip.keep_latest_run_visible);
+    }
+
+    #[test]
+    fn keeping_the_latest_run_archives_the_one_it_replaces() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let mut automation = automation();
+        automation.archive_on_complete = true;
+        automation.keep_latest_run_visible = true;
+        automation_store::save(std::slice::from_ref(&automation)).unwrap();
+
+        let first = complete(&host, &automation);
+        assert!(!archived(&first), "the latest result stays one click away");
+
+        let second = complete(&host, &automation);
+        assert!((archived(&first), archived(&second)) == (true, false));
+
+        // A failed run stays visible and is not what the next one replaces.
+        let (_, failed, tab) = running_run(&automation);
+        fail_from_hook(&host, &failed, &tab, "The agent stopped on an error.");
+        let fourth = complete(&host, &automation);
+        assert!(archived(&second), "the newest completed run before it goes");
+        assert!(!archived(&failed) && !archived(&fourth));
+
+        // Brought back by a person, an older run is not archived again.
+        index::update_session(&first, |session| {
+            session.archived = false;
+            Ok(())
+        })
+        .unwrap();
+        complete(&host, &automation);
+        assert!(!archived(&first));
+    }
+
+    #[test]
+    fn a_run_that_goes_on_in_an_issue_pipeline_stays_visible() {
+        let mut automation = automation();
+        automation.archive_on_complete = true;
+        let finished = AutomationRun { session_id: Some("session-1".into()), status: AutomationRunStatus::Completed, ..run_fixture() };
+        assert_eq!(sessions_to_archive(&automation, &[], &finished), vec!["session-1".to_string()]);
+
+        automation.pipeline = Some(crate::issue_pipeline::LaunchOptions { auto_merge: true, ..Default::default() });
+        assert!(sessions_to_archive(&automation, &[], &finished).is_empty());
+    }
+
+    fn run_fixture() -> AutomationRun {
+        new_run("auto-1", AutomationTrigger::Manual, None, AutomationRunStatus::Completed)
     }
 }

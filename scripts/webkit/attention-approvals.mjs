@@ -63,7 +63,7 @@ try {
         await raise(page);
         assert.equal(await notices(page).count(), 4);
       }
-      await openConversation(page, "claude tab");
+      await openConversation(page, "Local long session");
       await tab(page, "gemini tab").click();
       const allow = page.getByRole("button", { name: /^Allow/ }).filter({ visible: true });
       const deny = page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
@@ -176,7 +176,7 @@ try {
       };
     ` });
     page.setDefaultTimeout(10_000);
-    await openConversation(page, "claude tab");
+    await openConversation(page, "Local long session");
     await tab(page, "gemini tab").click();
     const localApproval = page.locator("main").getByRole("button", { name: /^Allow/ }).filter({ visible: true });
     await localApproval.waitFor();
@@ -216,7 +216,7 @@ try {
       stub.answers.list_sessions[0].tabs.forEach(t => t.status = "idle");
     ` });
     page.setDefaultTimeout(10_000);
-    await openConversation(page, "claude tab");
+    await openConversation(page, "Local long session");
     await tab(page, "gemini tab").click();
     if (order === "notification-first") {
       await raise(page);

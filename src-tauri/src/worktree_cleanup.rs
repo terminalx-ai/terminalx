@@ -181,7 +181,8 @@ pub enum Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct ItemResult {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub archive_failure: Option<crate::archive_script::Failure>,
+    // Boxed: a failure carries its log and detail, and Progress::Finished holds this result.
+    pub archive_failure: Option<Box<crate::archive_script::Failure>>,
     pub project_path: String,
     pub path: String,
     pub outcome: Outcome,
@@ -1042,7 +1043,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         Err(error) => {
             let failure = crate::archive_script::Failure::from_error(&error.to_string());
             let mut failed = result(item, Outcome::Failed, failure.as_ref().map_or_else(|| error.to_string(), |failure| failure.message()));
-            failed.archive_failure = failure;
+            failed.archive_failure = failure.map(Box::new);
             return failed;
         }
     };

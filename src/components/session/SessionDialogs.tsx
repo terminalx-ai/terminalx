@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage, type QuickChatScratch } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { closeLinkIssue, closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
+import { closeLinkIssue, closeLinkPr, closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
 import { conversationTitle, moveQuickChatToProject, renameConversation, useSessionStore } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
 import { LocalSectionDialogs } from "./LocalSectionDialogs";
 import { TabDialogs } from "./TabDialogs";
 import { LinkIssueDialog } from "./LinkIssueDialog";
+import { LinkPrDialog } from "./LinkPrDialog";
 
 /**
  * Dialogs about one session that any window can open: rename, moving a
@@ -24,11 +25,13 @@ export function SessionDialogs() {
   const renaming = sessions.find((session) => session.id === dialogs.renameSession);
   const moving = sessions.find((session) => session.id === dialogs.moveToProject);
   const linking = sessions.find((session) => session.id === dialogs.linkIssue);
+  const linkingPr = sessions.find((session) => session.id === dialogs.linkPr);
   return (
     <>
       {renaming && <RenameSessionDialog key={renaming.id} session={renaming} onClose={closeRenameSession} />}
       {moving && <MoveToProjectDialog key={moving.id} session={moving} onClose={closeMoveToProject} />}
       {linking && <LinkIssueDialog key={linking.id} session={linking} onClose={closeLinkIssue} />}
+      {linkingPr && <LinkPrDialog key={linkingPr.id} session={linkingPr} onClose={closeLinkPr} />}
       <TabDialogs />
       <LocalSectionDialogs />
     </>

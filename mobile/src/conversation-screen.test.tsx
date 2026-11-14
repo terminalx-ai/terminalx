@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useImperativeHandle, type ReactNode } from "react";
+import { act, useEffect, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as DocumentPicker from "expo-document-picker";
@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   pasted: new Set<(image: { data: string; width: number; height: number }) => void>(),
 }));
 vi.mock("../modules/paste-image", () => ({ addPasteImageListener: (listener: any) => { mocks.pasted.add(listener); return () => { mocks.pasted.delete(listener); }; } }));
-vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
+vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
@@ -47,6 +47,7 @@ vi.mock("react-native", () => {
   return {
     // The + sheet: the test picks a file unless it chose the photo library.
     ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
+    AppState: { currentState: "active" },
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
     Keyboard: { addListener: () => ({ remove: () => undefined }) },
     PanResponder: { create: () => ({ panHandlers: {} }) },

@@ -455,12 +455,14 @@ pub(super) fn recover_using(
     )
 }
 
+/// What an agent with the selected macOS guest's tools is told (Claude Code only).
+const MACOS_NOTE: &str = "The computer MCP tools act only in the selected macOS guest, in the background. The parent agent shell and project files stay in their current environment. Run task in VM is a separate action. Respect guest ownership, permissions and application attestation; never switch targets or replay unknown input.";
+
 pub fn launch_args(
     session_id: &str,
     tab: &crate::store::index::TabEntry,
     target: &Target,
-    appends_prompt: bool,
-) -> Result<String> {
+) -> Result<crate::container_vm::VmLaunch> {
     let Target::MacosGuest {
         environment_id,
         generation,
@@ -482,17 +484,18 @@ pub fn launch_args(
     binding.validate()?;
     let executable = std::env::current_exe()?;
     let home = crate::store::root()?;
-    Ok(crate::container_vm::mcp_args(
-        &tab.harness,
-        &executable.to_string_lossy(),
-        &[
-            "macos-computer-stdio",
-            &serde_json::to_string(&binding)?,
-            &home.to_string_lossy(),
-        ],
-        appends_prompt,
-        "The computer MCP tools act only in the selected macOS guest, in the background. The parent agent shell and project files stay in their current environment. Run task in VM is a separate action. Respect guest ownership, permissions and application attestation; never switch targets or replay unknown input.",
-    ))
+    Ok(crate::container_vm::VmLaunch {
+        args: crate::container_vm::mcp_args(
+            &tab.harness,
+            &executable.to_string_lossy(),
+            &[
+                "macos-computer-stdio",
+                &serde_json::to_string(&binding)?,
+                &home.to_string_lossy(),
+            ],
+        ),
+        note: (tab.harness == "claude").then_some(MACOS_NOTE),
+    })
 }
 
 fn serve(binding: Binding, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {

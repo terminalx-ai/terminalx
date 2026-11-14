@@ -15,59 +15,117 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::{Deserialize, Serialize};
 
 const MAX_FILES: usize = 60_000;
+/// The index with ignored files: every file of the plain index, then ignored
+/// ones up to this many in all. A `node_modules` alone often passes 60,000.
+const MAX_FILES_WITH_IGNORED: usize = 250_000;
 const FRESH_FOR: Duration = Duration::from_secs(20);
 
+#[derive(Clone)]
 struct Index {
     built: Instant,
     files: Vec<String>,
+    truncated: bool,
 }
 
-fn cache() -> &'static Mutex<HashMap<PathBuf, Index>> {
-    static C: OnceLock<Mutex<HashMap<PathBuf, Index>>> = OnceLock::new();
+/// One index per checkout and per mode: with `include_ignored` it also holds
+/// what `.gitignore` (and the folders skipped by name) would leave out.
+fn cache() -> &'static Mutex<HashMap<(PathBuf, bool), Index>> {
+    static C: OnceLock<Mutex<HashMap<(PathBuf, bool), Index>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn walk(root: &Path) -> Vec<String> {
+/// The files of a checkout, hidden ones included, as the file tree shows
+/// them, walked in name order and cut at `cap`. Without `include_ignored`,
+/// what Git ignores is skipped, and so are `node_modules` and `target` in a
+/// folder that has no `.gitignore` for them. `keep` drops files as they are
+/// found, before they count against the cap.
+fn walk(root: &Path, include_ignored: bool, cap: usize, keep: impl Fn(&str) -> bool) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        .hidden(false)
+        .ignore(!include_ignored)
+        .git_ignore(!include_ignored)
+        .git_global(!include_ignored)
+        .git_exclude(!include_ignored)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|e| {
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
-            !(name == ".git" || name == "node_modules" || name == "target" || name == ".raccoon")
+            if name == ".git" || name == ".raccoon" || name == ".DS_Store" {
+                return false;
+            }
+            include_ignored || !(name == "node_modules" || name == "target")
         })
         .build();
     for entry in walker.flatten() {
-        if out.len() >= MAX_FILES {
-            break;
-        }
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            if let Ok(rel) = entry.path().strip_prefix(root) {
-                out.push(rel.to_string_lossy().into_owned());
+            let Ok(rel) = entry.path().strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !keep(&rel) {
+                continue;
             }
+            if out.len() >= cap {
+                return (out, true);
+            }
+            out.push(rel);
         }
     }
-    out
+    (out, false)
 }
 
-fn files_for(root: &Path) -> Vec<String> {
-    let mut c = cache().lock().unwrap();
-    if let Some(ix) = c.get(root) {
-        if ix.built.elapsed() < FRESH_FOR {
-            return ix.files.clone();
-        }
+/// Build a checkout's index. With ignored files it is the plain index whole,
+/// then the ignored files after it, so no file Git tracks is ever crowded
+/// out by a dependency folder; `truncated` says either part was cut.
+fn build(root: &Path, include_ignored: bool, caps: (usize, usize)) -> Index {
+    let (plain_cap, total_cap) = caps;
+    if !include_ignored {
+        let (files, truncated) = walk(root, false, plain_cap, |_| true);
+        return Index { built: Instant::now(), files, truncated };
     }
-    let files = walk(root);
-    c.insert(root.to_path_buf(), Index { built: Instant::now(), files: files.clone() });
-    files
+    let plain = cached(root, false).unwrap_or_else(|| store(root, false, build(root, false, caps)));
+    let seen: std::collections::HashSet<&str> = plain.files.iter().map(String::as_str).collect();
+    let room = total_cap.saturating_sub(plain.files.len());
+    let (ignored, cut) = walk(root, true, room, |rel| !seen.contains(rel));
+    let mut files = plain.files.clone();
+    files.extend(ignored);
+    Index { built: Instant::now(), files, truncated: plain.truncated || cut }
+}
+
+fn cached(root: &Path, include_ignored: bool) -> Option<Index> {
+    let c = cache().lock().unwrap();
+    c.get(&(root.to_path_buf(), include_ignored)).filter(|ix| ix.built.elapsed() < FRESH_FOR).cloned()
+}
+
+fn store(root: &Path, include_ignored: bool, ix: Index) -> Index {
+    cache().lock().unwrap().insert((root.to_path_buf(), include_ignored), ix.clone());
+    ix
+}
+
+/// The cached index, or a fresh walk. The cache lock is never held while
+/// walking: a slow walk of one checkout (or of ignored files) holds up no
+/// other search. Two searches that both miss may both walk; the last one wins.
+fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
+    let ix = cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))));
+    (ix.files, ix.truncated)
 }
 
 pub fn invalidate(root: &Path) {
-    cache().lock().unwrap().remove(root);
+    cache().lock().unwrap().retain(|(path, _), _| path != root);
+}
+
+/// How many files a search looks through (quick open's footer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileCount {
+    pub files: usize,
+    /// The walk stopped at its cap: there are at least `files`.
+    pub truncated: bool,
+}
+
+pub fn count(root: &Path, include_ignored: bool) -> FileCount {
+    let (files, truncated) = index_for(root, include_ignored);
+    FileCount { files: files.len(), truncated }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,9 +137,10 @@ pub struct FileHit {
 }
 
 /// Fuzzy-search the index. An empty query lists the shallowest files first,
-/// which is what a bare `@` should open on.
-pub fn search(root: &Path, query: &str, limit: usize) -> Result<Vec<FileHit>> {
-    let files = files_for(root);
+/// which is what a bare `@` should open on. `include_ignored` searches the
+/// files Git ignores as well.
+pub fn search(root: &Path, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<FileHit>> {
+    let (files, _) = index_for(root, include_ignored);
     let name_of = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     if query.trim().is_empty() {
         let mut v: Vec<&String> = files.iter().collect();
@@ -123,14 +182,94 @@ mod tests {
         std::fs::write(p.join("src/button.css"), "").unwrap();
         std::fs::write(p.join("README.md"), "").unwrap();
         std::fs::write(p.join("node_modules/x/button.js"), "").unwrap();
-        let all = search(p, "", 10).unwrap();
+        let all = search(p, "", 10, false).unwrap();
         assert_eq!(all[0].path, "README.md");
         assert!(all.iter().all(|h| !h.path.starts_with("node_modules")));
-        let hits = search(p, "button", 10).unwrap();
+        let hits = search(p, "button", 10, false).unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().any(|h| h.path == "src/components/Button.tsx"));
-        let hits = search(p, "readme", 10).unwrap();
+        let hits = search(p, "readme", 10, false).unwrap();
         assert_eq!(hits[0].path, "README.md");
+    }
+
+    #[test]
+    fn includes_ignored_files_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(p.join("node_modules/left-pad")).unwrap();
+        std::fs::create_dir_all(p.join("dist")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join(".gitignore"), ".env.local\ndist/\n").unwrap();
+        std::fs::write(p.join(".github/workflows/ci.yml"), "").unwrap();
+        std::fs::write(p.join(".env.local"), "").unwrap();
+        std::fs::write(p.join("dist/bundle.js"), "").unwrap();
+        std::fs::write(p.join("node_modules/left-pad/index.js"), "").unwrap();
+        std::fs::write(p.join(".git/config"), "").unwrap();
+        std::fs::write(p.join("main.rs"), "").unwrap();
+
+        // Hidden files are searched, as the tree shows them; ignored ones are not.
+        assert_eq!(search(p, "ci.yml", 10, false).unwrap()[0].path, ".github/workflows/ci.yml");
+        assert!(search(p, "env.local", 10, false).unwrap().is_empty());
+        assert!(search(p, "bundle", 10, false).unwrap().is_empty());
+        assert!(search(p, "left-pad", 10, false).unwrap().is_empty());
+        assert_eq!(count(p, false).files, 3, "{:?}", search(p, "", 10, false).unwrap());
+
+        // Asked to, the same search finds them, and the two modes keep their own index.
+        assert_eq!(search(p, "env.local", 10, true).unwrap()[0].path, ".env.local");
+        assert_eq!(search(p, "bundle", 10, true).unwrap()[0].path, "dist/bundle.js");
+        assert_eq!(search(p, "left-pad", 10, true).unwrap()[0].path, "node_modules/left-pad/index.js");
+        assert!(search(p, "", 20, true).unwrap().iter().all(|h| !h.path.starts_with(".git/")));
+        assert_eq!(count(p, true), FileCount { files: 6, truncated: false });
+        assert!(search(p, "env.local", 10, false).unwrap().is_empty());
+
+        invalidate(p);
+        std::fs::write(p.join("lib.rs"), "").unwrap();
+        assert_eq!(count(p, false).files, 4);
+        assert_eq!(count(p, true).files, 7);
+    }
+
+    #[test]
+    fn ignored_files_never_crowd_out_the_plain_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // `aaa` sorts, and so walks, before `src`: a capped walk of everything would fill up on it.
+        std::fs::create_dir_all(p.join("aaa_deps/pkg")).unwrap();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join(".gitignore"), "aaa_deps/\n").unwrap();
+        for i in 0..6 {
+            std::fs::write(p.join(format!("aaa_deps/pkg/f{i}.js")), "").unwrap();
+        }
+        std::fs::write(p.join("src/main.rs"), "").unwrap();
+        std::fs::write(p.join("src/lib.rs"), "").unwrap();
+
+        let ix = build(p, true, (100, 6));
+        assert_eq!(&ix.files[..3], [".gitignore", "src/lib.rs", "src/main.rs"]);
+        assert_eq!(ix.files[3..], ["aaa_deps/pkg/f0.js", "aaa_deps/pkg/f1.js", "aaa_deps/pkg/f2.js"]);
+        assert!(ix.truncated, "the cut is reported");
+
+        let whole = build(p, true, (100, 100));
+        assert_eq!(whole.files.len(), 9);
+        assert!(!whole.truncated);
+        assert_eq!(whole.files.iter().filter(|f| f.as_str() == "src/main.rs").count(), 1, "no file listed twice");
+    }
+
+    #[test]
+    fn mention_and_phone_searches_see_hidden_files_as_the_tree_does() {
+        // Chat @ mentions (`search_files`) and the phone's workspace search (remote/server.rs)
+        // both go through `search`: tracked dotfiles are found, ignored ones and .git are not.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".vscode")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(p.join(".vscode/settings.json"), "").unwrap();
+        std::fs::write(p.join(".env"), "").unwrap();
+        std::fs::write(p.join(".git/HEAD"), "").unwrap();
+        let all: Vec<String> = search(p, "", 50, false).unwrap().into_iter().map(|h| h.path).collect();
+        assert!(all.contains(&".vscode/settings.json".to_string()));
+        assert!(!all.iter().any(|f| f == ".env" || f.starts_with(".git/")));
+        assert_eq!(list_all(p, 50).unwrap().paths.len(), all.len(), "the same files the tree lists");
     }
 }
 
@@ -173,6 +312,44 @@ pub fn list_dir(root: &Path, rel: &str) -> Result<Vec<DirEntry>> {
     }
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     Ok(out)
+}
+
+/// Every file the All files tree can show, for its name filter: the same
+/// rules as [`list_dir`] (hidden files included, `.gitignore`d ones left
+/// out), walked to the bottom. `truncated` when `limit` cut it short.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileList {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
+pub fn list_all(root: &Path, limit: usize) -> Result<FileList> {
+    let mut paths = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name == ".git" || name == ".raccoon" || name == ".DS_Store")
+        })
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if paths.len() >= limit {
+            return Ok(FileList { paths, truncated: true });
+        }
+        if let Ok(rel) = entry.path().strip_prefix(root) {
+            paths.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(FileList { paths, truncated: false })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,6 +401,44 @@ pub fn read_text(path: &Path) -> Result<TextFile> {
     let binary = bytes.iter().take(8192).any(|&b| b == 0);
     let content = if binary { String::new() } else { String::from_utf8_lossy(&bytes).into_owned() };
     Ok(TextFile { content, mtime_ms: mtime_ms(&meta), size, binary, truncated: size > MAX_TEXT })
+}
+
+/// The most a file tab copies to the clipboard (PRO-297): far past what the
+/// editor shows (`MAX_TEXT`), short of what would stall the webview.
+const MAX_WHOLE_TEXT: u64 = 256 * 1024 * 1024;
+
+/// A file's whole text, for copying a file the editor shows truncated.
+pub fn read_whole_text(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)?.len();
+    anyhow::ensure!(size <= MAX_WHOLE_TEXT, "This file is too large to copy ({} MB); the limit is {} MB.", size / (1024 * 1024), MAX_WHOLE_TEXT / (1024 * 1024));
+    let bytes = std::fs::read(path)?;
+    anyhow::ensure!(!bytes.iter().take(8192).any(|&b| b == 0), "This file is binary; it cannot be copied as text.");
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Save a copy of a file somewhere the person chose (the file tab's
+/// Download): the file's exact bytes from `from`, or `content` (an unsaved
+/// buffer, or a cloud workspace's file). Returns the bytes written.
+pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Result<u64> {
+    anyhow::ensure!(to.is_absolute(), "The download location must be an absolute path");
+    anyhow::ensure!(!to.is_dir(), "{} is a folder", to.display());
+    match (from, content) {
+        (Some(from), None) => {
+            anyhow::ensure!(std::fs::metadata(from)?.is_file(), "{} is not a file", from.display());
+            if let (Ok(a), Ok(b)) = (from.canonicalize(), to.canonicalize()) {
+                // Copying a file onto itself would truncate it first.
+                if a == b {
+                    return Ok(std::fs::metadata(from)?.len());
+                }
+            }
+            Ok(std::fs::copy(from, to)?)
+        }
+        (None, Some(content)) => {
+            std::fs::write(to, content)?;
+            Ok(content.len() as u64)
+        }
+        _ => anyhow::bail!("Download needs either a file or its contents"),
+    }
 }
 
 pub fn write_text(path: &Path, content: &str) -> Result<u64> {
@@ -343,9 +558,29 @@ pub struct ReplaceReport {
 /// How much of a line to ship back with a hit.
 const SHOWN_CHARS: usize = 400;
 
-fn text_pattern(query: &str, regex: bool, case_sensitive: bool) -> Result<regex::Regex> {
-    let pattern = if regex { query.to_string() } else { regex::escape(query) };
+fn text_pattern(query: &str, regex: bool, case_sensitive: bool, whole_word: bool) -> Result<regex::Regex> {
+    let pattern = if regex {
+        query.to_string()
+    } else if whole_word {
+        // A literal needs a boundary only on a side that ends in a word
+        // character, so `foo(` still matches the start of `foo(x)`.
+        let edge = |c: Option<char>| if c.is_some_and(is_word_char) { r"\b" } else { "" };
+        format!("{}{}{}", edge(query.chars().next()), regex::escape(query), edge(query.chars().last()))
+    } else {
+        regex::escape(query)
+    };
     Ok(regex::RegexBuilder::new(&pattern).case_insensitive(!case_sensitive).build()?)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `line[start..end]` stands as a whole word: neither edge cuts
+/// through a run of word characters, the rule the editor's find uses.
+fn whole_word_at(line: &str, start: usize, end: usize) -> bool {
+    let cuts = |before: Option<char>, after: Option<char>| before.is_some_and(is_word_char) && after.is_some_and(is_word_char);
+    !cuts(line[..start].chars().next_back(), line[start..].chars().next()) && !cuts(line[..end].chars().next_back(), line[end..].chars().next())
 }
 
 /// Every regular file under `root` that a text search should read: the
@@ -446,13 +681,24 @@ struct Rewriter {
     re: regex::Regex,
     template: Option<String>,
     regex: bool,
+    /// A regex's matches are checked for word edges one by one; a literal
+    /// carries its boundaries in the pattern.
+    word_filter: bool,
 }
 
 impl Rewriter {
-    fn new(query: &str, replacement: Option<&str>, regex: bool, case_sensitive: bool) -> Result<Self> {
-        let re = text_pattern(query, regex, case_sensitive)?;
+    fn new(query: &str, replacement: Option<&str>, regex: bool, case_sensitive: bool, whole_word: bool) -> Result<Self> {
+        let re = text_pattern(query, regex, case_sensitive, whole_word)?;
         let template = replacement.map(|r| if regex { normalize_replacement(r) } else { r.to_string() });
-        Ok(Self { re, template, regex })
+        Ok(Self { re, template, regex, word_filter: regex && whole_word })
+    }
+
+    /// The matches in a line that count, in order.
+    fn captures<'a>(&'a self, line: &'a str) -> impl Iterator<Item = regex::Captures<'a>> + 'a {
+        self.re.captures_iter(line).filter(move |caps| {
+            let m = caps.get(0).expect("group 0");
+            !self.word_filter || (!m.is_empty() && whole_word_at(line, m.start(), m.end()))
+        })
     }
 
     /// What one match turns into.
@@ -471,7 +717,7 @@ impl Rewriter {
         let mut out = String::with_capacity(line.len());
         let mut last = 0;
         let mut n = 0;
-        for caps in self.re.captures_iter(line) {
+        for caps in self.captures(line) {
             let m = caps.get(0).expect("group 0");
             out.push_str(&line[last..m.start()]);
             out.push_str(&self.expand(&caps));
@@ -483,12 +729,14 @@ impl Rewriter {
     }
 }
 
-/// Grep the tree: literal or regex, case-sensitive or not, binary files
-/// skipped, capped by hit count so a broad query returns promptly. With a
-/// replacement, each hit also carries what its matches would become.
-pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
+/// Grep the tree: literal or regex, case-sensitive or not, whole words or
+/// not, binary files skipped, capped by hit count so a broad query returns
+/// promptly. With a replacement, each hit also carries what its matches
+/// would become.
+#[allow(clippy::too_many_arguments)]
+pub fn search_text(root: &Path, query: &str, regex: bool, case_sensitive: bool, whole_word: bool, limit: usize, replacement: Option<&str>) -> Result<TextSearch> {
     let never = std::sync::atomic::AtomicBool::new(false);
-    Ok(search_text_under(root, root, query, regex, case_sensitive, limit, replacement, &never)?.0)
+    Ok(search_text_under(root, root, query, regex, case_sensitive, whole_word, limit, replacement, &never)?.0)
 }
 
 /// [`search_text`] over the tree at `base` (inside `root`, which hit paths
@@ -501,6 +749,7 @@ pub fn search_text_under(
     query: &str,
     regex: bool,
     case_sensitive: bool,
+    whole_word: bool,
     limit: usize,
     replacement: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
@@ -508,7 +757,7 @@ pub fn search_text_under(
     if query.is_empty() {
         return Ok((TextSearch { hits: vec![], files: 0, capped: false }, false));
     }
-    let rw = Rewriter::new(query, replacement, regex, case_sensitive)?;
+    let rw = Rewriter::new(query, replacement, regex, case_sensitive, whole_word)?;
     let mut hits = Vec::new();
     let mut files = 0usize;
     let mut capped = false;
@@ -552,7 +801,7 @@ fn line_hit(rw: &Rewriter, rel: &str, number: u32, line: &str, preview: bool) ->
         byte_at = to;
         chars_at
     };
-    for caps in rw.re.captures_iter(line) {
+    for caps in rw.captures(line) {
         let m = caps.get(0).expect("group 0");
         let start = advance(m.start());
         let end = advance(m.end());
@@ -580,19 +829,21 @@ fn line_hit(rw: &Rewriter, rel: &str, number: u32, line: &str, preview: bool) ->
 /// paths in `skip` (open buffers the caller updates itself). Files are only
 /// written when something changed, and a file that is not valid UTF-8 is
 /// left alone rather than written back lossily.
+#[allow(clippy::too_many_arguments)]
 pub fn replace_text(
     root: &Path,
     query: &str,
     replacement: &str,
     regex: bool,
     case_sensitive: bool,
+    whole_word: bool,
     targets: Option<Vec<ReplaceTarget>>,
     skip: &[String],
 ) -> Result<ReplaceReport> {
     if query.is_empty() {
         return Ok(ReplaceReport { files: 0, replacements: 0 });
     }
-    let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive)?;
+    let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive, whole_word)?;
     let root = root.canonicalize()?;
     let jobs: Vec<(PathBuf, Option<Vec<u32>>)> = match targets {
         Some(targets) => targets
@@ -651,6 +902,27 @@ fn rewrite_text(rw: &Rewriter, text: &str, lines: Option<&[u32]>) -> (String, us
 mod tree_tests {
     use super::*;
 
+    /// The All files filter sees what the tree shows: hidden files and
+    /// folders such as node_modules unless .gitignore leaves them out.
+    #[test]
+    fn the_filter_list_follows_the_trees_rules_and_says_when_it_was_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for path in [".github/workflows/ci.yml", ".env.example", "node_modules/pkg/index.js", "src/main.rs", "build/out.bin", ".git/HEAD", ".raccoon/x", ".DS_Store"] {
+            std::fs::create_dir_all(p.join(path).parent().unwrap()).unwrap();
+            std::fs::write(p.join(path), "x").unwrap();
+        }
+        std::fs::write(p.join(".gitignore"), "build/\n").unwrap();
+        let mut all = list_all(p, 100).unwrap();
+        all.paths.sort();
+        assert_eq!(all.paths, [".env.example", ".github/workflows/ci.yml", ".gitignore", "node_modules/pkg/index.js", "src/main.rs"]);
+        assert!(!all.truncated);
+        let cut = list_all(p, 2).unwrap();
+        assert_eq!(cut.paths.len(), 2);
+        assert!(cut.truncated, "a capped list says so");
+        assert!(!list_all(p, 5).unwrap().truncated, "exactly the limit is complete");
+    }
+
     #[test]
     fn lists_reads_writes_and_greps() {
         let dir = tempfile::tempdir().unwrap();
@@ -671,13 +943,39 @@ mod tree_tests {
         let m = write_text(&p.join("src/new.ts"), "hi").unwrap();
         assert!(m > 0);
         assert_eq!(stat_mtime(&p.join("src/new.ts")), Some(m));
-        let s = search_text(p, "find", false, false, 100, None).unwrap();
+        let s = search_text(p, "find", false, false, false, 100, None).unwrap();
         assert_eq!(s.hits.len(), 2);
         assert!(s.hits.iter().all(|h| h.path != "ignored.txt"));
-        let s = search_text(p, "find", false, true, 1, None).unwrap();
+        let s = search_text(p, "find", false, true, false, 1, None).unwrap();
         assert!(s.capped && s.hits.len() == 1);
-        let s = search_text(p, "f.nd.?me", true, false, 100, None).unwrap();
+        let s = search_text(p, "f.nd.?me", true, false, false, 100, None).unwrap();
         assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn whole_word_skips_partial_hits_in_search_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join("a.rs"), "let id = ids + id_x + Id;\nfoo(id)\n").unwrap();
+        let s = search_text(p, "id", false, false, true, 100, None).unwrap();
+        let spans: Vec<_> = s.hits.iter().map(|h| (h.line, h.matches.clone())).collect();
+        assert_eq!(spans, vec![(1, vec![(4, 6), (22, 24)]), (2, vec![(4, 6)])]);
+        let s = search_text(p, "id", false, true, true, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 2);
+        // Without the toggle every partial hit is back.
+        let s = search_text(p, "id", false, false, false, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 5);
+        // A literal edge that is not a word character needs no boundary.
+        let s = search_text(p, "foo(", false, false, true, 100, None).unwrap();
+        assert_eq!(s.hits.len(), 1);
+        // A regex is checked match by match.
+        let s = search_text(p, "i.", true, true, true, 100, None).unwrap();
+        assert_eq!(s.hits.iter().map(|h| h.matches.len()).sum::<usize>(), 2);
+        let r = replace_text(p, "id", "key", false, true, true, None, &[]).unwrap();
+        assert_eq!((r.files, r.replacements), (1, 2));
+        assert_eq!(std::fs::read_to_string(p.join("a.rs")).unwrap(), "let key = ids + id_x + Id;\nfoo(key)\n");
+        let r = replace_text(p, "k.y", "id", true, true, true, None, &[]).unwrap();
+        assert_eq!(r.replacements, 2);
     }
 
     #[test]
@@ -723,16 +1021,16 @@ mod tree_tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         std::fs::write(p.join("a.txt"), "héllo foo, foo again\nnothing\nfoo\n").unwrap();
-        let s = search_text(p, "foo", false, false, 100, Some("bar")).unwrap();
+        let s = search_text(p, "foo", false, false, false, 100, Some("bar")).unwrap();
         assert_eq!(s.hits.len(), 2);
         // Columns count characters, so the accent before the first match is one column wide.
         assert_eq!(s.hits[0].col, 6);
         assert_eq!(s.hits[0].matches, vec![(6, 9), (11, 14)]);
         assert_eq!(s.hits[0].replacements.as_deref(), Some(&["bar".to_string(), "bar".to_string()][..]));
         assert_eq!(s.hits[1].line, 3);
-        let s = search_text(p, "f(o+)", true, false, 100, Some("<$1>")).unwrap();
+        let s = search_text(p, "f(o+)", true, false, false, 100, Some("<$1>")).unwrap();
         assert_eq!(s.hits[0].replacements.as_deref(), Some(&["<oo>".to_string(), "<oo>".to_string()][..]));
-        let s = search_text(p, "foo", false, false, 100, None).unwrap();
+        let s = search_text(p, "foo", false, false, false, 100, None).unwrap();
         assert!(s.hits[0].replacements.is_none());
     }
 
@@ -758,30 +1056,62 @@ mod tree_tests {
         std::fs::write(p.join("ignored.txt"), "foo\n").unwrap();
 
         // Only the second line of a.ts, leaving the first alone.
-        let r = replace_text(p, "foo", "bar", false, false, Some(vec![ReplaceTarget { path: "src/a.ts".into(), lines: Some(vec![2]) }]), &[]).unwrap();
+        let r = replace_text(p, "foo", "bar", false, false, false, Some(vec![ReplaceTarget { path: "src/a.ts".into(), lines: Some(vec![2]) }]), &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
         assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
 
         // The whole tree, minus a path the caller handles itself; CRLF endings survive.
-        let r = replace_text(p, "foo", "baz", false, false, None, &["src/a.ts".to_string()]).unwrap();
+        let r = replace_text(p, "foo", "baz", false, false, false, None, &["src/a.ts".to_string()]).unwrap();
         assert_eq!(r, ReplaceReport { files: 1, replacements: 2 });
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "baz\r\nbaz\r\n");
         assert_eq!(std::fs::read_to_string(p.join("src/a.ts")).unwrap(), "foo();\nbar(); bar();\nkeep();\n");
         assert_eq!(std::fs::read_to_string(p.join("ignored.txt")).unwrap(), "foo\n");
         // Untouched files keep their mtime: nothing was written to c.txt.
-        let r = replace_text(p, "foo", "qux", false, false, Some(vec![ReplaceTarget { path: "c.txt".into(), lines: None }]), &[]).unwrap();
+        let r = replace_text(p, "foo", "qux", false, false, false, Some(vec![ReplaceTarget { path: "c.txt".into(), lines: None }]), &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 0, replacements: 0 });
 
         // Regex with a capture group and a literal replacement that looks like one.
-        let r = replace_text(p, "(ba)([rz])", "$2$1", true, false, None, &[]).unwrap();
+        let r = replace_text(p, "(ba)([rz])", "$2$1", true, false, false, None, &[]).unwrap();
         assert_eq!(r, ReplaceReport { files: 2, replacements: 4 });
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "zba\r\nzba\r\n");
-        let r = replace_text(p, "zba", "$1", false, false, None, &[]).unwrap();
+        let r = replace_text(p, "zba", "$1", false, false, false, None, &[]).unwrap();
         assert_eq!(r.replacements, 2);
         assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap(), "$1\r\n$1\r\n");
 
         // Paths cannot escape the root.
-        let err = replace_text(p, "x", "y", false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
+        let err = replace_text(p, "x", "y", false, false, false, Some(vec![ReplaceTarget { path: "../outside".into(), lines: None }]), &[]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn whole_text_reads_past_the_editor_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let text = "a".repeat(MAX_TEXT as usize + 10);
+        std::fs::write(&path, &text).unwrap();
+        assert!(read_text(&path).unwrap().truncated, "the editor shows only the start");
+        assert_eq!(read_whole_text(&path).unwrap().len(), text.len());
+        let bin = dir.path().join("bin");
+        std::fs::write(&bin, [0u8, 1, 2]).unwrap();
+        assert!(read_whole_text(&bin).is_err());
+    }
+
+    #[test]
+    fn export_copies_bytes_or_writes_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("in.bin");
+        std::fs::write(&from, [0u8, 0xff, 10, 13]).unwrap();
+        let to = dir.path().join("out.bin");
+        assert_eq!(export_file(&to, Some(&from), None).unwrap(), 4);
+        assert_eq!(std::fs::read(&to).unwrap(), vec![0u8, 0xff, 10, 13]);
+        // Onto itself: left alone, not truncated.
+        assert_eq!(export_file(&from, Some(&from), None).unwrap(), 4);
+        assert_eq!(std::fs::read(&from).unwrap().len(), 4);
+        let text = dir.path().join("note.md");
+        assert_eq!(export_file(&text, None, Some("hello")).unwrap(), 5);
+        assert_eq!(std::fs::read_to_string(&text).unwrap(), "hello");
+        assert!(export_file(Path::new("relative.txt"), None, Some("x")).is_err());
+        assert!(export_file(dir.path(), None, Some("x")).is_err());
+        assert!(export_file(&to, None, None).is_err());
     }
 }

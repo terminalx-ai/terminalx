@@ -107,7 +107,7 @@ impl Rig {
         let (manager, session, text) = (self.manager.clone(), session.to_string(), text.to_string());
         let (answered, answer) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = answered.send(manager.send_pressed(&session, TAB, text, Vec::new(), pressed_at));
+            let _ = answered.send(manager.send_pressed(&session, TAB, text, Vec::new(), pressed_at, Vec::new()));
         });
         answer.recv_timeout(WAIT).ok()
     }

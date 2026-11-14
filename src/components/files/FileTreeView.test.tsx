@@ -1,10 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ listDir: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listDir: vi.fn(), search: vi.fn(), list: vi.fn(), openProjectSearch: vi.fn() }));
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@/lib/api", () => ({ fs: { listDir: mocks.listDir } }));
+vi.mock("@/lib/api", () => ({ fs: { listDir: mocks.listDir }, files: { search: mocks.search, list: mocks.list } }));
+vi.mock("@/lib/projectSearch", () => ({ openProjectSearch: mocks.openProjectSearch }));
 vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: [], loading: false, head: null }) }));
 vi.mock("@/lib/editors", () => ({
   openFile: vi.fn(),
@@ -62,5 +63,75 @@ describe("FileTreeView", () => {
     await screen.findByText("beta.txt");
     expect(screen.queryByText("alpha.txt")).toBeNull();
     expect(mocks.listDir).toHaveBeenLastCalledWith("/repos/beta", "");
+  });
+
+  describe("name filter", () => {
+    const paths = ["README.md", "src/app/Settings.tsx", "src/lib/api.ts", "docs/guide.md", ".github/workflows/settings.yml"];
+    beforeEach(() => {
+      mocks.listDir.mockImplementation(async (_root: string, rel: string) =>
+        rel ? [] : [{ path: "docs", name: "docs", isDir: true }, { path: "src", name: "src", isDir: true }, { path: "README.md", name: "README.md", isDir: false }],
+      );
+      mocks.list.mockResolvedValue({ paths, truncated: false });
+      mocks.openProjectSearch.mockClear();
+    });
+
+    it("narrows to matching names and their folders, with a count", async () => {
+      render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="Alpha" active />);
+      await screen.findByText("README.md");
+      fireEvent.change(screen.getByLabelText("Filter files by name"), { target: { value: "setT" } });
+      await screen.findByText("Settings.tsx");
+      expect(screen.getByText("app")).toBeTruthy();
+      expect(screen.queryByText("README.md")).toBeNull();
+      // Hidden files count and match too, as the tree shows them.
+      expect(screen.getByText("settings.yml")).toBeTruthy();
+      expect(screen.getByTestId("file-tree-filter-count").textContent).toBe("2 of 11");
+      expect(mocks.list).toHaveBeenCalledWith("/repos/alpha", 60_000);
+      expect(screen.queryByTestId("file-tree-filter-truncated")).toBeNull();
+    });
+
+    it("says when the file list was cut short instead of a count that looks complete", async () => {
+      mocks.list.mockResolvedValue({ paths, truncated: true });
+      render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="Alpha" active />);
+      await screen.findByText("README.md");
+      fireEvent.change(screen.getByLabelText("Filter files by name"), { target: { value: "setT" } });
+      await screen.findByText("Settings.tsx");
+      expect(screen.getByTestId("file-tree-filter-count").textContent).toBe("2 of 11+");
+      expect(screen.getByTestId("file-tree-filter-truncated").textContent).toContain("Only the first 60,000 files are filtered");
+    });
+
+    it("shows why the filter has nothing to show when the file list cannot be read", async () => {
+      mocks.list.mockRejectedValue("permission denied");
+      render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="Alpha" active />);
+      await screen.findByText("README.md");
+      fireEvent.change(screen.getByLabelText("Filter files by name"), { target: { value: "setT" } });
+      expect((await screen.findByTestId("file-tree-filter-error")).textContent).toContain("permission denied");
+      // No folder rows that would ignore a click while filtering.
+      expect(screen.queryByText("docs")).toBeNull();
+      expect(screen.queryByText("README.md")).toBeNull();
+    });
+
+    it("says nothing matched; Clear filter restores the earlier folders, Search in files carries the query", async () => {
+      mocks.listDir.mockImplementation(async (_root: string, rel: string) =>
+        rel === "docs" ? [{ path: "docs/guide.md", name: "guide.md", isDir: false }] : rel ? [] : [{ path: "docs", name: "docs", isDir: true }],
+      );
+      render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="Alpha" active />);
+      fireEvent.click(await screen.findByText("docs"));
+      await screen.findByText("guide.md");
+      fireEvent.change(screen.getByLabelText("Filter files by name"), { target: { value: "zzz" } });
+      await screen.findByText("No files match “zzz”");
+      expect(screen.getByText("The filter matches file and folder names. To look inside files, search in files.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: /Search in files/ }));
+      expect(mocks.openProjectSearch).toHaveBeenCalledWith("zzz");
+      fireEvent.click(screen.getAllByRole("button", { name: "Clear filter" }).find((b) => b.textContent?.includes("Clear filter"))!);
+      expect((screen.getByLabelText("Filter files by name") as HTMLInputElement).value).toBe("");
+      expect(await screen.findByText("guide.md")).toBeTruthy();
+    });
+
+    it("is hidden where the source cannot find files by name", async () => {
+      const source = { key: "cloud:x", kind: "cloud", readOnly: false, listDir: async () => [] } as never;
+      render(<FileTreeView sessionId="f" root="/w" rootName="W" active source={source} />);
+      await waitFor(() => expect(screen.getByRole("tree")).toBeTruthy());
+      expect(screen.queryByLabelText("Filter files by name")).toBeNull();
+    });
   });
 });

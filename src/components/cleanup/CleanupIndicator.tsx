@@ -110,7 +110,7 @@ function Card({ label, progress, title, detail, problems, open, onOpen, onDismis
       data-cleanup-indicator
       // The whole card opens it for the mouse; the button is the same action for the keyboard.
       onClick={onOpen}
-      className="pointer-events-auto flex max-w-full cursor-pointer items-center gap-2.5 rounded-xl bg-popover glass px-3 py-2.5 text-sm shadow-surface hairline animate-fade-in"
+      className="pointer-events-auto flex max-w-full cursor-pointer items-center gap-2.5 rounded-xl bg-popover px-3 py-2.5 text-sm shadow-surface hairline animate-fade-in"
     >
       {icon}
       <div role="status" className="min-w-0 flex-1">

@@ -135,3 +135,11 @@ it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside
   fireEvent.click(screen.getByRole("button", { name: `Discard changes to ${path}` }));
   expect(onDiscard).toHaveBeenCalledTimes(1);
 });
+
+it("offers one stage action for each Git hunk in the diff header", async () => {
+  const hunkSource = { ...source, hunkCount: vi.fn().mockResolvedValue(2), applyHunk: vi.fn() } as unknown as GitSource;
+  const onHunk = vi.fn();
+  render(<FileDiff {...props} source={hunkSource} staging={{ staged: false, onHunk }} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Stage hunk 2" }));
+  expect(onHunk).toHaveBeenCalledWith(1);
+});

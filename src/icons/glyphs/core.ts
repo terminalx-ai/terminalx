@@ -30,6 +30,7 @@ export const GLYPHS: Record<string, Glyph> = {
   ArrowLeft: [["path", { d: "M13 8H3M7.5 3.5 3 8l4.5 4.5" }]],
   ArrowRight: [["path", { d: "M3 8h10M8.5 3.5 13 8l-4.5 4.5" }]],
   Ellipsis: [dot(3.5, 8), dot(8, 8), dot(12.5, 8)],
+  EllipsisVertical: [dot(8, 3.5), dot(8, 8), dot(8, 12.5)],
   PanelLeft: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M6 3v10" }]],
   PanelRight: [["rect", { x: 2, y: 3, width: 12, height: 10, rx: 1.5 }], ["path", { d: "M10 3v10" }]],
   // A gear: six rounded teeth around a hole, in the set's stroke. (Settings2 keeps the sliders, for options.)
@@ -70,6 +71,8 @@ export const GLYPHS: Record<string, Glyph> = {
   FileCode2: [["path", { d: "M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5zM9 1.5v4h4M6.5 8l-1.5 1.5L6.5 11M9.5 8l1.5 1.5-1.5 1.5" }]],
   // A trunk with a dot at each end, and a branch that leaves it and runs down to its own dot: read top to bottom, a branch made from another.
   GitBranch: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 7h4a3 3 0 0 1 3 3v1" }]],
+  // The branch's own dot swapped for a plus: a branch about to be made.
+  GitBranchPlus: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 7h4a3 3 0 0 1 3 3M11.5 11.5v3M10 13h3" }]],
   GitMerge: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 12, cy: 8, r: 1.5 }], ["path", { d: "M4.5 5v6M4.5 5a5.5 5.5 0 0 0 6 3" }]],
   GitPullRequest: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V6a2 2 0 0 0-2-2H8M9.5 2.5 8 4l1.5 1.5" }]],
   GitPullRequestDraft: [["circle", { cx: 4.5, cy: 3.5, r: 1.5 }], ["circle", { cx: 4.5, cy: 12.5, r: 1.5 }], ["circle", { cx: 11.5, cy: 12.5, r: 1.5 }], ["path", { d: "M4.5 5v6M11.5 11V9.5M11.5 7V5.5" }]],

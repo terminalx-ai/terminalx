@@ -1,0 +1,21 @@
+{
+  "id": "audit-startup-retain-recorder",
+  "shape": "search",
+  "title": "Find every caller and export of the startup recorder hand-off",
+  "prompt": "In the desktop app's startup diagnostics, `retain_recorder` hands a recorder child process to a background thread that waits on it. Those waits die when the observer restarts, so the function is being replaced by a detached supervisor. Find every Rust file, integration tests included, that defines, re-exports or calls `retain_recorder`.\n\nWrite the answer to `bench-answer.txt` at the repository root: one repository-relative path per line (for example `path/to/file.rs`), each file once, nothing else on the line. List files, not line numbers. Do not change any other file.",
+  "startCommit": "470e5b06a8fb876bbf71749efda3998400c0ce63",
+  "solution": "audit-startup-retain-recorder.patch",
+  "check": {
+    "run": "node .bench-check/audit-startup-retain-recorder.mjs",
+    "timeoutSeconds": 30,
+    "files": [
+      ".bench-check/audit-startup-retain-recorder.mjs"
+    ],
+    "install": false
+  },
+  "source": {
+    "commit": "b1d7a29a629a",
+    "pr": 830
+  },
+  "notes": "Small (5 files), Rust only: src-tauri/src/startup and src-tauri/tests. Recall must be 1; one wrong file is allowed."
+}

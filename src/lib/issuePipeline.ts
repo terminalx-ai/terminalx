@@ -180,6 +180,40 @@ export function pipelineForSession(pipelines: IssuePipeline[], sessionId: string
   return found ? { pipeline: found, role: found.author.sessionId === sessionId ? "author" : "reviewer" } : null;
 }
 
+/**
+ * What a pipeline's helper is doing for an author's session, in a short
+ * phrase for the row's second line; null when no helper is at work (the
+ * author's own work, a stop, a merge) and the row says its place again.
+ * Only the author's session carries it: the helper's tab is inside it.
+ */
+export function helperActivity(pipelines: IssuePipeline[], sessionId: string): string | null {
+  const pipeline = pipelines.filter((value) => value.author.sessionId === sessionId && (value.state === "working" || value.state === "waiting")).sort(newest)[0];
+  if (!pipeline) return null;
+  if (pipeline.state === "waiting") return pipelineHeadline(pipeline).label;
+  if (pipeline.answered) return null;
+  if (pipeline.stage === "review") return `Review ${Math.max(pipeline.round, 1)} of ${pipeline.maxRounds} running`;
+  if (pipeline.stage === "resolve") return `Resolving conflicts with ${pipeline.pr?.base || "main"}`;
+  return null;
+}
+
+/**
+ * The sessions a pipeline's reviewer was opened as before reviewers became
+ * tabs of the author's session, each with the author's session it belongs to
+ * (matched by worktree). One list of chats folds them under the author.
+ */
+export function legacyReviewerSessions(pipelines: IssuePipeline[], sessions: readonly { id: string; cwd: string }[]): Map<string, string> {
+  const folded = new Map<string, string>();
+  const canon = (path: string) => path.replace(/\/+$/, "");
+  for (const pipeline of pipelines) {
+    const reviewer = pipeline.reviewer?.sessionId;
+    if (!reviewer || reviewer === pipeline.author.sessionId) continue;
+    const reviewing = sessions.find((session) => session.id === reviewer);
+    const author = sessions.find((session) => session.id === pipeline.author.sessionId);
+    if (reviewing && author && canon(reviewing.cwd) === canon(author.cwd)) folded.set(reviewer, author.id);
+  }
+  return folded;
+}
+
 /** `failed`: a required check failed, as the issue page's check list says it. */
 export type PipelineTone = "add" | "warning" | "info" | "merged" | "faint" | "failed";
 
@@ -377,7 +411,10 @@ export function pipelineActions(pipeline: IssuePipeline): { primary: PipelineAct
         return { primary: { action: "review", label: "Review the new commit" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       }
       // Findings left open at the round limit: one more round is the reader's to grant.
-      if (kind === "roundLimit") return { primary: { action: "advance", label: "Review once more" }, secondary: [stop] };
+      // A review, not an advance: at the merge stage an advance only looks again and stops again.
+      if (kind === "roundLimit") return { primary: { action: "review", label: "Review once more" }, secondary: [stop] };
+      // The final review passed and the branch then moved with commits of its own (#947).
+      if (kind === "movedAfterFinalReview") return { primary: { action: "review", label: "Review the new head once more" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       // The reviewer's own checks failed on the commit it passed: another look is the way on.
       if (kind === "reviewChecksFailed") return { primary: { action: "review", label: "Review again" }, secondary: [{ action: "refresh", label: "Check again" }, stop] };
       return { primary: { action: "advance", label: ADVANCE[pipeline.stage] }, secondary: [stop] };

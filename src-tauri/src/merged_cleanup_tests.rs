@@ -100,7 +100,7 @@ impl Fixture {
     fn archive_script(&mut self, archive: &str) {
         let project = crate::store::projects::add(self.alpha().to_str().unwrap()).unwrap();
         crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
-            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into() }), ..Default::default()
+            scripts: Some(crate::store::projects::RepositoryScripts { setup: String::new(), archive: archive.into(), archive_timeout_minutes: None }), ..Default::default()
         }).unwrap();
         if self.archive.is_none() { self.archive = Some((Arc::new(crate::pty::Terminals::new()), Arc::new(crate::sink::BroadcastSink::new(64)))); }
     }
@@ -805,6 +805,34 @@ fn an_undo_puts_back_the_worktree_its_branches_and_its_sessions_and_keeps_it_fro
     assert!(f.with_host(|host| restore(host, &*f.events, &record.id, f.at(22))).is_err());
     assert_eq!(reason(of(&f.sweep(600), &wt)), (Phase::Held, ""));
     assert!(wt.exists());
+}
+
+#[test]
+fn an_undo_brings_a_sparse_workspace_back_with_the_folders_it_had() {
+    let f = Fixture::new();
+    // Made while the repository chose only its root files; the choice is gone by the undo.
+    std::fs::create_dir_all(f.alpha().join("docs")).unwrap();
+    std::fs::write(f.alpha().join("docs/guide.md"), "guide\n").unwrap();
+    sh(&f.alpha(), &["add", "docs"]);
+    sh(&f.alpha(), &["commit", "-qm", "docs"]);
+    sh(&f.alpha(), &["push", "-q", "origin", "HEAD"]);
+    std::fs::create_dir_all(f.alpha().join(".terminalx")).unwrap();
+    std::fs::write(f.alpha().join(".terminalx/settings.json"), r#"{"sparseCheckout": []}"#).unwrap();
+    let wt = f.worktree("narrow");
+    assert!(!wt.join("docs").exists());
+    std::fs::remove_dir_all(f.alpha().join(".terminalx")).unwrap();
+    f.session(&wt, TabStatus::Idle);
+    f.squash("narrow", 96);
+    f.sweep(1);
+    let swept = f.sweep(12);
+    let status = of(&swept, &wt);
+    let record = status.record.clone().unwrap_or_else(|| panic!("not removed: {status:?}"));
+    assert!(!wt.exists());
+    assert_eq!(record.sparse_checkout, Some(Vec::new()));
+    f.with_host(|host| restore(host, &*f.events, &record.id, f.at(21)).unwrap());
+    assert!(wt.join("narrow.txt").exists());
+    assert!(!wt.join("docs").exists(), "the undo checks out only what the workspace had");
+    assert_eq!(sh(&wt, &["status", "--porcelain"]), "");
 }
 
 #[test]

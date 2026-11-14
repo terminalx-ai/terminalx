@@ -155,6 +155,8 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    #[cfg(target_os = "linux")]
+    if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
     #[cfg(unix)]
     if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return code; }
@@ -753,10 +755,17 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     let record = &mut adopted.record;
     log::info!("taking over {} terminal(s) and {} agent tab(s) from runtime {}", record.panes.len(), record.tabs.len(), record.from);
     // Before anything here starts a child of its own.
-    crate::local_runtime::handover::reap_strays(&record.panes.iter().filter_map(|pane| pane.pid).collect());
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut kept: std::collections::HashSet<u32> = record.panes.iter().filter_map(|pane| pane.pid).collect();
+    // Supervisors are this process's children too, and theirs to reap (#467).
+    #[cfg(target_os = "linux")]
+    kept.extend(record.panes.iter().filter_map(|pane| pane.supervisor.as_ref()).chain(record.supervised.iter().map(|launch| &launch.supervisor)).map(|supervisor| supervisor.state.supervisor()));
+    crate::local_runtime::handover::reap_strays(&kept);
     let panes = std::mem::take(&mut record.panes);
     let retained = std::mem::take(&mut record.retained);
     let groups = std::mem::take(&mut record.groups);
+    #[cfg(target_os = "linux")]
+    let supervised = std::mem::take(&mut record.supervised);
     let tabs = std::mem::take(&mut record.tabs);
     let frames = std::mem::take(&mut record.frames);
     let decisions = std::mem::take(&mut record.decisions);
@@ -767,16 +776,28 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     for pane in panes {
         let master = adopted.take(pane.fd)?;
         let id = pane.id.clone();
+        #[cfg(target_os = "linux")]
+        let supervised = match pane.supervisor { Some(supervisor) => Some((supervisor.state, adopted.take(supervisor.fd)?)), None => None };
         let frozen = crate::pty::FrozenPane {
             id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: pane.environment.unwrap_or_else(|| crate::store::environment::Stamp::unconfigured(&pane.cwd)), cwd: pane.cwd, created: pane.created,
             tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
             quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed, docked: pane.docked,
+            #[cfg(target_os = "linux")]
+            supervised,
         };
         if let Err(error) = terminals.adopt(emit.clone(), frozen) {
-            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched");
+            log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched, or, under a supervisor whose channel is let go, is ended by it");
         }
     }
     terminals.adopt_rest(retained, groups);
+    #[cfg(target_os = "linux")]
+    for launch in supervised {
+        let id = launch.id.clone();
+        let socket = adopted.take(launch.supervisor.fd)?;
+        if let Err(error) = terminals.adopt_supervised(&launch.id, launch.supervisor.state, socket) {
+            log::error!("take over the supervised launch of {id}: {error:#}; its supervisor, its channel let go, ends what it runs");
+        }
+    }
     let mut waits = Vec::new();
     for tab in tabs {
         let name = format!("{}/{}", tab.session_id, tab.tab_id);

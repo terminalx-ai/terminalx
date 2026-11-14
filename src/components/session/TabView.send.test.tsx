@@ -163,10 +163,14 @@ describe("sending a message (#727)", () => {
     // The median of five: the first send also pays for compiling the code it runs.
     const median = (times: number[]) => [...times].sort((a, b) => a - b)[Math.floor(times.length / 2)];
     const said = (times: { cpu: number[]; wall: number[] }) => `cpu ${times.cpu.map(Math.round).join(", ")} ms; wall ${times.wall.map(Math.round).join(", ")} ms`;
-    expect(median(atOnce.cpu), `drawn as sending: ${said(atOnce)}`).toBeLessThan(100);
-    expect(median(asSent.cpu), `drawn as sent: ${said(asSent)}`).toBeLessThan(100);
-    expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400);
-    expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400);
+    // Hosted CI runners are slower per core: medians of 108-114 ms CPU were
+    // measured there for the same work. The regression this guards (#727) cost
+    // 3-4 s, so three times the bound on CI still catches it many times over.
+    const slack = process.env.CI ? 3 : 1;
+    expect(median(atOnce.cpu), `drawn as sending: ${said(atOnce)}`).toBeLessThan(100 * slack);
+    expect(median(asSent.cpu), `drawn as sent: ${said(asSent)}`).toBeLessThan(100 * slack);
+    expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400 * slack);
+    expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400 * slack);
     expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
   });
 });
@@ -195,5 +199,100 @@ describe("held follow-ups", () => {
     expect(field().value).toBe("");
     expect(sentText("Fix the typo")).toBe(false);
     expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+  });
+});
+
+describe("sending files (PRO-290)", () => {
+  const notes = () => new File([new Uint8Array([1, 2, 3])], "notes.md", { type: "text/markdown" });
+  const drop = (files: File[]) => fireEvent.drop(field().parentElement!, { dataTransfer: { files, types: ["Files"] } });
+  const stored = (folder: string) => [{ path: `/home/.terminalx/attachments/${session.id}/${folder}/notes.md`, name: "notes.md", mediaType: "text/markdown", size: 3 }];
+
+  it("stores a file that is not an image with the session, then sends its reference with the message", async () => {
+    runtime(false);
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) =>
+      command === "store_attachments" ? stored("f1") : normal(command, args));
+    render(<Tab />);
+    drop([notes()]);
+    await screen.findByTitle("notes.md");
+    fireEvent.change(field(), { target: { value: "Read these notes" } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ text: "Read these notes", files: stored("f1") })));
+    expect(mocks.invoke).toHaveBeenCalledWith("store_attachments", { sessionId: session.id, files: [{ name: "notes.md", data: "AQID", mediaType: "text/markdown" }] });
+    const order = mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command === "store_attachments" || command === "send_message");
+    expect(order).toEqual(["store_attachments", "send_message"]);
+    await waitFor(() => expect(screen.queryByTitle("notes.md")).toBeNull());
+  });
+
+  it("stores a file once: a send that fails after storing it is tried again with the same copy", async () => {
+    runtime(false);
+    const normal = mocks.invoke.getMockImplementation()!;
+    let sends = 0;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "store_attachments") return stored("f4");
+      if (command === "send_message" && ++sends === 1) throw new Error("the runtime restarted");
+      return normal(command, args);
+    });
+    render(<Tab />);
+    drop([notes()]);
+    await screen.findByTitle("notes.md");
+    fireEvent.change(field(), { target: { value: "Read these notes" } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(field().value).toBe("Read these notes"));
+    expect(await screen.findByTitle("notes.md")).toBeTruthy();
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(sends).toBe(2));
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "send_message").map(([, args]) => (args as { files?: unknown }).files)).toEqual([stored("f4"), stored("f4")]);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "store_attachments")).toHaveLength(1);
+  });
+
+  it("sends nothing and gives the file back when it cannot be stored, and stores it again on the next send", async () => {
+    runtime(false);
+    const normal = mocks.invoke.getMockImplementation()!;
+    let stores = 0;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command !== "store_attachments") return normal(command, args);
+      if (++stores === 1) throw new Error("disk full");
+      return stored("f2");
+    });
+    render(<Tab />);
+    drop([notes()]);
+    await screen.findByTitle("notes.md");
+    fireEvent.change(field(), { target: { value: "Read these notes" } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(field().value).toBe("Read these notes"));
+    expect(await screen.findByTitle("notes.md")).toBeTruthy();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({ files: stored("f2") })));
+    expect(stores).toBe(2);
+  });
+
+  it("stores a held follow-up's files first and holds them by reference with its text", async () => {
+    const { setPrefs } = await import("@/lib/prefs");
+    setPrefs({ followUps: "hold", shortcuts: {} });
+    try {
+      runtime(false);
+      const normal = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+        if (command === "store_attachments") return stored("f3");
+        if (command !== "change_held_queue") return normal(command, args);
+        return { queued: true, events: [{ id: "queue", seq: 1, sessionId: session.id, tabId: session.tabs[0].id, harness: "claude", ts: "",
+          payload: { type: "held_queue", queue: { items: [{ id: "held", text: "Read these notes", images: [], files: stored("f3") }], paused: false, sending: null, next: null, error: null } } }] };
+      });
+      render(<Tab />);
+      drop([notes()]);
+      await screen.findByTitle("notes.md");
+      fireEvent.change(field(), { target: { value: "Read these notes" } });
+      fireEvent.keyDown(field(), { key: "Enter" });
+      await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("change_held_queue", expect.objectContaining({ change: { type: "enqueue", text: "Read these notes", images: [], files: stored("f3"), sendNow: false } })));
+      const order = mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command === "store_attachments" || command === "change_held_queue");
+      expect(order).toEqual(["store_attachments", "change_held_queue"]);
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
+      const tray = await screen.findByRole("region", { name: "Held follow-ups" });
+      expect(tray.textContent).toContain("notes.md");
+    } finally {
+      setPrefs({ followUps: "now" });
+    }
   });
 });

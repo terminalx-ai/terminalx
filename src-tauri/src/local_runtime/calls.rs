@@ -41,6 +41,13 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
         if method == "agentLoginTabs" {
             return Ok(serde_json::to_value(crate::agent_keys::running(string(&params, "harness")?))?);
         }
+        // A saved action's run is decided here, in the runtime, for the
+        // desktop and for Run after setup alike (PRO-363): one owner, so a
+        // non-concurrent action never gets two tabs from two processes.
+        if method == "actionRun" {
+            let options = crate::action_runner::RunOptions { restart: params["restart"].as_bool().unwrap_or(false) };
+            return Ok(serde_json::to_value(crate::action_runner::run(manager, string(&params, "sessionId")?, string(&params, "actionId")?, options)?)?);
+        }
         if method == "busyMany" {
             let ids: Vec<String> = serde_json::from_value(params["ids"].clone())?;
             if ids.len() > 4096 || ids.iter().any(|id| id.is_empty() || id.len() > 256) { bail!("invalid pane list"); }
@@ -221,7 +228,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
     let session = string(&params, "sessionId")?;
     let tab = string(&params, "tabId")?;
     let value = match method {
-        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?)?)?,
+        "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?, params["confirm"].as_str())?)?,
         "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
@@ -240,7 +247,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
-            serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64())?)?,
+            serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64(),
+            serde_json::from_value(params.get("files").cloned().unwrap_or_else(|| json!([])))?)?)?,
         "terminalViewReport" => { manager.note_terminal_view(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }

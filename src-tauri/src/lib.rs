@@ -76,6 +76,9 @@ mod cloud_control;
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+mod notification_permission;
+#[cfg(feature = "desktop")]
+mod transparency;
 #[cfg(feature = "desktop")]
 mod drag_text;
 #[cfg(feature = "desktop")]
@@ -89,6 +92,7 @@ mod floating;
 #[cfg(feature = "desktop")]
 mod media;
 mod media_types;
+mod attachments;
 mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
@@ -97,6 +101,7 @@ mod git;
 mod repo_mirror;
 mod checkpoints;
 mod worktree_files;
+mod sparse_checkout;
 mod git_media;
 mod github;
 mod github_process;
@@ -110,6 +115,7 @@ pub fn run_git_transport_cli() -> Option<i32> {
     { None }
 }
 mod unfinished_merge;
+mod merge_conflicts;
 mod pr_associations;
 mod github_identity;
 mod ssh_containment;
@@ -148,9 +154,19 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+pub mod power;
 mod project_start;
 mod project_templates;
 mod pty;
+/// Private inherited-descriptor helper, dispatched before application threads.
+#[cfg(target_os = "linux")]
+pub fn run_pty_supervisor() -> Option<i32> { pty::supervisor::dispatch() }
+/// The same, from an executable's `.preinit_array`, before any thread can
+/// exist. Every Linux executable that opens terminals lists it there.
+#[cfg(target_os = "linux")]
+pub extern "C" fn pty_supervisor_preinit(argc: libc::c_int, argv: *const *const libc::c_char, envp: *const *const libc::c_char) {
+    pty::supervisor::dispatch_before_main(argc, argv, envp)
+}
 #[cfg(feature = "desktop")]
 mod quit;
 #[cfg(feature = "desktop")]
@@ -163,8 +179,10 @@ mod session;
 mod sidebar_activity;
 mod session_archive;
 mod session_usage;
+mod session_names;
 mod session_ops;
 mod workspace_setup;
+mod action_runner;
 mod stray_processes;
 pub mod serve;
 pub mod sink;
@@ -260,6 +278,30 @@ fn let_go_of_unresponsive_runtime(state: &AppState) {
     }
 }
 
+/// Tells the webview a setting link (PRO-127) is waiting: it takes the link
+/// with `settings_link_take`, so the event itself carries nothing of it.
+#[cfg(feature = "desktop")]
+const SETTINGS_LINK_REQUESTED: &str = "settings_link_requested";
+
+/// Keep a validated setting link for the webview and tell it one is waiting.
+/// A webview that is not listening yet (the link launched the app) takes it
+/// when it starts.
+#[cfg(feature = "desktop")]
+fn offer_settings_link(app: &tauri::AppHandle, link: desktop_links::SettingsLink) {
+    app.state::<desktop_links::PendingSettingsLink>().set(link);
+    if let Err(error) = app.emit(SETTINGS_LINK_REQUESTED, ()) {
+        log::warn!("tell the webview about a settings link: {error}");
+    }
+}
+
+/// The setting link waiting for the webview, once: `{ id, enable }` and
+/// nothing else of the URL, or null when none is.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn settings_link_take(pending: tauri::State<'_, desktop_links::PendingSettingsLink>) -> Option<desktop_links::SettingsLink> {
+    pending.take()
+}
+
 /// The desktop's log file, `desktop.log` beside the runtime's (#716), kept
 /// from setup on: the app's stderr goes nowhere once it is opened normally.
 #[cfg(all(feature = "desktop", unix))]
@@ -336,6 +378,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(transparency::plugin())
         .plugin(tauri_plugin_window_state::Builder::default().with_filter(|label| !chat_windows::is_chat_window(label)).build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -349,6 +392,7 @@ pub fn run() {
         )
         .manage(floating::Floating::default())
         .manage(state)
+        .manage(desktop_links::PendingSettingsLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .setup(move |app| {
@@ -388,6 +432,7 @@ pub fn run() {
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
+                        else if let Some(link) = links.settings_link(&url) { offer_settings_link(&app_handle, link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -396,6 +441,9 @@ pub fn run() {
                             account::focus_main_window(&app_handle);
                             if links.is_join_link(&url) {
                                 if joining.set_pending_join(url.to_string()).is_err() { log::warn!("ignored invalid session link"); }
+                            } else if let Some(link) = links.settings_link(&url) {
+                                log::info!("received TerminalX settings link");
+                                offer_settings_link(&app_handle, link);
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -415,6 +463,8 @@ pub fn run() {
             }
             local_runtime::ui::observe(app.handle());
             let sink: Arc<dyn sink::EventSink> = Arc::new(app.handle().clone());
+            // Saved actions' exit codes, from every runtime pty_exit (PRO-363).
+            action_runner::observe(sink.clone());
             let endpoint = hooks::prepare_control()?;
             let asking = app.handle().clone();
             let ask: issue_control::Ask = Arc::new(move |question: issue_control::Question| {
@@ -448,7 +498,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
+            configuration_commands::settings_files_list,
+            configuration_commands::open_settings_file,
             configuration_watch::configuration_watch,
             configuration_commands::configuration_write,
             configuration_commands::configuration_review,
@@ -485,6 +538,7 @@ pub fn run() {
             updater::app_update_check,
             updater::app_update_install,
             commands::repository_files_preview,
+            commands::repository_folders,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
@@ -617,11 +671,16 @@ pub fn run() {
             commands::session_share_status,
             commands::session_share_change,
             commands::session_join_pending,
+            settings_link_take,
             commands::session_guest_join,
             commands::session_guest_send,
             commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
+            commands::pairing_approve,
+            commands::pairing_decline,
+            commands::pairing_disconnect,
+            commands::pairing_set_keep_awake,
             commands::machine_name,
             commands::set_machine_name,
             commands::add_project,
@@ -654,6 +713,9 @@ pub fn run() {
             commands::stats_usage_refresh,
             commands::create_session,
             commands::workspace_setup,
+            commands::action_run,
+            commands::action_states,
+            commands::workspace_ports,
             commands::create_quick_chat,
             commands::set_quick_chat_cwd,
             commands::move_quick_chat_to_project,
@@ -711,6 +773,9 @@ pub fn run() {
             commands::load_tab_events,
             commands::prepare_continuation,
             commands::send_message,
+            commands::store_attachments,
+            commands::inspect_attachments,
+            commands::save_attachment_copy,
             commands::report_send_shown,
             commands::report_terminal_view,
             commands::report_recovery_ui,
@@ -739,11 +804,19 @@ pub fn run() {
             commands::list_models,
             commands::frontend_log,
             commands::search_files,
+            commands::count_files,
+            commands::list_files,
             commands::list_slash_commands,
             commands::read_image_file,
             drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
+            commands::git_stage_paths,
+            commands::git_unstage_paths,
+            commands::git_unstage_all,
+            commands::git_apply_hunk,
+            commands::git_hunk_count,
+            commands::generate_commit_message,
             commands::git_identity,
             commands::cloud_mirror_status,
             commands::cloud_mirror_enable,
@@ -775,13 +848,21 @@ pub fn run() {
             commands::unfinished_merge,
             commands::commit_merge,
             commands::abort_merge,
+            commands::merge_conflict_file,
+            commands::resolve_merge_conflict,
+            commands::mark_conflict_resolved,
             commands::git_checkout,
+            commands::git_branch_here,
             commands::working_changes,
+            commands::working_change_sets,
             commands::pr_list,
             commands::pr_search,
             commands::pr_attach,
             commands::pr_associations,
             commands::pr_associations_batch,
+            commands::pr_link_candidates,
+            commands::pr_link,
+            commands::pr_unlink,
             commands::pr_details,
             commands::pr_conversation,
             commands::pr_conversation_action,
@@ -837,6 +918,8 @@ pub fn run() {
             media::open_media_file,
             media::close_media_file,
             commands::read_text_file,
+            commands::read_whole_text_file,
+            commands::export_file,
             commands::write_text_file,
             commands::file_mtime,
             commands::inspect_local_path,
@@ -845,6 +928,7 @@ pub fn run() {
             commands::replace_text,
             commands::fork_session,
             commands::dictation_available,
+            commands::notification_permission,
             commands::dictation_start,
             commands::dictation_stop,
             commands::update_project,
@@ -896,9 +980,11 @@ pub fn run() {
             store::settings::file::settings_file_status,
             store::settings::file::update_user_preferences,
             store::settings::file::create_settings_file,
+            store::settings::file::reset_user_setting,
             commands::set_experimental_settings,
             commands::orchestrator_settings,
             commands::set_orchestrator_settings,
+            commands::orchestrator_tier_models,
             commands::orchestration_run_for_session,
             commands::orchestration_runs,
             commands::orchestration_create,
@@ -906,6 +992,16 @@ pub fn run() {
             commands::orchestration_approve,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
+            commands::orchestration_merge,
+            commands::orchestration_send_back,
+            commands::orchestration_resolve_in_lead,
+            commands::orchestration_take_over,
+            commands::orchestration_finish,
+            commands::orchestration_widen,
+            commands::orchestration_note,
+            commands::orchestration_skip,
+            commands::orchestration_set_limits,
+            commands::orchestration_resume,
             commands::session_usage,
             commands::organization_work_status,
             commands::set_organization_work_status,

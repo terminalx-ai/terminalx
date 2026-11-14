@@ -206,7 +206,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
             sideOffset={4}
             align="start"
             collisionPadding={8}
-            className="z-(--z-menu) flex flex-col rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in"
+            className="z-(--z-menu) flex flex-col rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline animate-fade-in"
             onClick={(event) => event.stopPropagation()}
           >
             {/* Explicit tab stops also work with macOS WebKit's default keyboard navigation. */}

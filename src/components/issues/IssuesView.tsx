@@ -39,6 +39,8 @@ import { planCloudStart, startInWorkspace, type CloudIssueOutcome } from "@/lib/
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { cn } from "@/lib/cn";
 import { noteSessionStarted } from "@/lib/notify";
+import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/lib/orchestrateStart";
+import { showRunView } from "@/lib/orchestration";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
@@ -189,6 +191,8 @@ export function IssuesView({
   const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
   // Work on the issue to say before a session starts on it.
   const [takenBy, setTakenBy] = useState<IssueWorker[] | null>(null);
+  /** The start in progress, or waiting on the taken-issue warning, is an Orchestrate start (PRO-337). */
+  const [orchestrating, setOrchestrating] = useState(false);
   const [assigneeOpen, setAssigneeOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -443,9 +447,15 @@ export function IssuesView({
     thread.current = { key, thread: value };
   }, []);
 
-  const start = useCallback(async (anyway = false) => {
+  // Orchestrate (PRO-337): only where the session could lead a run, a local git project's.
+  const orchestrateShown = useOrchestrateOffered({ local: !cloud && !!project?.local, git: isGit, cloud: !!cloud });
+
+  const start = useCallback(async (anyway = false, orchestrateAsked = false) => {
     const issue = detail ?? selected;
     if (!issue || !projectPath || !harness) return;
+    // Never in the cloud: a run is led from this computer.
+    const orchestrate = orchestrateAsked && !cloud;
+    setOrchestrating(orchestrate);
     // A warning, not a lock: the reader may start anyway.
     const busy = workToWarnAbout(work.byIssue.get(workKeyOf(issue)));
     if (!anyway && busy.length > 0) {
@@ -513,6 +523,8 @@ export function IssuesView({
         onMain: !useWorktree,
         worktreeName: isGit ? issueWorktreeName(issue.identifier, issue.title) : null,
         issue: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
+        // Any run it leads waits for the person's Approve, whatever the project's setting.
+        ...(orchestrate ? { orchestrate: true } : {}),
         tab: {
           harness: harness.id,
           model: modelId,
@@ -531,6 +543,11 @@ export function IssuesView({
         } catch (e) {
           console.error("issue pipeline did not start", e);
         }
+      }
+      if (orchestrate) {
+        // The plan-a-run request ends the first prompt, after the issue and the pipeline's brief, and the session opens on its Run tab.
+        prompt = orchestratePrompt(prompt);
+        showRunView(s.id, true);
       }
       onCreated?.(s.id, s.tabs[0].id, prompt);
       noteSessionStarted(s.id, s.tabs[0].id, harness.id, `${issue.identifier} ${issue.title}`);
@@ -1024,8 +1041,16 @@ export function IssuesView({
                         Open session
                       </Button>
                     )}
+                    {orchestrateShown && (
+                      <WithTooltip label={ORCHESTRATE_TITLE}>
+                        <Button size="sm" variant="accent" disabled={starting || detailLoading || !harness?.available} onClick={() => void start(false, true)}>
+                          {starting && orchestrating ? <Loader2 className="animate-spin" /> : null}
+                          Orchestrate
+                        </Button>
+                      </WithTooltip>
+                    )}
                     <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start(false)}>
-                      {starting ? <Loader2 className="animate-spin" /> : null}
+                      {starting && !orchestrating ? <Loader2 className="animate-spin" /> : null}
                       Start session
                     </Button>
                   </div>
@@ -1106,7 +1131,7 @@ export function IssuesView({
         <TakenIssueDialog
           workers={workToWarnAbout(selected ? workOf(selected) : undefined)}
           now={work.now}
-          onStart={() => void start(true)}
+          onStart={() => void start(true, orchestrating)}
           onOpen={(sessionId) => {
             setTakenBy(null);
             selectSession(sessionId);

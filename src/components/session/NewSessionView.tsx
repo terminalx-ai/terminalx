@@ -16,10 +16,11 @@ import {
 } from "@/components/ui/menu";
 import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
 import { insertNewLine } from "@/components/chat/Composer";
-import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
+import { AttachButton, DropHint, useAttachments } from "@/components/chat/useImageAttachments";
+import { AttachmentChips } from "@/components/chat/ComposerAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
-import { api, errorMessage, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
+import { api, errorMessage, type FileInput, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
 import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
 import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -37,6 +38,9 @@ import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
+import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/lib/orchestrateStart";
+import { showRunView } from "@/lib/orchestration";
+import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -73,7 +77,8 @@ export function NewSessionView({
   compact = false,
   modal = false,
 }: {
-  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[]) => void;
+  /** `files`: attached files besides images (PRO-290), passed only when there are any, to be stored once the session exists. */
+  onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[], files?: FileInput[]) => void;
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
   /** Start a quick chat: a session with no project. */
@@ -153,6 +158,10 @@ export function NewSessionView({
     cloud ? "Cloud workspaces require a person to merge." : undefined,
     // A picked issue makes this a session started from an issue: switches nobody touched follow it.
     issue ? "issue" : "session");
+  // Orchestrate (PRO-337): a session of a local git project can lead a run; a cloud draft, a chat or the compact window cannot.
+  const orchestrateShown = useOrchestrateOffered({ local: !projectless && !cloud && !!project, git: isGit, cloud: !!cloud, quick: projectless, compact });
+  /** The start in progress is an Orchestrate start. */
+  const [orchestrating, setOrchestrating] = useState(false);
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -244,10 +253,11 @@ export function NewSessionView({
   useDictationShortcuts(dictation);
   const keymap = useKeymap();
   const sendKeys = keymap["composer.send"][0];
-  const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
-  const hasImages = attach.attachments.length > 0;
+  const attach = useAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
+  // Refused chips are never sent, and alone make no prompt.
+  const hasImages = attach.images.length + attach.files.length > 0;
 
-  // A screenshot alone is a prompt, as it is in the session composer.
+  // A screenshot or a file alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
     () =>
       cloud
@@ -348,12 +358,14 @@ export function NewSessionView({
       if (blocked) { setError(blocked); return; }
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
+      const files = attach.files;
       const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, text, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, text, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, text, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -361,11 +373,13 @@ export function NewSessionView({
     }
   };
 
-  const create = async () => {
+  const create = async (orchestrateAsked = false) => {
     if (projectless) return createProjectless();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
+    const orchestrate = orchestrateAsked && orchestrateShown;
     if (dictation.dictating) await stopDictation();
+    setOrchestrating(orchestrate);
     setBusy(true);
     setError(null);
     try {
@@ -376,6 +390,7 @@ export function NewSessionView({
       // sends an empty title rather than inventing one here.
       const title = (text.trim().split("\n")[0] || issue?.title || pullRequest?.title || "").slice(0, 60);
       const images = attach.images;
+      const files = attach.files;
       // Named for the work: the issue's name when there is one, else the prompt's words; the drawn name when they say nothing.
       // An existing branch's worktree is named after the branch.
       const named = pullRequest ? `pr-${pullRequest.number}-${pullRequest.title}` : checkoutBranch ? (checkoutBranch.split("/").pop() ?? "") : !preset?.cwd && useWorktree && !issue ? worktreeNameFromPrompt(text) : "";
@@ -392,6 +407,8 @@ export function NewSessionView({
         baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
+        // Any run it leads waits for the person's Approve, whatever the project's setting.
+        ...(orchestrate ? { orchestrate: true } : {}),
       });
       upsertSession(s);
       let first = pullRequest ? [text.trim(), `Continue work on pull request #${pullRequest.number}: ${pullRequest.title}\n${pullRequest.url}`].filter(Boolean).join("\n\n") : text;
@@ -401,12 +418,16 @@ export function NewSessionView({
         await linkSessionIssue(s.id, ref).catch((cause) => console.error("the new session was not linked to its issue", cause));
         first = [text.trim(), await issuePromptWithComments(project.path, issue)].filter(Boolean).join("\n\n");
       }
-      const prompt = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      const launched = await preparePipelineLaunch(s.id, s.tabs[0].id, first, pipelineLaunch.value);
+      // The plan-a-run request ends the first prompt, and the session opens on its Run tab.
+      const prompt = orchestrate ? orchestratePrompt(launched) : launched;
+      if (orchestrate) showRunView(s.id, true);
       setText("");
       setIssue(null);
       attach.clear();
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, prompt, images);
+      if (files.length) onCreated?.(s.id, s.tabs[0].id, prompt, images, files);
+      else onCreated?.(s.id, s.tabs[0].id, prompt, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -468,7 +489,7 @@ export function NewSessionView({
             </div>
           )}
 
-          <div className={cn("relative overflow-hidden rounded-2xl bg-composer glass shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
+          <div className={cn("relative overflow-hidden rounded-2xl bg-composer shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-12 items-center gap-1 border-b border-hairline px-2">
@@ -593,7 +614,7 @@ export function NewSessionView({
                   <button type="button" aria-label="Remove pull request" onClick={() => setPullRequest(null)} className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3" /></button>
                 </div>
               )}
-              <AttachmentThumbs attach={attach} />
+              <AttachmentChips attach={attach} />
               <textarea
                 ref={ref}
                 autoFocus
@@ -645,8 +666,16 @@ export function NewSessionView({
               <div className="ml-auto flex items-center gap-0.5">
                 <MicButton dictation={dictation} />
                 {!cloud && <AttachButton attach={attach} />}
-                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={create} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
-                  {busy ? <Loader2 className="animate-spin" /> : null}
+                {orchestrateShown && (
+                  <WithTooltip label={ORCHESTRATE_TITLE} side="top">
+                    <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create(true)}>
+                      {busy && orchestrating ? <Loader2 className="animate-spin" /> : null}
+                      Orchestrate
+                    </Button>
+                  </WithTooltip>
+                )}
+                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create()} aria-label={projectless ? "Ask" : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"}>
+                  {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
                   {projectless ? "Ask" : "Create"}
                   {sendKeys && !busy && <span className="font-sans opacity-70">{keycaps(sendKeys).join("")}</span>}
                 </Button>

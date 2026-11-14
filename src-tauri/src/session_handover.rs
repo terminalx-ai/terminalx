@@ -355,7 +355,14 @@ impl SessionManager {
         // A tab held up elsewhere is not waited on for long: the handover
         // itself finds out whether it comes to rest.
         let deadline = Instant::now() + PLAN_WITHIN;
-        tabs.iter().filter_map(|tab| Self::unadoptable_tab(&*take(tab, deadline, "An agent tab").ok()?)).collect()
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut work: Vec<Work> = tabs.iter().filter_map(|tab| Self::unadoptable_tab(&*take(tab, deadline, "An agent tab").ok()?)).collect();
+        // Supervised Linux terminals, agents' included, by title: named for
+        // the reader but never by a session and tab, so Update now does not
+        // stop them. The handover waits until they have ended (#467).
+        #[cfg(target_os = "linux")]
+        work.extend(self.terminals.supervised_work().into_iter().map(|launch| Work { kind: WorkKind::Terminal, session_id: None, tab_id: None, harness: None, title: Some(launch.title), pane: Some(launch.id) }));
+        work
     }
 
     fn unadoptable_tab(rt: &TabRuntime) -> Option<Work> {
@@ -364,7 +371,7 @@ impl SessionManager {
                 // A drained leader can leave descendants behind. These native
                 // process groups are not among the PTYs the record carries.
                 let kind = if rt.turn_open || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting) { WorkKind::Turn } else { WorkKind::Processes };
-                Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None })
+                Some(Work { kind, session_id: Some(rt.session_id.clone()), tab_id: Some(rt.tab_id.clone()), harness: Some(rt.harness.clone()), title: None, pane: None })
             }
             _ => None,
         }

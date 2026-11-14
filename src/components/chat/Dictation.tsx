@@ -2,10 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObje
 import { invoke } from "@tauri-apps/api/core";
 import type { DictationContext } from "@/lib/dictationContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, Mic } from "@/icons";
+import { ExternalLink, Mic, MicOff, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
+import { bindingKind, isMac, keycaps, useKeymap } from "@/lib/shortcuts";
 import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
 import { anchorAt, insertSpoken, spokenSince, formattedSince, joinSpoken, correctedSegment, type DictationPart, type DictationAnchor } from "@/lib/dictationText";
@@ -346,12 +347,35 @@ function listeningLabel(state: DictationState, held: boolean): string {
   return held ? "Listening. Speak, then release the key." : "Listening. Speak, then press the mic again.";
 }
 
+/** What the Rust side says in place of the key, which only this side knows (it can be rebound). */
+const DICTATION_SHORTCUT = "the dictation shortcut";
+
 /** The error row and the listening row, above the composer box. */
 export function DictationStatus({ dictation }: { dictation: Dictation }) {
   const { state, dictating } = dictation;
+  // A key to press again, so the chord rather than a key held to talk.
+  const chord = useKeymap()["composer.dictate"].find((binding) => bindingKind(binding) !== "hold");
+  const shortcut = chord ? keycaps(chord).join(isMac ? "" : "+") : "";
+  const message = state.error && shortcut ? state.error.replace(DICTATION_SHORTCUT, shortcut) : state.error;
   return (
     <>
-      {state.error && state.target === null && (
+      {state.error && state.target === null && state.settings === "microphone" && (
+        // A narrow composer puts the actions under the words rather than squeezing them into a column.
+        <div role="alert" data-dictation-error className="mb-2 flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-lg border border-destructive/35 bg-destructive/[0.07] px-3 py-2.5">
+          <MicOff className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <div className="min-w-48 flex-1">
+            <div className="text-[12.5px] font-medium">Microphone access is off for TerminalX</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">{message}</div>
+          </div>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <Button size="sm" onClick={() => void openUrl(PRIVACY_SETTINGS_URLS.microphone)}>Open System Settings</Button>
+            <button type="button" aria-label="Dismiss" className="rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground" onClick={clearDictationError}>
+              <X className="size-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+      {state.error && state.target === null && state.settings !== "microphone" && (
         <div className="mb-2 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <span className="flex-1">{state.error}</span>
           {state.settings && (

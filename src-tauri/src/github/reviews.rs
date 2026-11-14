@@ -18,6 +18,10 @@ pub struct ReviewComment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Author {
     pub login: String,
+    /// A person's display name, shown on inline threads (PRO-234). Bots and
+    /// people without one have none; the login stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +69,7 @@ pub struct ReviewFile {
     pub patch: Option<String>,
 }
 
-const COMMENTS: &str = "nodes { id author { login } body url createdAt diffHunk } pageInfo { hasNextPage endCursor }";
+const COMMENTS: &str = "nodes { id author { login ... on User { name } } body url createdAt diffHunk } pageInfo { hasNextPage endCursor }";
 const THREAD: &str = "id path line originalLine startLine originalStartLine diffSide startDiffSide isOutdated isResolved viewerCanResolve viewerCanUnresolve viewerCanReply";
 const THREAD_OWNER: &str = "query($id:ID!) { node(id:$id) { ... on PullRequestReviewThread { id pullRequest { url } } } }";
 const RESOLVE: &str = "mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } } }";

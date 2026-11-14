@@ -1657,6 +1657,7 @@ fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry
         automation: None,
         cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
         tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        orchestrate: false,
     })
     .unwrap()
 }
@@ -2149,6 +2150,29 @@ async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
     assert_eq!(listed["terminals"][0]["sessionId"], session.id.as_str());
     let attached = call(&f.rpc, &manager, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
     assert_eq!(attached["sessionId"], session.id.as_str());
+}
+
+/// #467 review: closing a session leaves an idle tab as it is, as main did:
+/// no "Session closed" in its log, an unread reply still unread, and no
+/// refusal from a stop it never needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_session_leaves_its_idle_tabs_alone() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    let session = seed_session(&f.root, "Read later", None);
+    let tab_id = session.tabs[0].id.clone();
+    manager.set_status_for_test(&session.id, &tab_id, crate::store::index::TabStatus::Completed);
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
+    assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
+    let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
+        .any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == crate::recovery::SESSION_CLOSED_MESSAGE));
+    assert!(!closed, "nothing was stopped, so nothing says the session closed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3699,5 +3723,117 @@ fn privacy_raw_pty_child() {
         policy(false); send("restored"); expected.extend(b"restored");
         wait("fresh input after partial delivery", &|| std::fs::read(&input).unwrap() == expected);
         assert_eq!(runtime.block_on(call(&f.rpc, &peer, "pty.write", json!({"ptyId":id,"data":"restored","seq":seq,"writerId":"raw"}))).unwrap()["applied"], false);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
+    for method in ["session.delete", "session.close"] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "retained", None);
+        let other = seed_session(&f.root, "unrelated", None);
+        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"retention-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        let _attached = call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let subscriptions = f.rpc.ptys.lock().unwrap()[id].subscribers.len();
+        let pid = f.terminals.pid(id).unwrap();
+        let failure = f.terminals.inspection_failure_for_test(id);
+        failure.store(true, Ordering::SeqCst);
+        f.terminals.write(id, b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::harness::host::group_or_process_alive(pid) {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let result = call(&f.rpc, &manager, method, json!({"sessionId":session.id,"remove":true,"clientRequestId":"retention-first"})).await;
+        assert!(result.as_ref().is_err_and(|(_, message)| message.contains("PTY process exit could not be confirmed")), "{method}: {result:?}");
+        assert!(index::get(&session.id).is_ok());
+        assert!(index::get(&other.id).is_ok());
+        {
+            let ptys = f.rpc.ptys.lock().unwrap();
+            assert!(!ptys[id].closed, "unconfirmed wait destroyed retry metadata");
+            assert_eq!(ptys[id].subscribers.len(), subscriptions);
+        }
+        failure.store(false, Ordering::SeqCst);
+        call(&f.rpc, &manager, method, json!({"sessionId":session.id,"remove":true,"clientRequestId":"retention-retry"})).await.unwrap();
+        assert!(index::get(&session.id).is_err());
+        assert!(index::get(&other.id).is_ok());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_stop_completion_refuses_a_replaced_pane_before_closing_metadata() {
+    for detach_replacement in [false, true] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "replacement", None);
+        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"replacement-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let identities = {
+            let mut ptys = f.rpc.ptys.lock().unwrap();
+            let pty = ptys.get_mut(id).unwrap();
+            pty.stop_pending = true;
+            vec![(id.to_string(), pty.input_pending.clone(), pty.pid)]
+        };
+        f.terminals.kill_and_wait_confirmed(id, Duration::from_secs(5)).unwrap();
+        // The wait completed, but a successor now owns the same pane name before
+        // the metadata continuation. No timing/scheduler assumption is needed.
+        f.terminals.spawn(f.rpc.sink.clone(), id, crate::pty::PaneSpec {
+            cwd: f.root.to_str().unwrap(), cols: 80, rows: 24,
+            command: Some("sh -c 'read line'"), env: &[],
+        }).unwrap();
+        let successor = f.terminals.pid(id).unwrap();
+        let failure = f.terminals.inspection_failure_for_test(id);
+        if detach_replacement {
+            failure.store(true, Ordering::SeqCst);
+            f.terminals.begin_stop_all(&[id.to_string()]);
+            assert!(!f.terminals.is_live(id));
+        }
+        let result = f.rpc.finish_selected_ptys_stop(identities);
+        assert!(result.as_ref().is_err_and(|error| error.contains("terminal changed")), "{result:?}");
+        if !detach_replacement { assert!(crate::harness::host::is_alive(successor)); }
+        {
+            let ptys = f.rpc.ptys.lock().unwrap();
+            assert!(!ptys[id].closed);
+            assert!(ptys[id].stop_pending);
+            assert!(!ptys[id].subscribers.is_empty());
+        }
+        failure.store(false, Ordering::SeqCst);
+        f.rpc.close_selected_ptys_waiting(&[id.to_string()], Duration::from_secs(5)).unwrap();
+        assert!(!crate::harness::host::is_alive(successor));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
+    for waiting in [false, true] {
+        let _home = crate::store::temp_home();
+        let f = fixture();
+        let session = seed_session(&f.root, "exit retention", None);
+        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"exit-open"})).await.unwrap();
+        let id = opened["ptyId"].as_str().unwrap();
+        call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
+        let identities = {
+            let mut ptys = f.rpc.ptys.lock().unwrap();
+            let pty = ptys.get_mut(id).unwrap();
+            pty.closed = true; // An earlier nonwaiting request already closed it.
+            pty.stop_pending = waiting;
+            vec![(id.to_string(), pty.input_pending.clone(), pty.pid)]
+        };
+        f.terminals.kill_and_wait_confirmed(id, Duration::from_secs(5)).unwrap();
+        // Apply the exit event at this exact boundary; the real emitter can
+        // also report it, and both paths must leave the same retention state.
+        f.rpc.on_pty_exit(PtyExit { id: id.to_string(), code: None });
+        assert_eq!(f.rpc.ptys.lock().unwrap().contains_key(id), waiting);
+        if waiting {
+            assert!(!f.rpc.ptys.lock().unwrap()[id].subscribers.is_empty());
+            f.rpc.finish_selected_ptys_stop(identities).unwrap();
+            assert!(!f.rpc.ptys.lock().unwrap().contains_key(id));
+        }
     }
 }

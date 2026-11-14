@@ -621,8 +621,10 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
+/// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
+///   resolves setup and archive scripts and the archive timeout from them.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -950,6 +952,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
                 base_ref: None, worktree_name: (p.use_worktree && !named.is_empty()).then_some(named),
                 checkout_branch: None, issue: None, automation: None, cwd: None, tab: Some(tab),
                 checkout_pr: None,
+                orchestrate: false,
             };
             crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
             crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?
