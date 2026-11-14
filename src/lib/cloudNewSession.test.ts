@@ -274,7 +274,7 @@ describe("new session in a cloud project", () => {
 
   it("reuses a workspace whose first prompt failed once an agent has run there, as Open workspace does (PRO-23 Q3, #499)", async () => {
     // A failed launch starts no session; the machine is Ready.
-    const failedLaunch = { launch: { phase: "failed", state: "failed", agent: "claude" } };
+    const failedLaunch = { launch: { phase: "failed", state: "failed", agent: "claude", timings: { failedAt: 0 } } };
     const quiet = { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } };
     await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch, ...quiet })]);
     // Nothing has run since: the failure stands, and the workspace is neither reused nor openable.
