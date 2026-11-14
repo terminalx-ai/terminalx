@@ -59,7 +59,7 @@ pub struct Project {
 }
 
 /// Script fields shared by the Scripts page and workspace lifecycle hooks.
-/// Setup is stored for PRO-240; this build only executes the archive hook.
+/// Both hooks run only commands explicitly saved in this local store.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RepositoryScripts {

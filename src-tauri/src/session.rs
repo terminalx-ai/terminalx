@@ -1781,6 +1781,7 @@ impl SessionManager {
                 }
             }),
         );
+        crate::workspace_setup::follow_creations(self);
     }
 
     pub(crate) fn pipeline(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {

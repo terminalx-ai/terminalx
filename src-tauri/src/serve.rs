@@ -619,6 +619,7 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         Some(adopted) => Some(take_over(adopted, &sink, &terminals, &manager)?),
         None => None,
     };
+    crate::workspace_setup::recover(&manager);
     let hooked = manager.clone();
     let mut service = crate::control::ControlService::headless(
         sink.clone(),
