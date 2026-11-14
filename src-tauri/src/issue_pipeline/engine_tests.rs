@@ -93,6 +93,7 @@ fn switch_history_names_people_author_sessions_and_other_cli_sessions_and_surviv
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
+type LocalHook = Box<dyn FnOnce(&FakeHost) -> Result<()> + Send>;
 
 struct World {
     now: DateTime<Utc>,
@@ -120,7 +121,7 @@ struct World {
     local_error: bool,
     startup_blocker: Option<String>,
     validation_pending: bool,
-    during_local: Option<Hook>,
+    during_local: Option<LocalHook>,
     resolution_error: Option<String>,
     /// Merges TerminalX aborted: `(head, merge_head)`.
     aborts: Vec<(String, String)>,
@@ -388,7 +389,7 @@ impl Host for FakeHost {
             if world.local_error { bail!("Local check command failed"); }
             world.during_local.take()
         };
-        if let Some(hook) = hook { hook(); }
+        if let Some(hook) = hook { hook(self)?; }
         Ok(())
     }
 
@@ -2664,6 +2665,191 @@ fn host_incident_admits_no_new_local_check_even_with_successful_ci() {
     assert!(blocked.failed_local_checks.is_empty(), "host-blocked is not an application test failure");
     assert!(run.host.world().local_runs.is_empty());
     assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_check_finishing_during_an_incident_requires_a_fresh_retry() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().startup_blocker = Some("Incident a: fresh health required".into());
+        Ok(())
+    }));
+    let blocked = run.to_gate();
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.local_check.is_none());
+    assert!(blocked.failed_local_checks.is_empty());
+    assert!(run.merges().is_empty());
+    run.poll();
+    run.poll();
+    assert_eq!(run.host.world().local_runs.len(), 1, "no retry during the incident");
+    // The runtime only removes its blocker after fresh health is established.
+    run.host.world().startup_blocker = None;
+    assert_eq!(run.poll().state, State::Merged);
+    assert_eq!(run.host.world().local_runs.len(), 2, "the late result was not cached");
+}
+
+#[test]
+fn pending_recorders_survive_restart_without_certifying_or_repeating_a_check() {
+    let run = Run::start(&github_issue(), false);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().validation_pending = true;
+        host.world().startup_blocker = Some("Incident a: recorder pending".into());
+        Err(crate::startup::ValidationHeld("Incident a: recorder pending".into()).into())
+    }));
+    let blocked = run.to_gate();
+    assert!(blocked.checking_locally);
+    assert!(blocked.local_check.is_none());
+    let reason = blocked.reason.clone();
+    recover(&run.host);
+    recover(&run.host);
+    assert_eq!(run.pipeline().reason, reason, "restart retains the incident blocker");
+    assert!(run.pipeline().checking_locally);
+    let events = run.pipeline().events.len();
+    run.poll();
+    assert_eq!(run.pipeline().events.len(), events);
+    run.host.world().validation_pending = false;
+    run.poll();
+    assert!(!run.pipeline().checking_locally, "durable completion releases checkout ownership");
+    assert!(run.pipeline().local_check.is_none(), "completion never promotes a late result");
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    run.host.world().startup_blocker = None;
+    assert_eq!(run.poll().state, State::ReadyToMerge);
+    assert_eq!(run.host.world().local_runs.len(), 2);
+}
+
+#[test]
+fn a_successful_observer_cannot_certify_a_still_pending_recorder() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().validation_pending = true;
+        Ok(())
+    }));
+    let blocked = run.to_gate();
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.checking_locally);
+    assert!(blocked.local_check.is_none());
+    let events = blocked.events.len();
+    run.poll();
+    run.poll();
+    assert_eq!(run.pipeline().events.len(), events, "pending recorder alerts are deduplicated");
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn pending_validation_owns_the_checkout_even_when_policy_is_disabled_or_a_check_is_cached() {
+    for disabled in [false, true] {
+        let run = Run::start(&github_issue(), false);
+        run.host.world().settings.local_check_command = Some("project-check".into());
+        assert_eq!(run.to_gate().state, State::ReadyToMerge);
+        let checked = run.pipeline().local_check;
+        run.host.world().validation_pending = true;
+        if disabled { run.host.world().settings.local_check_command = None; }
+        let held = run.poll();
+        assert_eq!(held.state, State::NeedsYou);
+        assert!(held.checking_locally);
+        assert_eq!(held.local_check, checked, "pending work certifies no new result");
+        let events = held.events.len();
+        run.poll();
+        assert_eq!(run.pipeline().events.len(), events);
+        let reason = run.pipeline().reason;
+        recover(&run.host);
+        recover(&run.host);
+        assert_eq!(run.pipeline().reason, reason, "reopening preserves the recorder blocker");
+        assert_eq!(run.pipeline().events.len(), events);
+        assert!(run.pipeline().checking_locally);
+        assert_eq!(run.host.world().local_runs.len(), 1);
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn interrupted_recorder_details_survive_polling_and_restart_without_duplicate_alerts() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().validation_pending = true;
+        Err(crate::startup::ValidationHeld("Recorder a is pending after the observer timed out".into()).into())
+    }));
+    let blocked = run.to_gate();
+    let reason = blocked.reason.clone();
+    assert!(blocked.note.unwrap().contains("Recorder a"));
+    let events = blocked.events.len();
+    run.poll();
+    recover(&run.host);
+    run.poll();
+    recover(&run.host);
+    assert_eq!(run.pipeline().reason, reason);
+    assert_eq!(run.pipeline().events.len(), events);
+    assert!(run.pipeline().checking_locally);
+    assert!(run.pipeline().local_check.is_none());
+    assert!(run.pipeline().failed_local_checks.is_empty());
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn fresh_health_does_not_release_a_pending_recorder_or_accept_its_late_result() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().validation_pending = true;
+        host.world().startup_blocker = Some("Incident a: fresh health required".into());
+        Err(crate::startup::ValidationHeld("Incident a: fresh health required".into()).into())
+    }));
+    assert_eq!(run.to_gate().state, State::NeedsYou);
+    run.host.world().startup_blocker = None;
+    let held = run.poll();
+    assert!(held.checking_locally);
+    assert!(held.local_check.is_none());
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    assert!(run.merges().is_empty());
+    run.host.world().validation_pending = false;
+    assert_eq!(run.poll().state, State::Merged);
+    assert_eq!(run.host.world().local_runs.len(), 2, "only a fresh check certifies the head");
+}
+
+#[test]
+fn a_real_check_failure_is_not_erased_by_incident_recovery() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.world().startup_blocker = Some("Incident a: fresh health required".into());
+        bail!("Local validation exited 23")
+    }));
+    let blocked = run.to_gate();
+    assert_eq!(blocked.failed_local_checks, [C1]);
+    assert!(blocked.local_check.is_none());
+    run.poll();
+    run.host.world().startup_blocker = None;
+    let failed = run.poll();
+    assert_eq!(failed.reason, Some(StopReason::LocalChecksFailed));
+    assert_eq!(failed.failed_local_checks, [C1]);
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_successful_check_on_an_old_head_does_not_certify_the_final_head() {
+    let run = Run::start(&github_issue(), false);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().during_local = Some(Box::new(|host| {
+        host.commit(C2);
+        host.world().pr.as_mut().unwrap().head_sha = C2.into();
+        Ok(())
+    }));
+    let blocked = run.to_gate();
+    assert_eq!(blocked.state, State::NeedsYou);
+    assert!(blocked.local_check.is_none());
+    assert!(run.merges().is_empty());
+    assert_eq!(run.poll().stage, Stage::Review);
+    let checked = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!(checked.state, State::ReadyToMerge);
+    assert_eq!(checked.local_check.unwrap().head, C2);
+    assert_eq!(run.host.world().local_runs, [(C1.into(), "project-check".into()), (C2.into(), "project-check".into())]);
 }
 
 #[test]

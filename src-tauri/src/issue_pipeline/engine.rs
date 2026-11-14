@@ -1618,14 +1618,25 @@ impl Step<'_> {
     }
 
     fn check_locally(&mut self, head: &str) -> Result<bool> {
+        // A policy change or a cached check cannot release a recorder that
+        // still owns the checkout. Only its durable completion can do that.
+        if self.host.validation_pending(&self.p)? {
+            self.p.checking_locally = true;
+            if let Some(message) = self.host.startup_blocker(&self.p, false)? {
+                self.needs_you(StopReason::Failed { step: "Local child startup".into(), message });
+            } else {
+                let reason = match &self.p.reason {
+                    Some(reason @ StopReason::Failed { step, .. }) if step == "Local validation recorder" => reason.clone(),
+                    _ => StopReason::Failed { step: "Local validation recorder".into(), message: "The previous validation recorder is still pending. No duplicate check was started, and its result has not been accepted.".into() },
+                };
+                self.needs_you(reason);
+            }
+            return Ok(false);
+        }
         let Some(command) = self.settings.local_check_command.clone().filter(|command| !command.trim().is_empty()) else { return Ok(true) };
         if self.p.local_check.as_ref().is_some_and(|checked| checked.command == command && same_commit(&checked.head, head)) { return Ok(true); }
         if let Some(message) = self.host.startup_blocker(&self.p, true)? {
             self.needs_you(StopReason::Failed { step: "Local child startup".into(), message });
-            return Ok(false);
-        }
-        if self.host.validation_pending(&self.p)? {
-            self.needs_you(StopReason::Failed { step: "Local validation recorder".into(), message: "The previous validation recorder is still pending. No duplicate check was started, and its result has not been accepted.".into() });
             return Ok(false);
         }
         if self.background && self.host.defer_local_check(&self.p.id) {
@@ -1654,9 +1665,24 @@ impl Step<'_> {
         let result = self.host.run_local_check(&self.p, &self.cwd, &command);
         self.p.checking_locally = self.host.validation_pending(&self.p)?;
         self.save()?;
+        // Recheck health even after success: a recorder may finish during an
+        // incident. Use polling's reason for an interrupted observer too, so
+        // that incident does not generate a second alert.
+        if result.is_ok() || result.as_ref().is_err_and(|error| error.downcast_ref::<crate::startup::ValidationHeld>().is_some()) {
+            if let Some(message) = self.host.startup_blocker(&self.p, true)? {
+                self.needs_you(StopReason::Failed { step: "Local child startup".into(), message });
+                return Ok(false);
+            }
+        }
         if let Err(error) = result {
-            if error.downcast_ref::<crate::startup::ValidationHeld>().is_none() && !self.p.failed_local_checks.iter().any(|failed| same_commit(failed, head)) { self.p.failed_local_checks.push(head.into()); }
-            self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
+            let held = error.downcast_ref::<crate::startup::ValidationHeld>().is_some();
+            if !held && !self.p.failed_local_checks.iter().any(|failed| same_commit(failed, head)) { self.p.failed_local_checks.push(head.into()); }
+            self.needs_you(StopReason::Failed { step: if held { "Local validation recorder" } else { self.doing }.into(), message: format!("{error:#}") });
+            return Ok(false);
+        }
+        // An observer returning before durable completion certifies no head.
+        if self.p.checking_locally {
+            self.needs_you(StopReason::Failed { step: "Local validation recorder".into(), message: "The previous validation recorder is still pending. No duplicate check was started, and its result has not been accepted.".into() });
             return Ok(false);
         }
         let Some(workspace) = self.clean_workspace()? else { return Ok(false) };
@@ -2704,7 +2730,11 @@ fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline]) {
         let _ = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
             step.p.resolution = None;
             step.p.checking_locally = step.p.checking_locally && step.host.validation_pending(&step.p)?;
-            step.needs_you(StopReason::Failed { step: "Recovering checkout automation".into(), message: "TerminalX restarted during resolution or local checks. Inspect the checkout and any remaining processes before continuing; no result was accepted.".into() });
+            // Keep the persisted incident ID or recorder detail visible
+            // across restart, including when its recorder is still pending.
+            if !matches!(&step.p.reason, Some(StopReason::Failed { step, .. }) if step == "Local child startup" || step == "Local validation recorder") {
+                step.needs_you(StopReason::Failed { step: "Recovering checkout automation".into(), message: "TerminalX restarted during resolution or local checks. Inspect the checkout and any remaining processes before continuing; no result was accepted.".into() });
+            }
             Ok(())
         });
     }
