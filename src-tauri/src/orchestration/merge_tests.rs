@@ -1200,3 +1200,74 @@ fn legacy_process_stop_cannot_authorize_archival_without_cleanup_stop_handling()
     assert_eq!(failures.len(), 3);
     assert!(failures.values().all(|reason| reason.contains("cleanup stop handling is not configured")));
 }
+
+#[test]
+fn production_retirement_backs_up_three_tries_and_cleans_them_with_the_lead_session_gone() {
+    use crate::store::index;
+    use std::sync::Arc;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    let (first, second) = add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    let run = store::get(&id).unwrap();
+    let entries: Vec<index::SessionEntry> = ["first", "second", "final"].into_iter().map(|name| serde_json::from_value(json!({
+        "id": name, "projectPath": repo.lead(), "cwd": repo.worker(name), "title": name,
+        "created": index::now(), "modified": index::now(), "tabs": []
+    })).unwrap()).collect();
+    index::save(&entries).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(1024));
+    let manager = crate::session::SessionManager::new(sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()), Arc::default(), Arc::default(), crate::hooks::prepare_control().unwrap());
+    let host = super::host::ManagerHost::new(sink, manager.clone());
+    crate::github::stand_in::set(&repo.lead(), Ok(Default::default()));
+    let pending = merge::cleanup(&host, &id, true).unwrap();
+    assert!(pending.removed.is_empty());
+    for (name, tip, attempt) in [("first", &first, 1), ("second", &second, 2)] {
+        assert!(index::get(name).unwrap().archived);
+        assert_eq!(git(&repo.root.path().join("origin.git"), &["rev-parse", &format!("refs/heads/raccoon/archive/{id}/final-try{attempt}")]), *tip);
+        assert!(!crate::landed::check(&repo.lead(), &repo.worker(name), crate::landed::Fetch::Fresh).safe);
+    }
+    assert!(!index::get("final").unwrap().archived);
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr {
+        number: 962, state: "MERGED".into(), head: run.merge.as_ref().unwrap().final_head.clone().unwrap(), base: "main".into(), ..Default::default()
+    })].into()));
+    assert!(crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    let clean = merge::cleanup(&host, &id, true).unwrap();
+    assert_eq!(clean.removed.len(), 2, "{:?}", clean.refused);
+    assert!(repo.worker("final").exists());
+    for name in ["first", "second"] {
+        assert!(!repo.worker(name).exists());
+        let session = index::get(name).unwrap();
+        assert!(session.archived && session.worktree_removed);
+    }
+    assert!(merge::cleanup(&host, &id, true).unwrap().removed.is_empty());
+    manager.closing();
+}
+
+#[test]
+fn production_retirement_proof_rejects_failed_runs_new_commits_and_missing_backups() {
+    use super::retirement;
+    use crate::store::index;
+    let _home = crate::store::temp_home();
+    let repo = Repo::new();
+    let accepted = repo.work("final", &[("final.txt", "accepted\n")]);
+    let id = repo.run(&[("final", &[], &accepted, &["final.txt"], "true")], Some("true"));
+    let (first, _) = add_superseded(&repo, &id);
+    repo.merge(&[], false);
+    index::save(&[serde_json::from_value(json!({"id":"first", "projectPath":repo.lead(), "cwd":repo.worker("first"), "title":"first", "created":index::now(), "modified":index::now(), "tabs":[]})).unwrap()]).unwrap();
+    let run = store::get(&id).unwrap();
+    let worker = run.superseded_workers()[0];
+    retirement::preserve(&run, worker).unwrap();
+    crate::github::stand_in::set(&repo.lead(), Ok([(String::from("lead"), crate::github::BranchPr { state:"MERGED".into(), head:repo.head(), base:"main".into(), ..Default::default() })].into()));
+    assert!(retirement::landed(&repo.lead(), &repo.worker("first"), &first));
+    store::update(&id, |r| { r.state = RunState::Failed; Ok(()) }).unwrap();
+    assert!(!retirement::landed(&repo.lead(), &repo.worker("first"), &first));
+    store::update(&id, |r| { r.state = RunState::Done; Ok(()) }).unwrap();
+    git(&repo.worker("first"), &["commit", "--allow-empty", "-qm", "New work"]);
+    assert!(!crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    retirement::preserve(&run, worker).unwrap();
+    assert!(crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+    git(&repo.root.path().join("origin.git"), &["update-ref", "-d", &format!("refs/heads/raccoon/archive/{id}/final-try1")]);
+    assert!(!crate::landed::check(&repo.lead(), &repo.worker("first"), crate::landed::Fetch::Fresh).safe);
+}

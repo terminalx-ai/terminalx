@@ -1226,6 +1226,16 @@ fn superseded_unsettled(worktree: &Worktree) -> Option<String> {
 /// Branches are kept. Without `yes` nothing is removed: the refusal lists what
 /// would go and what would stay.
 pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
+    cleanup_workers(host, id, yes, false)
+}
+
+/// Removing the lead explicitly also cleans its final workers, preserving the
+/// existing orphan-prevention behavior of worktrees delete (PRO-364).
+pub fn cleanup_before_lead_removal(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
+    cleanup_workers(host, id, yes, true)
+}
+
+fn cleanup_workers(host: &dyn Checkouts, id: &str, yes: bool, include_final: bool) -> Result<Cleanup, EngineError> {
     // Held to the end: no pass may begin, make a merge this counts as in the lead's branch, and
     // then undo it once the worktree is gone.
     let _no_merge = Hold::take(id, Holder::Cleanup).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
@@ -1273,7 +1283,7 @@ pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, Eng
                 Some(format!("Worker lifecycle cleanup failed: {reason}. Retry cleanup."))
             } else if matches!(run.state, RunState::Failed | RunState::Stopped) {
                 Some("The run did not succeed; its worktrees are kept for recovery.".to_string())
-            } else if run.state == RunState::Done && !replaced {
+            } else if run.state == RunState::Done && !replaced && !include_final {
                 Some("Its final worker is kept visible with its worktree.".to_string())
             } else if at_work {
                 Some("Its piece is still being worked on or checked.".to_string())

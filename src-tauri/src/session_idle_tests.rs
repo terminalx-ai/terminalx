@@ -404,3 +404,15 @@ fn reading_a_completed_tab_does_not_change_its_dashboard_order() {
     assert_eq!(after.tab(TAB).unwrap().status, TabStatus::Idle);
     assert_eq!(rt.lock().unwrap().status, TabStatus::Idle);
 }
+
+#[test]
+fn orchestration_cleanup_stop_settles_a_dead_workers_stale_turn() {
+    use crate::orchestration::engine::Host as _;
+    let rig = Rig::new(json!({}));
+    rig.manager.set_status_for_test(SESSION, TAB, TabStatus::InProgress);
+    let host = crate::orchestration::host::ManagerHost::new(rig.manager.sink().clone(), rig.manager.clone());
+    let worker = crate::orchestration::SessionRef { session_id: SESSION.into(), tab_id: Some(TAB.into()) };
+    host.stop_worker_for_cleanup(&worker).unwrap();
+    assert!(!rig.running());
+    assert!(!matches!(rig.manager.status_for_test(SESSION, TAB), TabStatus::InProgress | TabStatus::Waiting));
+}

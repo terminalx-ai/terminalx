@@ -20,6 +20,7 @@ const MERGED_HOW: Record<NonNullable<Landed["merged"]>, string> = {
   rebase: "was rebased into",
   squash: "was squash-merged into",
   noChanges: "changes nothing relative to",
+  superseded: "is backed up; its run merged into",
 };
 
 /**

@@ -85,6 +85,34 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
 }
 
 impl Host for ManagerHost {
+    fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        let Some(session) = index::load()?.into_iter().find(|s| s.id == worker.session_id) else { return Ok(false) };
+        if session.worktree_removed { return Ok(false); }
+        engine::stop_worker_agents(&session.tabs, &|tab| self.manager.is_running(&session.id, tab), &|tab| self.manager.stop(&session.id, tab))
+    }
+
+    fn preserve_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        if index::get(&worker.session_id)?.worktree_removed { return Ok(()); }
+        super::retirement::preserve(run, worker)
+    }
+
+    fn archive_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        use crate::issue_pipeline::admission::{self, Kind, Scope};
+        let session = index::get(&worker.session_id)?;
+        if session.worktree_removed { return Ok(()); }
+        let fence = {
+            let _admission = admission::lock();
+            anyhow::ensure!(!session.tabs.iter().any(|tab| self.manager.is_running(&session.id, &tab.id)), "Worker is still running");
+            admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(Path::new(&session.cwd))])
+        };
+        // Recheck preservation under the prompt fence: a new turn between the
+        // earlier stop and this archive must not hide newly written commits.
+        super::retirement::preserve(run, worker)?;
+        crate::session_archive::set_archived(&*self.sink, std::slice::from_ref(&worker.session_id), true, crate::session_archive::By::Automation)?;
+        drop(fence);
+        Ok(())
+    }
+
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
@@ -428,6 +456,16 @@ impl Host for ManagerHost {
 }
 
 impl Checkouts for ManagerHost {
+    fn stop_agents_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> { Host::stop_worker_for_cleanup(self, worker) }
+    fn preserve_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> { Host::preserve_worker(self, run, worker) }
+    fn archive_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> { Host::archive_worker(self, run, worker) }
+    fn run_pr_merged(&self, run: &Run) -> anyhow::Result<bool> { Ok(super::retirement::merged_pr(run)?.is_some()) }
+    fn preserve_worker_tip(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, tip: &str) -> anyhow::Result<()> {
+        Host::preserve_worker(self, run, worker)?;
+        anyhow::ensure!(super::retirement::preserved(Path::new(&run.project_path), &worktree.path, tip), "The exact worker tip is not preserved");
+        Ok(())
+    }
+
     fn lead_checkout(&self, run: &Run) -> anyhow::Result<PathBuf> {
         Ok(PathBuf::from(index::get(&run.lead.session_id).context("the lead's session is gone")?.cwd))
     }
@@ -506,18 +544,18 @@ impl Checkouts for ManagerHost {
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &run.project_path,
             path: &path,
-            sessions: crate::session_ops::SessionsFate::Delete,
+            sessions: if run.superseded_workers().iter().any(|w| w.session_id == worker.session_id) { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
             // Never the branch: what was merged is named by it, and what was not is kept by it.
             delete_branch: false,
             // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the
             // lead's branch (or, with the lead gone, in the project's base branch).
-            confirmation: crate::session_ops::Confirmation::Forced,
+            confirmation: if run.superseded_workers().iter().any(|w| w.session_id == worker.session_id) { crate::session_ops::Confirmation::Single } else { crate::session_ops::Confirmation::Forced },
             // Only the worker's own session goes: one somebody else opened there keeps the worktree.
             expected_sessions: Some(&expected),
             direct: crate::git::DirectDelete::Never,
-            fetch: crate::landed::Fetch::Skip,
+            fetch: crate::landed::Fetch::Fresh,
             guard: Some(still_safe),
-            archive: None,
+            archive: Some(crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: true }),
             archive_failure: None,
             archive_retry: None,
             archive_started: None,

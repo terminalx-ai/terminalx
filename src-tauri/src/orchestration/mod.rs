@@ -937,23 +937,31 @@ impl Run {
     /// A session reused by any final try or legacy worker, and the lead, stays visible.
     pub fn superseded_workers(&self) -> Vec<&SessionRef> {
         let mut protected = vec![self.lead.session_id.as_str()];
+        let mut final_branches = Vec::new();
         for piece in &self.pieces {
-            if let Some(worker) = piece.tries.last().and_then(|attempt| attempt.worker.as_ref()) {
+            // A skipped piece has no final merged try. A failed/stopped run
+            // uses archival_workers instead and never inherits landing proof.
+            if piece.state == PieceState::Skipped { continue; }
+            if let Some(attempt) = piece.tries.last() {
+                if let Some(worker) = &attempt.worker { protected.push(&worker.session_id); }
+                if let Some(branch) = &attempt.branch { final_branches.push(branch.as_str()); }
+            } else if let Some(worker) = &piece.worker {
                 protected.push(&worker.session_id);
-            }
-            if let Some(worker) = piece.worker.as_ref().filter(|_| piece.tries.is_empty()) {
-                protected.push(&worker.session_id);
+                if let Some(branch) = &piece.branch { final_branches.push(branch.as_str()); }
             }
         }
         let mut workers = Vec::new();
         let mut seen = Vec::new();
         for piece in &self.pieces {
-            for attempt in piece.tries.iter().take(piece.tries.len().saturating_sub(1)) {
-                if let Some(worker) = &attempt.worker {
-                    if !protected.contains(&worker.session_id.as_str()) && !seen.contains(&worker.session_id.as_str()) {
-                        seen.push(worker.session_id.as_str());
-                        workers.push(worker);
-                    }
+            let attempts: Vec<_> = if piece.tries.is_empty() {
+                piece.worker.as_ref().map(|worker| (worker, piece.branch.as_deref())).into_iter().collect()
+            } else {
+                piece.tries.iter().filter_map(|attempt| attempt.worker.as_ref().map(|worker| (worker, attempt.branch.as_deref()))).collect()
+            };
+            for (worker, branch) in attempts {
+                if !protected.contains(&worker.session_id.as_str()) && !branch.is_some_and(|branch| final_branches.contains(&branch)) && !seen.contains(&worker.session_id.as_str()) {
+                    seen.push(worker.session_id.as_str());
+                    workers.push(worker);
                 }
             }
         }
@@ -1032,3 +1040,5 @@ pub(crate) fn end_workers(
     });
     failures.into_inner()
 }
+
+pub(crate) mod retirement;

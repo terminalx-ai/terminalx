@@ -10,7 +10,7 @@ use anyhow::{bail, ensure, Context, Result};
 
 use crate::git;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Preservation {
     pub head: String,
     /// The single, resolved push destination that was actually checked.
@@ -123,7 +123,7 @@ pub(crate) fn preserve_try(
         );
         if let Ok(commit) = commit {
             let commit = commit.trim().to_owned();
-            if ancestor(checkout, &head, &commit)? {
+            if name.starts_with("refs/heads/") && ancestor(checkout, &head, &commit)? {
                 check_head(checkout, &head)?;
                 return Ok(Preservation {
                     head,
@@ -158,6 +158,16 @@ pub(crate) fn preserve_try(
         head,
         pushed: true,
     })
+}
+
+/// Revalidate a saved exact-tip receipt against the live remote without pushing.
+pub(crate) fn verify_preservation(checkout: &Path, receipt: &Preservation) -> Result<()> {
+    let _authority = crate::github_process::scope();
+    check_head(checkout, &receipt.head)?;
+    let remote = ArchiveRemote::new(checkout, receipt.remote.clone())?;
+    ensure!(remote_refs(checkout, &remote)?.get(&receipt.remote_ref) == Some(&receipt.remote_commit), "Backup ref changed or disappeared; preserve the try again before cleanup");
+    ensure!(ancestor(checkout, &receipt.head, &receipt.remote_commit)?, "Backup no longer covers the try");
+    check_head(checkout, &receipt.head)
 }
 
 fn backup_ref(run: &str, piece: &str, attempt: u32) -> Result<String> {
@@ -230,9 +240,10 @@ impl ArchiveRemote {
             push_config: format!("remote.{name}.pushurl={destination}"),
             name,
         };
-        let read = remote.run(checkout, &["remote", "get-url", &remote.name])?;
-        let write = remote.run(checkout, &["remote", "get-url", "--push", &remote.name])?;
-        ensure!(read.trim() == destination && write.trim() == destination,
+        // `remote get-url` ignores command-scoped remotes on Apple Git.
+        // ls-remote resolves the same command configuration as the transfer.
+        let read = remote.run(checkout, &["ls-remote", "--get-url", &remote.name])?;
+        ensure!(read.trim() == destination,
             "Archive remote URL rewrites do not resolve to one stable read/write destination; keep the checkout and correct the remote configuration.");
         Ok(remote)
     }
@@ -855,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_checkout_and_live_remote_tags_are_supported() {
+    fn detached_checkout_with_only_a_remote_tag_still_gets_a_branch_backup() {
         let f = Fixture::new();
         let expected = head(f.local.path()).unwrap();
         git::run(f.local.path(), &["checkout", "--detach", "-q"]).unwrap();
@@ -869,9 +880,9 @@ mod tests {
         .unwrap();
         git::run(f.remote.path(), &["update-ref", "-d", &receipt.remote_ref]).unwrap();
         let receipt = f.preserve().unwrap();
-        assert!(!receipt.pushed);
-        assert_eq!(receipt.remote_ref, "refs/tags/saved");
-        assert!(f.backup().is_none());
+        assert!(receipt.pushed);
+        assert_eq!(receipt.remote_ref, "refs/heads/raccoon/archive/run-123/worker-try2");
+        assert_eq!(f.backup(), Some(expected));
     }
 
     #[test]
