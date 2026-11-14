@@ -3301,6 +3301,28 @@ pub async fn git_checkout(cwd: String, name: String, create: bool) -> CmdResult<
     tauri::async_runtime::spawn_blocking(move || git::checkout_branch(Path::new(&cwd), &name, create).map_err(err)).await.map_err(err)?
 }
 
+/// "Create a branch here" on a detached HEAD (PRO-295): a branch at the
+/// commit the checkout is on, named from `name` (the conversation's title)
+/// as a new worktree is from its prompt, so the header can name it; a drawn
+/// name when that has no letters or numbers, or is a branch already.
+/// Returns the branch.
+#[tauri::command]
+pub async fn git_branch_here(app: AppHandle, project_path: String, cwd: String, name: Option<String>) -> CmdResult<String> {
+    let project = project_path.clone();
+    let branch = tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
+        let project = Path::new(&project_path);
+        let cwd = Path::new(&cwd);
+        let named = name.as_deref().map(names::from_prompt).filter(|name| !name.is_empty());
+        let mut chosen = available_worktree_name(project, named.as_deref(), None)?;
+        if named.is_some() && git::branch_exists(cwd, &git::worktree_branch_for(project, &chosen).map_err(err)?) {
+            chosen = available_worktree_name(project, None, None)?;
+        }
+        git::branch_here(project, cwd, &chosen).map_err(err)
+    }).await.map_err(err)??;
+    let _ = app.emit(crate::session_ops::WORKSPACES_CHANGED_EVENT, project);
+    Ok(branch)
+}
+
 /// Uncommitted changes: HEAD's tree against a snapshot of the checkout. The
 /// snapshot (not `git diff <tree>`) is what makes untracked files count.
 #[tauri::command]

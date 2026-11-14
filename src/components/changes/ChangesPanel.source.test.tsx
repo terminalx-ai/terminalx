@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { dropEditors, getEditors } from "@/lib/editors";
+import { dismissError, getErrorToasts } from "@/lib/errorToasts";
 import type { GitSource } from "@/lib/gitSource";
 import type { CommitInfo } from "@/types/session";
 import type { AgentEvent } from "@/types/events";
@@ -8,6 +9,7 @@ import type { AgentEvent } from "@/types/events";
 const { invoke, sessions, patchTab } = vi.hoisted(() => ({
   invoke: vi.fn(async (command: string, _args?: unknown) => {
     if (command === "send_message") return { events: [], queued: false };
+    if (command === "copy_text") return undefined;
     throw new Error(`A source-backed panel called ${command}`);
   }),
   sessions: { value: [] as unknown[] },
@@ -19,6 +21,7 @@ vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { childr
 vi.mock("./DiffPane", () => ({ DiffPane: ({ path, before, after }: { path: string; before: string; after: string }) => <pre data-testid="diff">{`${path}:${before}->${after}`}</pre> }));
 
 const { ChangesPanel } = await import("./ChangesPanel");
+const { Toasts } = await import("@/components/ui/Toasts");
 
 const events: AgentEvent[] = [
   { id: "prompt", sessionId: "s", tabId: "t", harness: "codex", seq: 1, ts: "", payload: { type: "user_message", text: "Go", queued: false, baseline: "base-tree" } },
@@ -50,7 +53,7 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
   } as never;
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); invoke.mockClear(); patchTab.mockClear(); sessions.value = []; });
+afterEach(() => { cleanup(); for (const toast of getErrorToasts()) dismissError(toast.id); localStorage.clear(); invoke.mockClear(); patchTab.mockClear(); sessions.value = []; });
 
 it("diffs the turn's range and reads both sides through the given source", async () => {
   const source = fakeSource("cloud:w1|repo");
@@ -176,17 +179,55 @@ it("does not reuse a previous turn when the latest prompt has no snapshot", asyn
   expect(screen.queryByText(/Last turn ·/)).toBeNull();
 });
 
-it("clears an invalid comparison and retries the same target on Apply", async () => {
+it("keeps comparing against the previous branch when the new one can't be used, and says why in a toast (PRO-295)", async () => {
   const source = fakeSource("invalid-target");
-  render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
+  render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
   await screen.findByRole("button", { name: /turn.ts/ });
-  vi.mocked(source.reviewRange).mockRejectedValueOnce("invalid target");
+  await screen.findByText(/Against main/);
+  const gitError = "git rev-parse --verify --end-of-options origin/release/0.9^{commit}: fatal: Needed a single revision";
+  vi.mocked(source.reviewRange).mockRejectedValueOnce(gitError);
+  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "origin/release/0.9" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  const toast = await screen.findByRole("alert");
+  expect(within(toast).getByText("Couldn't switch to origin/release/0.9")).toBeTruthy();
+  expect(toast.textContent).toContain("The branch may have been deleted on its remote, or not fetched here yet. Changes still compare against main.");
+  // git's own line, without the command it ran.
+  expect(within(toast).getByText("fatal: Needed a single revision").className).toContain("font-mono");
+  expect(toast.getAttribute("data-tone")).toBe("error");
+  expect(within(toast).getAllByRole("button").map((button) => button.textContent)).toEqual(["Choose another branch", "Copy error", ""]);
+  // The comparison stayed where it was: same files, same target, and the typed name is still there to fix.
+  expect(screen.getByRole("button", { name: /turn.ts/ })).toBeTruthy();
+  expect(screen.getByText(/Against main/)).toBeTruthy();
+  expect(Object.values({ ...localStorage }).join(" ")).not.toContain("release/0.9");
+
+  invoke.mockClear();
+  await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Copy error" })));
+  expect(invoke).toHaveBeenCalledWith("copy_text", { text: expect.stringContaining("fatal: Needed a single revision") });
+  expect(within(toast).getByRole("button", { name: "Copied" })).toBeTruthy();
+
+  await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Choose another branch" })));
+  const input = screen.getByLabelText("Comparison target") as HTMLInputElement;
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, "origin/release/0.9".length]);
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  // A branch that can be used is switched to.
+  fireEvent.change(input, { target: { value: "release" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await screen.findByText(/Against release/);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("says a local name that names nothing is not here", async () => {
+  const source = fakeSource("missing-local");
+  render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
+  await screen.findByText(/Against main/);
+  vi.mocked(source.reviewRange).mockRejectedValueOnce("fatal: Needed a single revision");
   fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "missing" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText("source: invalid target");
-  expect(screen.queryByRole("button", { name: /turn.ts/ })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText(/Against missing/);
+  const toast = await screen.findByRole("alert");
+  expect(toast.textContent).toContain("There's no branch or commit by that name here. Changes still compare against main.");
 });
 
 it("refreshes while idle without requiring a new agent turn", async () => {

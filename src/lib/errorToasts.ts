@@ -29,11 +29,20 @@ export interface ErrorToast {
   /** Raised again under the same key, the toast is updated in place and not stacked. */
   key?: string;
   /**
+   * Drawn with an edge in its colour, as the branch toasts are (PRO-295):
+   * `warning` for an action that cannot be done yet and says what to do
+   * first, `error` for one that failed. Unset, the plain error look.
    * "success": something worked and the reader is told so on the same card
    * (PRO-234 "Thread resolved on GitHub"): a check mark, read out politely,
-   * and no Copy error.
+   * the plain look, and no Copy error.
    */
-  tone?: "success";
+  tone?: "error" | "warning" | "success";
+  /** Its mark in place of the failure's cross: a branch, for a branch action. */
+  icon?: "branch";
+  /** `cause` is one line of a tool's output (a git error): set apart, in a box of its own. */
+  detail?: "line";
+  /** False when there is nothing to report: a toast that only explains has no Copy error. */
+  copy?: boolean;
 }
 
 /**
@@ -44,17 +53,14 @@ export interface ErrorToast {
  */
 export interface ErrorToastAction {
   label: string;
-  icon?: "retry";
+  icon?: "retry" | "branch" | "branch-plus";
+  /** The one thing to do next, filled in: "Create a branch here". */
+  primary?: boolean;
   run: () => unknown;
   keepOpen?: boolean;
 }
 
-export interface ErrorToastOptions {
-  title?: string;
-  actions?: ErrorToastAction[];
-  key?: string;
-  tone?: "success";
-}
+export type ErrorToastOptions = Pick<ErrorToast, "title" | "actions" | "key" | "tone" | "icon" | "detail" | "copy">;
 
 let toasts: ErrorToast[] = [];
 let next = 0;
@@ -75,18 +81,19 @@ export function errorToastText(toast: Pick<ErrorToast, "action" | "cause" | "tit
 export function showError(action: string, cause?: unknown, options: ErrorToastOptions = {}): string {
   const what = action.trim().replace(/[.:]+$/, "");
   const why = cause === undefined || cause === null ? "" : errorMessage(cause).trim();
-  const { title, actions, key, tone } = options;
+  const { title, actions, key, ...look } = options;
   const same = key
     ? toasts.find((toast) => toast.key === key)
     : toasts.find((toast) => !toast.key && toast.action === what && toast.cause === why && toast.title === title);
   if (same) {
-    const bumped = { ...same, action: what, cause: why, title, actions, tone, count: same.count + 1, at: Date.now() };
+    const bumped = { ...same, ...look, action: what, cause: why, title, actions, count: same.count + 1, at: Date.now() };
     toasts = [...toasts.filter((toast) => toast.id !== same.id), bumped];
     emit();
     return same.id;
   }
   const id = `error:${++next}`;
-  toasts = [...toasts, { id, action: what, cause: why, count: 1, at: Date.now(), ...(title ? { title } : {}), ...(actions?.length ? { actions } : {}), ...(key ? { key } : {}), ...(tone ? { tone } : {}) }];
+  const drawn = Object.fromEntries(Object.entries(look).filter(([, value]) => value !== undefined));
+  toasts = [...toasts, { id, action: what, cause: why, count: 1, at: Date.now(), ...(title ? { title } : {}), ...(actions?.length ? { actions } : {}), ...(key ? { key } : {}), ...drawn }];
   emit();
   return id;
 }
@@ -109,7 +116,7 @@ export async function runErrorAction(id: string, action: ErrorToastAction): Prom
     if (action.keepOpen) showError(`Couldn't ${action.label.charAt(0).toLowerCase()}${action.label.slice(1)}`, cause);
     else {
       const toast = toasts.find((candidate) => candidate.id === id);
-      if (toast) showError(toast.action, cause, { title: toast.title, actions: toast.actions, key: toast.key, tone: toast.tone });
+      if (toast) showError(toast.action, cause, { title: toast.title, actions: toast.actions, key: toast.key, tone: toast.tone, icon: toast.icon, detail: toast.detail, copy: toast.copy });
     }
   }
 }
