@@ -1,3 +1,5 @@
+import { isReviewEditor, useEditors } from "@/lib/editors";
+import { EditorSplit } from "@/components/editor/EditorSplit";
 import { useLayoutEffect } from "react";
 import { SessionNode } from "@/components/layout/SidebarTree";
 import { TabDialogs } from "@/components/session/TabDialogs";
@@ -17,9 +19,10 @@ import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
  * terminal to type in. The tab on screen is worked out the way the session
  * view does it, from the same stores.
  */
-export function TabsHarness({ readOnlyReason, hideSingle }: { readOnlyReason?: string; hideSingle?: boolean }) {
+export function TabsHarness({ readOnlyReason, hideSingle, reviews = false }: { readOnlyReason?: string; hideSingle?: boolean; reviews?: boolean }) {
   const store = useSessionStore();
   const terminals = useTerminals();
+  const editors = useEditors();
   const pages = useBrowser().pages;
   const session = store.sessions.find((candidate) => candidate.id === store.selectedSessionId) ?? null;
   const selected = session
@@ -29,6 +32,7 @@ export function TabsHarness({ readOnlyReason, hideSingle }: { readOnlyReason?: s
         activeTab: session.activeTab,
         terminalIds: terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden).map((pane) => pane.id),
         browserIds: pagesFor(pages, session.cwd).map((page) => page.id),
+        reviewIds: editors.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id),
       })
     : null;
   const sessionId = session?.id ?? null;
@@ -50,6 +54,7 @@ export function TabsHarness({ readOnlyReason, hideSingle }: { readOnlyReason?: s
         ))}
       </div>
       <TabDialogs />
+      {reviews && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
       <textarea aria-label="Composer" />
       <div className="xterm">
         <textarea aria-label="Terminal input" />

@@ -56,8 +56,8 @@ describe("native menu integration", () => {
     cleanups.push(startNativeMenu());
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
     expect(settingsItem().accelerator).toBe("CmdOrCtrl+Comma");
-    saveShortcut("app.settings", ["mod+shift+y"]);
-    await waitFor(() => expect(settingsItem().accelerator).toBe("CmdOrCtrl+Shift+Y"));
+    saveShortcut("app.settings", ["mod+shift+v"]);
+    await waitFor(() => expect(settingsItem().accelerator).toBe("CmdOrCtrl+Shift+V"));
     saveShortcut("app.settings", []);
     await waitFor(() => expect(settingsItem().accelerator).toBeNull());
     setPrefs({ shortcuts: {} });
@@ -69,8 +69,8 @@ describe("native menu integration", () => {
     cleanups.push(startNativeMenu());
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
     // The preferences store listens to storage events from the other webview.
-    saveShortcut("app.settings", ["mod+shift+y"]);
-    await waitFor(() => expect(settingsItem().accelerator).toBe("CmdOrCtrl+Shift+Y"));
+    saveShortcut("app.settings", ["mod+shift+v"]);
+    await waitFor(() => expect(settingsItem().accelerator).toBe("CmdOrCtrl+Shift+V"));
     const key = Object.keys(localStorage).find((key) => localStorage.getItem(key)?.includes('"shortcuts"'))!;
     const prefs = JSON.parse(localStorage.getItem(key)!);
     prefs.shortcuts = { "app.settings": ["mod+shift+g"] };
@@ -84,7 +84,7 @@ describe("native menu integration", () => {
     mocks.invoke.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     cleanups.push(startNativeMenu());
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
-    saveShortcut("app.settings", ["mod+shift+y"]);
+    saveShortcut("app.settings", ["mod+shift+v"]);
     saveShortcut("app.settings", []);
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
     finish();
@@ -124,14 +124,14 @@ describe("native menu integration", () => {
 
   it.each(["floating", "chat-test"] as const)("forwards all main-window bindings from %s and follows rebinding", async (label) => {
     setAppWindowForTest(label);
-    setPrefs({ shortcuts: { "app.settings": ["mod+,", "mod+shift+y"] } });
+    setPrefs({ shortcuts: { "app.settings": ["mod+,", "mod+shift+v"] } });
     cleanups.push(startNativeMenu());
     await Promise.resolve();
     const press = (key: string) => document.body.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
-    press("y");
+    press("v");
     expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("forward_menu_action", { action: "app.settings" });
     setPrefs({ shortcuts: { "app.settings": ["mod+,", "mod+shift+g"] } });
-    press("y");
+    press("v");
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
     press("g");
     expect(mocks.invoke).toHaveBeenCalledTimes(2);
@@ -141,13 +141,14 @@ describe("native menu integration", () => {
     expect(mocks.invoke).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["main", "floating", "chat-test"] as const)("creates a new chat window on each menu or shortcut invocation from %s", async (label) => {
+  it.each(["main", "floating", "chat-test"] as const)("creates a new chat window on each menu or configured shortcut invocation from %s", async (label) => {
     setAppWindowForTest(label);
+    setPrefs({ shortcuts: { "app.newWindow": ["mod+alt+n"] } });
     const { unmount } = renderHook(useNativeMenus);
     cleanups.push(unmount);
     await Promise.resolve();
     dispatchNativeMenu("app.newWindow");
-    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "N", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "n", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }));
     if (label === "main") {
       expect(mocks.invoke.mock.calls.filter(([name]) => name === "new_chat_window")).toHaveLength(2);
     } else {
@@ -156,6 +157,20 @@ describe("native menu integration", () => {
       expect(mocks.invoke).not.toHaveBeenCalledWith("new_chat_window");
     }
     expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
+  });
+
+  it.each(["main", "floating", "chat-test"] as const)("routes the Start from menu and default shortcut from %s to the main composer", async (label) => {
+    setAppWindowForTest(label);
+    const startFrom = vi.fn();
+    if (label === "main") cleanups.push(registerShortcut("app.startFrom", startFrom));
+    const { unmount } = renderHook(useNativeMenus);
+    cleanups.push(unmount);
+    await Promise.resolve();
+    dispatchNativeMenu("app.startFrom");
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "N", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    if (label === "main") expect(startFrom).toHaveBeenCalledTimes(2);
+    else expect(mocks.invoke.mock.calls.filter(([command, args]) => command === "forward_menu_action" && args.action === "app.startFrom")).toHaveLength(2);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("new_chat_window");
   });
 
   it("cleans up a listener that finishes after unmount and does not install a stale menu", async () => {

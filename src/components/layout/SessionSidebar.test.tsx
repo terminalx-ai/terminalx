@@ -71,10 +71,10 @@ describe("new-chat entry points", () => {
     const titlebar = screen.getByTestId("sidebar-titlebar");
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: true, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
     fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionQuick: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });
@@ -407,7 +407,7 @@ describe("the conversation list", () => {
     expect(within(web).queryByText("Talk m1")).toBeNull();
     expect(within(web).queryByText("Talk m2")).toBeNull();
     // The row's state is the most pressing among them.
-    expect(within(main).getByRole("img", { name: "Needs you" })).toBeTruthy();
+    expect(within(main).getByText("Needs attention")).toBeTruthy();
     fireEvent.click(main);
     expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
     expect(within(web).queryByText("Talk m1")).toBeNull();
@@ -477,7 +477,7 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Remove workspace, keep conversations…", "Delete…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -595,6 +595,22 @@ it("keeps removed-workspace provenance separate from a live checkout on the same
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   expect(screen.getByRole("button", { name: "topic, Talk live" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
+});
+
+it.each(["simple", "list"] as const)("offers Restore workspace for a removed conversation in the %s sidebar", async (sidebarLayout) => {
+  prefs.setPrefs({ sidebarLayout });
+  await boot([session("restore", "/repos/web", new Date().toISOString(), {
+    worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" },
+  })]);
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk restore" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Restore workspace…" }));
+  const dialogs = await import("@/lib/dialogs");
+  const Probe = () => <div data-testid="restore-request">{dialogs.useDialogs().workspaceRestore}</div>;
+  render(<Probe />);
+  expect(screen.getByTestId("restore-request").textContent).toBe("restore");
+  act(dialogs.closeWorkspaceRestore);
 });
 
 
@@ -786,5 +802,129 @@ describe("the archive (#718)", () => {
     act(() => { fireEvent.click(row); });
     expect(store.getSessions().selectedSessionId).toBe("b");
     expect(selection.getPickedSessions()).toEqual([]);
+  });
+});
+
+describe("row extras and unread reminders (PRO-179)", () => {
+  it.each(["simple", "list"] as const)("renders background count updates and live drafts in the %s layout", async (sidebarLayout) => {
+    const { setDraft, clearDrafts } = await import("@/lib/drafts");
+    const { setTabStatus } = await import("@/lib/agentEvents");
+    let additions = 12;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_workspaces") return [{ path: "/repos/web", name: "web", branch: "main", additions: 1, deletions: 1, branchAdditions: additions, branchDeletions: 4 }];
+      return base(command, args);
+    });
+    const row = session("background", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "in_progress";
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
+    mount();
+    expect(await screen.findByText("+12")).toBeTruthy();
+    expect(store.getSessionStore().selectedSessionId).not.toBe("background");
+    additions = 27;
+    await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
+    expect(await screen.findByText("+27")).toBeTruthy();
+    expect(screen.getByText("−4")).toBeTruthy();
+    act(() => setDraft("background-tab", "Finish the\nregression test"));
+    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Finish the regression test");
+    expect(screen.getByRole("button", { name: "Archive Talk background" })).toBeTruthy();
+    act(() => clearDrafts((id) => id === "background-tab"));
+    expect(screen.queryByTestId("row-draft")).toBeNull();
+  });
+
+  it.each(["simple", "list"] as const)("toggles the persisted flag with R without changing waiting state in the %s layout", async (sidebarLayout) => {
+    const row = session("reminder", "/repos/web", "2026-11-05T00:00:00Z");
+    row.tabs[0].status = "waiting";
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_tab_unread") {
+        const { sessionId, tabId, unread } = args as { sessionId: string; tabId: string; unread: boolean };
+        sessions = sessions.map((entry) => entry.id !== sessionId ? entry : { ...entry, tabs: entry.tabs.map((tab) => tab.id !== tabId ? tab : { ...tab, markedUnread: unread }) });
+        return;
+      }
+      return base(command, args);
+    });
+    await boot([row]);
+    prefs.setPrefs({ sidebarLayout });
+    mount();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Menu for Talk reminder" }), { key: "ArrowDown" });
+    const menu = await screen.findByRole("menu");
+    fireEvent.keyDown(menu, { key: "r", metaKey: true });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "set_tab_unread")).toBe(false);
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as read" });
+    expect(mocks.invoke).toHaveBeenCalledWith("set_tab_unread", { sessionId: "reminder", tabId: "reminder-tab", unread: true });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: true, status: "waiting" });
+    fireEvent.keyDown(menu, { key: "r" });
+    await screen.findByRole("menuitem", { name: "Mark as unread" });
+    expect(store.getSessionStore().sessions[0].tabs[0]).toMatchObject({ markedUnread: false, status: "waiting" });
+  });
+});
+
+describe("custom order (PRO-169)", () => {
+  it("uses the saved order inside the archive and restores recency when off", async () => {
+    const { archivedConversations, groupConversations } = await import("./SessionSidebar");
+    const entries = [session("recent", "/repos/web", "2026-11-02", { archived: true }), session("older", "/repos/web", "2026-11-01", { archived: true })];
+    const order = { custom: true, sessions: ["older", "recent"], projects: [], revision: 1 };
+    expect(archivedConversations(entries, "updated", order).map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(archivedConversations(entries, "updated", { ...order, custom: false }).map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(groupConversations(entries, projects, chatsPath, {}, null, true, true, "updated", order).groups[0].archived.map((s) => s.id)).toEqual(["older", "recent"]);
+  });
+  it("restores recency when off without losing either saved order, and keeps new sessions first", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const order = { custom: true, sessions: ["older", "recent"], projects: ["/repos/other", "/repos/web"], revision: 1 };
+    const entries = [session("recent", "/repos/web", "2026-11-02"), session("older", "/repos/web", "2026-11-01"), session("other", "/repos/other", "2026-11-01")];
+    const attached = [...projects, { path: "/repos/other", name: "other", kind: "git" as const }];
+    const grouped = (custom: boolean, list = entries) => groupConversations(list, attached, chatsPath, {}, null, true, false, "updated", { ...order, custom });
+    expect(grouped(true).groups.map((g) => g.path)).toEqual(["/repos/other", "/repos/web"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(false).groups[0].sessions.map((s) => s.id)).toEqual(["recent", "older"]);
+    expect(grouped(true).groups[1].sessions.map((s) => s.id)).toEqual(["older", "recent"]);
+    expect(grouped(true, [...entries, session("new", "/repos/web", "2026-11-03")]).groups[1].sessions.map((s) => s.id)).toEqual(["new", "older", "recent"]);
+  });
+  it("uses one mutually exclusive View sort in both sidebar layouts", async () => {
+    const ordering = await import("@/lib/sidebarOrder");
+    let saved = { custom: false, sessions: ["older", "recent"], projects: [], revision: 10 };
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "set_sidebar_order") {
+        saved = { ...saved, ...(args as { patch: object }).patch, revision: saved.revision + 1 };
+        return saved;
+      }
+      return base(command, args);
+    });
+    await boot([session("recent", "/repos/web", "2026-11-02", { branch: "recent" }), session("older", "/repos/web", "2026-11-01", { branch: "raccoon/quiet-amber-fox" })]);
+    await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
+    mount();
+    fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Sort by: Updated" }), { key: "ArrowRight" });
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Custom order" })).toBeNull();
+    expect((await screen.findByRole("menuitemradio", { name: "Updated" })).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Custom" }));
+    // The handle names the displayed conversation, not its hidden generated branch.
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rowIds()).toEqual(["older", "recent"]);
+    act(() => prefs.setPrefs({ sidebarLayout: "list" }));
+    await screen.findByRole("button", { name: "Reorder Talk older" });
+    expect(rowIds()).toEqual(["older", "recent"]);
+    const choose = async (current: string, next: string) => {
+      fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
+      fireEvent.keyDown(await screen.findByRole("menuitem", { name: `Sort by: ${current}` }), { key: "ArrowRight" });
+      const choices = await Promise.all(["Updated", "Created", "Custom"].map((name) => screen.findByRole("menuitemradio", { name })));
+      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current]);
+      fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+      await waitFor(() => expect(prefs.getPrefs().sidebarSort).toBe(next.toLowerCase()));
+    };
+    await choose("Custom", "Created");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    await choose("Created", "Custom");
+    expect(rowIds()).toEqual(["older", "recent"]);
+    await choose("Custom", "Updated");
+    expect(rowIds()).toEqual(["recent", "older"]);
+    expect(screen.queryByRole("button", { name: /Reorder/ })).toBeNull();
+    expect(saved.sessions).toEqual(["older", "recent"]);
   });
 });

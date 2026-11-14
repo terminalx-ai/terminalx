@@ -38,7 +38,7 @@ vi.mock("@/lib/terminal", async (original) => ({
   // and the switch's refusal/retry path are covered in createInstance.test.ts.
   ensureTerminalAttached: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
+vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn(), subscribePrefs: () => () => {} }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
 vi.mock("@/lib/models", async (original) => ({
@@ -59,6 +59,8 @@ vi.mock("@/components/terminal/TerminalView", () => ({
   ),
   createTerminal: () => mocks.createTerminal(),
 }));
+vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <div>File review</div> }));
+vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>PR review</div> }));
 vi.mock("@/components/browser/BrowserView", () => ({ BrowserView: () => <div data-testid="browser-view" /> }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 vi.mock("@/components/chat/Composer", async () => {
@@ -84,6 +86,7 @@ import { SessionView } from "./SessionView";
 import { useCloudSession } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { agentTerminalId, agentTerminalOf, cloudTerminalFactory, ensureAgentTerminal, resetCloudTerminals, typeIntoCloudTerminal } from "@/lib/cloudTerminals";
+import { dropEditors, openDiff, openPr } from "@/lib/editors";
 import { getInstance } from "@/lib/terminal";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
@@ -339,6 +342,25 @@ describe("a local session's row of tabs under the title bar", () => {
     mocks.prefs.tabStrip = false;
     // A shell one test opened is not there for the next.
     dropSessionTerminals(["strip-1"]);
+    dropEditors((e) => e.sessionId === "strip-1");
+  });
+
+  it.each(["diff", "pr"] as const)("shows the selected agent transcript after leaving a %s tab", async (kind) => {
+    show();
+    act(() => {
+      const session = local();
+      if (kind === "diff") openDiff(session.id, session.cwd, "app.ts", { scope: "all", range: { base: "base", head: null } });
+      else openPr(session.id, session.cwd, { url: "https://github.com/org/repo/pull/12", number: 12, head: "fix", scope: { kind: "local", cwd: session.cwd } });
+    });
+    const name = kind === "diff" ? "app.ts · All changes" : "PR #12";
+    expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Prompt" })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Write the fix" }));
+    await waitFor(() => expect(screen.queryByRole("tabpanel", { name })).toBeNull());
+    expect(screen.getByRole("textbox", { name: "Prompt" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel", { name: "Write the fix" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name }));
+    expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
   });
 
   it("names the place in the title bar, with the actions at the right, and puts the tabs in a row under it with the + after them", () => {
@@ -352,7 +374,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "Workspace details" })).toBeTruthy();
     expect(within(header).queryByRole("tablist")).toBeNull();
     // The row of tabs is right under the title bar, and the + ends it.
-    const row = header.nextElementSibling as HTMLElement;
+    const row = screen.getByTestId("workspace-tab-strip");
     expect(row.getAttribute("data-testid")).toBe("workspace-tab-strip");
     const strip = within(row).getByRole("tablist", { name: "Workspace tabs" });
     expect(within(strip).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Investigate", "Write the fix"]);
@@ -673,6 +695,52 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("session-github-account")).toBeNull();
   });
 
+  it("shows and refreshes a linked ordinary chat's repository identity while its plain working folder keeps Git panels off", async () => {
+    const cwd = "/Users/me/Chats/linked-identity";
+    const linkedPath = "/Users/me/linked-identity-repo";
+    const session: SessionEntry = { ...quick(), id: "linked-identity", kind: "project", projectPath: cwd, cwd };
+    guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });
+    guard.handlers.github_identity = ({ refresh }) => ({ login: refresh ? "refreshed-account" : "linked-account", source: "ssh", email: "me@example.com", repo: "me/linked-repo", remoteHost: "github" });
+    mocks.prefs.panelOpen = true;
+    const Local = () => {
+      const current = useSessionStore().sessions.find((entry) => entry.id === session.id)!;
+      return <SessionView session={current} sidebarOpen onToggleSidebar={() => undefined} />;
+    };
+    upsertSession(session);
+    const view = render(wrap(<Local />));
+    try {
+      await settle();
+      expect(guard.calls.filter((call) => call.command === "work_status").map((call) => call.args)).toContainEqual({ cwd });
+      expect(guard.calls.filter((call) => call.command === "github_identity")).toEqual([]);
+      expect(screen.queryByTestId("session-github-account")).toBeNull();
+      expect(screen.getByRole("button", { name: "Files" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
+
+      // Agent activity links the repository without moving the chat's working folder.
+      act(() => upsertSession({ ...session, link: { path: linkedPath, branch: "feature" } }));
+      const chip = await screen.findByRole("button", { name: "Connected to GitHub as linked-account" });
+      expect(getSessionStore().sessions.find((entry) => entry.id === session.id)?.cwd).toBe(cwd);
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
+      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: linkedPath, refresh: false }]);
+
+      fireEvent.click(chip);
+      expect(await screen.findByRole("button", { name: "Connected to GitHub as refreshed-account" })).toBeTruthy();
+      expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([
+        { projectPath: linkedPath, refresh: false },
+        { projectPath: linkedPath, refresh: true },
+      ]);
+
+      act(() => upsertSession({ ...session, link: null }));
+      await settle();
+      expect(screen.queryByTestId("session-github-account")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Branch" })).toBeNull();
+      expect(guard.calls.filter((call) => call.command === "github_identity")).toHaveLength(2);
+    } finally {
+      view.unmount();
+      mocks.prefs.panelOpen = false;
+    }
+  });
+
   it("in the main window, is named a quick chat and says where it runs instead of showing a project or a branch", async () => {
     const session = { ...quick(), cwd: "/Users/me/notes" };
     guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });
@@ -688,6 +756,21 @@ describe("a quick chat in the floating window's compact chrome", () => {
 });
 
 describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
+  it("never looks up a cloud chat's linked repository identity on this computer", async () => {
+    function LinkedCloud() {
+      const cloud = useCloudSession(KEY);
+      if (!cloud) return null;
+      return <SessionView session={{ ...cloud.session, link: { path: "/workspace/cloud-linked-repo", branch: "main" } }} cloud={cloud} sidebarOpen onToggleSidebar={() => undefined} />;
+    }
+    render(wrap(<LinkedCloud />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    await screen.findByText("Fix login redirect");
+    expect(screen.queryByTestId("session-github-account")).toBeNull();
+    expect(guard.calls.filter((call) => call.command === "github_identity")).toEqual([]);
+    expect(guard.violations).toEqual([]);
+  });
+
   it("shows the agent's live terminal, types into it over the workspace connection, and comes back to the same turn", async () => {
     await open();
     expect(await screen.findByText("why does login loop?")).toBeTruthy();

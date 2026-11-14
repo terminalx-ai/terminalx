@@ -1,8 +1,9 @@
+import { useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { commitRange } from "@/lib/changesScope";
-import { useGitWorkingChanges } from "@/lib/changes";
+import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -14,6 +15,7 @@ import { FileDiff } from "./FileDiff";
 import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
 import { ReviewFileList } from "./ReviewFileList";
+import { AddRemote, GitError } from "./GitRecovery";
 
 export type RepoView = "uncommitted" | "history";
 
@@ -23,7 +25,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0 }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff }: {
+  onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
   active: boolean;
@@ -37,6 +40,9 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   revision?: number;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
+  const selectedSource = useRef({ source, generation: 0 });
+  if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
+  const generation = selectedSource.current.generation;
   const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
@@ -45,10 +51,14 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, head, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operation, setOperation] = useState<string | undefined>();
+  const [needsRemote, setNeedsRemote] = useState(false);
   /** Null until the history is read: an empty list is then really empty. */
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
   const [openCommit, setOpenCommit] = useState<string | null>(null);
@@ -60,6 +70,8 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
     setSelected(null);
     setNotice(null);
     setError(null);
+    setNeedsRemote(false);
+    setBusy(null);
   }, [source]);
 
   useEffect(() => {
@@ -81,23 +93,35 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   }, [source, active, sub, tick]);
 
   const run = async (label: string, fn: () => Promise<string | null | void>) => {
+    setOperation(label);
     setBusy(label);
     setError(null);
     setNotice(null);
     try {
       const said = await fn();
+      if (selectedSource.current.generation !== generation) return false;
       if (said) setNotice(said);
       refresh();
       return true;
     } catch (e) {
+      if (selectedSource.current.generation !== generation) return false;
       setError(source.errorMessage(e));
       refresh();
       return false;
     } finally {
-      setBusy(null);
+      if (selectedSource.current.generation === generation) setBusy(null);
     }
   };
   const commit = () => void run("commit", () => source.commit(message.trim())).then((ok) => ok && setMessage(""));
+  const push = () => void run("push", async () => {
+    if (source.hasRemote && !await source.hasRemote()) {
+      if (selectedSource.current.generation === generation) setNeedsRemote(true);
+      return;
+    }
+    if (selectedSource.current.generation !== generation) return;
+    setNeedsRemote(false);
+    return source.push();
+  });
   const writable = source.canWrite;
 
   return (
@@ -120,9 +144,10 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
         </div>
       </div>}
       {!embedded && <DiffOptions />}
-      {error && <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
+      {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
+      {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
-        <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div>
+        source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{source.errorMessage(readError)}</div> : <GitError details={source.errorMessage(readError)} />
       )}
       {notice && <div role="status" className="mx-3 mb-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(status?.operation || !!status?.conflicted?.length) && (
@@ -173,7 +198,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                   {busy === "commit" ? <Loader2 className="animate-spin" /> : <Check />} Commit
                 </Button>
                 <WithTooltip label="Push">
-                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => void run("push", () => source.push())}>
+                  <Button size="sm" variant="secondary" disabled={!!busy} onClick={push}>
                     {busy === "push" ? <Loader2 className="animate-spin" /> : <ArrowUpFromLine />} Push
                   </Button>
                 </WithTooltip>
@@ -196,9 +221,14 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[35%] border-b border-hairline" : "flex-1")}>
             <ReviewFileList
               workspace={source.key}
+              base={head ?? undefined}
               files={files}
               selected={selected}
-              onSelect={(p) => setSelected((s) => (s === p ? null : p))}
+              onSelect={(p) => {
+                const file = files.find((f) => f.path === p);
+                if (onOpenDiff && file && head) onOpenDiff(file, { base: head, head: null });
+                else setSelected((s) => s === p ? null : p);
+              }}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
                 <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
@@ -233,6 +263,8 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
   const [selected, setSelected] = useState<string | null>(null);
   const [base, setBase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const review = useReviewComments();
+  useEffect(() => { review?.refresh(); }, [files, base, review?.refresh]);
   const current = files.find((file) => file.path === selected);
   useEffect(() => {
     if (!open) return;
@@ -270,7 +302,7 @@ function CommitRow({ source, commit, open, onToggle, onReview }: { source: GitSo
         <div className="ml-3 border-l border-hairline">
           {commit.body && <div className="px-3 py-1 text-xs text-muted-foreground whitespace-pre-wrap select-text">{commit.body}</div>}
           {onReview && <Button size="xs" variant="ghost" onClick={() => onReview(commit.sha)}>Review this commit</Button>}
-          <ReviewFileList workspace={source.key} files={files} selected={selected} onSelect={setSelected} empty="No files." />
+          <ReviewFileList workspace={source.key} base={base ?? undefined} files={files} selected={selected} onSelect={setSelected} empty="No files." />
           {error && <p role="alert" className="p-2 text-xs text-destructive">{error}</p>}
           {current && base && <div className="h-96 border-t border-hairline">
             <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={base} head={commit.tree} />

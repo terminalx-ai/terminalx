@@ -756,6 +756,8 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
     let tabs = std::mem::take(&mut record.tabs);
     let frames = std::mem::take(&mut record.frames);
     let decisions = std::mem::take(&mut record.decisions);
+    // Before any tab taken over can record a change.
+    crate::store::activity::carry_on(std::mem::take(&mut record.activity));
     let (own, published) = (record.control.own, record.control.published);
     let emit: Arc<dyn EventSink> = sink.clone();
     for pane in panes {
@@ -764,7 +766,7 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
         let frozen = crate::pty::FrozenPane {
             id: pane.id, master, pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: pane.environment.unwrap_or_else(|| crate::store::environment::Stamp::unconfigured(&pane.cwd)), cwd: pane.cwd, created: pane.created,
             tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback, printed: pane.printed, screen: pane.screen,
-            quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed,
+            quiet: pane.quiet_ms.map(Duration::from_millis), title: pane.title, renamed: pane.renamed, docked: pane.docked,
         };
         if let Err(error) = terminals.adopt(emit.clone(), frozen) {
             log::error!("take over the terminal {id}: {error:#}; its program runs on unwatched");

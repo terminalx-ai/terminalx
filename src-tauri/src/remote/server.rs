@@ -2335,7 +2335,9 @@ impl WorkspaceRpc {
     /// Every session of this workspace, whoever asks.
     fn workspace_sessions(&self) -> Result<Vec<SessionEntry>, RpcError> {
         crate::store::message_activity::backfill(self.sink.clone());
-        Ok(index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect())
+        let mut sessions: Vec<_> = index::load().map_err(RpcError::internal)?.into_iter().filter(|session| super::session_target::owns_project(&self.root, &session.project_path)).collect();
+        if let Ok(manager) = self.manager() { manager.annotate_row_statuses(&mut sessions); }
+        Ok(sessions)
     }
 
     /// Sharing is workspace-wide (PRO-30): a person it is shared with sees
@@ -2461,6 +2463,7 @@ impl WorkspaceRpc {
                 on_main: !p.use_worktree,
                 base_ref: None,
                 checkout_branch: None,
+                checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
                 issue: p.issue.clone(),
                 automation: None,

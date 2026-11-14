@@ -1,4 +1,4 @@
-import { StatusGroups } from "./StatusGroups";
+import { ArchiveRowButton, DraftPreview, SessionRowExtras, sidebarConversationTitle, useSessionDraft } from "./SessionRowExtras";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useId, useMemo, useState } from "react";
@@ -15,12 +15,12 @@ import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/R
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
 import { AgentMark } from "@/components/AgentMark";
-import { StatusMark } from "@/components/ui/StatusMark";
+import { SessionStatus } from "@/components/ui/SessionStatus";
 import { cn } from "@/lib/cn";
-import { errorMessage } from "@/lib/api";
 import { isUnread } from "@/lib/dashboard";
+import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
-import { addProject, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
+import { addProject, conversationTitle, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
 import { openRenameSession } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
@@ -30,7 +30,7 @@ import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { colorCss } from "./PixelMascot";
 import { projectHueByName } from "@terminalx/portable/botFace";
 import { BotFace } from "./BotFace";
-import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, rowMenuKeys, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, mixesAgents, orderConversations } from "./SessionSidebar";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -38,6 +38,9 @@ import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
 
 import { conversationTime } from "@/lib/messageActivity";
+
+import { useSidebarOrder } from "@/lib/sidebarOrder";
+import { SortableStatusGroups, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
@@ -67,6 +70,7 @@ export function chatPreview(
  */
 export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const order = useSidebarOrder();
   const { sidebarLayout, sidebarSort } = usePrefs();
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
@@ -76,11 +80,11 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const showArchived = store.showArchived && filter.filter === "all";
   // Unread or Needs you: only the conversations that pass, and the open one.
   const conversations = useMemo(
-    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived, sidebarSort),
-    [filter, store.sessions, store.selectedSessionId, showArchived, sidebarSort],
+    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId, showArchived, sidebarSort, order),
+    [filter, store.sessions, store.selectedSessionId, showArchived, sidebarSort, order],
   );
   // Show archived (#718): the archived ones, under a fold of their own at the end.
-  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions.filter((session) => filter.shows(session.id)), sidebarSort) : []), [showArchived, store.sessions, filter, sidebarSort]);
+  const archived = useMemo(() => (showArchived ? archivedConversations(store.sessions.filter((session) => filter.shows(session.id)), sidebarSort, order) : []), [showArchived, store.sessions, filter, sidebarSort, order]);
   const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
   const showAgents = useMemo(() => mixesAgents(listed), [listed]);
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
@@ -123,6 +127,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
+      <SidebarOrderError />
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
         <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={sidebarLayout === "status"} renderSession={(session) => chatRow(session)} />
         {conversations.length === 0 && archived.length === 0 && filter.active ? (
@@ -139,19 +144,19 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </button>
         ) : (
           <ul className="flex flex-col gap-px">
-            {sidebarLayout === "status" ? <StatusGroups sessions={ungroupedConversations}>{(session) => chatRow(session)}</StatusGroups> : live.map((session) => chatRow(session))}
+            {sidebarLayout === "status" ? <SortableStatusGroups sessions={ungroupedConversations}>{(session) => chatRow(session)}</SortableStatusGroups> : <SidebarSortList items={live.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{live.map((session) => chatRow(session))}</SidebarSortList>}
             {sidebarLayout !== "status" && removed.length > 0 && (
               <RemovedWorkspaces
                 id="chats"
                 count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
                 opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
               >
-                {removed.map((session) => chatRow(session))}
+                <SidebarSortList items={removed.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{removed.map((session) => chatRow(session))}</SidebarSortList>
               </RemovedWorkspaces>
             )}
             {ungroupedArchived.length > 0 && (
               <ArchivedSessions id="list" count={ungroupedArchived.length} opened={ungroupedArchived.some((session) => session.id === store.selectedSessionId)}>
-                {sidebarLayout === "status" ? <StatusGroups sessions={ungroupedArchived} scope="local:archived">{(session) => chatRow(session, true)}</StatusGroups> : ungroupedArchived.map((session) => chatRow(session, true))}
+                {sidebarLayout === "status" ? <SortableStatusGroups sessions={ungroupedArchived} scope="local:archived">{(session) => chatRow(session, true)}</SortableStatusGroups> : <SidebarSortList items={ungroupedArchived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{ungroupedArchived.map((session) => chatRow(session, true))}</SidebarSortList>}
               </ArchivedSessions>
             )}
           </ul>
@@ -195,7 +200,10 @@ function ChatRow({
   /** Drawn under the Archived fold, which says it already. */
   inArchive?: boolean;
 }) {
-  const title = conversationTitle(session);
+  const sort = useSidebarSortable(session.id);
+  const { sessions } = useSessionStore();
+  const title = sidebarConversationTitle(session, link?.branch, sessions);
+  const draft = useSessionDraft([session]);
   const ids = [session.id];
   const pickedNow = usePickedSessions();
   const picking = pickedNow.length > 0;
@@ -212,7 +220,7 @@ function ChatRow({
   const said = (summary?.waitingOn ?? summary?.lastReply ?? summary?.lastPrompt)?.replace(/\s+/g, " ").trim();
   const agent = showAgent ? conversationAgent(session) : null;
   return (
-    <li>
+    <li ref={sort.ref} style={sort.style}>
       <AsyncDropdownMenu>
         <AsyncContextMenu>
         <ContextMenuTrigger asChild>
@@ -221,6 +229,7 @@ function ChatRow({
           {...{ [ROW_ATTRIBUTE]: session.id }}
           title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
         >
+          {sort.handle}
           <button
             type="button"
             onClick={(event) => {
@@ -242,19 +251,24 @@ function ChatRow({
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
                 {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
+                <SessionRowExtras sessions={[session]} selected={selected} />
                 <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>{relativeTime(conversationTime(session))}</span>
               </span>
-              <span className="flex items-center gap-2">
-                <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : "text-faint")} data-testid="chat-preview">
-                  {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
-                  <span className="truncate">{preview.text}</span>
-                </span>
-                {/* One sign: waiting on you first, then still working, then an answer nobody has read. */}
-                <StatusMark status={status} unread={isUnread(session)} className={yieldsToRowActions} />
+              <span className="flex min-w-0 items-center gap-2">
+                {draft ? <DraftPreview text={draft} /> : (
+                  <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : "text-faint")} data-testid="chat-preview">
+                    {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
+                    <span className="truncate">{preview.text}</span>
+                  </span>
+                )}
+                {/* Status is shared across views; unread remains a separate reading indicator. */}
+                <SessionStatus session={session} className={cn("max-w-[60%]", yieldsToRowActions)} />
+                {isUnread(session) && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
               </span>
             </span>
           </button>
           <RowActions>
+            <ArchiveRowButton session={session} title={title} />
             {session.archived && <UnarchiveButton session={session} title={title} />}
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${title}`}>
@@ -266,7 +280,7 @@ function ChatRow({
         </ContextMenuTrigger>
         <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </AsyncContextMenu>
-        <DropdownMenuContent align="end" className="w-56" onCloseAutoFocus={keepFocusForNameField}>
+        <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
           <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>

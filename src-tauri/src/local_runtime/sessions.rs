@@ -81,6 +81,10 @@ impl Sessions {
         self.0.call_within("runtime.session.workspace", json!({"operation":operation,"params":params}), std::time::Duration::from_secs(seconds))
     }
 
+    pub fn save_terminal_selection(&self, session: &str, tab: &str, text: &str) -> Result<String> {
+        self.tab("saveTerminalSelection", session, tab, json!({"text":text}))
+    }
+
     pub fn delete_session(&self, session: &str) -> Result<()> {
         self.call("runtime.session.deleteSession", json!({"sessionId":session}))
     }
@@ -151,6 +155,10 @@ impl Sessions {
 
     pub fn resume_conversation(&self, session: &str, tab: &str, harness: &str, provider_session_id: &str) -> Result<()> {
         self.tab("resumeConversation", session, tab, json!({"harness":harness,"providerSessionId":provider_session_id}))
+    }
+
+    pub fn row_statuses(&self, ids: Vec<String>) -> Result<Value> {
+        self.quick("runtime.session.rowStatuses", json!({"ids":ids}))
     }
 
     pub fn running_tabs(&self) -> Result<Vec<RunningTab>> {
@@ -268,6 +276,10 @@ impl Sessions {
     }
 
 
+    pub fn change_held(&self, session: &str, tab: &str, change: crate::session::held::Change) -> Result<SendOutcome> {
+        self.tab("heldQueue", session, tab, json!({"change":change}))
+    }
+
     pub fn send_queued_now(&self, session: &str, tab: &str, seq: u64) -> Result<()> {
         self.quick_tab("sendQueuedNow", session, tab, json!({"seq":seq}))
     }
@@ -294,6 +306,10 @@ impl Sessions {
 
     pub fn set_effort(&self, session: &str, tab: &str, effort: Option<&str>) -> Result<()> {
         self.tab("effort", session, tab, json!({"effort":effort}))
+    }
+
+    pub fn set_tab_unread(&self, session: &str, tab: &str, unread: bool) -> Result<()> {
+        self.quick_tab("setUnread", session, tab, json!({"unread": unread}))
     }
 
     pub fn mark_read(&self, session: &str, tab: &str) -> Result<()> {

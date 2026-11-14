@@ -106,7 +106,6 @@ it("does not copy a truncation marker as file contents", async () => {
   expect(screen.queryByRole("button", { name: "Copy file" })).toBeNull();
 });
 
-
 it.each(["file.ts", "image.png"])("keeps Discard in the %s diff header alongside its viewer", async (path) => {
   vi.mocked(source.mediaContentAt!).mockResolvedValue({ data: btoa("image"), mime: "image/png" });
   const onDiscard = vi.fn();

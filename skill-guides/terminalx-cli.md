@@ -112,6 +112,33 @@ only the archived ones, as the sidebar's Show archived does; it combines with `-
 sitting idle. `sessions show` and every other session command take an archived session's id
 as they take any other.
 
+`sessions list` and `sessions show` include `detailedStatus` (id, label, icon,
+colour token and tooltip) and `rowStatus` (the live facts behind it). Agent
+attention takes precedence over the session's associated PR. The existing
+session-PR registry supplies ownership; a shared branch alone never does. A
+local head must match the PR head before a row says Ready to merge or Merged.
+Default branches and detached heads carry agent status only. Local facts refresh
+in the background every 10 seconds; associated PRs are batched once per project
+every 120 seconds, with rate-limit backoff and at least 1,000 points reserved for
+other GitHub work. A first read can return agent status while the cache warms;
+read again to see the result. The existing tab `status` remains the agent's
+lifecycle state.
+
+### Layered configuration
+
+```text
+terminalx config show [--project <project>] --json
+```
+
+Reads supported effective settings with their source layer and managed lock.
+Environment values are redacted. Precedence is managed, repository local,
+repository shared, user, defaults. All workspaces inherit files from the primary
+checkout: `.terminalx/settings.json` and ignored `.terminalx/settings.local.json`.
+Shared environment and branch prefixes require the person's native trust approval;
+the CLI cannot grant it. An untrusted launch directs the person to Settings →
+General → Layered configuration. Setup and archive scripts and files to copy are
+not read from repository files yet. See `docs/layered-configuration.md` for scope.
+
 ### Sessions a session started (`parent`)
 
 ```text
@@ -411,6 +438,122 @@ One target with neither flag gives the single-target result above. Pass `--any` 
 with one target to get the list. A target that names no session fails the call before any
 waiting. Several targets are local sessions or tabs: wait on a cloud session by itself.
 
+#### Wait on all of a lead's workers
+
+```text
+terminalx wait --children-of <session> [--any|--all] [--timeout <seconds>] --json
+```
+
+Waits on every session that session started, the ones `sessions list --children-of` shows,
+archived workers and quick chats included. The result is the one above, with the workers as
+its targets. The workers are found once, when the call begins: a session the lead starts
+after that is not waited on, so make the call again to include it.
+
+`--children-of` cannot be combined with named targets, an empty value or a cloud session
+(each is refused as on `sessions list`). A lead with no workers returns at once with
+`"targets": []`, `"timedOut": false` and a `reason` saying there was nothing to wait for;
+the exit code is 0.
+### Worker reports
+
+When you start a session to do part of your work (a worker), ask it for a report and read
+that instead of its whole transcript:
+
+```text
+terminalx sessions create --project <project> --agent <agent> --prompt <text> --report --json
+terminalx sessions create --quick --agent <agent> --prompt <text> --report --json
+terminalx wait <session-or-tab> --json
+terminalx sessions report <session-or-tab> --json
+```
+
+`--report` adds the report instructions to the worker's prompt and holds it to them: a worker
+whose turn ends without a readable report is asked for it once more, and after that its report
+stays `missing`. A worker never gets an issue pipeline of its own, so `--report` cannot be
+combined with `--issue`, `--auto-merge` or `--resolve-conflicts`, and it is not available for
+cloud sessions. It needs an agent that runs in its own terminal, `claude` or `codex`: such a
+Codex worker stays on the terminal connection whatever Native Codex is set to, and
+`--experimental-codex-stdio` and other agents are refused, because they could not be reminded.
+Creation returns `"report": true`, and a `reportNote` that is null unless the worker was briefed
+but could not be recorded as owing a report (it is then not reminded).
+
+To read every worker's report at once, name the session that started them:
+
+```text
+terminalx sessions report --children-of <session> --json
+```
+
+It returns `parent` (the lead, as `sessions list --children-of` gives it) and `reports`, one
+row for each session that session started: the same sessions `sessions list --children-of`
+lists, in any project or worktree, quick chats and archived ones included. Each row is what
+`sessions report <session>` returns, described below, plus the session's `title`. A row is
+read from the worker's own agent, the first tab it was given, which is the `tabId` of its
+`workers` row and the tab `--report` holds to a report; to read another tab, name that tab.
+A lead that started nothing gets `"reports": []` and exit code 0. A worker with no agent tab
+is `missing` with reason `noAgent`, and one whose transcript cannot be read is `missing`
+with reason `unreadable`; neither hides the other rows. `--children-of` takes a session on
+this computer and no other target: an empty value and a cloud session are refused.
+
+The worker ends its final reply with a `terminalx-report` block, JSON in a fenced code block:
+
+````text
+```terminalx-report
+{
+  "status": "done",
+  "result": "Two or three sentences on what you did or found.",
+  "evidence": ["cargo test auth: exit 0", "src/auth.rs:42"],
+  "changed": {"files": ["src/auth.rs"], "branch": "fix-login", "commit": "abc1234"},
+  "notDone": [],
+  "couldNotRead": [],
+  "uncertain": []
+}
+```
+````
+
+- `status`: `done`, `partial`, `blocked` or `failed`. Nothing else is accepted.
+- `result`: two or three sentences.
+- `evidence`: commands run with their exit codes, or `file:line` for a claim.
+- `changed`: `files`, `branch` and `commit`, or null when nothing changed.
+- `notDone`: what was skipped, and why.
+- `couldNotRead`: sources the worker tried to read and could not. A failed read is listed
+  here; it is never the same as "nothing found".
+- `uncertain`: claims made without direct evidence.
+
+`status` and `result` are required. A list that is left out is empty. If you write a worker's
+prompt yourself and send it without `--report`, include the block above in it; `sessions
+report` reads any session's last reply, but only a session started with `--report` is reminded.
+
+`sessions report` reads the tab's last turn (a session's active tab, like `read` and `wait`)
+and returns `sessionId`, `tabId` and one of two shapes:
+
+- A report: the seven fields, plus `seq` (the transcript sequence number of the reply that
+  holds the block) and `at` (when the turn ended).
+  - `noEvidence: true` is added when `status` is `done` and `evidence` is empty. Treat such a
+    result as a claim: check it before you rely on it.
+  - A block over 8,000 characters is cut to that much text, and `truncated` says so:
+    `limit`, `chars` (the full size), `seq`, and `cut` (the fields that lost text; `evidence`
+    gives way first). The whole block is in the transcript: `terminalx read <tab> --since <seq - 1>`
+    returns the event that holds it first.
+- Either shape may carry `laterTurn: {"seq": N}`: after the turn this was read from, the
+  agent started a turn of its own (a background task reporting in, a scheduled check) that
+  ended without a report. The report stands; read what it said from `seq` if it matters. A
+  turn of its own that ends with a report block is read as the newer report instead.
+- `"status": "missing"`: there is no readable report. `reason` says why, `detail` says it in
+  a sentence, `tail` is the last 2,000 characters of the reply, and `reminded` is true once
+  the worker has been asked again and still sent none. A status is never guessed from prose.
+  - `noBlock`: the reply has no report block. `malformed`: the block is not JSON, has no
+    valid `status` or `result`, or has a field of the wrong shape.
+  - `reminderPending: true` is added for a `--report` worker whose turn has just ended and
+    whose reminder has not reached it yet. Do not `send` it anything: `wait` again, then ask
+    again. If it is still pending after that, the reminder could not be delivered; treat the
+    report as missing.
+  - `working`: the tab is still in a turn, the reminder's turn included. `wait`, then ask
+    again. `waiting`: its turn has stopped on a permission request, a question or an error;
+    `wait` says which.
+  - `turnAborted`, `turnFailed`: the last turn was interrupted or ended on an error.
+    `noReply`, `noTurn`: it said nothing, or has not finished a turn.
+
+Handle `missing` yourself: read the `tail`, read the transcript, or `send` the worker a
+question. Do not treat it as done, and do not treat it as failed.
+
 ### Permissions
 
 ```text
@@ -462,6 +605,42 @@ terminalx worktrees delete <worktree> --yes --sessions <ids from the dry run> --
 A worktree that is not clean and merged also needs `--force`. Pass it only when losing the
 work the preview lists is intended. The response lists each deleted session under
 `removedSessions` with its `id`, `title`, `project` and `belongsTo`.
+
+### Review comments
+
+From a pipeline's recorded reviewer tab, while its review is active:
+
+```text
+terminalx review comment --file src/foo.ts --line 40 --body "Explain the defect and when it occurs." --json
+terminalx review comment --file src/foo.ts --line 40-43 --body "One finding on this range." --json
+terminalx review comments --json
+```
+
+Comments are local annotations, persisted per workspace outside the checkout. They do not
+post to GitHub or Linear. The tab's stored workspace and name are used; changing the shell's
+directory does not change that workspace. Both commands need the tab's `RACCOON_SESSION_ID`
+and `RACCOON_TAB_ID`, set when TerminalX launches the agent. Writing also requires that
+tab's current `RACCOON_HOOK_TOKEN`; the CLI sends it automatically. Author tabs, ordinary
+chats and calls claiming a different tab are refused. Listing remains available to other
+agent tabs. The commands work on the headless local owner too. Cloud workspaces return `unsupported` until they share the desktop comment store.
+
+`--file` is relative to that workspace root, or an absolute path inside it. Parent traversal
+and symlinks resolving outside it are refused. `--line` is one-based and inclusive on the
+current file (the after side), and must not exceed its last line. Empty, binary, non-UTF-8
+and files larger than 4 MiB cannot be annotated; `--body` is nonempty and at most 32 KiB.
+Ranges are limited to 10,000 lines and 1,000,000 bytes of quoted text. Deleted files and
+before-side lines are not supported by these commands.
+
+The result includes the saved `comment`, with its quoted `lineText`, range, `note`, revision,
+and shared `author` (`kind: agent`, `role: reviewer`) with the tab's id and name. It uses the same workspace key
+and store as user diff comments. Agent notes appear on their diff lines with the agent's name
+and are included by “Add all to chat”; editing, Sent and Outdated work as for user comments.
+Each new comment also appears as a card in the caller's chat. `review comments` lists all user
+and agent comments in file and line order. Read that list before retrying an uncertain write:
+an identical retry for the same reviewer and reviewed commit returns that note with
+`created: false`, preserving its state and avoiding another chat card. Note text uses the
+store's whitespace trimming. The anchor records the PR comparison tree, surrounding source
+lines and `reviewedCommit`; changed checkout commits or quoted lines are refused.
 
 ### Issues
 

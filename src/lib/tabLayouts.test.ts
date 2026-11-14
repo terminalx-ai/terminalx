@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { followedLayout, mergeOrder, moveKey, settleLayout, sortByLayout, workspaceKey, workspaceSessions } from "./tabLayouts";
+import { followedLayout, layoutOf, moveToPane, panesOf, paneRatio, selectPaneTab, mergeOrder, moveKey, settleLayout, sortByLayout, workspaceKey, workspaceSessions } from "./tabLayouts";
 import type { SessionEntry } from "@/types/session";
 
 const session = (id: string, patch: Partial<SessionEntry> = {}): SessionEntry => ({
@@ -142,5 +142,83 @@ describe("a shell an agent was started in (#437)", () => {
     const saved = layout(["agent:a1", "terminal:a:other"]);
     expect(followedLayout(saved, withTab)).toBe(saved);
     expect(followedLayout(saved, [session("a")])).toBe(saved);
+  });
+});
+
+
+describe("workspace panes (PRO-263)", () => {
+  const keys = ["agent:a", "agent:b", "terminal:c", "browser:d"];
+  const base = () => layout(keys);
+  const split = () => moveToPane(base(), keys, "agent:b", "right", "agent:a");
+
+  it("reads legacy layouts as one pane and refuses to split a lone tab", () => {
+    expect(panesOf(base(), keys, "agent:b")).toEqual([{ id: "left", tabs: keys, active: "agent:b" }]);
+    const single = layout([keys[0]]);
+    expect(moveToPane(single, [keys[0]], keys[0], "right")).toBe(single);
+  });
+
+  it("splits a tab to the right with an independent active tab on each side", () => {
+    expect(panesOf(split(), keys)).toEqual([
+      { id: "left", tabs: [keys[0], keys[2], keys[3]], active: keys[0] },
+      { id: "right", tabs: [keys[1]], active: keys[1] },
+    ]);
+    expect(split().focusedPane).toBe("right");
+    expect(selectPaneTab(split(), keys, keys[2]).panes?.map((pane) => pane.active)).toEqual([keys[2], keys[1]]);
+  });
+
+  it("moves an active tab, selects its neighbour, and collapses an emptied pane", () => {
+    const moved = moveToPane(split(), keys, keys[0], "right");
+    expect(panesOf(moved, keys).map((pane) => pane.active)).toEqual([keys[2], keys[0]]);
+    const collapsed = moveToPane(split(), keys, keys[1], "left");
+    expect(panesOf(collapsed, keys)).toEqual([{ id: "left", tabs: keys, active: keys[1] }]);
+    expect(collapsed.focusedPane).toBe("left");
+  });
+
+  it("collapses either last-tab close, and can split again", () => {
+    for (const keep of [[keys[1]], [keys[0], keys[2], keys[3]]]) {
+      const closed = settleLayout(split(), keep, (key) => !keep.includes(key));
+      expect(closed.panes).toHaveLength(1);
+      expect(closed.panes![0].id).toBe("left");
+      expect(closed.panes![0].tabs).toEqual(keep);
+      expect(panesOf(closed, keep)).toHaveLength(1);
+    }
+    const closed = settleLayout(split(), [keys[0], keys[2]], (key) => key === keys[1] || key === keys[3]);
+    expect(panesOf(moveToPane(closed, [keys[0], keys[2]], keys[2], "right"), [keys[0], keys[2]])).toHaveLength(2);
+  });
+
+  it("round-trips membership, active tabs, focus and the divider through saved state", () => {
+    const saved = { ...split(), splitRatio: 0.62 };
+    const read = layoutOf(JSON.parse(JSON.stringify({ workspaces: { repo: saved }, closed: [] })), "repo");
+    expect(read).toEqual(saved);
+    expect(paneRatio(read)).toBe(0.62);
+    expect(panesOf(read, keys)).toEqual(panesOf(saved, keys));
+  });
+
+  it("puts new tabs in the focused pane and keeps unrelated row assignments", () => {
+    const saved = split();
+    expect(panesOf(saved, [...keys, "agent:new"])[1].tabs).toEqual([keys[1], "agent:new"]);
+    const selected = selectPaneTab(saved, [keys[0], keys[2]], keys[2]);
+    expect(selected.panes?.flatMap((pane) => pane.tabs).sort()).toEqual([...keys].sort());
+    expect(panesOf(selected, keys)[1].tabs).toEqual([keys[1]]);
+  });
+
+  it("repairs duplicate and stale assignments in the projection without losing any visible tab", () => {
+    const saved = { ...base(), panes: [
+      { id: "left" as const, tabs: [keys[0], keys[0], "gone"], active: "gone" },
+      { id: "right" as const, tabs: [keys[0], keys[1]], active: keys[0] },
+    ] };
+    const panes = panesOf(saved, keys);
+    expect(panes.flatMap((pane) => pane.tabs).sort()).toEqual([...keys].sort());
+    expect(panes.map((pane) => pane.active)).toEqual([keys[0], keys[1]]);
+    expect(panesOf(saved, [keys[0]])).toHaveLength(1);
+    expect(paneRatio({ ...base(), splitRatio: NaN })).toBe(0.5);
+    expect(paneRatio({ ...base(), splitRatio: 5 })).toBe(0.8);
+  });
+
+  it("keeps a shell's pane and selection when an agent adopts it", () => {
+    const saved = moveToPane(base(), keys, keys[2], "right");
+    const followed = followedLayout(saved, [{ tabs: [{ id: "adopted", pane: "c" }] } as SessionEntry]);
+    expect(followed.panes?.[1]).toEqual({ id: "right", tabs: ["agent:adopted"], active: "agent:adopted" });
+    expect(panesOf(followed, [keys[0], keys[1], "agent:adopted", keys[3]])).toHaveLength(2);
   });
 });

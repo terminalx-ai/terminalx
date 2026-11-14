@@ -116,3 +116,46 @@ it("recovers on focus without replacing the terminal or stealing input focus", (
   expect(inst.term.dispose).not.toHaveBeenCalled();
   vi.useRealTimers();
 });
+
+
+it("keeps both pane terminals visible while only the focused one takes keyboard focus", () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const first = instance();
+  const second = instance();
+  const frame = () => act(() => { frames.splice(0).forEach((callback) => callback(0)); });
+  const view = render(<><TerminalView id="p1" visible focused create={() => first} fit={false} /><TerminalView id="p2" visible focused={false} create={() => second} fit={false} /></>);
+  try {
+    frame();
+    expect(first.term.focus).toHaveBeenCalledOnce();
+    expect(second.term.focus).not.toHaveBeenCalled();
+    view.rerender(<><TerminalView id="p1" visible focused={false} create={() => first} fit={false} /><TerminalView id="p2" visible focused create={() => second} fit={false} /></>);
+    frame();
+    expect(first.el.isConnected && second.el.isConnected).toBe(true);
+    expect(first.term.focus).toHaveBeenCalledOnce();
+    expect(second.term.focus).toHaveBeenCalledOnce();
+  } finally {
+    view.unmount();
+    disposeInstance("p2");
+    vi.unstubAllGlobals();
+  }
+});
+
+it("reparents the same terminal across view trees with a full idle cache", async () => {
+  const create = vi.fn(() => ({ ...instance(), restorable: true }));
+  const view = render(<div key="dock"><TerminalView id="p1" visible create={create} /></div>);
+  const first = peekInstance("p1")!;
+  first.el.textContent = "existing scrollback";
+  const release = vi.fn();
+  first.release = release;
+  for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) getInstance(`move-idle-${i}`, create);
+  await act(async () => view.rerender(<section key="tab"><TerminalView id="p1" visible create={create} /></section>));
+  expect(peekInstance("p1")).toBe(first);
+  expect(first.el.closest("section")).not.toBeNull();
+  expect(first.el.textContent).toBe("existing scrollback");
+  expect(first.term.dispose).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  view.unmount();
+  for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) disposeInstance(`move-idle-${i}`);
+});

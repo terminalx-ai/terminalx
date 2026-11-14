@@ -36,13 +36,13 @@
 //! `thread_settings_applied`, which the TUI's `/permissions` writes the
 //! moment a preset is confirmed.
 //!
-//! Every shape here came out of rollouts written by codex-cli 0.152.0 and
-//! 0.153.4 driven through a PTY; three of them are the fixtures this module
-//! is tested on.
+//! Shapes were captured from codex-cli 0.152.0 and 0.153.4 through a PTY,
+//! and goal snapshots from 0.164.0 through an isolated app-server thread.
+//! The fixtures retain the records used to verify these contracts.
 
 use serde_json::Value;
 
-use crate::events::{BlockRef, EditKind, FileEdit, ImageRef, Payload, ToolResult, ToolType, Usage};
+use crate::events::{BlockRef, EditKind, FileEdit, Goal, ImageRef, Payload, ToolResult, ToolType, Usage};
 use crate::harness::settings::{Signal, Stance};
 use crate::harness::tui::TurnMark;
 
@@ -188,6 +188,16 @@ fn profile_sandbox(profile: &Value) -> Option<&'static str> {
 
 fn decode_event(p: &Value, out: &mut Vec<Payload>) {
     match p["type"].as_str().unwrap_or("") {
+        // Captured from 0.164.0. These are snapshots, not token deltas; a
+        // turn ending or failing says nothing about the goal's lifecycle.
+        "thread_goal_updated" => {
+            if let Ok(goal) = serde_json::from_value::<Goal>(p["goal"].clone()) {
+                if !goal.objective.trim().is_empty() && goal.token_budget != Some(0) {
+                    out.push(Payload::GoalUpdated { goal });
+                }
+            }
+        }
+        "thread_goal_cleared" => out.push(Payload::GoalCleared),
         "task_started" => out.push(Payload::ModelRequestStarted),
         "thread_settings_applied" => {
             let settings = &p["thread_settings"];
@@ -208,14 +218,15 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
             // `total` is cumulative over the turn and would over-report it
             // several times.
             let last = &info["last_token_usage"];
-            if let Some(used) = last["total_tokens"].as_u64() {
+            if last.is_object() || info["total_token_usage"].is_object() {
                 out.push(Payload::UsageUpdate(Usage {
                     input_tokens: last["input_tokens"].as_u64(),
                     output_tokens: last["output_tokens"].as_u64(),
-                    context_used: Some(used),
+                    context_used: last["total_tokens"].as_u64(),
                     context_max: info["model_context_window"].as_u64(),
                     cost_usd: None,
                     model: None,
+                    ..Default::default()
                 }));
             }
         }
@@ -439,6 +450,67 @@ mod tests {
     /// the timezone `UTC`, and the collaboration mode's standing instructions
     /// are trimmed; nothing else is changed.
     const SETTINGS: &str = include_str!("fixtures/settings.jsonl");
+
+    #[test]
+    fn recorded_goals_cover_every_cli_state_and_survive_log_serialization() {
+        use crate::events::GoalStatus;
+        let fixture = include_str!("fixtures/goals_0164.jsonl");
+        let mut stream = Streamer::at(0, decode_line);
+        // A tail can see any boundary, including the middle of a goal record.
+        let payloads: Vec<_> = fixture.as_bytes().chunks(37).flat_map(|chunk| stream.push(chunk)).collect();
+        let expected = [GoalStatus::Paused, GoalStatus::Active, GoalStatus::Paused, GoalStatus::Complete,
+            GoalStatus::Blocked, GoalStatus::BudgetLimited, GoalStatus::UsageLimited];
+        assert_eq!(payloads.len(), expected.len());
+        for (payload, status) in payloads.iter().zip(expected) {
+            let Payload::GoalUpdated { goal } = payload else { panic!("not a goal: {payload:?}") };
+            assert_eq!(goal.status, status);
+            assert_eq!(goal.objective, "PRO-256 isolated goal persistence probe");
+            assert_eq!(goal.token_budget, Some(1000));
+            assert_eq!(goal.tokens_used, 0);
+            assert!(payload.is_persisted());
+            assert!(!payload.is_turn_boundary());
+            let json = serde_json::to_value(payload).unwrap();
+            assert_eq!(json["goal"]["tokenBudget"], 1000);
+            assert_eq!(serde_json::from_value::<Payload>(json).unwrap(), *payload);
+        }
+        for line in fixture.lines() { assert_eq!(turn_mark(line), None); }
+    }
+
+    #[test]
+    fn goal_snapshots_use_their_own_counters_and_optional_budget() {
+        let mut record: Value = serde_json::from_str(include_str!("fixtures/goals_0164.jsonl").lines().nth(1).unwrap()).unwrap();
+        let mut out = Vec::new();
+        for (budget, used) in [(serde_json::json!(1000), 1200), (Value::Null, 1500)] {
+            record["payload"]["goal"]["tokenBudget"] = budget;
+            record["payload"]["goal"]["tokensUsed"] = used.into();
+            decode_line(&record.to_string(), &none(), &mut out);
+        }
+        assert!(matches!(&out[0], Payload::GoalUpdated { goal } if goal.token_budget == Some(1000) && goal.tokens_used == 1200));
+        assert!(matches!(&out[1], Payload::GoalUpdated { goal } if goal.token_budget.is_none() && goal.tokens_used == 1500));
+        record["payload"]["goal"].as_object_mut().unwrap().remove("tokenBudget");
+        decode_line(&record.to_string(), &none(), &mut out);
+        assert!(matches!(&out[2], Payload::GoalUpdated { goal } if goal.token_budget.is_none()));
+    }
+
+    #[test]
+    fn malformed_or_unknown_goals_do_not_replace_the_last_reported_goal() {
+        let valid: Value = serde_json::from_str(include_str!("fixtures/goals_0164.jsonl").lines().next().unwrap()).unwrap();
+        for (key, value) in [("status", serde_json::json!("futureStatus")), ("objective", Value::Null),
+            ("objective", serde_json::json!("  ")), ("tokensUsed", serde_json::json!(-1)),
+            ("tokensUsed", Value::Null), ("tokenBudget", serde_json::json!(-1)), ("tokenBudget", serde_json::json!(0))] {
+            let mut record = valid.clone();
+            record["payload"]["goal"][key] = value;
+            let mut out = Vec::new();
+            decode_line(&record.to_string(), &none(), &mut out);
+            assert!(out.is_empty(), "accepted malformed {key}");
+        }
+        let mut out = Vec::new();
+        decode_line(r#"{"type":"event_msg","payload":{"type":"thread_goal_updated","goal":null}}"#, &none(), &mut out);
+        assert!(out.is_empty());
+        // Known protocol event, not persisted by 0.164.0; accept it if a CLI writes it.
+        decode_line(r#"{"type":"event_msg","payload":{"type":"thread_goal_cleared"}}"#, &none(), &mut out);
+        assert_eq!(out, [Payload::GoalCleared]);
+    }
 
     fn reported(payloads: &[Payload]) -> Vec<(Option<&str>, Option<&str>)> {
         payloads

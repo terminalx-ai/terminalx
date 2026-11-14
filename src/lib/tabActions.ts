@@ -1,3 +1,4 @@
+import { closeEditor, getEditors, openReview } from "@/lib/editors";
 import { agent, api, type TabLayout } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 import { getBrowserState, navigateBrowserPage, openBrowserTab, refreshBrowserPages } from "@/lib/browser";
@@ -8,7 +9,7 @@ import { addTab, getSessionStore, openWelcome, reopenTab, selectSession } from "
 import { activatePeer, agentTabsOf, endPeer, isShellPeer, noteClosed, offerUndoFor, offersUndo, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { forgetCloseUndoFor } from "@/lib/closeUndo";
 import { isByHand } from "@/lib/tabFront";
-import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
+import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveToPane, panesOf, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
 import { startTabAgent } from "@/lib/tabViews";
 import { openTerminal, type SelectedSessionTab } from "@/lib/terminal";
 
@@ -36,6 +37,7 @@ function isGone(key: string): boolean {
   const at = key.indexOf(":");
   const [kind, id] = [key.slice(0, at), key.slice(at + 1)];
   if (kind === "agent") return !getSessionStore().sessions.some((session) => session.tabs.some((tab) => tab.id === id));
+  if (kind === "review") return !getEditors().editors.some((e) => e.id === id);
   if (kind === "browser") return getBrowserState().loaded && !getBrowserState().pages.some((page) => page.id === id);
   return false;
 }
@@ -66,6 +68,19 @@ export function moveTab(row: TabRow, tab: PeerTab, to: number) {
   const target = landingIndex(row, tab, to);
   if (from < 0 || from === target) return;
   arrange(row, {}, moveKey(keys, tab.key, target));
+}
+
+/** Split or transfer a tab using the full workspace row, even from a pane menu. */
+export function moveTabToPane(row: TabRow, tab: PeerTab, target: "left" | "right", selected: SelectedSessionTab | null = null) {
+  const now = fresh(row);
+  const layout = moveToPane(now.layout, now.tabs.map((peer) => peer.key), tab.key, target, selected ? tabKey(selected.kind, selected.id) : null);
+  if (layout === now.layout) return;
+  saveTabLayout(now.workspace, layout);
+  openPeer(now.session.id, tab);
+}
+
+export function otherPane(row: TabRow, tab: PeerTab): "left" | "right" {
+  return panesOf(row.layout, row.tabs.map((peer) => peer.key)).find((pane) => pane.tabs.includes(tab.key))?.id === "right" ? "left" : "right";
 }
 
 export type TabMove = "left" | "right" | "start" | "end";
@@ -152,6 +167,7 @@ async function openPage(session: SessionEntry, url?: string | null): Promise<str
  * that is a terminal now (#437) gives a terminal.
  */
 export function duplicateTab(row: TabRow, tab: PeerTab): Promise<string> {
+  if (tab.kind === "review") return Promise.resolve(openReview(tab.editor));
   if (tab.kind === "browser") return newTab(row, { kind: "browser", url: tab.page.url }, tab);
   if (isShellPeer(tab) || tab.kind !== "agent") return newTab(row, { kind: "terminal" }, tab);
   // A mode that was set in the terminal is not one the app can start an agent in.
@@ -170,6 +186,7 @@ export function canRestartAgent(tab: PeerTab): boolean {
 
 /** Reload a page, restart an agent's CLI (its conversation resumes), or start an exited shell again in its tab. */
 export async function restartTab(row: TabRow, tab: PeerTab) {
+  if (tab.kind === "review") return;
   if (tab.kind === "browser") {
     await navigateBrowserPage(tab.id, "reload");
     return;
@@ -253,23 +270,32 @@ export function busyTabs(tabs: readonly PeerTab[], running: ReadonlySet<string> 
  */
 export async function closeTabs(row: TabRow, closing: readonly PeerTab[], selected: SelectedSessionTab | null) {
   if (!closing.length) return;
+  const accepted: PeerTab[] = [];
+  for (const tab of closing) {
+    if (tab.kind !== "review" || await closeEditor(tab.id)) accepted.push(tab);
+  }
+  closing = accepted;
   const gone = new Set(closing.map((tab) => tab.key));
   const shown = row.tabs.findIndex((tab) => tab.kind === selected?.kind && tab.id === selected.id);
   const stays = (tab: PeerTab | undefined) => !!tab && !gone.has(tab.key);
   let next: PeerTab | undefined;
   if (shown >= 0 && gone.has(row.tabs[shown].key)) {
-    next = row.tabs.slice(shown + 1).find(stays) ?? row.tabs.slice(0, shown).reverse().find(stays);
+    next = row.tabs.slice(shown + 1).find(stays) ?? row.tabs.slice(0, shown).reverse().find(stays) ?? fresh(row).tabs.find(stays);
   }
   // Read before they close: the sessions whose last running agent this stops.
   const undo = offersUndo(agentTabsOf(closing));
-  noteClosed(row.session.id, closing);
+  noteClosed(row.session.id, closing, row);
   // What takes the view is chosen before anything closes, so no tab that is about to go is shown on the way.
   if (next) openPeer(row.session.id, next);
   // Shells and pages first: a session whose last agent tab closes is given a tab to show, and must not be given one that is about to close.
   const ordered = [...closing].sort((a, b) => Number(a.kind === "agent") - Number(b.kind === "agent"));
   for (const tab of ordered) {
+    if (tab.kind === "review") continue;
     await endPeer(row.session.id, tab).catch((error) => console.error("closing a tab failed", error));
   }
+  const now = fresh(row);
+  const kept = new Set(now.tabs.map((tab) => tab.key));
+  saveTabLayout(now.workspace, settleLayout(now.layout, [...kept], (key) => gone.has(key) && !kept.has(key)));
   offerUndoFor(undo);
   if (getSessionStore().selectedSessionId === row.session.id && !fresh(row).tabs.length) openWelcome(row.session.id);
 }
@@ -283,7 +309,7 @@ function lastClosed(row: Pick<TabRow, "workspace" | "sessions">, tabs: TabStore)
   const sessionIds = row.sessions.map((session) => session.id);
   const candidates: Reopenable[] = [
     ...closedTabsOf(tabs, sessionIds).map((closed) => ({ at: Date.parse(closed.closedAt) || 0, agent: { sessionId: closed.sessionId, tabId: closed.tab.id } })),
-    ...tabs.closedHere.filter((record) => record.workspace === row.workspace && record.page).map((record) => ({ at: record.at, page: record })),
+    ...tabs.closedHere.filter((record) => record.workspace === row.workspace && (record.page || (record.review && sessionIds.includes(record.review.sessionId)))).map((record) => ({ at: record.at, page: record })),
   ];
   return candidates.reduce<Reopenable | null>((latest, candidate) => (!latest || candidate.at >= latest.at ? candidate : latest), null);
 }
@@ -352,6 +378,13 @@ export async function reopenClosedTab(row: TabRow): Promise<boolean> {
   }
   const was = last.page;
   forgetClosed(was.key);
+  if (was.review) {
+    const entry = was.review;
+    const id = openReview(entry.kind === "diff" ? { ...entry, diff: { ...entry.diff, mode: "diff" } } : entry);
+    if (getSessionStore().selectedSessionId !== entry.sessionId) selectSession(entry.sessionId);
+    restorePlace(row, tabKey("review", id), was);
+    return true;
+  }
   const key = tabKey("browser", await openPage(row.session, was.page!.url));
   if (getSessionStore().selectedSessionId !== row.session.id) selectSession(row.session.id);
   restorePlace(row, key, { ...was, key });

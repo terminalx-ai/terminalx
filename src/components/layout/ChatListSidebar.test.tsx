@@ -64,18 +64,18 @@ async function boot(list: SessionEntry[]) {
 }
 
 const rows = () => within(screen.getByTestId("conversation-list")).getAllByRole("listitem");
-const titleOf = (row: HTMLElement) => within(row).getByRole("button", { name: /^(Talk|Session)/ }).getAttribute("aria-label");
+const titleOf = (row: HTMLElement) => row.querySelector("[data-row-sessions] > button")?.getAttribute("aria-label");
 
 describe("the chat list", () => {
   it("lists every conversation in one list, pinned first then newest, whatever project it is in", async () => {
     await boot([
       session("chat", chatsPath, at(3)),
-      session("work", "/repos/web", at(2), { worktreeName: "fix-login", branch: "raccoon/fix-login" }),
+      session("work", "/repos/web", at(2), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }),
       session("old", "/repos/web", at(1), { pinned: true }),
       session("gone", chatsPath, at(4), { archived: true }),
     ]);
     mount();
-    expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "Talk work"]);
+    expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "fix login"]);
     // No project level: the project view is one click away.
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "View" }));
@@ -89,7 +89,7 @@ describe("the chat list", () => {
       alone: { waitingOn: "Which file?" },
     };
     await boot([
-      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", branch: "raccoon/fix-login" }, "waiting"),
+      session("asks", "/repos/web", at(4), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }, "waiting"),
       session("said", chatsPath, at(3), {}, "completed"),
       session("alone", chatsPath, at(2), {}, "waiting"),
       session("quiet", "/repos/web", at(1), { branch: "main" }),
@@ -99,9 +99,9 @@ describe("the chat list", () => {
     await act(async () => {});
     const [asks, said, alone, quiet] = rows();
     expect(within(asks!).getByTestId("chat-preview").textContent).toBe("web · raccoon/fix-login");
-    expect(within(asks!).getByRole("img", { name: "Needs you" })).toBeTruthy();
+    expect(within(asks!).getByText("Needs attention")).toBeTruthy();
     // What it waits on is still there, on hover.
-    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("Talk asks\nweb · raccoon/fix-login\nAllow rm -rf dist?");
+    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("fix login\nweb · raccoon/fix-login\nAllow rm -rf dist?");
     expect(within(said!).getByTestId("chat-preview").textContent).toBe("Done: the tests pass and the build is green.");
     expect(within(said!).getByRole("img", { name: "Unread" })).toBeTruthy();
     expect(within(alone!).getByTestId("chat-preview").textContent).toBe("Which file?");
@@ -184,7 +184,7 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
   const kept = screen.getByRole("button", { name: "Talk kept" });
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
-  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
   expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
   expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
 });
@@ -207,7 +207,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Delete…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });

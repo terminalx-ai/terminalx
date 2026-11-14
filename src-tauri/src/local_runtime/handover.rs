@@ -86,6 +86,10 @@ pub struct Record {
     pub groups: Vec<u32>,
     #[serde(default)]
     pub(crate) tabs: Vec<TabRecord>,
+    /// Each tab's last state as activity history counted it, so work under
+    /// way is counted once, for its whole time.
+    #[serde(default)]
+    pub activity: Vec<crate::store::activity::CarriedTab>,
 }
 
 /// The launch's hook and control sockets.
@@ -141,6 +145,8 @@ pub struct PaneRecord {
     pub title: Option<String>,
     #[serde(default)]
     pub renamed: bool,
+    #[serde(default)]
+    pub docked: Option<bool>,
 }
 
 /// What `handover-formats` prints: which records this binary reads.
@@ -353,10 +359,12 @@ impl Record {
             id: pane.id, fd: keep(pane.master), pid: pane.pid, group: pane.group, explicit_command: pane.explicit_command, environment: Some(pane.environment),
             cwd: pane.cwd, created: pane.created, tty: pane.tty, cols: pane.cols, rows: pane.rows, scrollback: pane.scrollback,
             printed: pane.printed, screen: pane.screen, quiet_ms: pane.quiet.map(|quiet| u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX)),
-            title: pane.title, renamed: pane.renamed,
+            title: pane.title, renamed: pane.renamed, docked: pane.docked,
         }).collect();
+        // Read with every tab held: no transition is recorded meanwhile.
+        let activity = crate::store::activity::carried();
         let record = Self { format: FORMAT, from: env!("CARGO_PKG_VERSION").into(), pid: std::process::id(), owner, control, frames, decisions,
-            panes, retained: terminals.retained, groups: terminals.groups, tabs };
+            panes, retained: terminals.retained, groups: terminals.groups, tabs, activity };
         Ok((record, kept))
     }
 }

@@ -34,6 +34,8 @@ export interface TabEntry {
    */
   transport?: "experimentalCodexStdio";
   status: TabStatus;
+  /** A persisted reminder, independent of the agent status. */
+  markedUnread?: boolean;
   created: string;
   modified: string;
   /** Latest verified user/assistant message time; absent for unverified history. */
@@ -101,6 +103,19 @@ export interface RemovedWorkspace {
   path: string;
   name: string;
   branch?: string | null;
+  commit?: string | null;
+  repository?: string | null;
+}
+
+export interface WorkspaceRestorePreview {
+  projectPath: string;
+  path: string;
+  branch: string | null;
+  commit: string;
+  needsBranch: string | null;
+  suggestedBranch: string;
+  legacy: boolean;
+  sessionIds: string[];
 }
 
 /**
@@ -122,6 +137,8 @@ export interface SessionParent {
 }
 
 export interface SessionEntry {
+  /** Live presentation facts supplied by the owning runtime. */
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   /** The person’s workflow status; older entries default to Backlog. */
   manualStatus?: ManualStatus;
   id: string;

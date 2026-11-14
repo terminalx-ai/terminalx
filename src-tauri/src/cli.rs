@@ -46,13 +46,14 @@ const HELP: &str = r#"terminalx — control a running TerminalX app
 Usage:
   terminalx status [--json]
   terminalx projects list [--json]
+  terminalx config show [--project PROJECT] [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
   terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
   terminalx sessions list --children-of SESSION [--json]
   terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge]
@@ -60,10 +61,12 @@ Usage:
       [--title TEXT] [--name NAME] [--on-main] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--parent SESSION|--no-parent]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx sessions report SESSION_OR_TAB [--json]
+  terminalx sessions report --children-of SESSION [--json]
   terminalx share create SESSION [--can-drive|--read-only] [--people EMAIL,EMAIL]
       [--expires-in SECONDS] [--no-approve|--approve] [--can-approve] [--max-people COUNT]
       [--single-use] [--local-only] [--json]
@@ -110,6 +113,8 @@ Usage:
   terminalx issues create --project PROJECT [--provider github|linear] --title TEXT
       [--body TEXT|--body-file PATH] [--team TEAM] [--assignee USER...] [--label LABEL...]
       [--state STATE] [--priority none|urgent|high|medium|low] [--json]
+  terminalx review comment --file PATH --line N[-M] --body TEXT [--json]
+  terminalx review comments [--json]
   terminalx pipelines start SESSION-OR-TAB [--adopt-pr] [--auto-merge|--no-auto-merge]
       [--resolve-conflicts|--no-resolve-conflicts] [--json]
   terminalx pipelines list [--project PROJECT] [--json]
@@ -320,6 +325,29 @@ fn wait_many(first: String, tokens: &mut Tokens, all: bool, tab: &Option<String>
     })
 }
 
+/// `wait` on named targets: one session or tab, a cloud session, or several.
+fn wait_named(tokens: &mut Tokens, (any, all): (bool, bool), tab: &Option<String>, seconds: u64) -> Result<Action, ControlError> {
+    let target = tokens.required_front("session or tab")?;
+    // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
+    if any || all || !tokens.values.is_empty() {
+        wait_many(target, tokens, all, tab, seconds)
+    } else if is_cloud_key(&target) {
+        // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
+        Ok(Action::Rpc {
+            command: "cloud.wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
+            timeout: CLOUD_TIMEOUT,
+        })
+    } else {
+        local_only(tab, "--tab")?;
+        Ok(Action::Rpc {
+            command: "wait".into(),
+            params: json!({"target": target, "timeoutSeconds": seconds}),
+            timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
+        })
+    }
+}
+
 /// `wait` on a cloud session: the app waits at most
 /// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
 /// for again until the tab settles or the caller's timeout passes. When this
@@ -419,6 +447,11 @@ fn parse_with_stdin(
                 rpc("projects.list", json!({}), &mut tokens)
             }
         }
+        "config" => {
+            expect_word(&mut tokens, "show", "config")?;
+            let project = tokens.option("--project")?;
+            rpc("config.show", json!({"project": project}), &mut tokens)
+        }
         "cloud" => parse_cloud(&mut tokens),
         "sessions" => parse_sessions(&mut tokens),
         "floating" => {
@@ -471,32 +504,28 @@ fn parse_with_stdin(
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
             let tab = tokens.option("--tab")?;
             let (any, all) = (tokens.flag("--any")?, tokens.flag("--all")?);
-            let target = tokens.required_front("session or tab")?;
-            // Several targets, or one with --any or --all, get the answer that lists each (PRO-271).
             if any && all {
                 return Err(invalid("Pass --any or --all, not both."));
             }
-            if any || all || !tokens.values.is_empty() {
-                wait_many(target, &mut tokens, all, &tab, seconds)
-            } else if is_cloud_key(&target) {
-                // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
-                Ok(Action::Rpc {
-                    command: "cloud.wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
-                    timeout: CLOUD_TIMEOUT,
-                })
-            } else {
+            // Every session a lead started, found once when the call begins (PRO-328).
+            if let Some(lead) = children_of(&mut tokens)? {
+                if let Some(extra) = tokens.take_front() {
+                    return Err(invalid(format!("--children-of waits on the sessions that session started; it cannot be combined with a named target ({extra}).")));
+                }
                 local_only(&tab, "--tab")?;
                 Ok(Action::Rpc {
                     command: "wait".into(),
-                    params: json!({"target": target, "timeoutSeconds": seconds}),
+                    params: json!({"childrenOf": lead, "mode": if all { "all" } else { "any" }, "timeoutSeconds": seconds}),
                     timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
                 })
+            } else {
+                wait_named(&mut tokens, (any, all), &tab, seconds)
             }
         }
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
         "issues" => parse_issues(&mut tokens, stdin),
+        "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
@@ -632,6 +661,18 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
         }
+        // What a worker's last turn reported (`worker_report`), parsed.
+        "report" => {
+            // Every worker a lead started (PRO-270), one row each.
+            if let Some(lead) = children_of(tokens)? {
+                return rpc("sessions.report", json!({"childrenOf": lead}), tokens);
+            }
+            let session = tokens.required_front("session or tab")?;
+            if is_cloud_key(&session) {
+                return Err(invalid("sessions report reads a session on this computer; read a cloud session's transcript with `terminalx read`."));
+            }
+            rpc("sessions.report", json!({"session": session}), tokens)
+        }
         // Every running agent of the sessions a lead started (PRO-270).
         "stop" => {
             let lead = children_of(tokens)?.ok_or_else(|| invalid("sessions stop needs --children-of SESSION: it stops the running agents of the sessions that session started."))?;
@@ -682,6 +723,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "mode": mode,
                 });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             rpc("sessions.create", params, tokens)
         }
@@ -730,6 +772,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "mode": mode,
             });
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
             // Only an issue start carries these, so every other request is
             // word for word what it was.
@@ -1085,6 +1128,27 @@ pub(crate) fn issue_caller() -> Value {
     })
 }
 
+fn parse_review(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let command = tokens.required_front("review command")?;
+    let mut params = json!({"caller": issue_caller()});
+    match command.as_str() {
+        "comment" => {
+            let file = tokens.required_option("--file")?;
+            if file.trim().is_empty() { return Err(invalid("--file cannot be empty.")); }
+            let line = tokens.required_option("--line")?;
+            crate::control::review::line_range(&line).map_err(|error| invalid(error.to_string()))?;
+            let body = tokens.required_option("--body")?;
+            crate::control::review::validate_body(&body).map_err(|error| invalid(error.to_string()))?;
+            params["file"] = json!(file);
+            params["line"] = json!(line);
+            params["body"] = json!(body);
+        }
+        "comments" => {}
+        _ => return Err(invalid(format!("Unknown review command {command}. Use comment or comments."))),
+    }
+    rpc(&format!("review.{command}"), params, tokens)
+}
+
 /// `--body TEXT` or `--body-file PATH` (`-` for standard input).
 fn issue_body(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>, required: bool) -> Result<Option<String>, ControlError> {
     let body = match (tokens.option("--body")?, tokens.option("--body-file")?) {
@@ -1303,6 +1367,14 @@ impl Tokens {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configuration_reads_select_a_project() {
+        assert_eq!(rpc_of(&["config", "show"]).0, "config.show");
+        let (command, params, _) = rpc_of(&["config", "show", "--project", "app", "--json"]);
+        assert_eq!(command, "config.show");
+        assert_eq!(params["project"], "app");
+    }
+
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -1406,6 +1478,29 @@ mod tests {
     }
 
     #[test]
+    fn review_comments_parse_ranges_and_reject_incomplete_or_ambiguous_arguments() {
+        for line in ["1", "40-43"] {
+            let (command, params, _) = rpc_of(&["review", "comment", "--file", "src/foo.ts", "--line", line, "--body", "High: a defect.", "--json"]);
+            assert_eq!(command, "review.comment");
+            assert_eq!(params["file"], "src/foo.ts");
+            assert_eq!(params["line"], line);
+            assert_eq!(params["body"], "High: a defect.");
+            assert!(params["caller"].is_object());
+        }
+        assert_eq!(rpc_of(&["review", "comments"]).0, "review.comments");
+        for arguments in [
+            vec!["review"], vec!["review", "unknown"], vec!["review", "comment"],
+            vec!["review", "comments", "--file", "foo.ts"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "0", "--body", "note"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "2-1", "--body", "note"],
+            vec!["review", "comment", "--file", "foo.ts", "--line", "1", "--body", " "],
+            vec!["review", "comment", "--file", "foo.ts", "--file", "bar.ts", "--line", "1", "--body", "note"],
+        ] {
+            assert!(parse(&args(&arguments)).is_err(), "{arguments:?}");
+        }
+    }
+
+    #[test]
     fn a_quick_chat_is_created_and_listed_without_a_project() {
         let (command, params, _) = rpc_of(&["sessions", "create", "--quick", "--agent", "claude", "--prompt", "What is a monad?", "--cwd", "/tmp/notes", "--mode", "plan"]);
         assert_eq!(command, "sessions.create");
@@ -1424,6 +1519,37 @@ mod tests {
         assert_eq!(rpc_of(&["sessions", "list", "--project", "api"]).1, json!({"project": "api", "quick": false, "archived": false, "worktree": null}));
         assert!(parse(&args(&["sessions", "list", "--quick", "--project", "api"])).is_err());
         assert!(parse(&args(&["sessions", "list", "--quick", "--cloud"])).is_err());
+    }
+
+    #[test]
+    fn a_workers_report_is_asked_for_at_its_start_and_read_with_one_command() {
+        let (command, params, _) = rpc_of(&["sessions", "report", "0198a", "--json"]);
+        assert_eq!((command.as_str(), params), ("sessions.report", json!({"session": "0198a"})));
+        for refused in [&["sessions", "report"][..], &["sessions", "report", "0198a", "0198b"], &["sessions", "report", "cloud:org-a:ws-1:s1"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Every worker of a lead at once: the lead `sessions list --children-of` takes, refused the same way.
+        assert_eq!(rpc_of(&["sessions", "report", "--children-of", "0198c", "--json"]), ("sessions.report".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "report", "--children-of"][..], &["sessions", "report", "--children-of", ""], &["sessions", "report", "--children-of", "cloud:org-a:ws-1:s1"],
+            &["sessions", "report", "--children-of", "0198c", "0198a"], &["sessions", "report", "0198a", "--children-of", "0198c"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        // Asked for when the worker is started, in a project or as a quick chat; never said otherwise.
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "Audit the handlers", "--report"]);
+        assert_eq!(params["report"], json!(true));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--quick", "--report", "--agent", "claude", "--prompt", "Read the spec"]);
+        assert_eq!(params["report"], json!(true));
+        assert!(rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--prompt", "go"]).1.get("report").is_none());
+        for text in [help_text(), GUIDE.to_string()] {
+            for said in ["sessions report", "sessions report --children-of", "--report"] {
+                assert!(text.contains(said), "missing {said}");
+            }
+        }
+        for field in ["terminalx-report", "`status`", "`result`", "`evidence`", "`changed`", "`notDone`", "`couldNotRead`", "`uncertain`", "noEvidence", "`missing`", "truncated"] {
+            assert!(GUIDE.contains(field), "the guide does not document {field}");
+        }
     }
 
     #[test]
@@ -1588,6 +1714,19 @@ mod tests {
         // A cloud session is waited on in short calls of its own (`cloud_wait`).
         assert!(refused(&["wait", "s1", "cloud:org-a:ws-1:s1"]).contains("cloud session by itself"));
         assert!(refused(&["wait", "s1", "s2", "--tab", "t1"]).contains("cloud session"));
+
+        // Every session a lead started (PRO-328).
+        let (command, params, timeout) = rpc_of(&["wait", "--children-of", "lead", "--timeout", "40"]);
+        assert_eq!((command.as_str(), params, timeout), ("wait", json!({"childrenOf": "lead", "mode": "any", "timeoutSeconds": 40}), Duration::from_secs(50)));
+        assert_eq!(rpc_of(&["wait", "--all", "--children-of", "lead"]).1, json!({"childrenOf": "lead", "mode": "all", "timeoutSeconds": 600}));
+        assert_eq!(rpc_of(&["wait", "--children-of", "lead", "--any"]).1["mode"], "any");
+        assert!(refused(&["wait", "--children-of", "lead", "s1"]).contains("named target"));
+        assert!(refused(&["wait", "s1", "--children-of", "lead"]).contains("named target"));
+        assert!(refused(&["wait", "--children-of", ""]).contains("--children-of needs a session"));
+        assert!(refused(&["wait", "--children-of", "cloud:org-a:ws-1:s1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of", "lead", "--any", "--all"]).contains("not both"));
+        assert!(refused(&["wait", "--children-of", "lead", "--tab", "t1"]).contains("cloud session"));
+        assert!(refused(&["wait", "--children-of"]).contains("--children-of"));
     }
 
     #[test]

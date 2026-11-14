@@ -2,10 +2,63 @@
 
 ## Unreleased
 
+- Branch prefixes and local launch environment can now inherit shared repository
+  configuration, local overrides and managed locks. Settings → General → Layered
+  configuration shows sources and offers explicit repository saves. Shared values
+  require native consent tied to the repository and file contents; changed files
+  need approval again. CLI and paired phones can inspect redacted sources. Setup
+  and archive scripts and files to copy are not read from the shared file yet.
+
+- Sidebar rows show change counts, command/server activity and the current
+  window's unsent prompt previews. Mark rows read or unread from their menu
+  (R), archive on hover, and cycle waiting sessions with ⌘⌥L. Unread reminders
+  persist per tab and clear when opened on desktop or phone. Renaming a
+  conversation also pins its active tab's title, including a previously
+  untitled tab, so automatic branch/title changes keep the explicit name.
+  (PRO-179, #851)
+
+## 0.2.30
+
+- Open local diffs and pull requests in full-width centre tabs, alongside
+  files and terminals. (#826)
+- Show Codex goals and token budgets in the chat while keeping chat search
+  available. (#856)
+- Configure repository startup behavior and files to copy into new
+  workspaces from Settings. (#804)
+- Wait on several agent sessions at once and read structured worker reports
+  with the TerminalX CLI. (#878, #879)
+- Preserve each tab's activity state across background runtime handovers.
+  (#873)
+- Keep private paths and configured model filenames out of recovery
+  diagnostics, summaries, and exports. (#875, #884)
+
+- Connect GitHub from the PR tab or Settings → Integrations in an embedded
+  sign-in terminal. Pushing a repository without a remote now offers a URL
+  field, or creation of a GitHub repository when signed in. Git failures show
+  a readable explanation with command output behind **Show details**. Connection
+  checks and login target the repository's host after resolving SSH aliases and
+  excluding unrelated remotes. Connection failures offer retry,
+  failed login output stays available, and repository creation works from linked
+  worktrees. PR conversations, check logs, reruns and Fix errors remain available after
+  connecting; failed reruns keep their output behind **Show details**. Remote setup
+  preserves file filters and folder view in the updated Changes panel. (PRO-166)
+
+- Keep native resend regression fixtures within their existing deadlines by
+  removing shell helper launches from the simulated protocol. (PRO-166 validation)
+
+- Keep sidebar New chat conversations in Chats with ordinary retention and
+  project linking, while using the shared composer and saved agent settings.
+  Branch drafts retain their requested project and advertised source branch.
+  Chat Git panels follow the working folder's actual repository status;
+  linked chats keep their repository account indicator and refresh control.
+  (PRO-173 follow-up)
 - A session started with `terminalx sessions create` from inside another
   session records it as its `parent` (`--parent`, `--no-parent`).
   `sessions list --children-of` lists the sessions a session started, and
   `sessions stop --children-of` stops their running agents. (PRO-270)
+- `terminalx wait --children-of <session>` waits on every session that session
+  started, with `--any` or `--all`, and returns at once when it started none.
+  (PRO-328)
 
 ## 0.2.29
 

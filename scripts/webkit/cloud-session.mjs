@@ -524,6 +524,7 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
   // The side panel is the one `aside` inside the main slot, next to the header.
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
+  await page.locator("main aside").first().waitFor();
   await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   const measured = await headerLayout(page);
   failed += report(name, { "the side panel is open": measured.panel, ...headerChecks(measured, { collapsed, terminalSwitch }) }, measured);
@@ -590,8 +591,9 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
-  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
+  await page.locator("main aside").first().waitFor();
   await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
+  await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   let measured = await permissionButton(page);
   const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
   // Pin the scheduling case where opening the panel leaves Refresh's tooltip

@@ -420,3 +420,13 @@ fn an_interrupt_right_after_a_settings_restart_ends_the_turn() {
     assert_eq!(String::from_utf8_lossy(&launches[1].1), "", "typed into the Codex restarted for the effort");
     assert!(launches[2].1.starts_with(b"\x1b[200~next\x1b[201~\r"), "typed into the Codex restarted for the mode: {:?}", String::from_utf8_lossy(&launches[2].1));
 }
+
+#[test]
+fn a_paired_phone_reads_the_persisted_reminder_without_starting_the_agent() {
+    let phone = Phone::paired_on(json!({"harness":"claude", "markedUnread":true, "status":"waiting"}));
+    assert!(phone.tab().marked_unread);
+    phone.call("reading", "markRead", json!({})).unwrap();
+    assert!(!phone.tab().marked_unread);
+    assert_eq!(phone.tab().status, TabStatus::Waiting);
+    assert!(!phone.manager.is_running("phone-controls", "tab"));
+}

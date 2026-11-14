@@ -45,6 +45,10 @@ use crate::{git, pty, store};
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_row_status.rs"]
+pub(crate) mod row_status;
+#[path = "session_held.rs"]
+pub mod held;
 #[path = "session_reset.rs"]
 mod reset;
 #[path = "session_unsent.rs"]
@@ -883,6 +887,7 @@ pub struct TabRuntime {
     compaction: compaction::Admission,
     stdio_compaction: Option<compaction::Token>,
     stdio_starting: bool,
+    setup_failed: bool,
     /// Each frame with the phone or share a prompt came from, if any.
     stdio_writer: Option<std::sync::mpsc::SyncSender<(codex::stdio::Outbound, Option<codex_stdio::Authority>)>>,
     /// The phone or share the prompt just sent came from, until its frame is
@@ -903,6 +908,7 @@ pub struct TabRuntime {
     pub engine: Engine,
     pub pending: HashMap<String, PendingAsk>,
     pub queued: Vec<QueuedMessage>,
+    pub held_queue: held::Queue,
     pub turn_open: bool,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
@@ -910,6 +916,7 @@ pub struct TabRuntime {
     compact_completed: bool,
     compact_boundary_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     pub turn_started_at: Option<Instant>,
+    turn_usage: crate::harness::metrics::CompletedUsage,
     /// The open turn is a slash command's, with no work seen yet. The CLI
     /// runs `/help` or `/model` by itself and no `Stop` closes it, so the
     /// next prompt is where that prompt's time starts (`prompt_taken`).
@@ -1112,6 +1119,7 @@ pub fn idle_orphaned_tabs_except(tabs: &std::collections::HashSet<(String, Strin
 
 #[derive(Clone)]
 pub struct SessionManager {
+    row_prs: Arc<row_status::PrCache>,
     pub(crate) history_downloads: Arc<crate::local_runtime::history::Downloads>,
     /// Desktop typing waiting for its programs to read it (#661).
     pub(crate) typing: Arc<crate::local_runtime::typing::Typing>,
@@ -1202,6 +1210,9 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    /// A new desktop follow-up: decide again under the final send lock.
+    /// Some(true) requests interrupt-and-send; Some(false) holds it.
+    hold_if_busy: Option<bool>,
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
     shared_connection: Option<crate::local_sharing::WritePermit>,
     author: Option<crate::local_sharing::Person>,
@@ -1516,6 +1527,7 @@ impl SessionManager {
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         let manager = Self {
+            row_prs: Arc::default(),
             mobile: Arc::new(crate::local_runtime::mobile::Registry::default()),
             sharing: Arc::new(Mutex::new(crate::local_sharing::Sharing::default())),
             sink,
@@ -1822,6 +1834,16 @@ impl SessionManager {
         &self.sink
     }
 
+    /// Bind an agent control call to the same launch credential as its hooks.
+    /// Session/tab ids alone are selectors, never proof of the caller's identity.
+    pub(crate) fn authenticates_cli(&self, session_id: &str, tab_id: &str, token: &str) -> bool {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        runtime.is_some_and(|runtime| {
+            let rt = runtime.lock().unwrap();
+            matches!(&rt.engine, Engine::Cli(cli) if crate::hooks::token_matches(&cli.origin.token, token))
+        })
+    }
+
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
         let key = key_of(session_id, tab_id);
         one_per_key(&self.tabs, &key, || {
@@ -1841,15 +1863,17 @@ impl SessionManager {
                 engine: Engine::None,
                 pending: HashMap::new(),
                 queued: Vec::new(),
+                held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
+                turn_usage: Default::default(),
                 turn_by_command: false,
                 signed_out_in_turn: false,
                 last_activity: Instant::now(),
@@ -1884,6 +1908,7 @@ impl SessionManager {
             recovery::sanitize(&mut payload);
         }
         if subagent.is_none() {
+            rt.turn_usage.apply(&mut payload);
             match crate::checkpoints::observe(&rt.session_id, &rt.tab_id, rt.seq + 1, &mut payload) {
                 Ok(Some(checkpoint)) => { self.publish(rt, Payload::TurnCheckpoint { seq: checkpoint.seq, base: checkpoint.base, head: checkpoint.head }, None); }
                 Err(error) => log::warn!("capture turn checkpoint: {error:#}"),
@@ -1982,6 +2007,7 @@ impl SessionManager {
         rt.incident_agent();
         rt.incident(|incidents, ctx| incidents.raised(ctx, kind, source, event.seq));
         self.set_status(rt, TabStatus::Waiting);
+        self.schedule_held(rt);
     }
 
     /// Take the tab's warning down, published and noted with `cause` (#815).
@@ -2050,6 +2076,9 @@ impl SessionManager {
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        // A failed launch also completes a turn and settles to idle. Keep its
+        // reason until work actually starts again.
+        if status == TabStatus::InProgress { rt.setup_failed = false; }
         if status != TabStatus::Waiting {
             rt.stalled_at = None;
             if rt.recovery.take().is_some() {
@@ -2084,13 +2113,16 @@ impl SessionManager {
         }
     }
 
-    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
-        if rt.status == status {
-            return;
-        }
+    fn announce_display_status(&self, rt: &mut TabRuntime, status: TabStatus) -> bool {
+        if rt.status == status { return false; }
         rt.status = status;
         self.observer.tab_status(rt.key(), status);
         self.sink.emit("tab_status", &TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
+        true
+    }
+
+    fn set_display_status(&self, rt: &mut TabRuntime, status: TabStatus) {
+        if !self.announce_display_status(rt, status) { return; }
         let (sid, tid) = (rt.session_id.clone(), rt.tab_id.clone());
         // Serialize status writes under the runtime lock so an old running
         // write cannot overwrite a newer waiting/idle state.
@@ -2118,6 +2150,22 @@ impl SessionManager {
         latest.extend(events.into_iter().filter(|event| !seen.contains(&event.id)));
         latest.sort_by_key(|event| event.seq);
         events = latest;
+        // A live claim can have published its prompt but not yet its final
+        // snapshot. A history read must never write that item back after it.
+        if rt.held_queue.sending.is_none() && held::Queue::replay(&events) != rt.held_queue {
+            let queue = rt.held_queue.clone();
+            match self.save_held(&mut rt, queue.clone()) {
+                Ok(event) => events.push(event),
+                Err(error) => {
+                    log::warn!("persist restored held queue while reading history: {error:#}");
+                    // Reading a transcript still shows the safe restored state,
+                    // including a paused claim, when the disk cannot save it.
+                    let event = Self::held_event(&rt, queue);
+                    rt.seq = event.seq;
+                    events.push(event);
+                }
+            }
+        }
         self.reconcile_input_waits(&mut rt, &mut events);
         self.reconcile_compactions(&mut rt, &mut events)?;
         for event in &mut events { recovery::sanitize(&mut event.payload); }
@@ -2204,7 +2252,7 @@ impl SessionManager {
             status: rt.status,
             asks: !rt.pending.is_empty(),
             recovery: rt.recovery,
-            queued: held || !rt.queued.is_empty(),
+            queued: held || !rt.queued.is_empty() || !rt.held_queue.items.is_empty(),
             running: rt.child.is_some() || pane_running,
         }
     }
@@ -2513,7 +2561,7 @@ impl SessionManager {
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone() });
-        let environment = crate::store::environment::launch(cwd);
+        let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
@@ -2528,7 +2576,9 @@ impl SessionManager {
         // (`cloud_config`) first, so a grant always wins.
         env.extend(crate::cloud_config::launch_config(&harness, &rt.key()).env);
         env.extend(crate::cloud_grants::agent_env_for_launch(&harness, &rt.key()).into_iter().filter_map(|(name, value)| value.map(|value| (name, value))));
-        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &[] }, sink)?;
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(cwd)?);
+        let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink)?;
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
         rt.child = Some(child);
@@ -2572,7 +2622,7 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
@@ -2655,7 +2705,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -2674,7 +2724,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -2808,7 +2858,7 @@ impl SessionManager {
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -2847,7 +2897,7 @@ impl SessionManager {
             let _sharing = self.sharing.lock().unwrap();
             let _admitted = permit.enter()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -2856,7 +2906,7 @@ impl SessionManager {
 
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
-        self.send_admitted(admission, session_id, tab_id, PromptText { mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -2896,12 +2946,14 @@ impl SessionManager {
         let outcome = self.deliver_admitted(admission, session_id, tab_id, prompt, images, receipt);
         self.note_send(session_id, tab_id, origin, found, &outcome);
         let outcome = outcome?;
+        // A held follow-up has no user_message yet: it is not an answer, and
+        // its revert notes stay pending until the held text is delivered.
         if let Some(event) = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })) {
             if let Err(error) = crate::checkpoints::acknowledge_sent(session_id, tab_id, event.seq, &notes) {
                 log::warn!("acknowledge revert context: {error:#}");
             }
+            self.observer.answered(session_id, tab_id);
         }
-        self.observer.answered(session_id, tab_id);
         Ok(outcome)
     }
 
@@ -2942,6 +2994,19 @@ impl SessionManager {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
+        // Admission orders app sends; the terminal can still start a turn
+        // between change_held's idle check and this lock. Hold it here too.
+        if let Some(send_now) = prompt.hold_if_busy.filter(|_| rt.turn_open_for_prompts()) {
+            return self.enqueue_held(session_id, tab_id, &rt_arc, rt, prompt.display, images, send_now);
+        }
+        // A turn may have begun in the terminal after the queue claimed an
+        // idle boundary. Held input must still never be typed mid-turn.
+        if rt.held_queue.sending.is_some() {
+            if rt.turn_open_for_prompts() || (rt.held_queue.paused && rt.held_queue.next.is_none()) {
+                bail!("The agent started another turn or the queue was paused. The follow-up is still held; use Resume or Send now to retry.");
+            }
+            if let Some(reason) = rt.held_queue.blocked(&rt) { bail!(reason); }
+        }
         // A CLI the reader started by hand is theirs to drive: it runs with
         // whatever permissions they gave it, which no share was checked
         // against. And a terminal is the host's to start an agent in.
@@ -3423,6 +3488,7 @@ impl SessionManager {
             || rt.stdio_starting
             || !rt.pending.is_empty()
             || !rt.queued.is_empty()
+            || rt.held_queue.keeps_runtime_busy()
             || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
         if busy {
             return None;
@@ -3464,6 +3530,7 @@ impl SessionManager {
         self.mobile.invalidate_tab(session_id, tab_id);
         let key = key_of(session_id, tab_id);
         let rt_arc = self.runtime(session_id, tab_id)?;
+        self.pause_held_for_stop(&mut rt_arc.lock().unwrap());
         if matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(_)) {
             return self.stop_codex_stdio(&rt_arc, keep_unread);
         }
@@ -4123,11 +4190,22 @@ impl SessionManager {
     }
 
     pub fn mark_read(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        self.set_tab_unread(session_id, tab_id, false)
+    }
+
+    pub fn set_tab_unread(&self, session_id: &str, tab_id: &str, unread: bool) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        if rt.status == TabStatus::Completed {
-            self.set_status(&mut rt, TabStatus::Idle);
+        // Save before publishing; a failed write must not acknowledge the reminder.
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        if tab.marked_unread == unread && (unread || tab.status != TabStatus::Completed) { return Ok(()); }
+        index::set_tab_unread(session_id, tab_id, unread)?;
+        if !unread && rt.status == TabStatus::Completed {
+            // A read is not agent activity and must not reorder the dashboard.
+            self.announce_display_status(&mut rt, TabStatus::Idle);
         }
+        self.sink.emit("session_updated", &index::get(session_id)?);
         Ok(())
     }
 
@@ -4308,6 +4386,12 @@ impl SessionManager {
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
+        let result = self.start_cli_inner(rt, rt_arc, entry, tab, prompting);
+        if !rt.stopping && rt.restart_claim.is_none() { rt.setup_failed = result.is_err(); }
+        result
+    }
+
+    fn start_cli_inner(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
         self.accepting_work()?;
         if rt.stopping { bail!("Stop has not confirmed local process exit. Retry Stop before resuming."); }
         if rt.restart_claim.is_some() { bail!("The agent is restarting to apply its settings. Try again shortly."); }
@@ -4421,6 +4505,8 @@ impl SessionManager {
         // from where it stands now: what a CLI before this one left running
         // went with it.
         rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
+        env.extend(index::workspace_ports::environment(&entry.cwd)?);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
         self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4747,6 +4833,7 @@ impl SessionManager {
         if let (Engine::Cli(p), Some(now)) = (&mut rt.engine, now) {
             if p.harness == CliKind::Codex && p.launched_for.is_none() { p.launched_for = Some(now); }
         }
+        self.schedule_held(&rt);
         Ok(())
     }
 
@@ -5223,6 +5310,7 @@ impl SessionManager {
     /// refused sign-in when that line says so. The latch as for
     /// [`Self::close_open_turn`].
     fn fail_open_turn(&self, rt: &mut TabRuntime, exit: &recovery::EarlyExit) {
+        rt.setup_failed = true;
         if !rt.turn_open {
             return;
         }
@@ -6722,6 +6810,7 @@ impl SessionManager {
                 }
             }
             self.set_status(rt, if rt.recovery.is_some() { TabStatus::Waiting } else if aborted { TabStatus::Idle } else { TabStatus::Completed });
+            if main && (worked || (aborted && rt.held_queue.next.is_some())) { self.schedule_held(rt); }
         }
     }
 
@@ -6867,7 +6956,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -6887,7 +6976,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -7104,3 +7193,7 @@ mod tests {
         assert_eq!(pty_first("opencode"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "session_review_tests.rs"]
+mod review_tests;

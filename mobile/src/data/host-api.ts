@@ -7,6 +7,7 @@ import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
+  rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
   manualStatus?: import("@terminalx/portable/manualStatus").ManualStatus | null;
   id: string;
   /** `quick`: a quick chat, filed under "Quick chats" rather than a project. */
@@ -24,7 +25,7 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
@@ -41,7 +42,7 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -209,6 +210,11 @@ export class HostApi {
       throw new Error("The Mac returned an invalid transcript page. Try loading it again.");
     }
     return { events: value.events, hasMore: value.hasMore };
+  }
+
+  async markRead(sessionId: string, tabId: string): Promise<void> {
+    const result = await this.connection.request("session.markRead", { sessionId, tabId });
+    if (!result.ok) throw new Error(result.refusal.message);
   }
 
   subscribeSession(tabId: string, listener: (event: AgentEvent) => void, ready?: () => void): () => void {
@@ -409,6 +415,13 @@ export class HostApi {
       ...(sent && typeof sent.queued === "boolean" ? { queued: sent.queued } : {}),
       ...(typeof value.sendError === "string" ? { sendError: value.sendError } : !sent ? { sendError: "The Mac did not say whether it sent the first message." } : {}),
     };
+  }
+
+  async configuration(projectId?: string): Promise<import("../../../src/types/configuration").Configuration | null> {
+    if ((await this.features()).layeredConfiguration !== 1) return null;
+    const result = await this.connection.request<import("../../../src/types/configuration").Configuration>("configuration.resolve", { projectId: projectId ?? null });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
   }
 
   /** This Mac's settings; null from a Mac that does not offer them to a phone. */
