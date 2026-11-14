@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalVmStatus } from "@/lib/api";
 
 const localVm = vi.hoisted(() => ({ status: vi.fn(), start: vi.fn(), stop: vi.fn(), reset: vi.fn(), startRuntime: vi.fn() }));
+const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
-vi.mock("@/lib/api", () => ({ api: { localVm }, errorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)) }));
+vi.mock("@/lib/api", () => ({ api: { localVm }, invoke, fs: {}, errorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)) }));
 const views = vi.hoisted(() => [] as { port: number; password: string; control: boolean }[]);
 vi.mock("./VncView", async () => {
   const { useEffect } = await import("react");
@@ -33,6 +34,32 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the Computer tab", () => {
+  it.each([false, true])("routes the viewer to the selected ID without a name-based fallback (unavailable=%s)", async (unavailable) => {
+    const target = { kind: "linuxContainer", runtime: "podman", id: "a".repeat(64) };
+    const context = { sessionId: "session", tabId: "tab", conversation: null };
+    invoke.mockImplementation(async (_command, { method, params }) => {
+      if (method === "computer.inventory") return { entries: [{ target, name: "Linux · podman", capabilities: ["attachedDesktop"], state: "running" }], notices: [] };
+      if (method === "computer.selection") return { version: 1, conversation: null, target };
+      if (method === "computer.viewer") {
+        expect(params).toEqual({ target });
+        if (unavailable) throw new Error("Selected container unavailable; no fallback");
+        return running;
+      }
+      throw new Error(`Unexpected ${method}`);
+    });
+    render(<ComputerPanel active context={context} />);
+    if (unavailable) {
+      expect((await screen.findByRole("alert")).textContent).toContain("Selected container unavailable");
+      expect(screen.queryByTestId("vnc-view")).toBeNull();
+    } else {
+      await screen.findByTestId("vnc-view");
+      expect(views.at(-1)).toMatchObject({ port: 32768, control: false });
+    }
+    expect(localVm.status).not.toHaveBeenCalled();
+    expect(localVm.start).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("local_vm_request", { method: "computer.viewer", params: { target } });
+  });
+
   it("says what to install when there is no container runtime, and checks again", async () => {
     localVm.status.mockResolvedValue(vm("no_runtime", { runtime: null }));
     await show();

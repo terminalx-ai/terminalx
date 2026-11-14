@@ -170,6 +170,19 @@ impl Owner {
     }
 }
 
+/// Both the control socket and unattached native tray use this stop coordinator.
+/// Refuse unresolved guest work before committing a stop of the host owner.
+pub(crate) fn stop_all(manager: &crate::session::SessionManager, lifetime: &Lifetime, params: Value) -> Result<Value, ControlError> {
+    #[cfg(unix)]
+    let _vm_stop = crate::local_vm::supervisor::prepare_stop().map_err(|error| ControlError::new("local_vm_unresolved", format!("{error:#}"), None::<String>))?;
+    let result = lifetime.command("runtime.stopAll", params)?;
+    if let Err(error) = manager.stop_all_confirmed() {
+        lifetime.stop_failed();
+        return Err(ControlError::new("internal", format!("{error:#}"), None::<String>));
+    }
+    Ok(result)
+}
+
 struct State {
     starting: bool,
     leases: HashMap<String, Arc<Attachment>>,
@@ -306,6 +319,13 @@ impl Lifetime {
         }
         state.leases.get(lease).filter(|attachment| attachment.valid()).cloned()
             .ok_or_else(|| anyhow::anyhow!("The runtime attachment expired or disconnected."))
+    }
+
+    /// Signal/logout closes owner admission before any blocking child cleanup.
+    pub(crate) fn begin_shutdown(&self) {
+        let mut state=self.state.lock().unwrap();
+        state.exiting=true;
+        for attachment in state.leases.values() { attachment.revoke(); }
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -446,6 +466,17 @@ impl Lifetime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_shutdown_revokes_attachments_and_closes_admission_before_cleanup() {
+        let life=Lifetime::new(Duration::ZERO);
+        let lease=life.command("runtime.attach",json!({"protocol":1})).unwrap();
+        life.begin_shutdown();
+        assert!(life.is_stopping());
+        assert!(life.enter().is_err());
+        assert!(life.command("runtime.heartbeat",lease).is_err());
+        assert!(life.command("runtime.attach",json!({"protocol":1})).is_err());
+    }
 
     #[test]
     fn a_background_notice_says_who_asked_for_permission() {

@@ -123,6 +123,7 @@ function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: Tab
       live={live}
       sessionId={session.id}
       mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
+      conversation={tab.conversation ?? null}
       onFixErrors={!isTerminalTab(tab) ? checkFix.fix : undefined}
       fixBusy={checkFix.busy}
       statusKey={session.tabs.map((item) => item.status).join(",")}

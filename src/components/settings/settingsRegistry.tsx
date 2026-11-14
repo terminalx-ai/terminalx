@@ -24,6 +24,7 @@ export const SETTINGS_SECTIONS = {
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval" },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
+  localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks" },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
   projects: { title: "Project templates", group: "Projects", entry: "projects.templates" },
@@ -543,6 +544,12 @@ export const SETTINGS_ROWS = [
     description: "Connect a personal API key for Linear issues.",
     searchTerms: ["integrations", "linear"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#linearApiKey" }, layout: "content",
+  }),
+  defineSetting({
+    id: "localVms.tasks", section: "localVms", title: "Local VM tasks",
+    description: "Set up a local Cua VM and run selected tasks in it.",
+    searchTerms: ["local", "vms", "vm", "virtual", "machine", "cua", "lume", "macos", "linux", "guest", "tasks"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: $TERMINALX_HOME/local-vm/journal.json" }, layout: "content",
   }),
   defineSetting({
     id: "organizations.sidebar", section: "organizations", title: "Organizations in sidebar",

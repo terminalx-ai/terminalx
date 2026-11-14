@@ -33,6 +33,9 @@ dist-ssr
 native/**/.build/
 native/**/.swiftpm/
 
+# Rust native component build output
+native/**/target/
+
 # Python desktop runtime test bytecode
 native/**/__pycache__/
 scripts/**/__pycache__/

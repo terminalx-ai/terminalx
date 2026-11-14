@@ -74,6 +74,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.quitBehavior",
   "integrations.github",
   "integrations.linear",
+  "localVms.tasks",
   "organizations.sidebar",
   "organizations.organization",
   "organizations.members",

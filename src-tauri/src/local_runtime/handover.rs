@@ -308,6 +308,9 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
 /// Hold everything still, write the record, and exec `binary`. Returns only
 /// when the handover is off, with everything going on as before.
 fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>) -> Result<()> {
+    // Local VM work is not carried: none is in flight or under way, and none
+    // starts until the exec or until the handover is off.
+    let _vm = crate::local_vm::supervisor::prepare_handover().map_err(|error| Unsettled(format!("{error:#}")))?;
     // No frame is answered from here on, once those under way are: what
     // they wait for (a pipeline step, the admission lock) is not held yet.
     runtime.bridge.freeze(SETTLE_WITHIN).map_err(|error| Unsettled(format!("{error:#}")))?;

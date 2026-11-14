@@ -152,10 +152,11 @@ describe("settings in the command palette", () => {
     const results = screen.getAllByRole("option");
     const pages = within(screen.getByRole("group", { name: "Settings pages" })).getAllByRole("option");
     // Orchestrator is behind its Experimental switch, which is off.
-    expect(pages).toHaveLength(15);
+    expect(pages).toHaveLength(16);
     expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(screen.getByRole("option", { name: /^Environment/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^Local VMs/ }).id).toBe("palette:settings-page:localVms");
     // PRO-131: the repository pages are titled Projects and the templates page Project templates; their ids are unchanged.
     expect(screen.getByRole("option", { name: /^Project templates/ }).id).toBe("palette:settings-page:projects");
     expect(screen.getByRole("option", { name: /^ProjectsProject paths/ }).textContent).toBe("ProjectsProject paths, preview URLs, files to copy, scripts, actions and workspace cleanup");

@@ -142,6 +142,28 @@ pub struct Client {
     build: Build,
     ping: Duration,
     liveness: Duration,
+    local_vm: LocalVmCapability,
+}
+
+/// The Local VM protocols the pinned owner serves: `localVm` in its liveness
+/// answer, fixed for the owner's life. `None` where it serves none, or is
+/// too old to say.
+#[derive(Clone, Copy, Debug, Default)]
+struct LocalVmCapability {
+    protocol: Option<u64>,
+    reconciliation: Option<u64>,
+    onboarding: Option<u64>,
+}
+
+impl LocalVmCapability {
+    fn of(pinned: &Value) -> Self {
+        let local_vm = &pinned["localVm"];
+        Self {
+            protocol: local_vm["protocol"].as_u64(),
+            reconciliation: local_vm["reconciliationProtocol"].as_u64(),
+            onboarding: local_vm["onboardingProtocol"].as_u64(),
+        }
+    }
 }
 
 /// What one connection to the event socket carries.
@@ -231,7 +253,8 @@ impl Client {
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
         let build = Build::read(&pinned, || request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT));
-        let client = Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT });
+        let client = Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+            local_vm: LocalVmCapability::of(&pinned) });
         // Older owners can still serve local work. No receipt means no
         // forwarded network authority; never synthesize it from a boolean.
         if let Err(error) = client.refresh_data_privacy_within(LIFECYCLE_TIMEOUT) {
@@ -246,14 +269,15 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
         Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
-            epoch: epoch.into(), streams: super::STREAM_VERSION, build: Build::default(), ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT })
+            epoch: epoch.into(), streams: super::STREAM_VERSION, build: Build::default(), ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+            local_vm: LocalVmCapability::default() })
     }
 
     /// The same owner, pinged every `ping` and given up on after `liveness`
     /// of silence: a test hangs an owner without waiting the full deadline.
     pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
         Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
-            event_socket: self.event_socket.clone(), streams: self.streams, build: self.build.clone(), ping, liveness })
+            event_socket: self.event_socket.clone(), streams: self.streams, build: self.build.clone(), ping, liveness, local_vm: self.local_vm })
     }
 
     pub(crate) fn ping_interval(&self) -> Duration { self.ping }
@@ -307,6 +331,13 @@ impl Client {
         serde_json::from_value(request(&self.socket, &self.token, command, params, timeout)?).context("decode local runtime result")
     }
 
+    pub(crate) fn require_local_vm(&self) -> Result<()> {
+        if self.local_vm.protocol != Some(crate::local_vm::journal::PROTOCOL as u64) {
+            bail!("This running local owner does not support Local VM tasks. Its existing work remains running; no operation was sent. Update/reconnect deliberately after resolving that work.");
+        }
+        Ok(())
+    }
+
     /// A read the window shows or a quick control: see [`QUICK_TIMEOUT`].
     pub fn quick<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
         self.call_within(command, params, QUICK_TIMEOUT)
@@ -327,6 +358,19 @@ impl Client {
 
     pub fn stop_all(&self) -> Result<()> {
         let _: Value = self.call("runtime.stopAll", json!({"epoch":self.epoch}))?;
+        Ok(())
+    }
+
+    pub(crate) fn require_vm_reconciliation(&self) -> Result<()> {
+        if self.local_vm.reconciliation != Some(crate::local_vm::provisioning::PROTOCOL) {
+            bail!("This running local owner does not support verified provisioning reconciliation and deletion. Its existing work remains running; no operation was sent. Update/reconnect deliberately; no owner restart or fallback was attempted.");
+        }
+        Ok(())
+    }
+    pub(crate) fn require_vm_onboarding(&self) -> Result<()> {
+        if self.local_vm.onboarding != Some(crate::local_vm::setup::PROTOCOL) {
+            bail!("This pinned owner does not support guided VM setup. Existing work was left running; no setup/installer was sent. Update the owner deliberately after inspecting retained work.");
+        }
         Ok(())
     }
 
@@ -406,6 +450,44 @@ fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value>
     if count == 0 { bail!("the background runtime closed the connection"); }
     if count > 1024 * 1024 { bail!("local event frame exceeded its size limit"); }
     Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(test)]
+mod local_vm_tests {
+    use super::*;
+    #[test]
+    fn older_owner_cannot_receive_guided_create_setup_or_actions() {
+        for capability in [None,Some(0),Some(u64::MAX)] {
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
+            let sessions=super::super::sessions::Sessions::new(client);
+            for method in ["environment.create","environment.setup","environment.setupReadiness","environment.setupAction","environment.setupAuth"] {
+                let error=sessions.local_vm(method,json!({"confirm":true})).unwrap_err().to_string();
+                assert!(error.contains("no setup/installer was sent"),"{error}");
+                assert!(!error.contains("connect to the local runtime"));
+            }
+        }
+    }
+    #[test]
+    fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
+        for protocol in [None,Some(0),Some(u64::MAX)] {
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
+            let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
+            assert!(error.contains("no operation was sent"),"{error}");
+            assert!(!error.contains("connect to the local runtime"));
+        }
+    }
+    #[test]
+    fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
+        for capability in [None,Some(0),Some(u64::MAX)] {
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
+            let sessions=super::super::sessions::Sessions::new(client);
+            for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
+                let error=sessions.local_vm(method,params).unwrap_err().to_string();
+                assert!(error.contains("no operation was sent"),"{error}");
+                assert!(!error.contains("connect to the local runtime"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

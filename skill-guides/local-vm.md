@@ -11,6 +11,12 @@ description: >-
 TerminalX's Local VM is a Linux (XFCE) desktop in a container on this machine, with Firefox. The
 user sees it live in TerminalX's right panel, Computer tab, and may take control of it.
 
+While it runs, every new agent gets its tools as the `computer` MCP server. A tab can instead be
+given one exact computer in the Computer tab (stop the tab's agent first); that tab then uses only
+that computer, and a computer that is gone, stopped or replaced fails the start rather than
+falling back to another one. Clearing the choice returns the tab to the Local VM. Either way the
+agent, its shell and the project files stay on this machine; only desktop actions go to the VM.
+
 ## Rules
 
 - Use only this VM. Do not install, pull, build or start another VM, container image, X server,
@@ -27,6 +33,7 @@ Use the executable you resolved (`terminalx`, `tnx`, or the app's own binary). A
 machine-readable output.
 
 ```text
+terminalx vm inventory               # every computer TerminalX knows, each with its exact target
 terminalx vm status                  # no_runtime, runtime_down, not_created, stopped or running
 terminalx vm start                   # start it (the first start downloads about 450 MB)
 terminalx vm screenshot [--out PATH] # the whole screen as a PNG on this machine; read it to see it
@@ -34,6 +41,10 @@ terminalx vm tools [TOOL]            # the driver's tools, or one tool's argumen
 terminalx vm call TOOL [JSON]        # run one tool in the VM
 terminalx vm stop
 ```
+
+`tools`, `call` and `screenshot` act on the Local VM. To act on another computer from
+`vm inventory`, add `--target` with that entry's whole `target` object as one shell-quoted JSON
+argument; a target that no longer matches is refused, never swapped for another computer.
 
 When `status` is not `running`:
 

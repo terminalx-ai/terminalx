@@ -19,6 +19,17 @@ export type SessionKey = string;
 /** A path on a cloud VM. Branded so it can never be handed to a local command. */
 export type RemotePath = string & { readonly __remotePath: unique symbol };
 
+/** A guest location is always qualified; its raw /Users/… path is display-only. */
+export type GuestPath = string & { readonly __guestPath: unique symbol };
+
+export function guestTaskPath(target: import("./localVm").LocalVmTaskTarget, path: string): GuestPath {
+  return `local-cua://${[target.environmentId, target.generation, target.workspaceId, target.taskId].map(encodeURIComponent).join("/")}/${encodeURIComponent(path)}` as GuestPath;
+}
+
+export function isGuestPath(value: string): value is GuestPath {
+  return value.startsWith("local-cua:");
+}
+
 /**
  * The display root of a cloud workspace's files and the `cwd` a cloud
  * session carries in the UI: `cloud://<orgId>:<workspaceId>`. It starts with
@@ -35,7 +46,7 @@ export function isRemotePath(value: string): value is RemotePath {
 
 export class LocalPathLeakError extends Error {
   constructor(what: string, value: string) {
-    super(`A cloud path reached a local command (${what}: ${value})`);
+    super(`A ${isGuestPath(value) ? "guest" : "cloud"} path reached a local command (${what}: ${value})`);
     this.name = "LocalPathLeakError";
   }
 }
@@ -45,7 +56,7 @@ export class LocalPathLeakError extends Error {
  * Finder, local git, fs, pty, browser). A local path passes unchanged.
  */
 export function assertLocal<T extends string | null | undefined>(value: T, what = "path"): T {
-  if (typeof value === "string" && isRemotePath(value)) throw new LocalPathLeakError(what, value);
+  if (typeof value === "string" && (isRemotePath(value) || isGuestPath(value))) throw new LocalPathLeakError(what, value);
   return value;
 }
 
@@ -54,7 +65,7 @@ export function isCloudKey(key: string | null | undefined): key is CloudKey {
 }
 
 export function isLocalKey(key: string | null | undefined): key is string {
-  return typeof key === "string" && !key.startsWith("cloud:");
+  return typeof key === "string" && !isCloudKey(key) && !isGuestPath(key);
 }
 
 export function orgSectionKey(orgId: string): string {

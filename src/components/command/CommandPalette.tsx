@@ -51,6 +51,7 @@ import {
   Users,
   Workflow,
   Cloud,
+  Monitor,
   type LucideIcon,
   Trash2,
 } from "@/icons";
@@ -144,6 +145,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   agents: Bot,
   orchestrator: Workflow,
   environment: KeyRound,
+  localVms: Monitor,
   transcription: Mic,
   integrations: Plug,
   projects: FolderPlus,

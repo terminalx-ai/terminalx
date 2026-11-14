@@ -45,3 +45,6 @@ uuid = { version = "1", features = ["v4"] }
 name = "local_supervisor"
 path = "tests/local_supervisor.rs"
 harness = false
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

@@ -1,0 +1,148 @@
+import { useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/controls";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { errorMessage } from "@/lib/api";
+import { localVmRequest, taskFinished } from "@/lib/localVm";
+import type { LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmJson, LocalVmTask } from "@/types/localVm";
+import { reconcileLocalVmState, refreshLocalVmState, useLocalVmState } from "./useLocalVmState";
+import { LocalVmProvisionRecovery } from "./LocalVmProvisionRecovery";
+import { LocalVmOnboarding } from "./LocalVmOnboarding";
+import { LocalVmSetup } from "./LocalVmSetup";
+
+export function EnvironmentsTab() {
+  const { state, error, refreshing } = useLocalVmState();
+  const [doctor, setDoctor] = useState<LocalVmJson | undefined>();
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const environments = Object.values(state?.environments ?? {});
+
+  async function run(action: () => Promise<unknown>) {
+    if (lock.current) return;
+    lock.current = true;
+    setBusy(true);
+    setActionError(null);
+    try { await action(); } catch (error) { setActionError(errorMessage(error)); }
+    finally { lock.current = false; setBusy(false); }
+  }
+
+  return (
+    <div className="space-y-5 text-xs">
+      <div className="rounded-lg border border-border bg-card p-4 leading-relaxed">
+        <h3 className="mb-1 text-sm font-medium">Local Cua · Preview</h3>
+        <p>Opt in to run explicitly selected tasks in an existing compatible local macOS Cua VM. Secure fresh-VM creation is unavailable with the current profile. Opening Settings or a conversation does not provision or start a VM.</p>
+        <p className="mt-2 text-muted-foreground">Tasks share the guest account, files and desktop. Every task holds an exclusive desktop lease for its entire workflow; conflicting tasks queue. Use a separate VM for isolation. Sign in to providers and repositories in the guest; host credentials and conversation history are not copied.</p>
+        <p className="mt-2 text-warning">Product reconnect, host-lock, sleep and relaunch acceptance gates are pending. Local compute can still send data to your selected AI provider.</p>
+      </div>
+
+      <label className="flex items-start justify-between gap-4"><span><span className="block font-medium">Enable local VM tasks</span><span className="text-muted-foreground">Optional. This enables selected-task submission and environment setup. Turning it off retains task history.</span></span><Switch aria-label="Enable local VM tasks" checked={state?.enabled === true} disabled={!state || busy} onCheckedChange={(enabled) => void run(async () => { await localVmRequest("configure", { enabled }); await reconcileLocalVmState(); })} /></label>
+
+      {state?.enabled ? <section aria-label="Local environment supervisor" className="space-y-2 rounded-lg border border-border p-3">
+        <p role="status">{state.supervisor?.connected === true ? "Local environment supervisor connected." : state.supervisor?.connected === false ? "Local environment supervisor disconnected; task states are last retained records." : "Local environment supervisor connection has not been reported."}</p>
+        {state.supervisor?.detail ? <p className="whitespace-pre-wrap break-words text-muted-foreground">{state.supervisor.detail}</p> : null}
+        <p className="text-muted-foreground">Reconnect the local supervisor without starting a VM. Refresh only reads its current state.</p>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { await localVmRequest("configure", { enabled: true }); await reconcileLocalVmState(); })}>Reconnect local supervisor</Button>
+      </section> : null}
+
+      <section aria-label="Compatibility diagnostics" className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">Compatibility diagnostics</h3>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => setDoctor(await localVmRequest("doctor", {})))}>Run compatibility checks</Button>
+        </div>
+        <p className="text-muted-foreground">Check host compatibility, virtualization and installed Cua/Lume dependencies. A running VM alone does not prove guest runtime, provider or desktop readiness.</p>
+        {doctor !== undefined ? <pre aria-label="Cua doctor output" className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-well p-3">{JSON.stringify(doctor, null, 2)}</pre> : null}
+      </section>
+
+      <LocalVmOnboarding enabled={state?.enabled === true} environments={environments} creation={state?.creation} />
+
+      <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-medium">Enrolled environments</h3><Button size="xs" variant="ghost" disabled={refreshing} onClick={() => void refreshLocalVmState()}>Refresh environments</Button></div>
+      {error || actionError ? <p role="alert" className="text-destructive">{actionError ?? error}</p> : null}
+      {busy ? <p role="status">Request in progress. Provisioning stages appear in the environment record when reported by the host.</p> : null}
+      {!state && !error ? <p role="status">Loading local environment records…</p> : null}
+      {state && !environments.length ? <p className="text-muted-foreground">No local VM enrolled. Enrollment is optional.</p> : null}
+      {environments.map((environment) => <EnvironmentCard key={`${environment.id}:${environment.generation}:${environment.sandbox}`} environment={environment} setupEnabled={state?.enabled === true} tasks={Object.values(state?.tasks ?? {}).filter((task) => task.target.environmentId === environment.id && !taskFinished(task.status))} />)}
+    </div>
+  );
+}
+
+function EnvironmentCard({ environment, tasks, setupEnabled }: { environment: LocalVmEnvironment; tasks: LocalVmTask[]; setupEnabled: boolean }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const lock = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<LocalVmJson | undefined>();
+  const [stopOpen, setStopOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletionInspection, setDeletionInspection] = useState<{ generation: string; report: LocalVmEnvironmentInspection } | null>(null);
+  const progress = environment.provision;
+  const deleted = !!environment.deletedAt;
+  const deletion = deletionInspection?.generation === environment.generation ? deletionInspection.report?.deletion : null;
+
+  async function run(label: string, action: () => Promise<LocalVmJson>) {
+    if (lock.current) return;
+    lock.current = true; setBusy(label); setError(null); setResult(undefined);
+    try { setResult(await action()); }
+    catch (error) { setError(errorMessage(error)); }
+    finally { await reconcileLocalVmState(); lock.current = false; setBusy(null); }
+  }
+
+  return (
+    <article aria-label={`Environment ${environment.name}`} className="space-y-3 rounded-lg border border-border p-4">
+      <div><h4 className="text-sm font-medium">{environment.name}{deleted ? " · Deleted" : ""}</h4><p className="break-all text-muted-foreground">{environment.sandbox} · {tasks.length} unfinished task{tasks.length === 1 ? "" : "s"}</p></div>
+      {deleted ? <p className="text-muted-foreground">VM deleted at {environment.deletedAt}. Retained task records remain in their parent conversations.</p> : null}
+      {progress ? <EnvironmentProgress label="Environment progress" progress={progress} /> : null}
+      {!deleted ? <>
+      <LocalVmSetup environment={environment} disabled={!!busy || !setupEnabled} hasActiveTasks={tasks.length > 0} run={run} />
+      <LocalVmProvisionRecovery environment={environment} disabled={!!busy} run={run} />
+      {environment.manualControl ? <section aria-label="Manual desktop control" className="space-y-2 rounded-md border border-warning/40 p-2">
+        <p>Manual desktop control is held. Queued tasks wait until you return control. Closing the viewer does not release this hold; returning control does not resume the canceled task.</p>
+        <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Returning desktop control to queued tasks", () => localVmRequest("environment.releaseDesktop", { environmentId: environment.id, confirm: true }))}>Return control to queued tasks</Button>
+      </section> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Starting VM", () => localVmRequest("environment.start", { environmentId: environment.id }))}>Start VM</Button>
+        <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Opening desktop", () => localVmRequest("environment.desktop", { environmentId: environment.id }))}>Open desktop</Button>
+        <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => setStopOpen(true)}>Stop VM…</Button>
+        <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => void run("Inspecting deletion risks", async () => {
+          setDeletionInspection(null);
+          const report = await localVmRequest("environment.inspect", { environmentId: environment.id, generation: environment.generation, purpose: "deletion" });
+          setDeletionInspection({ generation: environment.generation, report }); setDeleteOpen(true);
+          return null;
+        })}>Delete VM…</Button>
+        {progress && !["ready", "completed", "adopted", "failed", "canceled", "deleted", "stopped"].includes(progress.status) ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Canceling provisioning", () => localVmRequest("environment.cancelProvision", { environmentId: environment.id }))}>Cancel provisioning</Button> : null}
+      </div>
+      <p className="text-muted-foreground">The desktop viewer is interactive and independent of task lifetime. Take over from the task card before changing apps; closing the viewer leaves tasks running.</p>
+      <label className="flex items-start justify-between gap-4 leading-relaxed"><span><span className="block">Keep this Mac awake while a local VM task is working</span><span className="text-muted-foreground">Scoped to this VM’s active work. The display can sleep and lock. Actual host sleep, lid closure, power off or reboot can interrupt local execution.</span></span><Switch aria-label={`Keep Mac awake for ${environment.name}`} checked={environment.keepAwake} disabled={!!busy} onCheckedChange={(enabled) => void run("Updating awake policy", () => localVmRequest("environment.awake", { environmentId: environment.id, enabled }))} /></label>
+      </> : null}
+      {busy ? <p role="status">{busy}…</p> : null}
+      {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+      {result !== undefined && result !== null ? <details><summary>Environment action diagnostics</summary><pre aria-label="Environment action result" className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-well p-2">{JSON.stringify(result, null, 2)}</pre></details> : null}
+      <Dialog open={stopOpen && !deleted} onOpenChange={setStopOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Stop {environment.name}?</DialogTitle><DialogDescription>This stops the whole VM and affects every task using it, including tasks from other conversations. It does not delete the retained task history.</DialogDescription></DialogHeader>
+          <p className="text-xs">{tasks.length} unfinished task{tasks.length === 1 ? "" : "s"} will be affected.</p>
+          {tasks.length ? <ul className="mt-2 max-h-40 list-inside list-disc overflow-auto text-xs">{tasks.map((task) => <li key={task.target.taskId}>{task.input.prompt.slice(0, 120)} ({task.status})</li>)}</ul> : null}
+          <DialogFooter><Button variant="ghost" onClick={() => setStopOpen(false)}>Keep VM running</Button><Button variant="destructive" onClick={() => { setStopOpen(false); void run("Stopping VM", () => localVmRequest("environment.stop", { environmentId: environment.id, confirm: true })); }}>Stop VM and its tasks</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={deleteOpen && !deleted} onOpenChange={setDeleteOpen}><DialogContent>
+        <DialogHeader><DialogTitle>Delete {environment.name}?</DialogTitle><DialogDescription>This removes the whole local VM and its guest files, affecting every task and conversation using it. Export needed artifacts first. Task history is retained; it does not restore deleted guest data.</DialogDescription></DialogHeader>
+        <p className="text-xs">{tasks.length} unfinished task{tasks.length === 1 ? "" : "s"} will be affected.</p>
+        <div className="max-h-[45vh] space-y-3 overflow-y-auto text-xs">
+          {deletion ? <>
+            <p role="status" className={deletion.canDelete ? "text-muted-foreground" : "text-warning"}>{deletion.reason ?? (deletion.canDelete ? "The host permits deletion based on this inspection. Confirmation checks again." : "The host does not permit deletion.")}</p>
+            <section aria-label="Retained task and provider resume identities" className="space-y-2"><h4 className="font-medium">Retained task and provider resume identities</h4>{deletion.tasks.length ? deletion.tasks.map((task) => <dl key={task.target.taskId} className="space-y-1 break-all rounded bg-well p-2"><dt>Task / status</dt><dd>{task.target.taskId} / {task.status}</dd><dt>Environment / generation / workspace</dt><dd>{task.target.environmentId} / {task.target.generation} / {task.target.workspaceId}</dd><dt>Guest worker session / tab</dt><dd>{task.workerSessionId ?? "Not recorded"} / {task.workerTabId ?? "Not recorded"}</dd><dt>Provider resume ID</dt><dd>{task.providerConversationId ?? "Not recorded"}</dd><dt>Guest directory</dt><dd>{task.guestCwd}</dd></dl>) : <p>No retained tasks reported.</p>}</section>
+            <section aria-label="Guest work deletion inspection" className="space-y-1"><h4 className="font-medium">Guest work and uncommitted changes</h4><pre className="whitespace-pre-wrap break-all rounded bg-well p-2">{JSON.stringify(deletion.guestWork, null, 2)}</pre></section>
+          </> : <p role="alert" className="text-warning">Deletion inspection is unavailable for this environment generation. Refresh the environment and inspect again.</p>}
+        </div>
+        <DialogFooter><Button variant="ghost" onClick={() => setDeleteOpen(false)}>Keep VM</Button><Button variant="destructive" disabled={deleted || !!busy || deletion?.canDelete !== true || tasks.length > 0} onClick={() => {
+          if (deleted || deletion?.canDelete !== true || tasks.length) return;
+          setDeleteOpen(false); void run("Deleting VM", () => localVmRequest("environment.delete", { environmentId: environment.id, generation: environment.generation, confirm: true }));
+        }}>Delete VM and guest files</Button></DialogFooter>
+      </DialogContent></Dialog>
+    </article>
+  );
+}
+
+function EnvironmentProgress({ progress, label }: { progress: LocalVmEnvironmentInspection; label: string }) {
+  return <section aria-label={label} className="space-y-1"><h5 className="font-medium">{label}</h5><p role="status">{progress.status}{progress.detail ? ` · ${progress.detail}` : ""}</p><ol className="list-inside list-decimal">{progress.stages.map((stage) => <li key={stage.id}>{stage.label}: {stage.status}{stage.detail ? ` · ${stage.detail}` : ""}</li>)}</ol>{progress.reconciliationReceipt ? <details><summary>Retained provisioning disposition and original uncertainty</summary><pre className="whitespace-pre-wrap break-all">{JSON.stringify(progress.reconciliationReceipt, null, 2)}</pre></details> : null}</section>;
+}

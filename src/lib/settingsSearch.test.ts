@@ -47,6 +47,7 @@ describe("settings row search", () => {
     expect(first("worktreeinclude")).toBe("repositories.filesToCopy");
     expect(first("files to copy")).toBe("repositories.filesToCopy");
     expect(first("variables")).toBe("environment.variables");
+    expect(first("local vm")).toBe("localVms.tasks");
     expect(searchSettings("hotkeys").map((match) => match.section)).toContain("shortcuts");
     expect(searchSettings("zzzz-no-such-setting")).toEqual([]);
   });

@@ -55,6 +55,7 @@ export function RightPanel({
   workingTree = false,
   sessionId,
   mentionTabId,
+  conversation = null,
   onFixErrors,
   fixBusy,
   statusKey = "",
@@ -86,6 +87,7 @@ export function RightPanel({
   workingTree?: boolean;
   sessionId?: string;
   mentionTabId?: string | null;
+  conversation?: string | null;
   onFixErrors?: (pr: PullRequest) => Promise<unknown>;
   fixBusy?: boolean;
   statusKey?: string;
@@ -352,7 +354,7 @@ export function RightPanel({
           </div>
         )}
         {/* Only while shown: it holds a live connection to the desktop. */}
-        {computer && tab === "computer" && <ComputerPanel active />}
+        {computer && tab === "computer" && <ComputerPanel active context={sessionId && mentionTabId ? { sessionId, tabId: mentionTabId, conversation } : undefined} />}
         {/* Only while shown: it streams the page. */}
         {browser && sessionId && tab === "browser" && <BrowserPanel sessionId={sessionId} cwd={cwd} active />}
         <div className={cn("h-full", tab !== "files" && "hidden")}>

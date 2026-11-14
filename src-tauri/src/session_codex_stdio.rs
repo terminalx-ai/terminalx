@@ -111,7 +111,7 @@ fn cloud_launch(key: &str, cwd: &str) -> Result<(crate::cloud_grants::LaunchGran
 /// `computer` is the Local VM's arguments; `note` what else the agent is
 /// told, here a sparse checkout's folders, joined with the workspace's prompts
 /// into the one `developer_instructions` Codex keeps.
-fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud_config::LaunchConfig, computer: &crate::local_vm::VmLaunch, note: Option<&str>) -> NativeLaunch {
+fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud_config::LaunchConfig, computer: &crate::container_vm::VmLaunch, note: Option<&str>) -> NativeLaunch {
     let route = grant.route.as_ref();
     let mut args = route.map(|route| shell_words(&route.codex_args)).unwrap_or_default();
     args.extend(shell_words(&config.args));
@@ -500,7 +500,13 @@ impl SessionManager {
         let key = key_of(session, tab);
         let (grant, config) = cloud_launch(&key, cwd)?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
-        let mut native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex"), sparse.as_deref());
+        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`).
+        let computer = {
+            let entry = index::get(session)?;
+            let retained = entry.tab(tab).context("This tab no longer exists")?;
+            crate::computer_targets::launch_args(session, retained)?
+        };
+        let mut native = native_launch(&grant, &config, &computer, sparse.as_deref());
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {
