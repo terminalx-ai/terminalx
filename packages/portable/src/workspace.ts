@@ -16,6 +16,13 @@
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
+/** PRO-212: sample lifecycle.resources only while the details card is open and
+ * this runtime is connected. Reuse runtimeResources in workspaceGit: v1 memory
+ * and storage are bytes, observedAt is epoch ms, absent samples stay unavailable.
+ * v1 has no CPU field. Discard samples on disconnect/runtime generation change.
+ */
+export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
+
 /**
  * Namespace versions, as `src-tauri/src/remote/protocol.rs` `CAPABILITIES`.
  * A newer version only adds to its namespace (CS-12):

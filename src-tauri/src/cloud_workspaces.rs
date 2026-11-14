@@ -723,12 +723,31 @@ pub struct CloudWorkspace {
     /// stops it, after which it cannot be started again.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub preparation: Option<WorkspacePreparation>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<WorkspaceCheckout>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<DetailsRuntime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePreparation {
     pub stop_after: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckout {
+    pub state: String,
+    pub repositories: Vec<WorkspaceCheckoutRepository>,
+    pub reported_at: i64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceCheckoutRepository {
+    pub repository: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// `you` on a workspace list item (§21.2).
@@ -876,6 +895,7 @@ pub enum OperationStage {
 pub enum OperationAction {
     Suspend,
     Resume,
+    Restart,
     Archive,
     Delete,
 }
@@ -939,6 +959,20 @@ pub struct CloudWorkspaceOperation {
     /// A delete's cleanup report until the provider confirms (§10.4).
     #[serde(default)]
     pub cleanup: Option<CleanupReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<Vec<OperationLog>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, deserialize_with = "safe_detail_code", skip_serializing_if = "Option::is_none")]
+    pub reason_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationLog {
+    pub source: String,
+    pub content: String,
+    pub occurred_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1005,6 +1039,63 @@ pub enum RetryReason {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceDetailsResponse {
+    pub workspace: CloudWorkspace,
+    pub details: CloudWorkspaceDetails,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceDetails {
+    pub organization_id: String,
+    pub workspace_id: String,
+    pub created_by: String,
+    pub provider: String,
+    pub repositories: Vec<DetailsRepository>,
+    pub machine_id: Option<String>,
+    pub environment_version_id: Option<String>,
+    pub environment_version: Option<DetailsEnvironmentVersion>,
+    pub runtime: Option<DetailsRuntime>,
+    pub provisioning_log: Option<DetailsProvisioningLog>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsRepository {
+    pub identity: Option<String>,
+    pub full_name: Option<String>,
+    pub clone_url: String,
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+    pub target_directory: Option<String>,
+    pub primary: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsEnvironmentVersion {
+    pub id: String,
+    pub version_number: i64,
+    pub toolchain_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsRuntime {
+    pub sha256: String,
+    pub protocol: Option<i64>,
+    pub installed_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsProvisioningLog {
+    pub url: String,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CloudWorkspaceSnapshot {
     pub workspace: CloudWorkspace,
     pub operation: CloudWorkspaceOperation,
@@ -1015,6 +1106,8 @@ pub struct CloudWorkspaceSnapshot {
 pub struct CloudWorkspaceListItem {
     pub workspace: CloudWorkspace,
     pub latest_operation: Option<CloudWorkspaceOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_markers: Option<Vec<crate::desktop_inbox::ReadMarker>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1760,18 +1853,12 @@ impl Client {
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
-        let agent = crate::data_privacy::http_agent()
-            .timeout(self.timeout)
-            .redirects(0)
-            .build();
-        let mut request = agent
-            .request(method, url.as_str())
-            .set("authorization", &format!("Bearer {}", context.access_token))
-            .set("content-type", "application/json")
-            .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
-            .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
-            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
-            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE);
+        self.send_url(method, context, url, body, idempotency_key, risk, limit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_url<T: DeserializeOwned>(&self, method: &str, context: &AccountContext, url: Url, body: Option<RequestBody>, idempotency_key: Option<&str>, risk: RequestRisk, limit: u64) -> Result<T, CloudWorkspaceClientError> {
+        let mut request = self.authorized_request(method, context, &url);
         if let Some(key) = idempotency_key {
             request = request.set("Idempotency-Key", key);
         }
@@ -1787,6 +1874,23 @@ impl Client {
             Err(ureq::Error::Transport(_)) => Err(transport_error(risk)),
         }
     }
+    fn inbox_url(&self, tail: &[&str]) -> Result<Url, CloudWorkspaceClientError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut().map_err(|_| inbox_invalid())?.extend(["v1", "desktop", "organization-inbox"]).extend(tail.iter().copied());
+        Ok(url)
+    }
+
+    fn authorized_request(&self, method: &str, context: &AccountContext, url: &Url) -> ureq::Request {
+        crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build()
+            .request(method, url.as_str())
+            .set("authorization", &format!("Bearer {}", context.access_token))
+            .set("content-type", "application/json")
+            .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
+            .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
+            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
+            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE)
+    }
+
 }
 
 enum RequestBody {
@@ -1833,6 +1937,8 @@ fn valid_cursor(value: &str) -> bool {
 pub struct CloudWorkspaceService {
     account: Arc<AccountManager>,
     client: Client,
+    // No authoritative SaaS readiness flag exists yet. Never infer readiness from providers-v1.
+    phase2_enabled: bool,
 }
 
 impl CloudWorkspaceService {
@@ -1840,6 +1946,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::production(),
+            phase2_enabled: false,
         }
     }
 
@@ -1848,6 +1955,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::for_test(base, timeout),
+            phase2_enabled: false,
         }
     }
 
@@ -1909,6 +2017,113 @@ impl CloudWorkspaceService {
         if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(risk));
         }
+        result
+    }
+
+    /// Account-wide inbox; never accepts a user or organization selector.
+    pub fn inbox(&self, after: &str, wait_ms: u32) -> Result<crate::desktop_inbox::InboxPage, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Read, |client, context| {
+            let mut url = client.inbox_url(&[])?;
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string());
+            let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
+            if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
+                || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(page)
+        })
+    }
+
+    pub fn inbox_stream(&self, after: &str, last_event_id: Option<&str>) -> Result<crate::desktop_inbox::InboxStreamPage, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Read, |client, context| {
+            let mut url = client.inbox_url(&["stream"])?;
+            url.query_pairs_mut().append_pair("after", after);
+            let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
+            if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
+            let response = match request.call() {
+                Ok(response) => response,
+                Err(ureq::Error::Status(status, response)) => return Err(http_error(status, response, RequestRisk::Read)),
+                Err(_) => return Err(transport_error(RequestRisk::Read)),
+            };
+            if !response.header("content-type").is_some_and(|value| value.starts_with("text/event-stream")) { return Err(post_send_error(RequestRisk::Read)); }
+            let page = crate::desktop_inbox::read_stream(response.into_reader()).map_err(|_| transport_error(RequestRisk::Read))?;
+            if page.cursor.parse::<i64>().unwrap() < last_event_id.unwrap_or(after).parse::<i64>().unwrap() { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(page)
+        })
+    }
+
+    pub fn inbox_receipts(&self, event_ids: Vec<String>) -> Result<crate::desktop_inbox::InboxReceipt, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if event_ids.is_empty() || event_ids.len() > 100 || event_ids.iter().any(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Mutation, |client, context| client.send_url("POST", context, client.inbox_url(&["receipts"])? , Some(RequestBody::Json(json!({"eventIds": event_ids}))), None, RequestRisk::Mutation, RESPONSE_LIMIT_BYTES))
+    }
+
+    fn inbox_account<T>(&self, risk: RequestRisk, operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        let context = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        let before = self.account.scope_if_same_account(&context).ok_or_else(|| context_changed_error(risk))?;
+        let result = operation(&self.client, &context);
+        if !self.account.scope_if_same_account(&context).is_some_and(|scope| scope.members == before.members) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    pub fn read_marker(&self, org: &str, workspace: &str, session_id: Option<String>, read_at: String) -> Result<crate::desktop_inbox::ReadMarker, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !valid_resource_id(org) || !valid_resource_id(workspace)
+            || session_id.as_ref().is_some_and(|id| id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:@-".contains(&b)))
+            || chrono::DateTime::parse_from_rfc3339(&read_at).is_err() { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        let mut body = json!({"readAt": read_at});
+        if let Some(session) = &session_id { body["sessionId"] = json!(session); }
+        let result: Result<crate::desktop_inbox::ReadMarker, _> = self.client.request_as("PUT", &context, &["cloud-workspaces", workspace, "read-marker"], None, Some(body), None, RequestRisk::Mutation);
+        if !self.account.inbox_member_is_current(&context, org) { return Err(context_changed_error(RequestRisk::Mutation)); }
+        let marker = result?;
+        if marker.session_id != session_id.unwrap_or_default() || chrono::DateTime::parse_from_rfc3339(&marker.read_at).is_err() { return Err(post_send_error(RequestRisk::Mutation)); }
+        Ok(marker)
+    }
+
+    pub fn phase2_contracts_available(&self) -> bool { self.phase2_enabled }
+
+    fn phase2_gate(&self, inbox: bool) -> Result<(), CloudWorkspaceClientError> {
+        if self.phase2_enabled { Ok(()) } else {
+            Err(CloudWorkspaceClientError::local(if inbox { "inbox_unavailable" } else { "cloud_workspace_runtime_not_ready" }, true))
+        }
+    }
+
+    /// PRO-212 retains active-organization authorization, independent of CS-18.
+    pub fn restart(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+        self.phase2_gate(false)?;
+        self.active_phase2_workspace(org, workspace_id, RequestRisk::Mutation, |client, context| {
+            let snapshot = client.request(context, &["cloud-workspaces", workspace_id, "restart"], None, Some(json!({})), None, RequestRisk::Mutation)?;
+            ensure_snapshot(snapshot, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
+        })
+    }
+
+    pub fn details(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDetailsResponse, CloudWorkspaceClientError> {
+        self.phase2_gate(false)?;
+        self.active_phase2_workspace(org, workspace_id, RequestRisk::Read, |client, context| {
+            let value: CloudWorkspaceDetailsResponse = client.request(context, &["cloud-workspaces", workspace_id, "details"], None, None, None, RequestRisk::Read)?;
+            if value.workspace.id != workspace_id || value.workspace.org_id != context.organization_id
+                || value.details.workspace_id != workspace_id || value.details.organization_id != context.organization_id
+                || value.details.provider != value.workspace.provider.as_str() {
+                return Err(post_send_error(RequestRisk::Read));
+            }
+            Ok(value)
+        })
+    }
+
+    fn active_phase2_workspace<T>(&self, org: Option<&str>, workspace: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace) { return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)); }
+        let context = self.context()?;
+        if org.is_some_and(|org| org != context.organization_id) {
+            return Err(CloudWorkspaceClientError::local("active_organization_required", false));
+        }
+        let result = operation(&self.client, &context);
+        if !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
         result
     }
 
@@ -2620,9 +2835,13 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
+        if matches!(action, OperationAction::Restart) {
+            return self.restart(org, workspace_id);
+        }
         let action_path = match action {
             OperationAction::Suspend => "suspend",
             OperationAction::Resume => "resume",
+            OperationAction::Restart => unreachable!(),
             OperationAction::Archive => "archive",
             OperationAction::Delete => "delete",
         };
@@ -3129,10 +3348,15 @@ fn parse_retry_after(value: Option<&str>) -> Option<u64> {
         .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECONDS))
 }
 
+fn inbox_invalid() -> CloudWorkspaceClientError {
+    CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)
+}
+
 fn known_error_code(code: &str) -> bool {
     matches!(
         code,
         "invalid_access_token"
+            | "inbox_unavailable"
             | "organization_admin_required"
             | "active_organization_required"
             | "cloud_workspace_not_found"
@@ -3179,6 +3403,12 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_schedule_prompt_file_mention"
             | "cloud_schedule_needs_approval"
             | "cloud_workspace_concurrency_exceeded"
+            // Existing SaaS lifecycle errors reused by restart; no new domain errors.
+            | "cloud_workspace_manager_required"
+            | "cloud_workspace_runtime_unsupported"
+            | "cloud_workspace_runtime_not_ready"
+            | "cloud_workspace_member_concurrency_exceeded"
+            | "cloud_preparation_workspace_expired"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
             | "cloud_workspace_request_invalid"
@@ -3661,6 +3891,233 @@ mod tests {
             value["operation"]["errorCode"] = Value::String(error_code.into());
         }
         value.to_string()
+    }
+
+    fn phase2_service(base: &str) -> (Arc<AccountManager>, CloudWorkspaceService) {
+        let (account, mut service) = test_service(base);
+        service.phase2_enabled = true;
+        (account, service)
+    }
+
+    fn phase2_headers(request: &str) {
+        let request = request.to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer native-secret-token"));
+        assert!(request.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
+        assert!(request.contains(&format!("x-terminalx-cloud-workspace-providers: {}", SUPPORTED_PROVIDERS)));
+        assert!(request.contains("x-terminalx-cloud-workspace-lifecycle: archive-v1"));
+    }
+
+    fn phase2_details_body() -> Value {
+        let snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        json!({"workspace": snapshot["workspace"], "details": {
+            "organizationId": "org-1", "workspaceId": "workspace-1", "createdBy": "user-1", "provider": "machine0",
+            "repositories": [{"identity": null, "fullName": null, "cloneUrl": "https://example.test/a.git", "ref": null, "targetDirectory": null, "primary": true}],
+            "machineId": "machine-1", "environmentVersionId": "env-1",
+            "environmentVersion": {"id": "env-1", "versionNumber": 7, "toolchainVersion": 12},
+            "runtime": {"sha256": "artifact-sha", "protocol": 1, "installedAt": 1794657600123_i64},
+            "provisioningLog": null
+        }})
+    }
+
+    #[test]
+    fn phase2_desktop_contract_production_activation_stays_held() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert!(!service.phase2_contracts_available());
+        assert_eq!(service.inbox("0", 0).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.inbox_stream("0", None).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.inbox_receipts(vec!["1".into()]).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.read_marker("org-1", "workspace-1", None, "2026-11-14T12:00:00Z".into()).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.restart(None, "workspace-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(service.details(None, "workspace-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_exact_empty_body_queued_snapshot_and_existing_poll() {
+        let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        body["operation"]["action"] = json!("restart");
+        body["operation"]["cancelable"] = json!(false);
+        body["operation"]["progress"] = json!({"phase": "starting", "retryAt": 1794657600123_i64});
+        body["operation"]["checkpoint"] = json!("committed");
+        body["operation"]["logs"] = json!([{"source": "runtime", "content": "checkpoint saved", "occurredAt": 1794657600123_i64}]);
+        body["workspace"]["runtime"] = json!({"sha256": "artifact", "protocol": 1, "installedAt": 1794657600123_i64});
+        body["workspace"]["checkout"] = json!({"state": "ready", "repositories": [{"repository": "owner/repo", "state": "ready"}], "reportedAt": 1794657600123_i64});
+        body["workspace"]["preparation"] = json!({"stopAfter": 1794657609999_i64});
+        let queued = body.to_string();
+        body["operation"]["state"] = json!("succeeded");
+        let (base, requests) = serve_each(vec![response("202 Accepted", &queued, ""), response("200 OK", &body.to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        let snapshot = service.restart(Some("org-1"), "workspace-1").unwrap();
+        let serialized = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(serialized["operation"]["state"], "queued");
+        assert_eq!(serialized["operation"]["action"], "restart");
+        assert_eq!(serialized["operation"]["type"], "create");
+        assert_eq!(serialized["operation"]["cancelable"], false);
+        assert_eq!(serialized["operation"]["checkpoint"], "committed");
+        assert_eq!(serialized["operation"]["logs"][0]["occurredAt"], 1794657600123_i64);
+        assert_eq!(serialized["workspace"]["runtime"]["installedAt"], 1794657600123_i64);
+        assert_eq!(serialized["workspace"]["checkout"]["state"], "ready");
+        assert_eq!(serialized["workspace"]["preparation"]["stopAfter"], 1794657609999_i64);
+        assert!(matches!(service.operation(None, "operation-1").unwrap().operation.state, OperationState::Succeeded));
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/restart HTTP/1.1"));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, "{}");
+        assert!(requests[1].starts_with("GET /v1/desktop/orgs/org-1/cloud-workspace-operations/operation-1 HTTP/1.1"));
+        for request in requests { phase2_headers(&request); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_details_integer_versions_epoch_ms_and_no_body() {
+        let body = phase2_details_body();
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "Cache-Control: no-store\r\n")]);
+        let (_, service) = phase2_service(&base);
+        let details = service.details(None, "workspace-1").unwrap();
+        let environment = details.details.environment_version.unwrap();
+        assert_eq!((environment.version_number, environment.toolchain_version), (7, 12));
+        assert_eq!(details.details.runtime.unwrap().installed_at, 1794657600123);
+        assert!(details.details.provisioning_log.is_none());
+        let request = &requests.join().unwrap()[0];
+        assert!(request.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/details HTTP/1.1"));
+        assert_eq!(request.split_once("\r\n\r\n").unwrap().1, "");
+        phase2_headers(request);
+        for field in ["toolchainVersion", "versionNumber"] {
+            for wrong in [json!("12"), json!(1.5)] {
+                let mut bad = body.clone();
+                bad["details"]["environmentVersion"][field] = wrong;
+                assert!(serde_json::from_value::<CloudWorkspaceDetailsResponse>(bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_details_keep_active_org_and_existing_errors() {
+        for code in ["cloud_workspace_manager_required", "cloud_workspace_runtime_unsupported", "cloud_workspace_runtime_not_ready", "cloud_workspace_member_concurrency_exceeded", "cloud_preparation_workspace_expired"] {
+            assert!(known_error_code(code));
+        }
+
+        let (account, service) = phase2_service("http://127.0.0.1:9");
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.restart(Some("org-2"), "workspace-1").unwrap_err().code, "active_organization_required");
+        assert_eq!(service.details(Some("org-2"), "workspace-1").unwrap_err().code, "active_organization_required");
+        for (status, code) in [("401 Unauthorized", "invalid_access_token"), ("403 Forbidden", "cloud_workspace_manager_required"), ("404 Not Found", "cloud_workspace_not_found"), ("409 Conflict", "cloud_workspace_operation_in_progress"), ("422 Unprocessable Entity", "cloud_workspace_request_invalid"), ("503 Service Unavailable", "cloud_provider_unavailable")] {
+            let (base, requests) = serve_each(vec![response(status, &json!({"error": code}).to_string(), "")]);
+            let (_, service) = phase2_service(&base);
+            assert_eq!(service.restart(None, "workspace-1").unwrap_err().code, code);
+            requests.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_inbox_account_route_bigint_filtered_page_receipts_and_revoke() {
+        let id = "9223372036854775807";
+        let body = json!({"v":1,"cursor":id,"hasMore":true,"events":[{"id":id,"type":"workspace.share-removed","workspaceId":"workspace-1","createdAt":"2026-11-14T12:00:00Z","organizationId":"must-drop","payload":{"private":"must-drop"}}]});
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), ""), response("200 OK", r#"{"acknowledged":true}"#, ""), response("200 OK", &json!({"v":1,"cursor":id,"hasMore":true,"events":[]}).to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_active_org_for_test("");
+        let page = service.inbox("0", 25000).unwrap();
+        assert_eq!(page.cursor, id);
+        assert!(page.has_more);
+        let event = serde_json::to_value(&page.events[0]).unwrap();
+        assert!(event.get("organizationId").is_none() && event.get("payload").is_none());
+        assert!(service.inbox_receipts(vec![id.into()]).unwrap().acknowledged);
+        let filtered = service.inbox(id, 0).unwrap();
+        assert!(filtered.has_more && filtered.events.is_empty());
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000 HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
+        for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_read_marker_inactive_member_iso_and_real_session_id() {
+        let timestamp = "2026-11-14T12:00:00.000Z";
+        let (base, requests) = serve_each(vec![response("200 OK", &json!({"sessionId":"runtime.session:1@host","readAt":timestamp}).to_string(), ""), response("200 OK", &json!({"sessionId":"","readAt":timestamp}).to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.read_marker("org-2", "workspace-1", Some("runtime.session:1@host".into()), timestamp.into()).unwrap().read_at, timestamp);
+        service.read_marker("org-2", "workspace-1", None, timestamp.into()).unwrap();
+        assert_eq!(service.read_marker("org-3", "workspace-1", None, timestamp.into()).unwrap_err().code, "cloud_organization_unavailable");
+        let requests = requests.join().unwrap();
+        for request in &requests {
+            assert!(request.starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/read-marker HTTP/1.1")); phase2_headers(request);
+        }
+        let workspace_body: Value = serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(workspace_body, json!({"readAt":timestamp}));
+    }
+
+    #[test]
+    fn phase2_desktop_contract_sse_checkpoint_last_event_id_and_poll_fallback() {
+        let sse = "event: inbox\nid: 9007199254740993\ndata: {\"id\":\"9007199254740993\",\"type\":\"workspace.share-removed\",\"workspaceId\":\"workspace-1\",\"createdAt\":\"2026-11-14T12:00:00Z\"}\n\nevent: checkpoint\nid: 9007199254740994\ndata: {\"cursor\":\"9007199254740994\"}\n\n";
+        let (base, requests) = serve_each(vec![response("200 OK", sse, "Content-Type: text/event-stream\r\n"), response("200 OK", "event: inbox\nid: 2\n", "Content-Type: text/event-stream\r\n"), response("200 OK", r#"{"v":1,"cursor":"9007199254740994","hasMore":false,"events":[]}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let page = service.inbox_stream("0", Some("9007199254740992")).unwrap();
+        assert_eq!(page.cursor, "9007199254740994"); assert_eq!(page.events.len(), 1);
+        assert!(service.inbox_stream(&page.cursor, None).is_err());
+        assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0 HTTP/1.1"));
+        assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
+        assert!(requests[2].contains("after=9007199254740994"));
+        for request in requests { phase2_headers(&request); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_non_machine0_details_and_response_scope_validation() {
+        for provider in ["box", "hetzner"] {
+            let mut body = phase2_details_body();
+            body["workspace"]["provider"] = json!(provider);
+            body["details"]["provider"] = json!(provider);
+            let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "")]);
+            let (_, service) = phase2_service(&base);
+            assert_eq!(service.details(None, "workspace-1").unwrap().details.provider, provider);
+            phase2_headers(&requests.join().unwrap()[0]);
+        }
+        let mut body = phase2_details_body();
+        body["details"]["organizationId"] = json!("other-org");
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        assert_eq!(service.details(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        requests.join().unwrap();
+    }
+
+    #[test]
+    fn phase2_desktop_contract_inbox_auth_and_late_account_membership_fences() {
+        let (base, requests) = serve_each(vec![response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let error = service.inbox("0", 0).unwrap_err();
+        assert_eq!(error.code, "invalid_access_token"); assert!(!error.retryable);
+        requests.join().unwrap();
+        for replace_account in [false, true] {
+            let (base, accepted, request) = serve_once(response("200 OK", r#"{"v":1,"cursor":"0","hasMore":false,"events":[]}"#, ""), Duration::from_millis(150));
+            let (account, service) = phase2_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], false);
+            let pending = thread::spawn(move || service.inbox("0", 0));
+            accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+            if replace_account { account.set_context_for_test(None); }
+            else { account.set_memberships_for_test(&["org-1"], false); }
+            assert!(pending.join().unwrap().is_err());
+            request.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_validation_unavailable_and_catalog_marker_types() {
+        let (_, service) = phase2_service("http://127.0.0.1:9");
+        for invalid in ["", "01", "-1", "1.0", "9223372036854775808"] {
+            assert_eq!(service.inbox(invalid, 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        assert!(service.inbox("0", 25001).is_err());
+        assert!(service.inbox_receipts(vec![]).is_err());
+        assert!(service.inbox_receipts(vec!["1".into(); 101]).is_err());
+        assert!(serde_json::from_value::<crate::desktop_inbox::InboxPage>(json!({"v":1,"cursor":1,"hasMore":false,"events":[]})).is_err());
+        let (base, requests) = serve_each(vec![response("503 Service Unavailable", r#"{"error":"inbox_unavailable"}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let error = service.inbox("0", 0).unwrap_err();
+        assert_eq!(error.code, "inbox_unavailable"); assert!(error.retryable);
+        requests.join().unwrap();
+        let snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        let item: CloudWorkspaceListItem = serde_json::from_value(json!({"workspace":snapshot["workspace"],"readMarkers":[{"sessionId":"","readAt":"2026-11-14T12:00:00.000Z"}]})).unwrap();
+        assert_eq!(serde_json::to_value(item).unwrap()["readMarkers"][0]["readAt"], "2026-11-14T12:00:00.000Z");
     }
 
     fn org_2_list_body() -> String {
@@ -5006,8 +5463,11 @@ mod tests {
                     you: None,
                     shared_with: None,
                     preparation: None,
+                    checkout: None,
+                    runtime: None,
                 },
                 latest_operation: None,
+                read_markers: None,
             }],
             tombstones: Vec::new(),
             quota: None,

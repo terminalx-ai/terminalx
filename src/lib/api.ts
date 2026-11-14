@@ -465,6 +465,18 @@ export const api = {
   cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
   /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
   cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
+  /** Held until SaaS integration/live readiness is explicitly confirmed. */
+  phase2DesktopContractsAvailable: () => invoke<boolean>("phase2_desktop_contracts_available"),
+  desktopInbox: (after = "0", waitMs = 25000) => invoke<DesktopInboxPage>("desktop_inbox", { after, waitMs }),
+  /** One SSE page through its checkpoint; apply/dedupe events before saving cursor. */
+  desktopInboxStream: (after: string, lastEventId?: string | null) => invoke<DesktopInboxStreamPage>("desktop_inbox_stream", { after, lastEventId: lastEventId ?? null }),
+  desktopInboxReceipts: (eventIds: string[]) => invoke<{ acknowledged: boolean }>("desktop_inbox_receipts", { eventIds }),
+  cloudWorkspaceReadMarker: (orgId: string, workspaceId: string, readAt: string, sessionId?: string | null) =>
+    invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
+  cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceDetailsResponse>("cloud_workspace_details", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
@@ -1234,6 +1246,8 @@ export interface CloudWorkspace {
   sharedWith?: number | null;
   /** A preparation workspace (PRO-20): when the server stops it for good. Absent on every other workspace. */
   preparation?: { stopAfter: number } | null;
+  checkout?: { state: string; repositories: { repository: string; state: string; category?: string }[]; reportedAt: number } | null;
+  runtime?: { sha256: string; protocol: number | null; installedAt: number } | null;
 }
 
 /** One repository checkout of a workspace, as the enriched list reports it (S1). */
@@ -1442,7 +1456,7 @@ export interface CloudWorkspaceOperation {
   id: string;
   workspaceId: string;
   type: "create";
-  action: "suspend" | "resume" | "archive" | "delete" | null;
+  action: "suspend" | "resume" | "restart" | "archive" | "delete" | null;
   state: "queued" | "running" | "cancel-requested" | "succeeded" | "failed" | "canceled";
   stage: "queued" | "preflight" | "creating-machine" | "bootstrapping" | "connecting-relay" | "cleanup" | "ready";
   cancelable: boolean;
@@ -1466,6 +1480,34 @@ export interface CloudWorkspaceOperation {
   /** When the runtime reported it; absent when it never answered. */
   checkpointAt?: number | null;
   cleanup?: CloudWorkspaceCleanup | null;
+  logs?: { source: string; content: string; occurredAt: number }[];
+  reason?: string;
+  reasonDetail?: string;
+}
+
+/** Canonical decimal bigint strings, never converted to JS numbers. ISO event/marker timestamps. */
+export interface DesktopReadMarker { sessionId: string; readAt: string }
+export type DesktopInboxEvent =
+  | { id: string; type: "workspace.share-removed"; workspaceId: string; createdAt: string }
+  | { id: string; type: "workspace.share-added" | "workspace.reassigned"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
+  | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string };
+export interface DesktopInboxPage { v: 1; cursor: string; hasMore: boolean; events: DesktopInboxEvent[] }
+export interface DesktopInboxStreamPage { cursor: string; events: DesktopInboxEvent[] }
+
+export interface CloudWorkspaceDetailsResponse { workspace: CloudWorkspace; details: CloudWorkspaceDetails }
+/** Original pinned setup. Timestamps here and on workspace are epoch milliseconds. */
+export interface CloudWorkspaceDetails {
+  organizationId: string;
+  workspaceId: string;
+  createdBy: string;
+  provider: string;
+  repositories: { identity: string | null; fullName: string | null; cloneUrl: string; ref: string | null; targetDirectory: string | null; primary: boolean }[];
+  machineId: string | null;
+  environmentVersionId: string | null;
+  environmentVersion: { id: string; versionNumber: number; toolchainVersion: number } | null;
+  runtime: { sha256: string; protocol: number | null; installedAt: number } | null;
+  /** Manager-only console organization entry link, not an expanded-row deep link. */
+  provisioningLog: { url: string; operationId: string | null } | null;
 }
 
 export interface CloudWorkspaceSnapshot {
@@ -1476,6 +1518,7 @@ export interface CloudWorkspaceSnapshot {
 export interface CloudWorkspaceListItem {
   workspace: CloudWorkspace;
   latestOperation: CloudWorkspaceOperation | null;
+  readMarkers?: DesktopReadMarker[];
 }
 
 export interface CloudWorkspaceList {
@@ -1567,6 +1610,7 @@ export interface CloudWorkspaceClientError {
 }
 
 export type CloudWorkspaceSafeErrorCode =
+  | "inbox_unavailable"
   | "invalid_access_token"
   | "organization_admin_required"
   | "active_organization_required"
@@ -1602,6 +1646,11 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_teardown_in_progress"
   | "cloud_workspace_quota_exceeded"
   | "cloud_workspace_concurrency_exceeded"
+  | "cloud_workspace_manager_required"
+  | "cloud_workspace_runtime_unsupported"
+  | "cloud_workspace_runtime_not_ready"
+  | "cloud_workspace_member_concurrency_exceeded"
+  | "cloud_preparation_workspace_expired"
   | "idempotency_key_reused"
   | "cloud_workspace_quote_expired"
   | "cloud_workspace_request_invalid"
