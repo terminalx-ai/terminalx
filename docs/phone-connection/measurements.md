@@ -349,6 +349,10 @@ not in the table above. Raw: `data/idle-cut-short/`. Summary:
   phone (its Release build on this Mac is dated 18:38 and has no measurement
   patch). Launches from 18:33 on wrote no marks. With the person's OK, the measurement build was installed again at
   19:04 (`xcrun devicectl device install app`, exit 0) and left installed.
+- After the last idle run ended (19:52), the measurement build was replaced on
+  the phone by a plain Release build of main at 19:59, with no measurement
+  patch. A later run needs the patches in `measurement-patch/` applied and the
+  measurement build installed again.
 - The first version of `idle-test.sh` logged `$?` after `$(date)`, so it showed
   exit 0 for failed `devicectl` calls. The committed script records the real
   exit code and stops at the first failure.
