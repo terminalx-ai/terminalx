@@ -10,7 +10,7 @@ fn text<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
     params[key].as_str().with_context(|| format!("{key} is required"))
 }
 
-fn host<R>(manager: &SessionManager, f: impl FnOnce(&cleanup::Host<'_>) -> Result<R>) -> Result<R> {
+pub(crate) fn host<R>(manager: &SessionManager, f: impl FnOnce(&cleanup::Host<'_>) -> Result<R>) -> Result<R> {
     let (projects, _) = projects::list()?;
     let (open, archived): (Vec<_>, Vec<_>) = projects.into_iter().partition(|project| !project.archived);
     let protected: Vec<PathBuf> = archived.into_iter().map(|project| project.path.into()).collect();

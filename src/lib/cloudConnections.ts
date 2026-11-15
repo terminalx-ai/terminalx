@@ -380,6 +380,14 @@ export function noteCloudWorkspaceListed(target: CloudTarget, listed: CloudWorks
   settle(entry);
 }
 
+/** A completed explicit restart invalidates the old relay. Held leases follow a fresh connect; never wake. */
+export function reconnectCloudWorkspace(target: CloudTarget) {
+  const entry = entries.get(cloudWorkspaceKey(target.orgId, target.workspaceId));
+  if (!entry) return;
+  if (entry.refs > 0) reattach(entry);
+  else drop(entry);
+}
+
 /** Close a connection now, whoever holds it. */
 function drop(entry: Entry) {
   if (entry.idle) clearTimeout(entry.idle);

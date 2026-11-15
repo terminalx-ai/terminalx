@@ -1115,3 +1115,38 @@ fn a_corrupt_automatic_ledger_blocks_sweeps_but_manual_removal_still_runs_its_ho
     assert!(!tree.exists());
     assert_eq!(std::fs::read_to_string(project.join("runs")).unwrap(), "ran\n");
 }
+
+#[test]
+fn superseded_try_without_a_pr_uses_run_merge_and_keeps_its_backup_and_archived_session() {
+    let f = Fixture::new();
+    let abandoned = f.worktree("abandoned");
+    let final_try = f.worktree("final");
+    let session = f.session(&abandoned, TabStatus::Completed);
+    crate::session_archive::set_archived(&*f.events, std::slice::from_ref(&session.id), true, crate::session_archive::By::Automation).unwrap();
+    f.merge("final", 962);
+    let final_head = sh(&final_try, &["rev-parse", "HEAD"]);
+    let worker = crate::orchestration::SessionRef { session_id: session.id.clone(), tab_id: None };
+    let run: crate::orchestration::Run = serde_json::from_value(serde_json::json!({
+        "id":"run-962", "lead":{"sessionId":"gone"}, "projectPath":f.alpha(), "goal":"cleanup", "state":"done",
+        "workerMode":"bypassPermissions", "created":index::now(), "modified":index::now(),
+        "merge":{"into":f.branch("final"), "finalHead":final_head},
+        "pieces":[{"id":"piece", "title":"piece", "brief":{"goal":"cleanup"}, "doneChecks":[], "state":"done", "agent":"codex", "tries":[
+            {"step":"first", "worker":worker, "branch":f.branch("abandoned"), "outcome":"failed"},
+            {"step":"effort", "worker":{"sessionId":"final"}, "branch":f.branch("final"), "outcome":"done"}
+        ]}]
+    })).unwrap();
+    crate::orchestration::store::insert(&run).unwrap();
+    crate::github::stand_in::set(&f.alpha(), f.prs.lock().unwrap().clone());
+    // Make this try unpublished, so preservation must create its backup ref.
+    sh(&f.base.join("alpha.git"), &["update-ref", "-d", &format!("refs/heads/{}", f.branch("abandoned"))]);
+    crate::orchestration::retirement::preserve(&run, &worker).unwrap();
+    let backup = "refs/heads/raccoon/archive/run-962/piece-try1";
+    let tip = sh(&f.base.join("alpha.git"), &["rev-parse", backup]);
+    let first = f.sweep(0);
+    assert!(first.iter().any(|s| s.branch == f.branch("abandoned") && s.phase == Phase::Scheduled), "{first:?}");
+    f.sweep(11);
+    assert!(!abandoned.exists());
+    assert_eq!(sh(&f.base.join("alpha.git"), &["rev-parse", backup]), tip);
+    let kept = index::get(&session.id).unwrap();
+    assert!(kept.archived && kept.worktree_removed);
+}

@@ -8,6 +8,7 @@ import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { NotSharedNotice } from "./CloudCollab";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { CloudWorkspaceDetails } from "./CloudWorkspaceDetails";
 import { WorkspaceLifecycleDialog } from "./WorkspaceActions";
 import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
@@ -192,6 +193,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         )}
         <Cloud className="size-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate text-sm font-medium">{item?.workspace.name ?? "Cloud workspace"}</span>
+        {item && !locked && <CloudWorkspaceDetails item={item} />}
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
         <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>
           {rowState?.label}

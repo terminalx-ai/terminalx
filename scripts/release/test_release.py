@@ -187,6 +187,38 @@ class CredentialTests(TempCase):
         config_path.write_text(json.dumps(data if data is not None else {'keyPath': str(key), 'keyId': 'KEYID12345', 'issuerId': 'issuer-uuid-1'}))
         return {'TERMINALX_NOTARY_CONFIG': str(config_path), 'HOME': str(self.directory)}
 
+    def test_archive_scan_loads_available_secrets_without_release_setup(self):
+        import base64
+        password = 'archive-password-' + 'fixture-only'
+        decoded = 'signing-material-' + 'z' * 40
+        key = base64.b64encode(decoded.encode()).decode()
+        key_path = self.directory / 'updater.key'
+        key_path.write_text(key)
+        env = {'HOME': str(self.directory), 'TERMINALX_UPDATER_KEY': str(key_path),
+               'TAURI_SIGNING_PRIVATE_KEY_PASSWORD': password}
+        needles = credentials.local_secrets(FakeRunner([(['gh', 'auth', 'token'], Result(1, ''))]), env, require_signing=False)
+        for value in (key, decoded, password):
+            self.assertIn(value, needles.values())
+            scanner = secrets_scan.Scanner({label: text.encode() for label, text in needles.items()})
+            scanner.scan('fixture', value.encode())
+            self.assertTrue(scanner.findings)
+            self.assertNotIn(value, json.dumps(scanner.findings))
+            patterns_only = secrets_scan.Scanner({})
+            patterns_only.scan('fixture', value.encode())
+            self.assertFalse(patterns_only.findings)
+        self.assertEqual(credentials.local_secrets(FakeRunner([(['gh', 'auth', 'token'], Result(1, ''))]), {'HOME': str(self.directory)},
+                                                  require_signing=False), {})
+        with self.assertRaises(ReleaseError):
+            credentials.local_secrets(FakeRunner([(['gh', 'auth', 'token'], Result(1, ''))]), env)
+
+    def test_archive_scan_refuses_broken_configured_credentials(self):
+        env = {'HOME': str(self.directory), 'TERMINALX_UPDATER_KEY': str(self.directory / 'missing')}
+        with self.assertRaises(ReleaseError):
+            credentials.local_secrets(FakeRunner([(['gh', 'auth', 'token'], Result(1, ''))]), env, require_signing=False)
+        env = self.notary_env({'keyPath': 'missing', 'keyId': 'test-id', 'issuerId': 'test-issuer'})
+        with self.assertRaises(ReleaseError):
+            credentials.local_secrets(FakeRunner([(['gh', 'auth', 'token'], Result(1, ''))]), env, require_signing=False)
+
     def test_a_missing_notary_config_names_the_file_and_the_override(self):
         with self.assertRaises(ReleaseError) as raised:
             credentials.notary_key({'HOME': str(self.directory)})

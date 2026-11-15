@@ -390,6 +390,10 @@ export interface PipelineActionButton {
  */
 export function pipelineActions(pipeline: IssuePipeline): { primary: PipelineActionButton | null; secondary: PipelineActionButton[] } {
   const stop: PipelineActionButton = { action: "stop", label: "Stop" };
+  const restart: PipelineActionButton = { action: "restartResolve", label: "Restart resolver" };
+  if (!pipeline.place && !pipeline.cloud && pipeline.stage === "resolve" && (pipeline.state === "working" || pipeline.state === "needsYou" || pipeline.state === "stopped")) {
+    return { primary: restart, secondary: pipeline.state === "stopped" ? [{ action: "resume", label: "Resume" }] : [{ action: "advance", label: ADVANCE.resolve }, stop] };
+  }
   switch (pipeline.state) {
     case "merged":
       return { primary: null, secondary: [] };

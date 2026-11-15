@@ -1,9 +1,12 @@
+import type { ReadMarker } from "@/lib/cloudInbox";
+import { forgetCloudReadMarkers, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { privacyEnabled, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 import { useSyncExternalStore } from "react";
 import type { RuntimeIssuePipeline, RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
 import {
   api,
+  closeWorkspaceConnection,
   type AccountStatus,
   type CloudCatalogFeed,
   type CloudCatalogOrganization,
@@ -21,10 +24,12 @@ import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { reconcileCloudAttention } from "@/lib/cloudAttention";
 import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
-import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
+import { closeCloudConnection, noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
-import { resetCloudAgents } from "@/lib/cloudAgents";
+import { cloudAgentsAccessDenied, denyCloudAgentsWorkspace, resetCloudAgents, setCloudAgentsAccess } from "@/lib/cloudAgents";
+import { dropCloudTerminals } from "@/lib/cloudTerminals";
+import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -108,6 +113,10 @@ export interface CloudCatalogState {
   /** What went with a workspace deleted elsewhere, until dismissed. */
   notices: PurgeNotice[];
 }
+
+let inboxRevision = 0;
+let catalogIdentity: string | null = null;
+let catalogGeneration = 0;
 
 const EMPTY: CloudCatalogState = { owner: null, revision: null, loaded: false, orgs: {}, createMemory: {}, notices: [] };
 
@@ -350,6 +359,8 @@ export async function ingestCloudList(
   /** When the list was asked for; a list asked for before the one already taken is older and is not taken. */
   requestedAt = now,
 ): Promise<{ workspaces: CloudWorkspaceListItem[]; notices: PurgeNotice[] }> {
+  const identityAsk = catalogGeneration;
+  const inboxAsk = inboxRevision;
   const tombstones = list.tombstones ?? [];
   const deleted = new Set(tombstones.map((tombstone) => tombstone.id));
   let workspaces = list.workspaces.filter((item) => !deleted.has(item.workspace.id));
@@ -377,11 +388,19 @@ export async function ingestCloudList(
     // title, tab or terminal of it is shown, or saved for the next launch.
     const readable = new Set(workspaces.filter((item) => item.workspace.you?.role !== "none").map((item) => item.workspace.id));
     for (const id of Object.keys(sessions)) if (!readable.has(id)) delete sessions[id];
+    for (const item of current.workspaces) if (!readable.has(item.workspace.id)) forgetCloudReadMarkers(item.workspace.id);
     set({
       ...state,
       orgs: { ...state.orgs, [org]: { ...current, workspaces, quota: list.quota ?? current.quota, fetchedAt: now, requestedAt, source: "live", error: null, sessions } },
       createMemory,
     });
+    for (const item of workspaces) {
+      try { setCloudAgentsAccess({ organizationId: org, workspaceId: item.workspace.id }, item.workspace.you?.role !== "none"); } catch { /* In-memory denial holds even when storage is unavailable. */ }
+      if (item.workspace.you?.role === "none") { forgetCloudReadMarkers(item.workspace.id); continue; }
+      for (const marker of (item as CloudWorkspaceListItem & { readMarkers?: ReadMarker[] }).readMarkers ?? []) {
+        reconcileCloudReadMarker(org, item.workspace.id, marker);
+      }
+    }
     tellConnections(workspaces, requestedAt);
     forgetCreatedBlankProjects(org, list.workspaces, createMemory);
     // A local mirror (PRO-25) of a workspace this person can no longer open,
@@ -390,7 +409,7 @@ export async function ingestCloudList(
     void purgeCloudMirrors((mirrorOrg, workspaceId) => mirrorOrg !== org || readable.has(workspaceId));
   }
   const notices = await purgeTombstones(tombstones, names);
-  if (notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
+  if (identityAsk === catalogGeneration && inboxAsk === inboxRevision && notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
   return { workspaces, notices };
 }
 
@@ -423,6 +442,7 @@ function forgetCreatedBlankProjects(orgId: string, listed: readonly CloudWorkspa
  */
 export function applyCloudSnapshot(snapshot: CloudWorkspaceSnapshot, requestedAt?: number) {
   const orgId = snapshot.workspace.orgId;
+  if (cloudAgentsAccessDenied({ organizationId: orgId, workspaceId: snapshot.workspace.id })) return;
   const current = state.orgs[orgId];
   if (!current) return;
   const item = reconcileCloudAttention(
@@ -445,6 +465,7 @@ export function setCloudRepositories(orgId: string, repositories: CloudSelectedR
 
 /** Keep a workspace's session list (CS-8) with the catalog, so it is on disk for the next launch. */
 export function cacheCloudSessions(orgId: string, workspaceId: string, sessions: RuntimeSession[], capabilities: string[] | null, now = Date.now()) {
+  if (cloudAgentsAccessDenied({ organizationId: orgId, workspaceId })) return;
   const current = state.orgs[orgId];
   if (!current) return;
   const previous = current.sessions[workspaceId];
@@ -463,6 +484,7 @@ export function pipelineReviewerIds(pipelines: RuntimeIssuePipeline[], known: re
 
 /** Keep a workspace's issue pipelines with the catalog (#433), so its issues show them while it sleeps. */
 export function cacheCloudPipelines(orgId: string, workspaceId: string, pipelines: RuntimeIssuePipeline[], now = Date.now(), knownReviewers: readonly string[] = []) {
+  if (cloudAgentsAccessDenied({ organizationId: orgId, workspaceId })) return;
   const current = state.orgs[orgId];
   if (!current) return;
   const previous = current.pipelines?.[workspaceId];
@@ -573,6 +595,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
   const running = flights.get(orgId);
   if (running) return running;
   const owner = state.owner;
+  const inboxAsk = inboxRevision;
   const flight = (async () => {
     const current = state.orgs[orgId];
     const requestedAt = now();
@@ -584,7 +607,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       wantRepositories ? api.cloudWorkspaceRepositories(cloudOrgArg(orgId)) : Promise.resolve(null),
     ]);
     // Signed out or another user while it ran, or (CS-18) the user left the organization: nothing lands.
-    if (state.owner !== owner) return;
+    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
     if (isMultiOrg(getAccount().status) && !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
     if (repositories.status === "fulfilled" && repositories.value) {
       patchOrg(orgId, { repositories: repositories.value.repositories, repositoriesAt: now() });
@@ -603,6 +626,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
         return;
       }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
+      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
       // The list is read every 30 s and names this person's role on every
       // workspace: a role changed by an owner shows here before the account
       // session is next renewed.
@@ -614,7 +638,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       if (errorText(list.reason) === "cloud_workspace_not_found") void refreshAccountRoles(true);
     }
   })().finally(() => {
-    flights.delete(orgId);
+    if (flights.get(orgId) === flight) flights.delete(orgId);
     schedulePoll(orgId);
   });
   flights.set(orgId, flight);
@@ -675,11 +699,12 @@ let feedPausedUntil = 0;
 
 /** An organization's selected repositories, every few minutes: the feed carries the workspace lists only. */
 async function refreshRepositories(orgId: string, owner: string | null, now: () => number): Promise<void> {
+  const inboxAsk = inboxRevision;
   const current = state.orgs[orgId];
   if (current?.repositoriesAt && now() - current.repositoriesAt <= REPOSITORIES_MAX_AGE_MS) return;
   try {
     const repositories = await api.cloudWorkspaceRepositories(cloudOrgArg(orgId));
-    if (state.owner !== owner || !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
+    if (state.owner !== owner || inboxAsk !== inboxRevision || !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
     if (repositories) patchOrg(orgId, { repositories: repositories.repositories, repositoriesAt: now() });
   } catch {
     // The picker reads them again when it opens; the rows do not depend on them.
@@ -714,6 +739,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
   if (feedFlight) return feedFlight;
   const owner = state.owner;
   const account = accountKey(getAccount().status);
+  const inboxAsk = inboxRevision;
   const asked = liveCloudOrgIds(getAccount().status);
   if (!asked.length) return Promise.resolve();
   let refused = false;
@@ -726,7 +752,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
     } catch (error) {
       await repositories;
       // Signed out or another user while it ran: nothing lands.
-      if (state.owner !== owner) return;
+      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
       const code = errorText(error);
       if (feedUnsupported(error)) {
         refused = true;
@@ -748,7 +774,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
       return;
     }
     await repositories;
-    if (state.owner !== owner) return;
+    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
     feedFailures = 0;
     // As of the answer: an organization the user left meanwhile gets nothing.
     const live = liveCloudOrgIds(getAccount().status);
@@ -788,7 +814,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
         const gone = new Set(feed.deletedWorkspaceIds ?? []);
         if (rows.some((item) => gone.has(item.workspace.id))) {
           await take(orgId, mergeFeedDelta(rows, { workspaces: [], tombstones: [], quota: state.orgs[orgId]?.quota ?? undefined }, feed.deletedWorkspaceIds ?? []));
-          if (state.owner !== owner) return;
+          if (state.owner !== owner || inboxAsk !== inboxRevision) return;
         }
         continue;
       }
@@ -807,7 +833,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
         ? { workspaces: entry.workspaces, tombstones: entry.tombstones ?? [], quota: entry.quota ?? undefined }
         : mergeFeedDelta(state.orgs[orgId]?.workspaces ?? [], { ...entry, tombstones: entry.tombstones ?? [] }, feed.deletedWorkspaceIds ?? []);
       await take(orgId, list);
-      if (state.owner !== owner) return;
+      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
       noteListedOrgRole(orgId, listedOrgManages(list, getAccount().status.memberWorkspaces === true), requestedAt);
     }
     // The cursor says "this desktop holds that catalog". Where part of it was
@@ -816,7 +842,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
   })().finally(() => {
     // Only its own flight: after an account switch a newer one may be running.
     if (feedFlight === flight) feedFlight = null;
-    if (state.owner !== owner) return;
+    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
     // No feed after all: each organization is listed on its own from now on.
     if (refused) for (const orgId of liveCloudOrgIds(getAccount().status)) void refreshCloudCatalog(orgId);
     schedulePoll();
@@ -1007,6 +1033,51 @@ function onAccessChange(orgId: string) {
   );
 }
 
+/** Inbox hints contain no display content. Revoke cached content before reauthorizing by list. */
+export function invalidateCloudInboxWorkspace(workspaceId: string, organizationId?: string, revoked = false) {
+  ++inboxRevision;
+  feedCursor = null;
+  let denialError: unknown;
+  if (revoked) {
+    forgetCloudReadMarkers(workspaceId);
+    try { denyCloudAgentsWorkspace(workspaceId); } catch (error) { denialError = error; }
+  }
+  const status = getAccount().status;
+  const affected = organizationId ? [organizationId] : [...new Set([
+    ...Object.keys(state.orgs),
+    ...(status.organizations ?? []).map((org) => org.id),
+    ...(status.identity?.organizationId ? [status.identity.organizationId] : []),
+  ])];
+  for (const orgId of affected) {
+    const org = state.orgs[orgId];
+    if (revoked) {
+      closeCloudConnection({ orgId, workspaceId });
+      closeWorkspaceConnection({ kind: "cloud", organizationId: orgId, workspaceId });
+      const workspaceKey = cloudWorkspaceKey(orgId, workspaceId);
+      dropCloudTerminals(workspaceKey);
+      dropEditors((entry) => entry.sessionId === workspaceKey || entry.source === workspaceKey);
+      const sessions = { ...org?.sessions };
+      const pipelines = { ...org?.pipelines };
+      delete sessions[workspaceId];
+      delete pipelines[workspaceId];
+      names.delete(workspaceId);
+      projectNames.delete(workspaceId);
+      providers.delete(workspaceId);
+      const createMemory = { ...state.createMemory };
+      delete createMemory[memoryKey(orgId, workspaceId)];
+      set({ ...state, createMemory, orgs: org ? { ...state.orgs, [orgId]: { ...org, sessions, pipelines, workspaces: org.workspaces.filter((item) => item.workspace.id !== workspaceId) } } : state.orgs });
+      void purgeCloudMirrors((mirrorOrg, id) => mirrorOrg !== orgId || id !== workspaceId);
+    }
+    const identity = getAccount().status.context?.account;
+    const revision = inboxRevision;
+    void flights.get(orgId)?.catch(() => {}).then(() => {
+      if (getAccount().status.context?.account === identity && inboxRevision === revision) void refreshCloudCatalog(orgId);
+    });
+    if (!flights.has(orgId)) void refreshCloudCatalog(orgId);
+  }
+  if (denialError) throw denialError;
+}
+
 // ---- Saved cache -----------------------------------------------------------
 
 const CATALOG_VERSION = 1;
@@ -1116,16 +1187,29 @@ async function saveNow() {
 
 /** Read the saved catalog; organizations the network already answered for keep the live rows. */
 async function loadSaved(owner: string, revision: string) {
+  const identityAsk = catalogGeneration;
+  const inboxAsk = inboxRevision;
   let saved: Pick<CloudCatalogState, "orgs" | "createMemory"> | null = null;
   try {
     saved = parseCatalog(await api.cloudCatalogLoad(revision));
   } catch {
     saved = null;
   }
-  if (state.owner !== owner) return;
+  if (state.owner !== owner || identityAsk !== catalogGeneration) return;
+  if (inboxAsk !== inboxRevision) saved = null;
+  const createMemory = { ...(saved?.createMemory ?? {}), ...state.createMemory };
   const orgs = { ...(saved?.orgs ?? {}) };
   for (const [orgId, org] of Object.entries(state.orgs)) if (org.source === "live" || !orgs[orgId]) orgs[orgId] = org;
-  set({ ...state, loaded: true, orgs, createMemory: { ...(saved?.createMemory ?? {}), ...state.createMemory } });
+  for (const [orgId, org] of Object.entries(orgs)) {
+    const allowed = (id: string) => !cloudAgentsAccessDenied({ organizationId: orgId, workspaceId: id });
+    for (const item of org.workspaces) if (!allowed(item.workspace.id)) delete createMemory[memoryKey(orgId, item.workspace.id)];
+    orgs[orgId] = { ...org,
+      workspaces: org.workspaces.filter((item) => allowed(item.workspace.id)),
+      sessions: Object.fromEntries(Object.entries(org.sessions).filter(([id]) => allowed(id))),
+      pipelines: Object.fromEntries(Object.entries(org.pipelines ?? {}).filter(([id]) => allowed(id))),
+    };
+  }
+  set({ ...state, loaded: true, orgs, createMemory });
   // What was saved for an organization the user has since left is not shown again.
   if (isMultiOrg(getAccount().status)) dropLeftOrganizations(getAccount().status);
 }
@@ -1153,7 +1237,11 @@ function syncAccount() {
   const signedIn = status.state === "signed-in" && !!status.identity;
   const owner = signedIn ? status.identity!.email : null;
   const revision = signedIn ? (status.context?.revision ?? null) : null;
-  if (owner !== state.owner) {
+  const identity = signedIn ? (status.context?.account ?? (owner === state.owner ? catalogIdentity : owner)) : null;
+  if (owner !== state.owner || identity !== catalogIdentity) {
+    ++inboxRevision;
+    catalogIdentity = identity;
+    ++catalogGeneration;
     // Signed out, or another user: nothing of the previous one stays in memory,
     // its agent tabs and unsent drafts included (another account may open the same shared workspace).
     // The file stays for the same user and is deleted natively if another signs in.
@@ -1204,6 +1292,7 @@ function dropLeftOrganizations(status: AccountStatus) {
   if (!left.length && !leftMemory.length) return;
   const orgs = { ...state.orgs };
   for (const orgId of left) {
+    for (const item of orgs[orgId]?.workspaces ?? []) forgetCloudReadMarkers(item.workspace.id);
     delete orgs[orgId];
     listedAt.delete(orgId);
     flights.delete(orgId);
@@ -1251,6 +1340,9 @@ export function resetCloudCatalog() {
   clearTimers();
   clearFeedTimer();
   resetFeed();
+  ++inboxRevision;
+  catalogIdentity = null;
+  ++catalogGeneration;
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = null;
   booted = false;

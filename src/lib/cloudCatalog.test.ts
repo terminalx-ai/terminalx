@@ -1673,3 +1673,121 @@ describe("attention across catalog refreshes (#934)", () => {
   });
 
 });
+
+// Inbox invalidations must win over list requests made before access changed.
+describe("inbox catalog invalidation", () => {
+  it("removes private cached content immediately and rejects an older in-flight list", async () => {
+    const { invalidateCloudInboxWorkspace } = await import("./cloudCatalog");
+    signIn();
+    await ingestCloudList({ workspaces: [item("private")] }, ORG);
+    cacheCloudSessions(ORG, "private", [{ id: "session", title: "secret", tabs: [] } as never], null);
+    let resolve!: (list: CloudWorkspaceList) => void;
+    mocks.api.cloudWorkspaces.mockReturnValueOnce(new Promise((r) => { resolve = r; })).mockResolvedValue({ workspaces: [] });
+    const old = refreshCloudCatalog(ORG);
+    invalidateCloudInboxWorkspace("private", undefined, true);
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+    expect(getCloudCatalog().orgs[ORG].sessions.private).toBeUndefined();
+    resolve({ workspaces: [item("private", { name: "stale secret" })] });
+    await old;
+    await Promise.resolve(); await Promise.resolve();
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+  });
+
+  it("clears catalog state when the native account changes even with the same email", async () => {
+    vi.useFakeTimers();
+    signIn();
+    mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:1", account: "account-a" } };
+    bootCloudCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    await ingestCloudList({ workspaces: [item("private")] }, ORG);
+    mocks.api.cloudWorkspaces.mockImplementation(() => new Promise(() => {}));
+    mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:2", account: "account-b" } };
+    for (const listener of mocks.listeners) listener();
+    expect(getCloudCatalog().orgs[ORG]?.workspaces ?? []).toEqual([]);
+  });
+
+  it("folds authorized catalog read markers without rolling back newer inbox markers", async () => {
+    const { configureCloudReadMarkers, reconcileCloudReadMarker, cloudActivityRead } = await import("./cloudReadMarkers");
+    configureCloudReadMarkers("a", null);
+    reconcileCloudReadMarker(ORG, "w", { sessionId: "s", readAt: "2026-11-14T11:00:00Z" });
+    const row = { ...item("w"), readMarkers: [{ sessionId: "s", readAt: "2026-11-14T10:00:00Z" }] };
+    await ingestCloudList({ workspaces: [row] }, ORG);
+    expect(cloudActivityRead(ORG, "w", "s", "2026-11-14T11:00:00Z")).toBe(true);
+    await ingestCloudList({ workspaces: [item("w", { you: { role: "none" } })] }, ORG);
+    expect(cloudActivityRead(ORG, "w", "s", "2026-11-14T10:00:00Z")).toBe(false);
+    configureCloudReadMarkers(null, null);
+  });
+});
+
+it("finishes catalog loading without restoring a saved row invalidated during its disk read", async () => {
+  vi.useFakeTimers();
+  const { invalidateCloudInboxWorkspace } = await import("./cloudCatalog");
+  let resolve!: (value: unknown) => void;
+  mocks.api.cloudCatalogLoad.mockReturnValue(new Promise((r) => { resolve = r; }));
+  mocks.api.cloudWorkspaces.mockImplementation(() => new Promise(() => {}));
+  signIn(); bootCloudCatalog();
+  invalidateCloudInboxWorkspace("private", undefined, true);
+  resolve({ version: 1, orgs: { [ORG]: org([item("private")]) }, createMemory: {} });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getCloudCatalog().loaded).toBe(true);
+  expect(getCloudCatalog().orgs[ORG]?.workspaces ?? []).toEqual([]);
+});
+
+
+it("rejects a delayed catalog list across A -> B -> A with an unchanged email", async () => {
+  vi.useFakeTimers();
+  let resolve!: (list: CloudWorkspaceList) => void;
+  mocks.api.cloudWorkspaces.mockReturnValueOnce(new Promise((r) => { resolve = r; })).mockResolvedValue({ workspaces: [] });
+  signIn();
+  mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:1", account: "a" } };
+  bootCloudCatalog(); await vi.advanceTimersByTimeAsync(0);
+  for (const [account, revision] of [["b", "s:2"], ["a", "s:3"]]) {
+    mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision, account } };
+    for (const listener of mocks.listeners) listener();
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  resolve({ workspaces: [item("old-account-secret")] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getCloudCatalog().orgs[ORG]?.workspaces ?? []).toEqual([]);
+  expect(lastKnownWorkspace("old-account-secret")).toBeNull();
+});
+
+it("does not restore revoked content through a late operation or runtime session callback", async () => {
+  const { invalidateCloudInboxWorkspace } = await import("./cloudCatalog");
+  signIn();
+  const row = item("revoked-snapshot");
+  await ingestCloudList({ workspaces: [row] }, ORG);
+  mocks.api.cloudWorkspaces.mockImplementation(() => new Promise(() => {}));
+  invalidateCloudInboxWorkspace(row.workspace.id, undefined, true);
+  applyCloudSnapshot({ workspace: row.workspace, operation: { id: "old" } as never });
+  cacheCloudSessions(ORG, row.workspace.id, [{ id: "old-session", title: "private", tabs: [] } as never], null);
+  expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+  expect(getCloudCatalog().orgs[ORG].sessions[row.workspace.id]).toBeUndefined();
+});
+
+
+it("closes a revoked workspace before the catalog has loaded its organization", async () => {
+  const { invalidateCloudInboxWorkspace } = await import("./cloudCatalog");
+  signIn();
+  mocks.api.cloudWorkspaces.mockImplementation(() => new Promise(() => {}));
+  invalidateCloudInboxWorkspace("early-revoke", undefined, true);
+  expect(mocks.closeWorkspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: ORG, workspaceId: "early-revoke" });
+  expect(getCloudCatalog().orgs[ORG]).toBeUndefined();
+});
+
+
+it("filters a previously saved private row using the durable account denial before rendering it", async () => {
+  vi.useFakeTimers();
+  const { denyCloudAgentsWorkspace, setCloudAgentAccount, setCloudAgentsAccess, resetCloudAgents } = await import("./cloudAgents");
+  const scope = { organizationId: ORG, workspaceId: "disk-revoked" };
+  setCloudAgentAccount("disk-owner");
+  denyCloudAgentsWorkspace(scope.workspaceId);
+  // Recreate account memory as on relaunch; only the durable denial remains.
+  setCloudAgentAccount(null); setCloudAgentAccount("disk-owner");
+  mocks.api.cloudCatalogLoad.mockResolvedValue({ version: 1, orgs: { [ORG]: org([item(scope.workspaceId)]) }, createMemory: {} });
+  mocks.api.cloudWorkspaces.mockImplementation(() => new Promise(() => {}));
+  signIn(); bootCloudCatalog(); await vi.advanceTimersByTimeAsync(0);
+  expect(getCloudCatalog().loaded).toBe(true);
+  expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+  setCloudAgentsAccess(scope, true); setCloudAgentAccount(null); resetCloudAgents();
+});

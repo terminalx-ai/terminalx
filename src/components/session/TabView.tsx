@@ -28,7 +28,7 @@ import { History, MessageSquare, Play, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { openTerminal, useTerminals } from "@/lib/terminal";
+import { getTerminalState, openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
@@ -49,6 +49,9 @@ import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEnt
 import { interruptUnanswered } from "@/types/events";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
+import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
+
+const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -225,6 +228,40 @@ export function TabView({
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
   const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || (viewError && !viewRefusal) ? classifyRecovery(error ?? viewError!) : null);
+  const loginTurn = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (!ev.subagent && ev.payload.type === "user_message" && !ev.payload.queued && ev.payload.text !== RECOVERY_PROMPT) return ev.seq;
+    }
+  }, [events]);
+
+  // One login terminal and one automatic authenticated retry belong to this turn.
+  // Replacing or unmounting its view revokes even work already awaiting Stop.
+  const initialLogin = useMemo(newLoginIncident,
+    [backend.key, backend.generation, session.id, tab.id, tab.harness, conversation, tab.front, loginTurn]);
+  const [replacementLogin, setReplacementLogin] = useState<{ initial: typeof initialLogin; incident: typeof initialLogin } | null>(null);
+  const loginIncident = replacementLogin?.initial === initialLogin ? replacementLogin.incident : initialLogin;
+  const currentLogin = useRef(loginIncident);
+  currentLogin.current = loginIncident;
+  const [loginPending, setLoginPending] = useState<typeof loginIncident | null>(null);
+  const continuationLogin = useRef<typeof loginIncident | null>(null);
+  useEffect(() => {
+    loginIncident.cancelled = false;
+    return () => { loginIncident.cancelled = true; };
+  }, [loginIncident]);
+  const cancelLogin = () => {
+    currentLogin.current.cancelled = true;
+    setLoginPending(null);
+  };
+  const restoreContinuationLogin = () => {
+    const incident = continuationLogin.current;
+    continuationLogin.current = null;
+    if (!incident || incident !== currentLogin.current || incident.cancelled) return;
+    incident.paused = false;
+    // Opening the dialog stops the process and clears its recovery event.
+    // Dismissing it leaves the interrupted turn available to sign in/retry.
+    setError(RECOVERY_MESSAGES.signed_out);
+  };
 
 
   const backendRef = useRef(backend);
@@ -340,6 +377,8 @@ export function TabView({
     async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
       if (blockedRef.current) throw new Error(blockedRef.current);
+      currentLogin.current.cancelled = true;
+      setLoginPending(null);
       setError(null);
       setBusyRefused(null);
       setStopped(false);
@@ -453,14 +492,19 @@ export function TabView({
       setError(STOP_REFUSED);
       return;
     }
+    const incident = currentLogin.current;
+    setLoginPending(null);
     if (recoveryLock.current) {
+      incident.cancelled = true;
       actions.rejected("stop", "in_progress", surface);
       return;
     }
+    incident.paused = true;
     recoveryLock.current = true;
     setRecovering(true);
     const done = actions.start("stop", surface);
     void backend.stop(tab.id).then(() => {
+      incident.cancelled = true;
       backend.setTabStatus(tab.id, "idle");
       // A queued cloud stop ends the turn on the runtime; there is nothing local to resume.
       if (backend.caps.recovery) setStopped(true);
@@ -472,6 +516,7 @@ export function TabView({
       setError(local ? safeError(e) : commandError(e));
       done("failed", failure(e));
     }).finally(() => {
+      incident.paused = false;
       recoveryLock.current = false;
       setRecovering(false);
     });
@@ -491,7 +536,7 @@ export function TabView({
   // One recovery at a time. It sends through the backend, not the composer's
   // `send`, whose failure would write the message into an empty draft. A
   // second press while one runs is told as rejected (#815).
-  const recover = async (action: RecoveryAction, surface: Surface, sendRecovery: () => ReturnType<SessionBackend["send"]>) => {
+  const recover = async (action: RecoveryAction, surface: Surface, sendRecovery: () => Promise<Awaited<ReturnType<SessionBackend["send"]>> | null>) => {
     if (recoveryLock.current) {
       actions.rejected(action, "in_progress", surface);
       return;
@@ -501,6 +546,7 @@ export function TabView({
     const done = actions.start(action, surface);
     try {
       const out = await sendRecovery();
+      if (!out) { done("cancelled"); return; }
       setStopped(false);
       for (const ev of out.events) applyEvent(ev);
       setError(null);
@@ -515,20 +561,28 @@ export function TabView({
     finally { recoveryLock.current = false; setRecovering(false); }
   };
 
-  const retry = (model?: string, surface: Surface = "banner") => recover(model ? "choose_model" : "retry", surface, async () => {
-    // Await confirmed local exit before starting a replacement. Remote
-    // outcomes remain unknown and the continuation asks to verify them.
-    await backend.stop(tab.id);
-    if (model) {
-      await backend.setModel(tab.id, model);
-      backend.patchTab(tab.id, { model });
-    }
-    return backend.send(tab.id, RECOVERY_PROMPT, []);
-  });
+  const retry = (model?: string, surface: Surface = "banner") => {
+    if (!model && recovery === "signed_out" && signInAgent && !loginIncident.cancelled) return requestSignIn();
+    cancelLogin();
+    return recover(model ? "choose_model" : "retry", surface, async () => {
+      // Await confirmed local exit before starting a replacement. Remote
+      // outcomes remain unknown and the continuation asks to verify them.
+      await backend.stop(tab.id);
+      if (model) {
+        await backend.setModel(tab.id, model);
+        backend.patchTab(tab.id, { model });
+      }
+      return backend.send(tab.id, RECOVERY_PROMPT, []);
+    });
+  };
 
   // The agent carries on in the same conversation (#665). Nothing is stopped: a
   // send starts an agent whose process has gone, and one still running takes it as its next turn.
-  const sendContinue = (surface: Surface = "banner") => recover("continue_here", surface, () => backend.send(tab.id, CONTINUE_PROMPT, []));
+  const sendContinue = (surface: Surface = "banner") => {
+    if (recovery === "signed_out" && signInAgent && !loginIncident.cancelled) return requestSignIn();
+    cancelLogin();
+    return recover("continue_here", surface, () => backend.send(tab.id, CONTINUE_PROMPT, []));
+  };
 
   // The agent never received the last prompt (#663): it goes again as it was sent, images and all.
   const resend = async () => {
@@ -631,18 +685,89 @@ export function TabView({
   const signInAgent = !local || recovery !== "signed_out"
     ? undefined
     : ptyFirst && tab.harness === "claude"
-      ? async () => {
-          try {
-            await enterTerminalView(session, tab);
-            // The command, then Return on its own, as a key and not as pasted text.
-            await pty.write(paneId, "/login");
-            await new Promise((done) => setTimeout(done, 120));
-            await pty.write(paneId, "\r");
-          } catch (e) { setError(safeError(e)); }
+      ? async (incident: typeof loginIncident) => {
+          await enterTerminalView(session, tab);
+          if (!loginCurrent(incident)) throw new Error("Sign-in cancelled");
+          // The command, then Return on its own, as a key and not as pasted text.
+          await pty.write(paneId, "/login");
+          await new Promise((done) => setTimeout(done, 120));
+          if (!loginCurrent(incident)) throw new Error("Sign-in cancelled");
+          await pty.write(paneId, "\r");
         }
       : tab.harness === "codex"
-        ? () => void openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" }).catch((e) => setError(safeError(e)))
+        ? async (incident: typeof loginIncident) => {
+            const pane = await openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" });
+            incident.loginPane = pane.id;
+          }
         : undefined;
+
+  const loginAllowed = useRef(false);
+  loginAllowed.current = local && !readOnly && !session.worktreeRemoved && backend.caps.write && !backend.readOnlyReason && !gate?.blocked && !transcript.pendingAsks.length && !continueOpen && !continuationOpen;
+  const loginCurrent = (incident: typeof loginIncident) => currentLogin.current === incident && !incident.cancelled && !incident.paused && loginAllowed.current;
+  const refreshLogin = useSignInReadiness(loginPending === loginIncident && loginCurrent(loginIncident) && !recovering ? tab.harness : null, () => {
+    const incident = loginIncident;
+    if (!loginCurrent(incident) || incident.opening || incident.consumed || recovery !== "signed_out" || recoveryLock.current) return;
+    setLoginPending(null);
+    void recover("retry", "banner", async () => {
+      await backend.stop(tab.id);
+      if (!loginCurrent(incident)) return null;
+      incident.consumed = true;
+      return backend.send(tab.id, RECOVERY_PROMPT, []);
+    });
+  });
+
+  async function requestSignIn() {
+    if (!signInAgent || !loginAllowed.current || recoveryLock.current) return;
+    let incident = currentLogin.current;
+    if (incident.cancelled) {
+      // Stop revokes the old automatic attempt permanently. An explicit
+      // Sign in starts a new incident; late work from the old one stays revoked.
+      incident = newLoginIncident();
+      currentLogin.current = incident;
+      setReplacementLogin({ initial: initialLogin, incident });
+    }
+    if (!loginCurrent(incident) || incident.opening) return;
+    if (incident.loginPane && !getTerminalState().panes.some(pane => pane.id === incident.loginPane && !pane.exited)) {
+      // Login commands exit on success too. Verify credentials before deciding
+      // that this terminal needs to be opened again.
+      incident.opening = true;
+      const readiness = await checkAgentReadiness(tab.harness);
+      incident.opening = false;
+      if (!loginCurrent(incident) || recoveryLock.current) return;
+      if (readiness.state !== "signed_out") {
+        incident.consumed = false;
+        if (loginPending === incident) await refreshLogin();
+        else setLoginPending(incident);
+        return;
+      }
+      incident.loginPane = null;
+      incident.launched = false;
+      incident.consumed = false;
+      setLoginPending(null);
+    }
+    if (incident.launched) {
+      // An explicit retry may recover a failed delivery; readiness events
+      // alone never re-arm a consumed automatic attempt.
+      incident.consumed = false;
+      if (loginPending === incident) await refreshLogin();
+      else setLoginPending(incident);
+      return;
+    }
+    incident.launched = true;
+    incident.opening = true;
+    const done = actions.start("sign_in");
+    try {
+      await signInAgent(incident);
+      // Opening a terminal proves nothing about credentials. Readiness probes
+      // while pending, on return, PTY exit, or Retry decide whether the turn can resume.
+      if (currentLogin.current === incident && !incident.cancelled) setLoginPending(incident);
+      done("ok");
+    } catch (e) {
+      incident.launched = false;
+      if (loginCurrent(incident)) setError(safeError(e));
+      done("failed", failure(e));
+    } finally { incident.opening = false; }
+  }
 
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
@@ -651,14 +776,18 @@ export function TabView({
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}
-        onSignIn={signInAgent ? () => {
-          const done = actions.start("sign_in");
-          void Promise.resolve(signInAgent()).then(() => done("ok"), () => done("failed"));
-        } : undefined}
+        signInPending={loginPending === loginIncident && !loginIncident.cancelled}
+        onSignIn={signInAgent ? () => void requestSignIn() : undefined}
         onContinue={() => {
           if (recoveryLock.current) {
             actions.rejected("continue_new", "in_progress");
             return;
+          }
+          // A dialog is tentative: suspend automatic retry until dismissal,
+          // and revoke it only when the handoff is actually delivered.
+          if (recovery === "signed_out") {
+            loginIncident.paused = true;
+            continuationLogin.current = loginIncident;
           }
           recoveryLock.current = true;
           setRecovering(true);
@@ -671,6 +800,7 @@ export function TabView({
             setContinueOpen(true);
           }).catch(e => {
             setError(safeError(e));
+            restoreContinuationLogin();
             done("failed", failure(e));
           }).finally(() => {
             recoveryLock.current = false;
@@ -952,6 +1082,8 @@ export function TabView({
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {
+        if (continuationLogin.current === currentLogin.current) cancelLogin();
+        continuationLogin.current = null;
         dialogShown.end("submitted");
         continueDone.current?.("ok", { targetSession: to.sessionId, targetTab: to.tabId });
         continueDone.current = null;
@@ -961,6 +1093,7 @@ export function TabView({
         continueDone.current?.("cancelled");
         continueDone.current = null;
         setContinueOpen(false);
+        restoreContinuationLogin();
       }} />}
     {collabLive && notesOpen && shared?.client ? (
       <div className="flex min-h-0 flex-1">
