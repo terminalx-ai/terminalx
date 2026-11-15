@@ -75,6 +75,7 @@ pub struct Started {
     pub session_id: String,
     pub tab_id: String,
     pub branch: Option<String>,
+    pub base_commit: Option<String>,
 }
 
 /// What a worker in a turn has been doing: what tells a stall from a long build.
@@ -188,9 +189,12 @@ pub trait Host: Send + Sync {
     fn retry_waits(&self, run_id: &str);
     fn limits(&self, project_path: &str) -> OrchestratorLimits;
     /// Make the piece's worker: a session of the lead, in a worktree of its
-    /// own on a branch cut from the lead's, with the piece's agent, model and
+    /// own on a branch with the lead's code and accepted dependencies, with its agent, model and
     /// effort, in `mode`. Nothing is sent to it yet.
     fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started>;
+    /// Prepare a trusted baseline from the current lead and accepted dependencies,
+    /// without changing a checkout. Used for new workers and send-back recovery.
+    fn worker_base(&self, run: &Run, piece: &Piece) -> anyhow::Result<String>;
     /// Make a new worker safe to brief: its branch pushes nowhere by itself. Asked again
     /// for the same session when it failed, so it must be safe to repeat.
     fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()>;
@@ -531,7 +535,7 @@ fn tell_started(host: &dyn Host, start: &Start, decided: &str) {
     host.tell_lead(
         run,
         &format!(
-            "{decided}{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
+            "{decided}{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and follow the results: pieces start automatically when their dependencies pass verification and worker slots are available. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
         ),
     );
 }
@@ -543,15 +547,13 @@ fn tell_started(host: &dyn Host, start: &Start, decided: &str) {
 enum Launch {
     /// Every piece whose dependencies are done: what the lead asks for.
     Ready,
-    /// Only pieces whose last try fell short and whose next one waits. What
-    /// a worker's turn ending starts by itself: a piece a `done` report
-    /// unblocked is the lead's to start, once it has read that report.
+    /// Only pieces whose last try fell short and whose next one waits.
     Retries,
-    /// Only the pieces a limit or the budget held, next tries among them:
-    /// what a freed slot or a resume starts. A piece that became ready since
-    /// waits for the lead, who may have to collect a finished piece's branch
-    /// before it starts.
+    /// Only the pieces a limit or the budget held, next tries among them.
     Held,
+    /// Queued first tries and capacity-held work in an active run. Failed
+    /// launches and retries not yet held remain on their explicit retry path.
+    Scheduled,
 }
 
 /// Start the next try of every piece whose last one fell short. Called by
@@ -704,6 +706,9 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
     let briefless = || run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some());
     let ready: Vec<String> = match launch {
         Launch::Ready => briefless().chain(run.ready()).map(|piece| piece.id.clone()).collect(),
+        Launch::Scheduled => briefless().filter(|piece| capacity_held(piece))
+            .chain(run.ready().into_iter().filter(|piece| schedulable(piece)))
+            .map(|piece| piece.id.clone()).collect(),
         Launch::Retries => run.ready().into_iter().filter(|piece| piece.retry_waits()).map(|piece| piece.id.clone()).collect(),
         Launch::Held => briefless()
             .filter(|piece| piece.queued_for.is_some())
@@ -782,6 +787,7 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
                     let attempt = piece.tries.last_mut().expect("a try was just planned");
                     attempt.worker = Some(reference.clone());
                     attempt.branch = worker.branch.clone();
+                    attempt.base_commit = worker.base_commit.clone();
                     attempt.started = Some(crate::store::index::now());
                 })?;
                 (reference, worker.branch)
@@ -1055,7 +1061,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     })
     .map_err(EngineError::internal)?;
     // A runtime that restarted has no watcher yet for the workers it found running.
-    if after.in_turn() > 0 || after.pieces.iter().any(|piece| piece.state == PieceState::Verifying) || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
+    if has_scheduled_work(&after) || after.in_turn() > 0 || after.pieces.iter().any(|piece| piece.state == PieceState::Verifying) || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
         host.watch();
     }
     // Past its budget: nothing new starts from here on, but what this read found is still
@@ -1516,6 +1522,14 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
             error.details = json!({"piece": piece_id, "inTurn": run.in_turn(), "workers": run.limits.workers});
             return Err(error);
         }
+        // The lead may have integrated other pieces since this try started.
+        // Pin those trusted changes before reopening it, and replay only the
+        // worker's own commits from its previous baseline onto the new one.
+        let base = host.worker_base(&run, piece).map_err(|error| EngineError::new(
+            "recovery_base_unavailable", format!("Piece {piece_id} was not sent back: its recovery baseline could not be prepared: {error:#}"),
+            Some("Resolve the dependency or checkout problem, then send the piece back again."),
+        ))?;
+        let text = super::merge::brief_with_base(&run, piece, Some(&base)).expect("the piece has a failed merge");
         // Back at work: the try is open again, and what was checked is not what it will report.
         host.check_reset(&worker);
         let (after, ()) = store::update(id, |run| {
@@ -1525,6 +1539,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
                 piece.merge = None;
                 if let Some(attempt) = piece.tries.last_mut() {
                     (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None);
+                    attempt.base_commit = Some(base.clone());
                 }
             }
             settle(run);
@@ -2296,19 +2311,19 @@ pub fn fill_slots(host: &dyn Host) {
         Ok(runs) => runs,
         Err(error) => return log::warn!("read the runs to start queued pieces: {error:#}"),
     };
-    for run in runs.iter().filter(|run| matches!(run.state, RunState::Running | RunState::Failed)) {
-        // Ready pieces a limit held (a next try among them), and pieces whose session waits for its brief behind one.
-        // A next try no limit has held yet is `start_retries`'s to start, not a freed slot's.
-        let held = |piece: &&Piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit));
-        if !run.ready().iter().any(held) && !run.pieces.iter().filter(|piece| piece.held.is_some() && piece.worker.is_some()).any(|piece| held(&piece)) {
+    // Refresh every active run before counting global capacity, including runs
+    // with no queue of their own whose last worker disappeared or finished.
+    for run in runs.iter().filter(|run| run.state.followed()) {
+        if let Err(error) = refreshed(host, &run.id) {
+            log::warn!("read run {} before starting queued pieces: {error}", run.id);
+        }
+    }
+    for run in runs {
+        let Ok(run) = stored(&run.id) else { continue };
+        if !has_scheduled_work(&run) {
             continue;
         }
-        // Read first: a worker whose session was deleted mid-turn holds its slot until a read
-        // finds it gone, and no turn of it ends to say so.
-        if let Err(error) = refreshed(host, &run.id) {
-            log::warn!("read run {} before starting its queued pieces: {error}", run.id);
-        }
-        match launch_ready(host, &run.id, Launch::Held) {
+        match launch_ready(host, &run.id, Launch::Scheduled) {
             Ok(start) if !start.started.is_empty() => log::info!("run {}: started queued pieces {}", run.id, start.started.join(", ")),
             Ok(_) => {}
             Err(error) => log::warn!("start the queued pieces of run {}: {error}", run.id),
@@ -2347,16 +2362,21 @@ pub fn watch(host: &dyn Host) -> bool {
                 None => {}
             }
         }
-        if run.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
+        // Recover missed turn-end events too: their dependencies may not yet
+        // be ready, so there need not be a capacity-held piece to trigger a fill.
+        if run.state.followed() {
             if let Err(error) = refreshed(host, &run.id) {
-                log::warn!("read the verifiers of run {}: {error}", run.id);
+                log::warn!("read the workers and verifiers of run {}: {error}", run.id);
             }
         }
         if let Err(error) = mark_stalls(host, &run.id, now) {
             log::warn!("check run {} for stalled workers: {error}", run.id);
         }
-        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0 || run.pieces.iter().any(|piece| piece.state == PieceState::Verifying || capacity_held(piece)));
-        fill |= matches!(run.state, RunState::Running | RunState::Failed) && run.pieces.iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit)));
+        if let Ok(current) = stored(&run.id) {
+            let queued = has_scheduled_work(&current);
+            more |= current.in_turn() > 0 || current.pieces.iter().any(|piece| piece.state == PieceState::Verifying) || queued;
+            fill |= queued;
+        }
     }
     // What waits for a slot is looked at on every tick, not only when a turn ends: a slot can
     // free up without one (a worker's session deleted mid-turn).
@@ -2448,6 +2468,16 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
         Err(error) => log::warn!("read the runs after {session_id} ended a turn: {error:#}"),
     }
     None
+}
+
+fn schedulable(piece: &Piece) -> bool {
+    capacity_held(piece) || (piece.state == PieceState::Queued && !piece.retry_waits())
+}
+
+fn has_scheduled_work(run: &Run) -> bool {
+    matches!(run.state, RunState::Running | RunState::Failed)
+        && (run.ready().into_iter().any(schedulable)
+            || run.pieces.iter().any(|piece| piece.held.is_some() && piece.worker.is_some() && capacity_held(piece)))
 }
 
 fn capacity_held(piece: &Piece) -> bool {

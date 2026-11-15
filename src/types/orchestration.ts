@@ -196,6 +196,7 @@ export interface PieceTry {
   outputTokens?: number;
   /** A try the lead took over: the commit its branch was at then. */
   fromCommit?: string;
+  baseCommit?: string;
   started?: string;
   ended?: string;
 }
