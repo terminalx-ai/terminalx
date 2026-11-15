@@ -161,5 +161,49 @@ def keepalive(directory):
             print(f"  lost after {m['connectedForMs'] / 1000:.0f} s connected, path {m['path']}: {m['cause']}")
 
 
+def idle(directory):
+    """Idle survival runs: one launch per file, idle on a quiet screen, then one trip to the background."""
+    print("| run | keep-alive | span min | connects | drops | drops 1001 | drops 4408 | connected before drop, median s | p90 s | max s | timer keep-alives sent | answered | failed | reconnect median ms | p90 ms | probe at the end |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for path in sorted(pathlib.Path(directory).glob("*.jsonl")):
+        marks = load(path)
+        head = marks[0]
+        connects = [m for m in marks if m["name"] == "14.connected"]
+        lost = [m for m in marks if m["name"] == "conn.lost"]
+        spans = [m["connectedForMs"] / 1000 for m in lost]
+        # A send within 1 s of a connect is the request every connect makes, not the timer.
+        timer_sent = [m for m in marks if m["name"] == "14.keepalive.sent"
+                      and not any(0 <= m["wall"] - c["wall"] < 1000 for c in connects)]
+        ok = [m for m in marks if m["name"] == "14.keepalive.ok"]
+        failed = [m for m in marks if m["name"] == "14.keepalive.failed"]
+        # Answers to timer sends: the first answer of the same generation after the send.
+        answered = 0
+        for s in timer_sent:
+            if any(o["generation"] == s["generation"] and o["wall"] >= s["wall"] for o in ok):
+                answered += 1
+        reconnect = []
+        for m in lost:
+            nxt = next((c for c in connects if c["wall"] > m["wall"]), None)
+            if nxt:
+                reconnect.append(nxt["wall"] - m["wall"])
+        fg = first(marks, "13.foreground")
+        probe = "none"
+        if fg:
+            if fg.get("lost"):
+                probe = "already down at return"
+            elif first(marks, "13.resume-probe.ok", fg["wall"]):
+                probe = f"answered in {first(marks, '13.resume-probe.ok', fg['wall'])['rttMs']:.0f} ms"
+            elif first(marks, "13.resume-probe.failed", fg["wall"]):
+                probe = "no answer in 1.5 s"
+        span = (marks[-1]["wall"] - marks[0]["wall"]) / 60000
+        c1001 = sum(1 for m in lost if "1001" in (m.get("cause") or ""))
+        c4408 = sum(1 for m in lost if "4408" in (m.get("cause") or ""))
+        def fmt(values, q=None, f=median):
+            return f"{(nearest_rank(values, q) if q else f(values)):.0f}" if values else "-"
+        print(f"| {path.stem} | {head.get('keepAliveMs')} ms | {span:.1f} | {len(connects)} | {len(lost)} | {c1001} | {c4408} | "
+              f"{fmt(spans)} | {fmt(spans, 0.9)} | {fmt(spans, f=max)} | {len(timer_sent)} | {answered} | {len(failed)} | "
+              f"{fmt(reconnect)} | {fmt(reconnect, 0.9)} | {probe} |")
+
+
 if __name__ == "__main__":
-    {"cold": cold, "warm": warm, "keepalive": keepalive}[sys.argv[1]](sys.argv[2])
+    {"cold": cold, "warm": warm, "keepalive": keepalive, "idle": idle}[sys.argv[1]](sys.argv[2])

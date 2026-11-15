@@ -5,9 +5,9 @@ comes from a raw file under `data/`, and the summary files next to them were
 produced from those raw files by `measurement-patch/analyze.py`. Anything not
 measured is marked "not measured" with the reason.
 
-Status: cold start, warm return and the drops while connected are measured. The
-battery runs are in progress: one hour per run, run by hand on the phone (see
-"Battery cost of the keep-alive").
+Status: cold start, warm return and the drops while connected are measured.
+Battery cost is not measured: the person chose to skip the battery runs. The
+idle survival runs are in progress.
 
 ## Method
 
@@ -189,51 +189,80 @@ Raw: `data/smoke/smoke-1.jsonl`, `data/cold-direct/*.jsonl`,
 
 ## Battery cost of the keep-alive
 
-Status: **in progress**. Nothing in this section is measured yet.
+Status: **not measured, by the person's choice.** No battery or energy number
+in this note.
 
-Plan, as agreed with the person: one hour per run, screen on (Auto-Lock off,
-auto-brightness off, brightness at about half), phone off the charger, Low
-Power Mode off, home Wi-Fi.
+What happened:
 
-- Intervals: none (baseline), 20 s, 30 s (today), 45 s (the top of the
-  `connection-path.md` range).
-- Screens: the sessions list idle; a conversation with a streaming
-  transcript; the terminal view with a tab printing a line each second.
-- That makes 12 runs on Wi-Fi. Mobile data is not planned: the person chose
-  Wi-Fi only.
+- The plan was one hour per run, screen on, for keep-alive none (baseline),
+  20 s, 30 s and 45 s, on three screens: 12 runs, about 13 hours with the
+  switchovers.
+- Instruments on the Mac could not record the phone over Wi-Fi (the phone has
+  no cable link):
+  - `xcrun xctrace record --template 'Power Profiler' --device <ECID> --attach TerminalX --time-limit 10s`
+    failed with "Timed out waiting for device to boot" (exit 13).
+    `xctrace list devices` lists the phone under "Devices Offline", while
+    `devicectl` shows it connected.
+  - `--all-processes` instead recorded the Mac, for 0 s, with
+    "Location Energy Model cannot handle a target type of 'All Processes'"
+    (exit 2).
+  - With the CoreDevice identifier, xctrace said "No devices found" (exit 1).
+- The fallback was the phone's own Performance Trace (Settings > Developer),
+  started by the person, then AirDropped and read with `xctrace export`
+  (xctrace 16.0 on this Mac has the Power Profiler template).
+- The first try launched run 1 (sessions list, keep-alive off) at 15:24. At
+  16:55 the person checked the phone: no trace was recording. So run 1 gave no
+  energy data. Its marks file holds only the first 3 s after launch and is not
+  used here.
+- The person was then asked to pick a design: the full 12 hours, 4 runs of
+  15 min on the terminal view, 2 runs of 30 min (none against 30 s), or no
+  battery runs. The person chose no battery runs.
 
-Energy tool. Instruments on the Mac could not record the phone over Wi-Fi:
+What a later measurement should keep in mind:
 
-- `xcrun xctrace record --template 'Power Profiler' --device <ECID> --attach TerminalX --time-limit 10s`
-  failed with "Timed out waiting for device to boot" (exit 13).
-  `xctrace list devices` lists the phone under "Devices Offline", while
-  `devicectl` shows it connected.
-- `--all-processes` instead recorded the Mac, for 0 s, with
-  "Location Energy Model cannot handle a target type of 'All Processes'"
-  (exit 2).
-- With the CoreDevice identifier, xctrace said "No devices found" (exit 1).
-
-So each run is recorded on the phone itself, with Settings > Developer >
-Performance Trace (Power Profiler), and then AirDropped to the Mac and exported
-with `xctrace export`.
-
-| Screen | none | 20 s | 30 s | 45 s |
-| --- | --- | --- | --- | --- |
-| Sessions list, idle | run 1 started 15:24 | not measured yet | not measured yet | not measured yet |
-| Streaming transcript | not measured yet | not measured yet | not measured yet | not measured yet |
-| Terminal view | not measured yet | not measured yet | not measured yet | not measured yet |
-
-One thing to keep in mind when reading the idle-list row: the sessions list
-already asks the Mac for `sessions.summaries` every 10 s while it is on screen
-(`mobile/app/(tabs)/sessions.tsx`, the `useFocusEffect` timer). The keep-alive
-is not the only traffic on that screen.
+- The sessions list asks the Mac for `sessions.summaries` every 10 s while it
+  is on screen (`mobile/app/(tabs)/sessions.tsx:36-38`), and an open
+  transcript re-reads every 15 s (`mobile/src/data/transcript-sync.ts:198`).
+  On those screens the keep-alive is not the only traffic. The Settings tab
+  has no timer of its own.
+- The measurement build's own file flush runs every 2 s and returns at once
+  when there is nothing new (`measurement-patch/js-marks.patch`,
+  `mobile/src/measure/marks.ts`). It would be the same in every run.
+- With the connection dropping as often as the next section shows, a battery
+  run would mostly measure reconnects, not the keep-alive.
 
 ## Does the connection survive each interval idle?
 
-Status: **in progress**. The keep-alive marks (`14.keepalive.*`) and drops
-(`conn.lost`) from each one-hour battery run will answer this per interval.
-For now, the smoke run is the only data: 7 keep-alives sent at 30 s, 7
-answered, round trip median 30 ms, p90 95 ms (`data/smoke.summary.txt`).
+Status: **in progress.** The 10-minute runs started at 17:02 and are not in
+this note yet. Only a short dry run is measured so far.
+
+Method: relay path (`-TXNoDirect 1`), home Wi-Fi, Release build, screen on,
+app on the Settings tab (no timer of its own), opened by launching with
+`--payload-url terminalx://settings`. Each launch is fresh
+(`--terminate-existing`). After the idle window the app goes to the background
+for 3 s (Settings is launched) and comes back, so the app's resume probe
+(`pairing.getEndpoints`, 1.5 s limit, `mobile/src/transport/connection.ts:28`)
+tests the old connection end to end. Script: `measurement-patch/idle-test.sh`.
+Summary: `measurement-patch/analyze.py idle`.
+
+Dry run, 20 s idle per interval (about 0.8 min per launch), raw
+`data/idle-dry/*.jsonl`, summary `data/idle-dry.summary.txt`:
+
+| keep-alive | connects | drops (1001 / 4408) | connected before drop, median s | max s | probe at the end |
+| --- | --- | --- | --- | --- | --- |
+| none | 4 | 3 (3 / 0) | 8 | 8 | already down at return |
+| 20 s | 4 | 3 (2 / 1) | 11 | 15 | answered in 321 ms |
+| 30 s | 4 | 3 (2 / 1) | 8 | 18 | answered in 1507 ms |
+| 45 s | 3 | 2 (2 / 0) | 3 | 4 | no answer in 1.5 s |
+
+- In this dry run the relay connection never lasted longer than 18 s, at any
+  interval, so no keep-alive timer fired before a drop. The drops come long
+  before any router or relay idle timeout (60 s and up, `connection-path.md`).
+- 4408 is the relay's "peer dropped" close: the Mac's leg ended. 1001 "Stream
+  end encountered" is iOS ending the stream (`mobile/src/transport/relay-client.ts:24-31`).
+- The 45 s run's resume probe got no answer in 1.5 s on a live connection, and
+  the 30 s run's probe took 1507 ms. Relay round trips here were 345 to
+  692 ms per keep-alive answer. The 1.5 s limit is tight for the relay.
 
 ## Follow-up issues found so far
 
