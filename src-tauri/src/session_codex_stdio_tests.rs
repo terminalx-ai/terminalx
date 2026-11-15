@@ -874,7 +874,7 @@ fn a_cloud_launch_takes_the_route_configuration_and_credential_like_a_terminal_o
     grant.env = vec![("CODEX_API_KEY".into(), Some("grant-secret".into())), ("OPENAI_API_KEY".into(), None)];
     grant.route = Some(crate::cloud_grants::RouteLaunch { model: Some("routed-model".into()), codex_args: " -c 'model_provider=\"route\"'".into(), notice: Some("The route is not answering".into()), ..Default::default() });
     let config = crate::cloud_config::LaunchConfig { env: vec![("NODE_ENV".into(), "test".into())], args: String::new(), prompt: Some("brief".into()) };
-    let computer = crate::local_vm::VmLaunch { args: " -c 'mcp_servers.computer={}'".into(), note: None };
+    let computer = crate::container_vm::VmLaunch { args: " -c 'mcp_servers.computer={}'".into(), note: None };
     let native = native_launch(&grant, &config, &computer, None);
     assert_eq!(native.args, ["-c", "model_provider=\"route\"", "-c", "mcp_servers.computer={}", "-c", "developer_instructions=\"brief\"", "app-server", "--listen", "stdio://"]);
     // The grant's variables come last, so a credential always wins.

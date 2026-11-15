@@ -13,6 +13,8 @@ import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
+import { RegisteredSetting } from "./settingsRegistry";
+import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
 
 interface SectionContext {
@@ -33,6 +35,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
+  localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   projects: () => <ProjectTemplatesSettings />,

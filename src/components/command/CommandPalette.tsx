@@ -51,6 +51,7 @@ import {
   Users,
   Workflow,
   Cloud,
+  Monitor,
   type LucideIcon,
   Trash2,
 } from "@/icons";
@@ -144,6 +145,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   agents: Bot,
   orchestrator: Workflow,
   environment: KeyRound,
+  localVms: Monitor,
   transcription: Mic,
   integrations: Plug,
   projects: FolderPlus,
@@ -315,7 +317,9 @@ export function CommandPalette({
   const [scope, setScope] = useState<PaletteScope>("all");
   const deferredQuery = useDeferredValue(query);
   // Settings behind an Experimental switch are listed and found only while it is on; the list follows the switch.
-  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
+  const switches = useExperimentalSettings();
+  const orchestratorRuns = switches?.orchestratorRuns === true;
+  const localVmTasks = switches?.localVmTasks === true;
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
   const [statusSessionId, setStatusSessionId] = useState<string | null>(null);
@@ -868,7 +872,7 @@ export function CommandPalette({
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
       ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
     ].filter((group) => paletteScopeShows(scope, group.id));
-  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns]);
+  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;

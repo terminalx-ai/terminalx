@@ -62,6 +62,8 @@ export default function SessionsScreen() {
   // The Mac, search and the filters stay at the top as the list scrolls under them, fading away there.
   const header = <View onLayout={({ nativeEvent }) => setHeaderHeight(nativeEvent.layout.height)} style={[styles.sticky, { paddingTop: insets.top }]}>
     <EdgeFade edge="top" height={headerHeight + 28} />
+    {/* Solid behind the status area: the list fades under the header but is never drawn over the clock (#984). */}
+    <View testID="top-bar-status" style={[styles.status, { height: insets.top, backgroundColor: palette.page }]} />
     <View style={styles.header}>
       {/* The Mac these sessions are on. */}
       <View style={styles.topBar}>
@@ -127,6 +129,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   screen: { flex: 1 },
   sticky: { position: "absolute", top: 0, left: 0, right: 0 },
+  status: { position: "absolute", top: 0, left: 0, right: 0 },
   header: { gap: 10, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 8 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10 },
   hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
