@@ -70,6 +70,7 @@ import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootDesktopInbox } from "@/lib/desktopInbox";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootCloudSelection } from "@/lib/cloudSelection";
 import { bootCloudMirrors } from "@/lib/cloudMirror";
@@ -146,6 +147,7 @@ export function AppShell() {
     void bootStatus();
     void bootDataPrivacy().then(() => {
       void bootAccount();
+      bootDesktopInbox();
       bootCloudCatalog();
     });
     bootCloudSelection();

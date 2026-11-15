@@ -362,6 +362,7 @@ function cloudHandlers() {
       expect(orgId).toBe(ORG);
       return guard.handlers.organization_members?.({}) ?? { members: [], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "" };
     },
+    phase2_desktop_contracts_available: () => false,
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => outbox,
@@ -451,6 +452,17 @@ async function openConnected(authority: "manage" | "participate" = "manage") {
 }
 
 describe("the same SessionView for local and cloud sessions", () => {
+  it("keeps details/restart/copy held in the cloud location without waking compute", async () => {
+    guard.handlers.cloud_schedules = () => { throw new Error("Schedules not offered in this fixture"); };
+    await openConnected();
+    expect(screen.queryByRole("button", { name: "Workspace details" })).toBeNull();
+    await mouseClick(screen.getByTestId("session-location"));
+    expect(screen.queryByText("Restart workspace…")).toBeNull();
+    expect(screen.queryByText("Copy machine ID")).toBeNull();
+    expect(guard.calls.filter((call) => ["cloud_workspace_details", "cloud_workspace_restart"].includes(call.command))).toEqual([]);
+    expect(mocks.workspaceConnection.mock.calls.every((call) => call[1] === "connect")).toBe(true);
+    expect(guard.violations).toEqual([]);
+  });
   it("restores cloud usage exhaustion without retry when reopening the session", async () => {
     const message = "Model allowance exhausted · resets at 11pm";
     runtime.events = [
