@@ -1,6 +1,6 @@
 //! Guest-side personalized account binding. OS account metadata, rather than
 //! HOME, selects the installation. No account/credential is created or changed.
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use super::guest_account::{current_user, User};
 use std::{
@@ -123,6 +123,9 @@ impl From<std::fs::Metadata> for Home {
 
 /// Unbound legacy installations are accepted only at the original lume path.
 /// A personalized installation never degrades to legacy after losing its binding.
+// The guest runtime calls this on macOS only; the tests call it on every Unix.
+// Elsewhere it would be dead code, which Linux clippy refuses.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn check_installation_binding(base: &Path, account: Option<&Account>) -> Result<()> {
     if let Some(account) = account {
         account.check_current(base)
@@ -133,7 +136,10 @@ pub(super) fn check_installation_binding(base: &Path, account: Option<&Account>)
     }
 }
 
+// Only a macOS guest finds its installation through its account.
+#[cfg(target_os = "macos")]
 pub(super) fn installation() -> Result<PathBuf> {
+    use anyhow::Context as _;
     let user = current_user()?;
     let home = Path::new(&user.home);
     home.file_name()
