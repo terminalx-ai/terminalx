@@ -60,7 +60,10 @@ export interface MachineHostStatus {
   pausedUntil: number | null;
 }
 
-/** `machines_host_status`, `machines_set_allow_operating`, the `machines_host_changed` event. */
+/**
+ * `machines_host_status`, `machines_set_allow_operating`, `machines_approve`,
+ * `machines_decline`, `machines_revoke`, and the `machines_host_changed` event.
+ */
 export interface MachineHostView {
   /** `machines.allowOperating` in settings. */
   allowOperating: boolean;
@@ -70,7 +73,10 @@ export interface MachineHostView {
   status: MachineHostStatus | null;
 }
 
-/** `machines_create_code`. */
+/**
+ * `machines_create_code`. Refused with a string starting `pairing_paused:` or
+ * `not_enabled:`; the status's `pausedUntil` says until when.
+ */
 export interface MachinePairingCode {
   code: string;
   expiresAt: number;
@@ -88,7 +94,7 @@ export interface InspectedMachineCode {
   alreadyPaired: boolean;
 }
 
-/** A machine this computer paired with (`machines.json`). */
+/** A machine this computer paired with (`machines.json`); `machines_set_route` answers the updated one. */
 export interface PairedMachine {
   machineId: string;
   name: string;

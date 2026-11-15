@@ -932,7 +932,9 @@ beside `deviceToken`. The machine host reads them; the phone host never sees the
 2. A paired computer's token is admitted only with the client key it paired
    with (`clientPublicKeyB64`). Another key is a wrong attempt, refused with
    close `4401`. A code that was used therefore cannot be replayed from
-   another computer. The relay route checks the same.
+   another computer. The relay route checks the same. A record with no
+   client key (only PRO-341's tests and hand-written records have none) is
+   admitted by its token alone, as before; every record pairing writes has one.
 3. The live code's token starts an approval: the host computes the fingerprint
    from the connection's client key, publishes `pending` in its status, and
    waits up to two minutes (`APPROVAL_TTL_MS`). More connections with the same
