@@ -698,7 +698,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             if !*active { bail!("The mobile driver lease was released."); }
             permit.check_mode(session,tab)?;
             if manager.pane_of(session,tab).is_none_or(|current| current.pane_id != pane) { bail!("The terminal instance changed."); }
-            manager.terminals().write_for_process(&pane,pid,text.as_bytes())
+            manager.with_raw_terminal_input(&pane, || manager.terminals().write_for_process(&pane,pid,text.as_bytes()))
         })();
         if result.is_err() { *driver.active.lock().unwrap() = false; }
         manager.mobile.publish_drivers(manager);
