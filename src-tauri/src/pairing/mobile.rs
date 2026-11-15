@@ -451,7 +451,7 @@ pub(super) fn dispatch(
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
         }
         "steerLease.release" => parse_params(params).and_then(|params| release_input(connection, params)),
-        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager)),
+        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager, connection.owner.build())),
         "sessions.create" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
         }
@@ -1179,18 +1179,28 @@ fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
 
 /// What the desktop's new-session view lets a person choose, for a phone to
 /// choose the same: projects (by an id that is not their path), the agents
-/// with their models and efforts, and the permission modes.
-fn new_session_options(manager: &PairingManager) -> Result<Value> {
+/// with their models and efforts, and the permission modes. With `runtime`
+/// starting sessions on an agent account (#980), each agent with several
+/// accounts also lists them.
+fn new_session_options(manager: &PairingManager, runtime: &crate::local_runtime::client::Build) -> Result<Value> {
     let projects = phone_projects()?;
     let codex = manager.mobile.codex_models.get().map(|cache| cache.get(false)).unwrap_or_default();
     let models = crate::models::offered(crate::harness::claude::models::get(false), codex);
+    let offered: HashSet<String> = projects.iter().filter_map(|project| project["id"].as_str().map(str::to_string)).collect();
+    let lists_accounts = serves_accounts(runtime);
     let agents: Vec<Value> = crate::harness::offered().into_iter().map(|agent| {
         let models: Vec<Value> = models.iter().filter(|model| model.harness == agent.id).map(|model| json!({
             "id": model.id, "label": model.label, "isDefault": model.is_default,
             "efforts": model.efforts, "defaultEffort": model.default_effort,
         })).collect();
-        json!({"id": agent.id, "name": agent.name, "available": agent.available, "installHint": agent.install_hint,
-            "effort": agent.caps.effort, "permissionModes": agent.caps.permission_modes, "models": models})
+        let mut entry = json!({"id": agent.id, "name": agent.name, "available": agent.available, "installHint": agent.install_hint,
+            "effort": agent.caps.effort, "permissionModes": agent.caps.permission_modes, "models": models});
+        // An agent without accounts, or whose index cannot be read, offers no choice: the phone starts it as before accounts.
+        // Nor does a runtime that would not start the session on the account chosen (#730): the choice would be lost.
+        if let Some(accounts) = lists_accounts.then(|| crate::agent_accounts::list(&agent.id).ok()).flatten().and_then(|view| phone_accounts(&view, &offered)) {
+            entry.as_object_mut().expect("an object").extend(accounts.as_object().expect("an object").clone());
+        }
+        entry
     }).collect();
     // As the desktop labels them (`PERMISSION_MODES`).
     let modes = json!([
@@ -1202,6 +1212,41 @@ fn new_session_options(manager: &PairingManager) -> Result<Value> {
     // Session does: Ask every time, never Bypass unasked (PRO-162).
     Ok(json!({"projects": projects, "agents": agents, "modes": modes, "defaultMode": index::FIRST_RUN_PERMISSION_MODE,
         "nativeCodex": store::settings::load().experimental.native_codex}))
+}
+
+/// The runtime feature that says `create` takes an `account` and starts the
+/// session's first tab on it (#980). The phone is listed accounts only when
+/// the runtime its connection reaches names it, so a choice is never offered
+/// and then dropped by a runtime that starts every session on the defaults.
+const SESSION_ACCOUNTS: &str = "sessionAccounts";
+
+fn serves_accounts(runtime: &crate::local_runtime::client::Build) -> bool {
+    runtime.mobile.get(SESSION_ACCOUNTS).and_then(Value::as_u64).is_some_and(|served| served >= 1)
+}
+
+/// An agent's accounts as a phone sees them (#980, docs/AGENT-ACCOUNTS.md):
+/// only when it has more than one, so with one nothing in the reply changes.
+/// Each is its id, label and agent, and nothing else: never a token, and no
+/// address, plan or organization beyond what its label says. The project
+/// defaults are keyed by the projects' public ids (never a path), and only for
+/// projects in `offered`.
+fn phone_accounts(view: &crate::agent_accounts::AgentAccounts, offered: &HashSet<String>) -> Option<Value> {
+    if view.accounts.len() < 2 {
+        return None;
+    }
+    let accounts: Vec<Value> = view.accounts.iter()
+        // A sign-in deleted outside the app cannot start a session until it is signed in again on the Mac.
+        .filter(|account| !account.missing)
+        .map(|account| json!({"id": account.id, "label": account.label, "agent": account.agent}))
+        .collect();
+    let listed = |id: &str| accounts.iter().any(|account| account["id"] == id);
+    let project_defaults: serde_json::Map<String, Value> = view.project_defaults.iter()
+        .map(|(path, id)| (store::projects::public_id(path), id))
+        .filter(|(project, id)| offered.contains(project) && listed(id))
+        .map(|(project, id)| (project, Value::String(id.clone())))
+        .collect();
+    let default = if listed(&view.default_account) { view.default_account.as_str() } else { crate::agent_accounts::LOCAL };
+    Some(json!({"accounts": accounts, "defaultAccount": default, "projectDefaults": project_defaults}))
 }
 
 /// The projects a phone may start a session in: not archived, named, and
@@ -1244,6 +1289,9 @@ struct SessionCreateParams {
     attachments: Vec<RemoteAttachmentInput>,
     #[serde(default)]
     client_message_id: Option<String>,
+    /// The agent account the session starts on (#980), one `sessions.options` listed. Absent: the project's default, then the agent's.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 /// Start a session from the phone, then send it the first message through
@@ -1256,9 +1304,18 @@ fn create_session(manager: &PairingManager, connection: &MobileConnection, param
         bail!("A new session needs a first message.");
     }
     let message = checked_message_id(params.client_message_id.clone())?;
-    let request = json!({"quick": params.quick, "projectId": params.project_id, "useWorktree": params.use_worktree,
+    let account = crate::session_ops::requested_account(params.account.as_deref()).map_err(|error| anyhow::anyhow!(error))?;
+    // A runtime that does not start sessions on an account would start this one on the defaults instead.
+    if account.is_some() && !serves_accounts(connection.owner.build()) {
+        bail!(OUTDATED);
+    }
+    let mut request = json!({"quick": params.quick, "projectId": params.project_id, "useWorktree": params.use_worktree,
         "agent": params.agent, "model": params.model, "effort": params.effort, "mode": params.mode,
         "title": params.title, "prompt": params.text});
+    // Only a chosen account is named, so a start without one asks the runtime exactly what it always did.
+    if let Some(account) = account {
+        request["account"] = Value::String(account);
+    }
     let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!([&request, send_digest(&params.text, &params.attachments)]))?));
     let created = create_once(&manager.mobile.send_ids, message.as_deref(), digest, || connection.call("create", request.clone()))?;
     let session_id = created["sessionId"].as_str().context("The Mac did not say which session it started.")?.to_string();
@@ -1793,6 +1850,63 @@ fn collapse_notification_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone_account(id: &str, label: &str, missing: bool) -> crate::agent_accounts::Account {
+        crate::agent_accounts::Account {
+            id: id.into(), agent: "claude", kind: crate::agent_accounts::Kind::Subscription, label: label.into(),
+            email: Some("person@example.com".into()), plan: Some("Max".into()), organization: Some("Example Org".into()),
+            local: id == "local", is_default: id == "local", missing, added_at: Some("2026-11-15T00:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn a_phone_is_offered_accounts_only_with_more_than_one_and_never_a_token_or_address() {
+        let repo = store::projects::public_id("/repos/raccoon");
+        let offered: HashSet<String> = [repo.clone()].into();
+        let one = crate::agent_accounts::AgentAccounts { agent: "claude", accounts: vec![phone_account("local", "This Mac's login", false)],
+            default_account: "local".into(), project_defaults: Default::default() };
+        assert_eq!(phone_accounts(&one, &offered), None, "with one account the reply is as before accounts");
+
+        let several = crate::agent_accounts::AgentAccounts {
+            agent: "claude",
+            accounts: vec![
+                phone_account("local", "This Mac's login", false),
+                phone_account("0123456789abcdef", "Work · Max", false),
+                phone_account("fedcba9876543210", "Gone", true),
+            ],
+            default_account: "local".into(),
+            project_defaults: [
+                ("/repos/raccoon".to_string(), "0123456789abcdef".to_string()),
+                ("/repos/archived".to_string(), "0123456789abcdef".to_string()),
+            ].into(),
+        };
+        let reply = phone_accounts(&several, &offered).unwrap();
+        assert_eq!(reply["defaultAccount"], "local");
+        assert_eq!(reply["accounts"], json!([
+            {"id": "local", "label": "This Mac's login", "agent": "claude"},
+            {"id": "0123456789abcdef", "label": "Work · Max", "agent": "claude"},
+        ]));
+        // Keyed by the public id a phone knows, never a path, and only for projects it is offered.
+        assert_eq!(reply["projectDefaults"], json!({ repo: "0123456789abcdef" }));
+        let text = reply.to_string();
+        for secret in ["token", "Token", "key", "person@example.com", "Example Org", "/repos/", "plan", "email"] {
+            assert!(!text.contains(secret), "{secret} reached the phone: {text}");
+        }
+        for account in reply["accounts"].as_array().unwrap() {
+            let mut keys: Vec<&str> = account.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["agent", "id", "label"]);
+        }
+    }
+
+    /// #730 and #980: accounts are listed only through a runtime that starts the session on the one chosen.
+    #[test]
+    fn a_phone_is_listed_accounts_only_through_a_runtime_that_starts_on_them() {
+        assert!(!serves_accounts(&runtime_of(Some("0.2.22"), None)), "a released runtime starts every session on the defaults");
+        assert!(!serves_accounts(&runtime_of(Some("9.0.0"), Some(json!({ "sessionCreate": 1 })))));
+        assert!(!serves_accounts(&runtime_of(Some("9.0.0"), Some(json!({ "sessionAccounts": "1" })))));
+        assert!(serves_accounts(&runtime_of(Some("9.0.0"), Some(json!({ "sessionCreate": 1, "sessionAccounts": 1 })))));
+    }
     use crate::events::TurnStatus;
 
     #[test]

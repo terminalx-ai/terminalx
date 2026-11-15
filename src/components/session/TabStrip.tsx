@@ -19,7 +19,50 @@ import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
 import { openTerminal, selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
 import type { CloudSessionModel } from "@/lib/cloudSession";
-import type { SessionEntry } from "@/types/session";
+import type { SessionEntry, TabEntry } from "@/types/session";
+import { tabAccount } from "@/lib/api";
+import { LOCAL_ACCOUNT, showsAccounts, type AgentAccount } from "@/lib/agentAccounts";
+import { useAgentAccounts } from "@/lib/useSessionAgent";
+
+/** How old a tab mark's accounts may be before a newly drawn mark reads them again. */
+const TAB_ACCOUNTS_MAX_AGE_MS = 30_000;
+
+/**
+ * The account `tab`'s agent runs on (#980), only when that agent has more
+ * than one account; with one, `null` and nothing is drawn. A tab that never
+ * named one, or ran on This Mac's login, is on This Mac's login: the launch
+ * records any other account it resolved to.
+ */
+export function useTabAccount(tab: Pick<TabEntry, "harness">): AgentAccount | null {
+  const view = useAgentAccounts(tab.harness, TAB_ACCOUNTS_MAX_AGE_MS);
+  if (!view || !showsAccounts(view)) return null;
+  const id = tabAccount(tab as TabEntry) ?? LOCAL_ACCOUNT;
+  return view.accounts.find((account) => account.id === id) ?? null;
+}
+
+/** The first letter of an account's label, for its mark in the tab strip. */
+function accountInitial(account: AgentAccount): string {
+  return (account.email ?? account.label).trim().charAt(0).toUpperCase() || "?";
+}
+
+/** A small mark on a tab in the strip: which of its agent's accounts it runs on. Nothing with one account. */
+export function TabAccountMark({ tab }: { tab: TabEntry }) {
+  const account = useTabAccount(tab);
+  if (!account) return null;
+  return (
+    <span data-testid="tab-account-mark" role="img" aria-label={`On ${account.label}`} title={account.label}
+      className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-veil-raised text-[12px] leading-none text-muted-foreground">
+      {accountInitial(account)}
+    </span>
+  );
+}
+
+/** The tab's account by name, for its header. Nothing with one account. */
+export function TabAccountLabel({ tab, className }: { tab: TabEntry; className?: string }) {
+  const account = useTabAccount(tab);
+  if (!account) return null;
+  return <span data-testid="tab-account-label" title={`This tab runs on ${account.label}`} className={className ?? "min-w-0 truncate text-[12px] text-muted-foreground"}>{account.label}</span>;
+}
 
 /**
  * The "+" that opens the new-tab menu. The menu's trigger is the button itself

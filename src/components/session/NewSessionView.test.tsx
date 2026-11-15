@@ -71,10 +71,12 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { NewSessionView } = await import("./NewSessionView");
+const { forgetAgentAccounts } = await import("@/lib/useSessionAgent");
 
 const created = { id: "session-1", tabs: [{ id: "tab-1" }] } as SessionEntry;
 
 beforeEach(() => {
+  forgetAgentAccounts();
   dragDropListener.mockReset();
   dragDropListener.mockResolvedValue(vi.fn());
   invoke.mockReset();
@@ -294,9 +296,9 @@ describe("starting a quick chat", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("quick-1", "quick-tab", "What is a monad?\nIn one paragraph.", []));
     expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
     expect(selectSession).toHaveBeenCalledWith("quick-1");
-    // Only local transcription preferences and agent readiness were read; no
-    // project session was made, and no git was read.
-    expect(invoke.mock.calls.map(([command]) => command).sort()).toEqual(["check_agent_readiness", "check_agent_readiness", "transcription_personalization_load"]);
+    // Only local transcription preferences, agent readiness and the agent's
+    // accounts (#980) were read; no project session was made, and no git was read.
+    expect(invoke.mock.calls.map(([command]) => command).sort()).toEqual(["agent_accounts_list", "check_agent_readiness", "check_agent_readiness", "transcription_personalization_load"]);
   });
 
   it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {
@@ -794,5 +796,59 @@ describe("Orchestrate (PRO-337)", () => {
     expect(prompt.indexOf("Move every read")).toBeLessThan(prompt.indexOf("HANDOFF BRIEF"));
     expect(prompt.endsWith(`HANDOFF BRIEF\n\n${PLAN_A_RUN_PROMPT}`)).toBe(true);
     expect(screen.getByTestId("run-shown").textContent).toBe("true");
+  });
+});
+
+// #980: the account New Session starts on.
+describe("agent accounts", () => {
+  const WORK = "0123456789abcdef";
+  const account = (id: string, label: string) => ({ id, agent: "claude", kind: "subscription", label, email: null, plan: null, organization: null, local: id === "local", isDefault: id === "local", missing: false, addedAt: null });
+  const answer = (accounts: unknown) => async (cmd: string, args: { paths: string[] }) => {
+    if (cmd === "agent_accounts_list") return accounts;
+    if (cmd === "check_agent_readiness") return { state: "ready", checkedAt: null, version: null };
+    if (cmd === "work_status") return { branch: "main", defaultBranch: "main" };
+    if (cmd === "create_session") return created;
+    if (cmd === "inspect_attachments") return inspected(args.paths);
+    throw new Error(`unexpected command ${cmd}`);
+  };
+  const start = async () => {
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix the login redirect" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([cmd]) => cmd === "create_session")).toBe(true));
+    return (invoke.mock.calls.find(([cmd]) => cmd === "create_session") as [string, { req: Record<string, unknown> }])[1].req;
+  };
+
+  it("asks for no account with only This Mac's login, so the request is as before accounts", async () => {
+    invoke.mockImplementation(answer({ agent: "claude", accounts: [account("local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));
+    renderView();
+    await waitFor(() => expect(invoke.mock.calls.some(([cmd]) => cmd === "agent_accounts_list")).toBe(true));
+    expect(screen.queryByTestId("agent-account")).toBeNull();
+    const req = await start();
+    expect(req).not.toHaveProperty("account");
+    expect(req.tab).toEqual({ harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" });
+  });
+
+  it("preselects the project's default account and starts the session on it", async () => {
+    invoke.mockImplementation(answer({ agent: "claude", accounts: [account("local", "This Mac's login"), account(WORK, "work@example.com · Max")], defaultAccount: "local", projectDefaults: { [project.path]: WORK } }));
+    renderView();
+    await waitFor(() => expect(screen.getByTestId("agent-account").textContent).toBe("work@example.com · Max"));
+    const req = await start();
+    expect(req).toMatchObject({ projectPath: project.path, account: WORK });
+    // The account goes beside the tab, as the request takes it, not inside it.
+    expect(req.tab).not.toHaveProperty("account");
+  });
+
+  it("starts a quick chat on the agent's default, not a project's", async () => {
+    store.newSessionChat = true;
+    invoke.mockImplementation(answer({ agent: "claude", accounts: [account("local", "This Mac's login"), account(WORK, "work@example.com · Max")], defaultAccount: WORK, projectDefaults: { [project.path]: "local" } }));
+    render(<NewSessionView onCreated={vi.fn()} useWorktree={false} onUseWorktreeChange={vi.fn()} quick />);
+    await waitFor(() => expect(screen.getByTestId("agent-account").textContent).toBe("work@example.com · Max"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "What is a monad?" } });
+    const create = screen.getByRole("button", { name: "Ask" });
+    await waitFor(() => expect(create.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(createQuickChat).toHaveBeenCalled());
+    expect(createQuickChat.mock.calls[0][0]).toMatchObject({ account: WORK });
   });
 });
