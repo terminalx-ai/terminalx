@@ -1065,6 +1065,9 @@ impl SessionManager {
     /// Start a tab's agent again, on the conversation it holds or on one it
     /// held before: the chat's "Resume" for a tab that is a terminal.
     pub fn resume_conversation(&self, session_id: &str, tab_id: &str, harness: &str, provider_session_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         if pty_first(harness).is_none() {
             bail!("{} conversations cannot be resumed here.", crate::harness::display_name(harness));
         }

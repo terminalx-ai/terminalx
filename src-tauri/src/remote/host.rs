@@ -28,7 +28,6 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message};
 
-use super::collab::Members;
 use super::protocol::{self, Authority};
 use super::server::{Peer, WorkspaceRpc, MAX_FRAME_BYTES};
 use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E2eeSession, HostKeypair, PayloadKind, RelayProofContext};
@@ -127,7 +126,9 @@ pub struct RelaySession {
     pub revocations: Vec<Revocation>,
     /// Who the workspace is shared with and how (contract §21.3); absent
     /// from an API before PRO-30.
-    pub collaboration: Option<Members>,
+    pub collaboration: Option<Value>,
+    /// Native request context, never read from the server response or a link file.
+    pub(crate) collaboration_v2: bool,
 }
 
 /// The runtime's identity and API session. Calls may block; the host runs
@@ -167,7 +168,7 @@ struct FileLinkContents {
     #[serde(default)]
     revocations: Vec<Revocation>,
     #[serde(default)]
-    collaboration: Option<Members>,
+    collaboration: Option<Value>,
 }
 
 impl FileLink {
@@ -211,6 +212,7 @@ impl RuntimeLink for FileLink {
             attachments: contents.attachments,
             revocations: contents.revocations,
             collaboration: contents.collaboration,
+            collaboration_v2: false,
         })
     }
 
@@ -276,6 +278,8 @@ pub fn token_identity(token: &str) -> Result<TokenIdentity> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Device {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collaboration: Option<super::collab::v2::Stamp>,
     #[serde(with = "hash_b64")]
     token_hash: [u8; 32],
     authority: Authority,
@@ -530,7 +534,7 @@ impl RelayHost {
         self.rpc.set_generation(identity.runtime_generation);
         // Who has access is known before any client can connect, not only
         // after the first refresh (contract §21.5).
-        self.rpc.set_collaboration(session.collaboration.clone());
+        self.install_session_policy(&session, identity.runtime_generation, None)?;
         let (mut socket, relay_generation) =
             self.open_control(&cell_url, assignment_epoch, &session.relay_token, &identity).await?;
         let (commands, mut command_rx) = mpsc::unbounded_channel();
@@ -754,14 +758,15 @@ impl RelayHost {
                         let _ = live.commands.send(ControlCommand::Reregister);
                         return;
                     }
-                    self.rpc.set_collaboration(session.collaboration.clone());
-                    if self.apply_revocations(&live, &session.revocations) {
-                        self.complete_revocations(&session.revocations).await;
+                    // Bind the entire response to the generation of this registered
+                    // connection, not to any caller-supplied policy field.
+                    if !token_identity(&session.relay_token).is_ok_and(|identity| identity.runtime_generation == runtime_generation) {
+                        log::warn!("ignoring refresh from a different runtime generation");
+                        tokio::time::sleep(SESSION_POLL_INTERVAL).await;
+                        continue;
                     }
-                    for attachment in session.attachments {
-                        if let Err(error) = self.answer_attachment(&live, &director_url, attachment).await {
-                            log::warn!("relay host: could not answer an attachment: {error:#}");
-                        }
+                    if let Err(error) = self.apply_refreshed_session(&live, &director_url, session, runtime_generation).await {
+                        log::warn!("collaboration refresh refused: {error:#}");
                     }
                 }
                 Err(error) if error.downcast_ref::<Revoked>().is_some() => {
@@ -772,6 +777,41 @@ impl RelayHost {
             }
             tokio::time::sleep(SESSION_POLL_INTERVAL).await;
         }
+    }
+
+    /// Policy, observed provenance revocations, then pending attachments from
+    /// this response. Never pair a device from a refused or retired snapshot.
+    async fn apply_refreshed_session(&self, live: &Live, director_url: &str, session: RelaySession, generation: u64) -> Result<()> {
+        let policy = self.install_session_policy(&session, generation, Some(live));
+        // Revocations have independent authority. A malformed or unsupported
+        // policy must not keep its revoked devices connected or reconnectable.
+        if self.apply_revocations(Some(live), &session.revocations) {
+            self.complete_revocations(&session.revocations).await;
+        }
+        policy?;
+        for attachment in session.attachments {
+            if let Err(error) = self.answer_attachment(live, director_url, attachment).await {
+                log::warn!("relay host: could not answer an attachment: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
+    fn install_session_policy(&self, session: &RelaySession, generation: u64, live: Option<&Live>) -> Result<()> {
+        let previous: Vec<_> = self.state.lock().unwrap().devices.iter().map(|(device_id, device)| {
+            let stamp = device.user_id.as_deref().and_then(|user| self.rpc.collab.runtime_policy.stamp(user));
+            (device_id.clone(), device.attachment_id.clone(), stamp)
+        }).collect();
+        install_session_collaboration(&self.rpc, session, generation)?;
+        let changed: Vec<_> = previous.into_iter().filter(|(_, _, stamp)| session.collaboration_v2 && stamp.as_ref().is_none_or(|stamp| !self.rpc.collab.runtime_policy.same_member(stamp)))
+            .map(|(device_id, id, _)| Revocation { id, device_id }).collect();
+        // Retire saved credentials too: reconnecting an old workspace/session
+        // attachment must not evade its observed source change. On restart,
+        // absent native provenance retires saved v2 attachments conservatively.
+        if !self.apply_revocations(live, &changed) {
+            bail!("could not persist collaboration attachment revocations");
+        }
+        Ok(())
     }
 
     /// Tell the API each applied revocation, so it stops listing it. A
@@ -796,13 +836,15 @@ impl RelayHost {
     /// Whether the revocations are durable: a revocation confirmed to the API
     /// is never listed again, so it must not be confirmed while the device
     /// list on disk still admits the device.
-    fn apply_revocations(&self, live: &Live, revocations: &[Revocation]) -> bool {
+    fn apply_revocations(&self, live: Option<&Live>, revocations: &[Revocation]) -> bool {
         let mut state = self.state.lock().unwrap();
         let mut changed = false;
         for revocation in revocations {
             if state.devices.remove(&revocation.device_id).is_some() {
                 changed = true;
-                let _ = live.commands.send(ControlCommand::Revoke { device_id: revocation.device_id.clone() });
+                if let Some(live) = live {
+                    let _ = live.commands.send(ControlCommand::Revoke { device_id: revocation.device_id.clone() });
+                }
             }
             for cancel in state.connections.remove(&revocation.device_id).unwrap_or_default() {
                 let _ = cancel.send(());
@@ -824,6 +866,12 @@ impl RelayHost {
         if !valid_opaque_id(&attachment.device_id) || attachment.device_token.len() < 16 {
             bail!("invalid attachment device");
         }
+        let collaboration = {
+            let _admission = self.rpc.collab.enter_admission();
+            let stamp = attachment.user_id.as_deref().and_then(|user| self.rpc.collab.runtime_policy.stamp(user));
+            anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(stamp.as_ref()), "attachment policy unavailable");
+            stamp
+        };
         let (respond, receive) = oneshot::channel();
         live.commands
             .send(ControlCommand::CreateInvite { device_id: attachment.device_id.clone(), respond })
@@ -851,10 +899,13 @@ impl RelayHost {
         // Admit the device before publishing the code, so the first connect
         // cannot race the registration.
         {
+            let _admission = self.rpc.collab.enter_admission();
+            anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(collaboration.as_ref()), "attachment policy changed while creating invite");
             let mut state = self.state.lock().unwrap();
             state.devices.insert(
                 attachment.device_id.clone(),
                 Device {
+                    collaboration,
                     token_hash: Sha256::digest(attachment.device_token.as_bytes()).into(),
                     authority,
                     attachment_id: attachment.id.clone(),
@@ -982,13 +1033,15 @@ impl RelayHost {
             let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, cancel))
                 .await??
                 .ok_or_else(|| anyhow!("device token refused"))?;
-            let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
+            let device = Device { collaboration: None, token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
             return Ok((device, Some((computer_id, tracked))));
         }
+        let _admission = self.rpc.collab.enter_admission();
         let mut state = self.state.lock().unwrap();
         // The relay credential named the device; the token must be that
         // device's, so an invite cannot be used with another attachment's token.
         let device = state.devices.get(relay_device_id).ok_or_else(|| anyhow!("device is not attached"))?.clone();
+        anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(device.collaboration.as_ref()), "attachment collaboration provenance retired");
         if !bool::from(device.token_hash.ct_eq(&hash)) {
             bail!("device token refused");
         }
@@ -1033,6 +1086,14 @@ impl RelayHost {
             Err(error) => protocol::failure(id, &protocol::RpcError::new("unavailable", format!("{error:#}"))),
         }
     }
+}
+
+/// The same generation-bound policy installation precedes initial registration
+/// and every refresh's revocations and pending attachments. `RelaySession`
+/// comes from the authenticated native link, never RPC parameters.
+pub(crate) fn install_session_collaboration(rpc: &WorkspaceRpc, session: &RelaySession, generation: u64) -> Result<()> {
+    anyhow::ensure!(token_identity(&session.relay_token)?.runtime_generation == generation, "refresh token generation mismatch");
+    rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2)
 }
 
 /// Start serving a workspace through the relay: learn the runtime
@@ -1435,6 +1496,201 @@ mod tests {
         assert!(host.admit("relay-desk", "another-token", refused).await.is_err(), "another device's token");
         host.close_all_connections();
         assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn phase2_collaboration_v2_refresh_attachment_route_fences_negotiation_generation_and_reconnect() {
+        struct Link {
+            session: Mutex<RelaySession>,
+            completed: Mutex<Vec<String>>,
+        }
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { [3; 32] }
+            fn session(&self) -> Result<RelaySession> { Ok(self.session.lock().unwrap().clone()) }
+            fn complete_attachment(&self, id: &str, _: &str) -> Result<()> {
+                self.completed.lock().unwrap().push(id.into()); Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> { Ok(()) }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 7, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        rpc.collab.runtime_policy.bind(root.path(), 7).unwrap();
+        let response = |revision: &str, source: &str, capabilities: &str, generation: u64, suffix: &str| {
+            let attachments = ["runtime", "session"].into_iter().map(|scope| json!({
+                "id":format!("att-{scope}-{suffix}"), "deviceId":format!("dev-{scope}-{suffix}"),
+                "deviceToken":"attachment-token-long-enough", "userId":"driver", "scope":scope, "expiresAt":now_ms()+60_000,
+            })).collect();
+            let session = crate::cloud_bootstrap::Session {
+                workspace_id:"ws".into(), organization_id:"org".into(), relay_host_id:"host".into(),
+                relay_token:jwt(json!({"sub":"host","cloudProfileId":"profile","organizationId":"org","runtimeGeneration":generation})),
+                relay_token_expires_at:0, director_url:"http://127.0.0.1:1".into(),
+                access_mode:crate::cloud_bootstrap::AccessMode::Private, attachments, revocations:vec![], quiesce:None, environment:None,
+                collaboration:Some(json!({"v":2,"revision":revision,"members":[
+                    {"userId":"driver","role":"driver","canApprove":true,"writeSource":source}
+                ]})),
+            };
+            super::super::bootstrap_link::relay_session(&session, capabilities)
+        };
+        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", crate::cloud_bootstrap::CAPABILITIES, 7, "first")), completed:Mutex::new(vec![]) });
+        let devices_path = root.path().join("devices.json");
+        let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
+        let (commands, mut receive) = mpsc::unbounded_channel();
+        let live = Live { commands, cell_url:"http://127.0.0.1:1".into(), assignment_epoch:1, relay_generation:1 };
+        let invites = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = invites.clone();
+        let relay = tokio::spawn(async move {
+            while let Some(command) = receive.recv().await {
+                if let ControlCommand::CreateInvite { respond, .. } = command {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = respond.send(Ok(("invite".into(), now_ms()+60_000)));
+                }
+            }
+        });
+        // Actual link fetch and refresh application must reject unnegotiated
+        // v2 before creating either kind of attachment, despite valid fields.
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(invites.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(link.completed.lock().unwrap().is_empty());
+        let mut unknown = response("1", "explicit", "collaboration-v2", 7, "unknown");
+        unknown.collaboration.as_mut().unwrap()["v"] = json!(9);
+        *link.session.lock().unwrap() = unknown;
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(invites.load(std::sync::atomic::Ordering::SeqCst), 0);
+        *link.session.lock().unwrap() = response("1", "explicit", "collaboration-v2", 7, "first");
+        host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        assert_eq!(link.completed.lock().unwrap().len(), 2);
+        let mut cancellations = Vec::new();
+        for scope in ["runtime", "session"] {
+            let (cancel, cancelled) = mpsc::unbounded_channel();
+            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.unwrap();
+            assert_eq!(device.user_id.as_deref(), Some("driver"));
+            cancellations.push(cancelled);
+        }
+        // Same role and approval, different DRIVE source. Old saved credentials
+        // and observed connections of both scopes must be retired; new pending
+        // attachments use the newly installed Everyone map.
+        *link.session.lock().unwrap() = response("2", "everyone", "collaboration-v2", 7, "next");
+        host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok()); }
+        for scope in ["runtime", "session"] {
+            let (cancel, _) = mpsc::unbounded_channel();
+            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.is_err());
+        }
+        let saved = std::fs::read_to_string(&devices_path).unwrap();
+        assert!(!saved.contains("-first"));
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        assert!(rpc.collab.runtime_policy.everyone("driver"));
+        // A retired response cannot pair new devices or overwrite current access.
+        *link.session.lock().unwrap() = response("3", "explicit", "collaboration-v2", 6, "stale");
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        assert!(rpc.collab.runtime_policy.everyone("driver"));
+        // Pause a real invite request, retire its captured generation, then
+        // complete it. Neither device insertion nor publishing may resurrect it.
+        let (race_commands, mut race_receive) = mpsc::unbounded_channel();
+        let race_live = Live { commands:race_commands, ..live.clone() };
+        let pending_host = host.clone();
+        let pending_session = response("3", "everyone", "collaboration-v2", 7, "raced");
+        let pending = tokio::spawn(async move {
+            pending_host.apply_refreshed_session(&race_live, "http://127.0.0.1:1", pending_session, 7).await
+        });
+        let command = tokio::time::timeout(Duration::from_secs(5), race_receive.recv()).await.unwrap().unwrap();
+        let ControlCommand::CreateInvite { respond, .. } = command else { panic!("expected pending invite") };
+        rpc.set_generation(8);
+        respond.send(Ok(("late-invite".into(), now_ms()+60_000))).unwrap();
+        pending.await.unwrap().unwrap();
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        let (cancel, _) = mpsc::unbounded_channel();
+        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", cancel).await.is_err());
+        relay.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn phase2_collaboration_v2_rejected_refresh_still_retires_independent_revocations() {
+        use std::sync::atomic::Ordering;
+
+        struct Link {
+            session: Mutex<RelaySession>,
+            paired: Mutex<Vec<String>>,
+            revoked: Mutex<Vec<String>>,
+        }
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { [3; 32] }
+            fn session(&self) -> Result<RelaySession> { Ok(self.session.lock().unwrap().clone()) }
+            fn complete_attachment(&self, id: &str, _: &str) -> Result<()> {
+                self.paired.lock().unwrap().push(id.into()); Ok(())
+            }
+            fn complete_revocation(&self, id: &str) -> Result<()> {
+                self.revoked.lock().unwrap().push(id.into()); Ok(())
+            }
+        }
+        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "writeSource":"explicit"});
+        for (policy, negotiated) in [
+            (json!({"v":2, "revision":"01", "members":[member.clone()]}), true),
+            (json!({"v":9, "revision":"2", "members":[member.clone()]}), true),
+            (json!({"v":2, "revision":"2", "members":[member.clone()]}), false),
+            (json!({"v":1, "members":"malformed"}), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let rpc = WorkspaceRpc::new(root.path(), 7, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+            rpc.collab.runtime_policy.bind(root.path(), 7).unwrap();
+            let attachments = |suffix: &str| ["runtime", "session"].into_iter().map(|scope| {
+                serde_json::from_value::<Attachment>(json!({
+                    "id":format!("att-{scope}-{suffix}"), "deviceId":format!("dev-{scope}-{suffix}"),
+                    "deviceToken":"attachment-token-long-enough", "userId":"driver", "scope":scope, "expiresAt":now_ms()+60_000,
+                })).unwrap()
+            }).collect();
+            let initial = RelaySession {
+                relay_token:jwt(json!({"sub":"host", "cloudProfileId":"profile", "organizationId":"org", "runtimeGeneration":7})),
+                director_url:"http://127.0.0.1:1".into(), attachments:attachments("old"), revocations:vec![],
+                collaboration:Some(json!({"v":2, "revision":"1", "members":[member.clone()]})), collaboration_v2:true,
+            };
+            let link = Arc::new(Link { session:Mutex::new(initial), paired:Mutex::new(vec![]), revoked:Mutex::new(vec![]) });
+            let devices_path = root.path().join("devices.json");
+            let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
+            let (commands, mut receive) = mpsc::unbounded_channel();
+            let live = Live { commands, cell_url:"http://127.0.0.1:1".into(), assignment_epoch:1, relay_generation:1 };
+            let invites = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = invites.clone();
+            let relay = tokio::spawn(async move {
+                while let Some(command) = receive.recv().await {
+                    if let ControlCommand::CreateInvite { respond, .. } = command {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let _ = respond.send(Ok(("invite".into(), now_ms()+60_000)));
+                    }
+                }
+            });
+            host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+            let mut cancellations = Vec::new();
+            for scope in ["runtime", "session"] {
+                let (cancel, cancelled) = mpsc::unbounded_channel();
+                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.unwrap();
+                cancellations.push(cancelled);
+            }
+            {
+                let mut session = link.session.lock().unwrap();
+                session.collaboration = Some(policy.clone());
+                session.collaboration_v2 = negotiated;
+                session.attachments = attachments("pending");
+                session.revocations = ["runtime", "session"].into_iter().map(|scope| Revocation {
+                    id:format!("att-{scope}-old"), device_id:format!("dev-{scope}-old"),
+                }).collect();
+            }
+            assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err(), "policy must be refused: {policy}");
+            for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok(), "revoked connection survives rejected policy: {policy}"); }
+            assert_eq!(link.revoked.lock().unwrap().len(), 2, "durable revocations must be acknowledged: {policy}");
+            assert_eq!(link.paired.lock().unwrap().len(), 2, "rejected policy must not publish new attachments: {policy}");
+            assert_eq!(invites.load(Ordering::SeqCst), 2);
+            assert!(!std::fs::read_to_string(&devices_path).unwrap().contains("-old"));
+            let restored = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path));
+            for scope in ["runtime", "session"] {
+                for runtime in [&host, &restored] {
+                    let (cancel, _) = mpsc::unbounded_channel();
+                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
+                }
+            }
+            relay.abort();
+        }
     }
 
     #[test]
