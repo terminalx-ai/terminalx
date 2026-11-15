@@ -325,7 +325,8 @@ const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command",
 ///
 /// A shell command goes ahead only when the app's own reader of discovery
 /// commands (`harness::read_only`) takes every part of it for one that reads:
-/// `git diff`, `git status`, `cat`, `rg`, `grep`, `ls`. Anything it does not know
+/// `git diff`, `git status`, `cat`, `rg`, `grep`, `ls`, `head`, numeric `sed -n`.
+/// Anything it does not know
 /// (`sed -i`, `git commit`, a redirect, a script) is refused, not asked about:
 /// nobody is there to answer.
 ///
@@ -338,12 +339,12 @@ pub fn verifier_call(payload: &Value) -> VerifierCall {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let edits = EDIT_TOOLS.contains(&tool) || (tool.starts_with("mcp__") && ["__write_file", "__edit_file", "__create_or_update_file", "__push_files"].iter().any(|suffix| tool.ends_with(suffix)));
     if edits {
-        return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run changes no file. You are here to judge the result as it is. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."));
+        return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run changes no file. This tool did not run. Use Read, Grep or Glob on permitted worktree files. If something is wrong, say where in your verdict block (`file:line`); the piece goes back to a worker."));
     }
     // A tool of a connected server may be a shell, an editor or anything else by another name:
     // none can be told from its name to only read, and a verifier needs none. It was given the diff.
     if tool.starts_with("mcp__") {
-        return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run uses no tool of a connected server, since none can be known to only read. Judge the result from the diff and the files in this worktree."));
+        return VerifierCall::Refuse(format!("TerminalX refused `{tool}`: a verifier of a run uses no tool of a connected server, since none can be known to only read. This tool did not run. Use Read, Grep or Glob on permitted worktree files, or judge the supplied diff."));
     }
     if !SHELL_TOOLS.contains(&tool) {
         return VerifierCall::Leave;
@@ -352,9 +353,9 @@ pub fn verifier_call(payload: &Value) -> VerifierCall {
     // `workdir`, and only without one the directory its hook reported.
     let input = &payload["tool_input"];
     let cwd = crate::harness::read_only::explicit_cwd(input).or_else(|| crate::harness::read_only::reported_scope(input, payload["cwd"].as_str()));
-    match crate::harness::read_only::approved(tool, input, cwd) {
-        Some(approved) => VerifierCall::Run(approved),
-        None => VerifierCall::Refuse("TerminalX refused this command: a verifier of a run runs only commands that read (`git diff`, `git status`, `cat`, `rg`, `grep`, `ls`), with no redirect and no script. The checks were already run for you; judge the result from the diff and the files as they are.".to_string()),
+    match crate::harness::read_only::vetted(tool, input, cwd) {
+        Ok(approved) => VerifierCall::Run(approved),
+        Err(reason) => VerifierCall::Refuse(format!("TerminalX refused this command: {reason}. This is a verifier policy refusal; the command did not run. Read the worktree with Read, Grep or Glob instead; provider permissions still apply. The checks were already run for you.")),
     }
 }
 
@@ -372,11 +373,11 @@ pub enum VerifierCall {
 
 /// Why a verifier's read-only command is refused where the person has not let
 /// TerminalX run read-only commands unasked (Settings, PRO-330).
-pub const NOT_ALLOWED: &str = "TerminalX refused this command: a verifier's shell commands are run by TerminalX itself, and read-only commands are not set to run unasked on this computer. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
+pub const NOT_ALLOWED: &str = "TerminalX refused this command: a verifier's shell commands are run by TerminalX itself, and read-only commands are not set to run unasked on this computer. This is a policy refusal; the command did not run. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
 
 /// Why a verifier's read-only command is refused where its agent's sandbox may
 /// narrow what it reads.
-pub const SANDBOXED: &str = "TerminalX refused this command: this agent's sandbox settings may limit what it reads, and TerminalX would run it outside that sandbox. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
+pub const SANDBOXED: &str = "TerminalX refused this command: this agent's sandbox settings may limit what it reads, and TerminalX would run it outside that sandbox. This is a policy refusal; the command did not run. Read the files with your file tools (Read, Grep, Glob) instead, and judge the result from the diff you were given.";
 
 /// Why a verifier's read-only command that was stopped before it finished is
 /// refused: no answer would let the agent's own shell run it.
@@ -663,7 +664,7 @@ mod tests {
         for writes in ["sed -i '' s/a/b/ src/cli.rs", "git commit -am fix", "git checkout -- src/cli.rs", "git stash", "echo fixed > src/cli.rs", "cat a | tee b", "rm src/cli.rs", "sh -c 'cat src/cli.rs'", "cargo t", "python3 fix.py", "git diff && touch x"] {
             for tool in ["Bash", "shell", "exec_command", "local_shell"] {
                 let reason = shell(tool, writes).unwrap_or_else(|| panic!("{tool}: {writes} is refused"));
-                assert!(reason.starts_with("TerminalX refused this command: a verifier of a run runs only commands that read"), "{reason}");
+                assert!(reason.starts_with("TerminalX refused this command:") && reason.contains("command did not run") && reason.contains("Grep"), "{reason}");
             }
         }
         // A connected server's tool may be a shell or an editor by any name: a verifier uses none.

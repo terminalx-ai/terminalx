@@ -197,7 +197,7 @@ mod desktop {
         }
 
         fn automation_failed(&self, session_id: &str, tab_id: &str, message: &str) {
-            crate::issue_pipeline::desktop::turn_failed(self, session_id, tab_id, message.contains("interrupted"));
+            crate::issue_pipeline::desktop::turn_failed(self, session_id, tab_id, message);
             crate::automations::fail_from_hook(self, session_id, tab_id, message);
         }
 
