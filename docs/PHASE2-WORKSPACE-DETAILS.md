@@ -3,16 +3,12 @@
 This slice consumes the accepted restart/details contract from worker
 `b117bfe47d2274e4df67661db60f8e600dd11171` (SaaS collection `7cc0f6c7`).
 Both pinned environment version fields are numbers. Installed/runtime and
-workspace dates are epoch milliseconds. The shared native/typed contract worker
-on `raccoon/contracts-try2-accepted-pro-125-212-shar` must be collected alongside
-this change: this worker does not edit `api.ts`, catalog, notification or native
-files. The guarded adapter in `cloudWorkspaceDetails.ts` describes those exact
-public method/DTO signatures locally, checks all methods and the public snapshot
-projection exist, and refuses with the existing runtime-not-ready code when
-collection is absent. It adds no native invocation, endpoint or projection
-fallback. Thus the base and the collected shared API both compile. The base
-worktree does not yet contain those APIs or
-`docs/PHASE2-DESKTOP-CONTRACTS.md`; that document was read from the shared branch.
+workspace dates are epoch milliseconds. The accepted native/typed contracts
+commit `ccbdda8505b58994ac3e3da7cfe74f39b3262486` is collected alongside
+this change. The guarded adapter in `cloudWorkspaceDetails.ts` checks the public
+methods and snapshot projection before use. It adds no alternate endpoint or
+projection fallback. See `docs/PHASE2-DESKTOP-CONTRACTS.md` for native transport
+and rollout requirements.
 
 Production remains held. Details buttons and details/copy/restart menu entries
 require `api.phase2DesktopContractsAvailable()` to return true. The shared worker

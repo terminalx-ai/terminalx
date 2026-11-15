@@ -2,9 +2,8 @@
 
 This slice implements accepted SaaS source `b94a5de6fdb2a0cbed5931a879c5092a28eb9561`
 and the authoritative `/Users/pareshdudhat/phase2-orch/PRO-125-handoff.md`.
-Production activation remains held. This worktree does not contain the shared
-contracts commit yet; the lead must collect the already completed
-`raccoon/contracts-try2-accepted-pro-125-212-shar` branch alongside this slice.
+Production activation remains held. The lead has collected the accepted shared
+contracts commit `ccbdda8505b58994ac3e3da7cfe74f39b3262486` alongside this slice.
 `desktopInbox.ts` implements a concrete typed adapter using the existing `invoke`
 wrapper and the exact native command names and arguments from that branch. It
 does not cast nonexistent API methods into existence. An absent native readiness
@@ -94,23 +93,8 @@ Integrated SaaS live readiness, real native two-account/cross-device delivery an
 macOS notification/hidden-window timing, disk cache access enforcement, and
 visual/design acceptance remain lead/native/server acceptance. No production
 service, compute, deploy, push or activation was used. This is desktop slice
-implementation, not whole-ticket certification. Native execution cannot be
-certified in this worktree until the lead collects the shared contracts branch;
-those native files are outside this worker's permitted paths.
-
-This continuation reviewed diffs from both prior attempts and selectively applied
-try 2's changes in the 13 owned paths, then replaced its structural API cast with
-an explicit native command adapter and command-boundary tests. No branch merge
-or cherry-pick was used. The adapter uses the exact shared contracts transport;
-it does not implement HTTP or handle tokens in the webview.
-
-Try 3 local verification: the required four-file Vitest command passed 125 tests;
-AppShell, cloudAgents and cloudRowState passed another 101 tests. `pnpm exec tsc
---noEmit` and `git diff --check` passed. These tests exercise the command adapter
-with mocks, not a native build. This worker reports partial integration because
-the required native commands are absent from this branch and collecting or
-editing their files is outside the allowed scope. The lead must collect the
-contracts worker before native integration validation; activation remains held.
+implementation, not whole-ticket certification. Native transport contract checks
+use local mocked HTTP responses; frontend checks use mocked native commands.
 
 ## Lead integration validation
 
