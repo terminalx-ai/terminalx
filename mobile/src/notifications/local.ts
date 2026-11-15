@@ -79,6 +79,17 @@ export async function setNotificationsAllowed(on: boolean): Promise<PermissionSt
   return permission;
 }
 
+/**
+ * Check iOS again and subscribe or stop to match, for every connected Mac.
+ * For when the app returns to the foreground: the person may have turned
+ * notifications on or off in iOS Settings meanwhile. Resolves the iOS state.
+ */
+export async function refreshLocalNotifications(): Promise<PermissionState> {
+  const settings = await loadNotificationSettings();
+  await Promise.all([...deliveries].map(([hostId, delivery]) => reconcile(hostId, delivery.connection, settings)));
+  return notificationPermission();
+}
+
 export async function handleNotificationEvent(hostId: string, value: unknown): Promise<void> {
   const event = parseNotification(value);
   if (!event) return;
