@@ -23,9 +23,13 @@ These are source, fixture and local-build results only:
   report are implemented and fixture-tested in `native/vm-bootstrap`. Its
   executable `terminalx-vm-bootstrap` exists only as a local ad hoc candidate
   build ([guest helper executable](#guest-helper-executable)).
-- **Nothing is distributed or adopted.** Nothing is Developer ID signed,
-  notarized, catalog-approved, installed, adopted or accepted, or run in a
-  real VM or guest.
+- **Nothing is distributed or adopted.** Nothing is notarized,
+  catalog-approved, installed, adopted or accepted, or run in a real VM or
+  guest. The recorded artifacts are not Developer ID signed. Since 2026-11-15
+  the guest helper, probe and seed tool can be: the owner chose the TerminalX
+  release Developer ID, and `scripts/release/release.py vm-bootstrap` signs a
+  build with it ([Releasing](RELEASING.md#signing-the-vm-guest-helper)). The
+  restricted Lume owner is still unsigned.
 - **Still absent or held.** The restore catalog is still empty. The bundled
   seed daemon (Option A) is not implemented, and its packaging is held for a
   separate review.

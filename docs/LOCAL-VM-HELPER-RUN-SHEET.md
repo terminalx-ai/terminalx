@@ -27,7 +27,7 @@ next to `manifest.json`.
 
 | Input | State |
 | --- | --- |
-| Developer ID signature for the probe (P3) | **Absent.** Signing is held. With this ad hoc probe, Run 1 can establish G1–G4 and the disable part of G6, but not G6's attribution. A Developer ID build changes the probe digest, so this sheet must be regenerated before that run. |
+| Developer ID signature for the probe (P3) | **Absent from the artifacts above**, which are the ad hoc ones. With this ad hoc probe, Run 1 can establish G1–G4 and the disable part of G6, but not G6's attribution. A Developer ID build changes the probe digest, so this sheet must be regenerated before that run. Since 2026-11-15 the identity is chosen (the TerminalX release Developer ID) and `python3 -I scripts/release/release.py vm-bootstrap <dir>` makes the signed build ([Releasing](RELEASING.md#signing-the-vm-guest-helper)); none is recorded here yet. |
 | Restore image (P1) | **Absent.** No image is selected or downloaded. |
 | Target `disk.img` identity | **Does not exist yet.** It is recorded in phase 1.1 (device, inode, size) and checked before every step below. |
 | Approval of the Run 1 scope | **Not requested.** |
