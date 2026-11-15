@@ -247,6 +247,12 @@ pub trait Host: Send + Sync {
     /// What the lead committed in its checkout since `since`, for a piece it took over
     /// ([`finish`]), and what it left uncommitted.
     fn lead_work(&self, run: &Run, since: &str) -> anyhow::Result<LeadWork>;
+    /// The piece's own work, when the lead's branch already holds it: what its last
+    /// worker's branch changed since that try's base commit, with `head` the lead's
+    /// commit. `None` when that branch has nothing since its base, or the lead's branch
+    /// does not contain its tip. Read when the lead committed the piece's work before it
+    /// took the piece over, so nothing came after ([`finish`]).
+    fn piece_in_lead(&self, run: &Run, piece: &Piece) -> anyhow::Result<Option<LeadWork>>;
     /// Run a piece's command done-checks in the lead's checkout, in order, until one fails.
     /// `by_lead`: the lead's own turn asked, so that turn is not one to wait for.
     /// `Err` says why they could not be run (its checkout is in use).
@@ -891,6 +897,11 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         .filter(|piece| !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none())
         .filter_map(|piece| {
             let worker = piece.worker.clone()?;
+            // A worker whose try is no longer the piece's latest (the lead's take-over, finished
+            // or not) has nothing more to say about it: its late report would undo the lead's.
+            if current_worker(piece) != Some(&worker) {
+                return None;
+            }
             // A try that has ended has its cost: only one still open is read again.
             let cost = piece.tries.last().is_some_and(|attempt| attempt.outcome.is_none()).then(|| host.worker_cost(&worker));
             Some((piece.id.clone(), worker.clone(), host.worker(&worker), cost))
@@ -932,7 +943,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         for (piece_id, worker, now, cost) in seen {
             // A piece whose worker was replaced meanwhile is not this worker's to decide.
-            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none()) else { continue };
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && current_worker(piece) == Some(&worker) && !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none()) else { continue };
             // What a worker reported stands when its session is deleted afterwards: the report
             // was read, and its branch is still in the repository.
             if piece.state == PieceState::Done && now == WorkerNow::Gone {
@@ -1678,6 +1689,12 @@ fn person_only(run: &Run, piece_id: &str, by: By, what: &str) -> Result<(), Engi
     Ok(())
 }
 
+/// The worker a piece belongs to now: its latest try's, which after a take-over is
+/// the lead, or the piece's own for a piece stored before tries named theirs.
+fn current_worker(piece: &Piece) -> Option<&SessionRef> {
+    piece.tries.last().and_then(|attempt| attempt.worker.as_ref()).or(piece.worker.as_ref())
+}
+
 /// A turn of a worker that has a session: within the budget and the worker limits, as any
 /// worker's turn is (PRO-280). `what` names it in the refusal.
 fn turn_fits(host: &dyn Host, run: &Run, piece_id: &str, what: &str) -> Result<(), EngineError> {
@@ -2024,6 +2041,16 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
         error.details = json!({"piece": piece_id, "files": work.uncommitted});
         return Err(error);
     }
+    // Nothing since the take-over: the lead may have brought the piece's work into its branch
+    // just before it took the piece over. That work, already in the lead's branch, is the result.
+    let work = if work.changes.is_empty() {
+        match host.piece_in_lead(&run, piece) {
+            Ok(Some(earlier)) if !earlier.changes.is_empty() => LeadWork { head: work.head, changes: earlier.changes, uncommitted: work.uncommitted },
+            _ => work,
+        }
+    } else {
+        work
+    };
     // The lead took it over itself on an approved plan: a change outside the files the piece
     // owns would widen it, and that is the person's (`person_only`).
     let held = piece.tries.last().is_some_and(|attempt| attempt.held_to_owns);

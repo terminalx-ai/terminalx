@@ -127,6 +127,14 @@ pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
 
 /// The commit a worker's branch is cut from: the lead's branch, or the commit
 /// it has checked out when it is on none.
+/// Each file changed from `from` to `to` in the lead's checkout, for a piece it finishes:
+/// every path as it is, never quoted, and both sides of a rename, since what the lead is
+/// held to is checked against the piece's files path by path.
+fn held_changes(cwd: &Path, from: &str, to: &str) -> anyhow::Result<Vec<verify::FileChange>> {
+    let numbers = crate::git::run(cwd, &["diff", "--numstat", "--no-renames", "-z", &format!("{from}..{to}"), "--"])?;
+    Ok(verify::numstat_z(&numbers))
+}
+
 fn lead_base(cwd: &Path) -> anyhow::Result<String> {
     match crate::git::current_branch(cwd) {
         Some(branch) => Ok(branch),
@@ -520,12 +528,25 @@ impl Host for ManagerHost {
         crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"]).ok().map(|head| head.trim().to_string()).filter(|head| !head.is_empty())
     }
 
+    fn piece_in_lead(&self, run: &Run, piece: &Piece) -> anyhow::Result<Option<engine::LeadWork>> {
+        let cwd = self.lead_checkout(run)?;
+        let Some((branch, base)) = piece.tries.iter().rev().filter(|attempt| attempt.step != super::ladder::Step::Lead).find_map(|attempt| Some((attempt.branch.clone().or_else(|| piece.branch.clone())?, attempt.base_commit.clone()?))) else { return Ok(None) };
+        let Ok(tip) = crate::git::run(&cwd, &["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else { return Ok(None) };
+        let tip = tip.trim().to_string();
+        let head = crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
+        // Its work must be in the lead's branch: else finishing would count a result the branch does not have.
+        if tip == base || !matches!(crate::git::raw(&cwd, &["merge-base", "--is-ancestor", &tip, &head]), Some((0, _))) {
+            return Ok(None);
+        }
+        Ok(Some(engine::LeadWork { head, changes: held_changes(&cwd, &base, &tip)?, uncommitted: Vec::new() }))
+    }
+
     fn lead_work(&self, run: &Run, since: &str) -> anyhow::Result<engine::LeadWork> {
         let cwd = self.lead_checkout(run)?;
         let head = crate::git::run(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
-        let numbers = crate::git::run(&cwd, &["diff", "--numstat", &format!("{since}..{head}"), "--"])?;
+        let changes = held_changes(&cwd, since, &head)?;
         let uncommitted = crate::git::run(&cwd, &["status", "--porcelain", "--untracked-files=no", "--"])?.lines().filter(|line| !line.trim().is_empty()).map(|line| line.get(3..).unwrap_or(line).trim().to_string()).collect();
-        Ok(engine::LeadWork { head, changes: verify::numstat(&numbers), uncommitted })
+        Ok(engine::LeadWork { head, changes, uncommitted })
     }
 
     fn lead_commands(&self, run: &Run, piece: &Piece, by_lead: bool) -> Result<Vec<verify::CommandRun>, String> {
@@ -678,6 +699,25 @@ mod tests {
 
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {
         crate::git::run(cwd, args).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn what_a_lead_changed_names_both_sides_of_a_rename_and_every_path_as_it_is() {
+        let repo = repository();
+        std::fs::create_dir_all(repo.path().join("secret")).unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        let base = commit_file(repo.path(), "secret/key.rs", "let key = 1;\n");
+        // Moved into the piece's files from outside them, and a name git would quote.
+        git(repo.path(), &["mv", "secret/key.rs", "src/cli.rs"]);
+        git(repo.path(), &["commit", "-qm", "move"]);
+        let head = commit_file(repo.path(), "src/a b\tc.rs", "x\n");
+        let changes = super::held_changes(repo.path(), &base, &head).unwrap();
+        let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
+        assert_eq!(paths, vec!["secret/key.rs", "src/a b\tc.rs", "src/cli.rs"]);
+        assert_eq!((changes[0].added, changes[0].removed), (Some(0), Some(1)));
+        let owns = vec!["src/**".to_string()];
+        let outside: Vec<&str> = paths.into_iter().filter(|path| !crate::orchestration::plan::owns(&owns, path)).collect();
+        assert_eq!(outside, vec!["secret/key.rs"], "the file it came from is outside the piece");
     }
 
     fn commit_file(cwd: &std::path::Path, file: &str, content: &str) -> String {
