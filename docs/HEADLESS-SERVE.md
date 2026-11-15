@@ -8,7 +8,11 @@ git/worktree code as the desktop app, with no WebView, GTK or audio libraries (P
 The same runtime is also the host when another TerminalX desktop operates this computer
 (a Mac mini, a headless server). [MACHINES.md](MACHINES.md) records how: one connection per
 machine through the additive `machine/1` namespace, the host endpoint in the runtime, and
-which workspace methods a machine connection is served.
+which workspace methods a machine connection is served. With `machines.allowOperating`
+on in the data directory's `settings.json`, the runtime listens on TCP 6768
+(`TERMINALX_MACHINE_HOST_PORT` moves it) and, given `--relay-link`, answers the relay
+with the same host key, kept in `<data dir>/machine-host/host-key.json` (mode 0600). It
+needs no desktop libraries for this; the pairing module stays desktop-only.
 
 ## How it is built
 

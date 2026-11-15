@@ -1,83 +1,102 @@
-import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { useCallback, useMemo, useState } from "react";
-import { AppState, Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+import { AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, ChevronRight, Laptop } from "lucide-react-native";
-import { branchChats, chatRows, projectGroups, shortTime, type ChatRow } from "@mobile/data/session-list";
+import { ChevronDown, Laptop, Search, X } from "lucide-react-native";
+import { chatRows, filterCounts, LIST_FILTERS, listSections, type ChatRow, type ListFilter } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
-import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
+import { Button, EmptyState } from "@mobile/ui/primitives";
+import { ConnectionLine } from "@mobile/ui/ConnectionLine";
+import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { useDeviceMenu } from "@mobile/ui/DeviceMenu";
 import { GlassIconButton } from "@mobile/ui/glass";
-import { MacIcon, StateMark } from "@mobile/ui/MacIcon";
-import { AgentMark } from "@mobile/ui/AgentMark";
-import { ChatListRow } from "@mobile/ui/ChatListRow";
-import { MutedMark, useSessionOverride } from "@mobile/ui/notifications/SessionNotifications";
+import { SessionListRow } from "@mobile/ui/SessionListRow";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@mobile/ui/theme";
 
-type ListView = "chats" | "projects";
-const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
-/** The view last chosen, for as long as the app runs. */
-let lastView: ListView = "chats";
+/** The filter last chosen, for as long as the app runs. */
+const chosen: { filter: ListFilter } = { filter: "all" };
+const rememberFilter = (filter: ListFilter) => { chosen.filter = filter; };
 
 export default function SessionsScreen() {
   const app = useApp();
   const { palette } = useTheme();
   const router = useRouter();
-  const [view, setViewState] = useState<ListView>(lastView);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const setView = (next: ListView) => { lastView = next; setViewState(next); };
+  const [filter, setFilterState] = useState<ListFilter>(() => chosen.filter);
+  const setFilter = (next: ListFilter) => { rememberFilter(next); setFilterState(next); };
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
   const insets = useSafeAreaInsets();
   const bar = useTabBarInset();
-  const [headerHeight, setHeaderHeight] = useState(insets.top + 56);
+  const [headerHeight, setHeaderHeight] = useState(insets.top + 104);
   // Row status facts are cached on the Mac; a silent refresh keeps them current while this list is in view.
+  // A change on the Mac (a question, an approval) is pushed at once as `sessions.changed`; this only catches PR and workspace facts.
   useFocusEffect(useCallback(() => {
     const timer = setInterval(() => {
-      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions();
     }, 10_000);
     return () => clearInterval(timer);
   }, [app.connectionStage, app.refreshSessions]));
+  const state = useConnectionState(app);
+  const pull = usePullRefresh(app.refreshSessions);
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
-  const rows = useMemo(() => chatRows(app.sessions), [app.sessions]);
-  const groups = useMemo(() => projectGroups(rows), [rows]);
-  const sections = useMemo(() => view === "chats"
-    ? (rows.length ? [{ key: "chats", title: "", needs: 0, data: rows }] : [])
-    : groups.map((group) => ({ key: group.project, title: group.project, needs: group.needs, data: collapsed.has(group.project) ? [] : group.rows })), [collapsed, groups, rows, view]);
+  const rows = useMemo(() => chatRows(app.sessions, query), [app.sessions, query]);
+  const counts = useMemo(() => filterCounts(rows), [rows]);
+  const sections = useMemo(() => listSections(rows, filter), [filter, rows]);
 
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
 
   const host = app.activeHost;
-  const connected = app.connectionStage === "connected";
-  const heldByMac = app.connectionStage === "disconnected-on-mac";
-  const diagnostic = connected || heldByMac ? undefined : [...app.logs].reverse().find((entry) => ["Trying connection paths", "Relay path failed", "Connection attempt failed"].includes(entry.message));
-  const stage = connectionCopy(app.connectionStage, app.connectionAttempt);
+  const connected = connectionUsable(state);
   const open = (row: ChatRow, tabId = row.tabId) => router.push({ pathname: "/session/[sessionId]", params: { sessionId: row.session.id, tabId, hostId: host.id, title: row.title } });
-  const toggle = (project: string) => setCollapsed((current) => { const next = new Set(current); if (next.has(project)) next.delete(project); else next.add(project); return next; });
-  const projects = view === "projects";
+  const closeSearch = () => { setQuery(""); setSearching(false); };
+  const empty = state === "updating" && !app.sessions.length ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." />
+    : query.trim() && !rows.length ? <EmptyState title="No matches" detail="No session's title, branch, project or tabs have those words." />
+    : filter === "needs" && rows.length ? <EmptyState title="Nothing waits for you" detail="Sessions waiting for your answer or approval will appear here." />
+    : filter === "working" && rows.length ? <EmptyState title="Nothing is working" detail="Sessions whose agent is working will appear here." />
+    : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
+    : <EmptyState title="No saved sessions" detail="This Mac's sessions appear here once the phone connects." />;
+  const waiting = filter === "needs" && counts.needs ? <Text style={[styles.footnote, { color: palette.muted }]}>{counts.needs === 1 ? "1 session is waiting for you." : `${counts.needs} sessions are waiting for you.`}</Text> : undefined;
 
-  // The Mac and the view switch stay at the top as the list scrolls under them, fading away there.
+  // The Mac, search and the filters stay at the top as the list scrolls under them, fading away there.
   const header = <View onLayout={({ nativeEvent }) => setHeaderHeight(nativeEvent.layout.height)} style={[styles.sticky, { paddingTop: insets.top }]}>
     <EdgeFade edge="top" height={headerHeight + 28} />
+    {/* Solid behind the status area: the list fades under the header but is never drawn over the clock (#984). */}
+    <View testID="top-bar-status" style={[styles.status, { height: insets.top, backgroundColor: palette.page }]} />
     <View style={styles.header}>
-      {/* The Mac these chats are on. */}
+      {/* The Mac these sessions are on. */}
       <View style={styles.topBar}>
+        {/* The Mac's name, and beneath it the connection in the words every screen uses (#983). */}
         <Pressable accessibilityRole="button" accessibilityHint="Opens device options" onPress={() => menu.open(host)} onLongPress={() => menu.open(host)} style={styles.hostName}>
           <Laptop size={21} color={palette.ink} strokeWidth={1.8} />
-          <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
-          <StatusDot color={connected ? palette.success : palette.warning} />
+          <View style={styles.hostTitles}>
+            <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
+            <ConnectionLine state={state} />
+          </View>
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`Device options for ${menu.nameOf(host)}`} hitSlop={10} onPress={() => menu.open(host)} style={styles.hostChevron}><ChevronDown size={16} color={palette.muted} /></Pressable>
         <View style={styles.flex} />
-        {/* The button shows where it goes: the list of chats from the projects, the projects from the list. */}
-        <GlassIconButton label={projects ? "Show all chats" : "Group by project"} size={40} icon={<MacIcon name={projects ? "LayoutList" : "FolderTree"} size={20} color={palette.ink} strokeWidth={1.4} />} onPress={() => setView(projects ? "chats" : "projects")} />
+        {/* Only once the phone has really failed to reach the Mac: it keeps trying by itself meanwhile. */}
+        {state === "waiting" ? <Button label="Try again" kind="secondary" onPress={app.retryConnection} style={styles.retry} /> : null}
+        {state === "held" ? <Button label="Reconnect" kind="secondary" onPress={() => app.connection.restart("reconnect was chosen", true)} style={styles.retry} /> : null}
+        <GlassIconButton label={searching ? "Close search" : "Search sessions"} size={40} icon={searching ? <X size={20} color={palette.ink} strokeWidth={1.6} /> : <Search size={20} color={palette.ink} strokeWidth={1.6} />} onPress={() => searching ? closeSearch() : setSearching(true)} />
       </View>
-      {!connected ? <View style={styles.offline}>
-        <Text style={[styles.offlineText, { color: palette.muted }]}><Text style={{ color: palette.warning }}>{stage.title}. </Text>{diagnostic?.detail ? `${diagnostic.message}: ${diagnostic.detail}` : stage.hint ?? "Showing what this phone saved."}</Text>
-        <Button label={heldByMac ? "Reconnect" : "Retry"} kind="secondary" onPress={() => app.connection.restart(heldByMac ? "reconnect was chosen" : "retry was tapped", true)} style={styles.retry} />
+      {searching ? <View style={[styles.search, { backgroundColor: palette.raised, borderColor: palette.border }]}>
+        <Search size={16} color={palette.muted} />
+        <TextInput autoFocus value={query} onChangeText={setQuery} placeholder="Search titles, branches, projects" placeholderTextColor={palette.faint} accessibilityLabel="Search sessions" autoCorrect={false} autoCapitalize="none" returnKeyType="search" clearButtonMode="while-editing" style={[styles.searchInput, { color: palette.ink }]} />
       </View> : null}
+      {/* What the phone is opened for: everything, what waits on you, what is working. */}
+      <View accessibilityRole="tablist" style={styles.filters}>
+        {LIST_FILTERS.map((item) => {
+          const on = filter === item.id;
+          return <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: on }} accessibilityLabel={`${item.label}, ${counts[item.id]}`} hitSlop={{ top: 5, bottom: 5 }} onPress={() => setFilter(item.id)} style={[styles.filter, { backgroundColor: on ? palette.ink : palette.raised }]}>
+            <Text style={[styles.filterText, { color: on ? palette.page : palette.ink }]}>{item.label}<Text style={styles.filterCount}>{`  ${counts[item.id]}`}</Text></Text>
+          </Pressable>;
+        })}
+      </View>
     </View>
   </View>;
 
@@ -86,99 +105,43 @@ export default function SessionsScreen() {
     keyExtractor={(item) => item.key}
     contentInsetAdjustmentBehavior="never"
     keyboardShouldPersistTaps="handled"
+    keyboardDismissMode="on-drag"
     stickySectionHeadersEnabled={false}
     style={{ backgroundColor: palette.page }}
-    contentContainerStyle={[styles.content, { paddingTop: headerHeight + 4, paddingBottom: bar + 16 }]}
+    // The last row scrolls clear of the floating tab bar.
+    contentContainerStyle={{ paddingTop: headerHeight + 4, paddingBottom: bar + 24 }}
     scrollIndicatorInsets={{ top: headerHeight, bottom: bar }}
-    refreshControl={<RefreshControl refreshing={app.loadingSessions} onRefresh={() => void app.refreshSessions()} tintColor={palette.accent} progressViewOffset={headerHeight} />}
-    renderSectionHeader={({ section }) => projects ? <ProjectHeader title={section.title} open={!collapsed.has(section.key)} onPress={() => toggle(section.key)} /> : null}
-    renderItem={({ item }) => projects ? <ProjectChat row={item} hostId={host.id} onOpen={(tabId) => open(item, tabId)} /> : <ChatListRow row={item} hostId={host.id} onPress={() => open(item)} />}
-    ListEmptyComponent={app.loadingSessions ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." busy />
-      : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
-      : <EmptyState title="Sessions are offline" detail="Cached transcripts remain available after you reopen a session from recent history." />}
+    refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={headerHeight} />}
+    renderSectionHeader={({ section }) => section.title ? <Text accessibilityRole="header" numberOfLines={1} style={[styles.section, { color: palette.muted }]}>{section.title}</Text> : null}
+    renderSectionFooter={() => <View style={styles.sectionGap} />}
+    renderItem={({ item, index, section }) => <SessionListRow row={item} hostId={host.id} first={index === 0} last={index === section.data.length - 1} onOpen={(tabId) => open(item, tabId)} />}
+    ListFooterComponent={waiting}
+    ListEmptyComponent={empty}
   />{header}</View>;
 }
 
-/** A project as the Mac's project list heads it: a folder and the project's name. */
-function ProjectHeader({ title, open, onPress }: { title: string; open: boolean; onPress(): void }) {
-  const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityLabel={title} onPress={onPress} style={({ pressed }) => [styles.project, pressed && { backgroundColor: palette.raised }]}>
-    <MacIcon name="Folder" size={18} color={palette.muted} strokeWidth={1.3} />
-    <Text numberOfLines={1} style={[styles.projectTitle, { color: palette.ink }]}>{title}</Text>
-    {open ? null : <ChevronRight size={16} color={palette.faint} />}
-  </Pressable>;
-}
-
-/**
- * A branch under its project, as on the Mac: named by its branch, else by its
- * title. A branch holding several chats (tabs on the Mac) says how many, and
- * opens to list them; one with a single chat opens it.
- */
-function ProjectChat({ row, hostId, onOpen }: { row: ChatRow; hostId: string; onOpen(tabId: string): void }) {
-  const { palette } = useTheme();
-  const [open, setOpen] = useState(false);
-  const chats = branchChats(row.session);
-  const many = chats.length > 1;
-  const state = row.state === "needs" ? "needs you" : row.state === "working" ? "working" : "";
-  const manualStatus = manualStatusLabel(row.session.manualStatus);
-  const unread = row.unread ? "Unread" : "";
-  const muted = useSessionOverride(hostId, row.session.id) === "mute" ? "Muted" : "";
-  return <View>
-    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, unread, muted, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
-      {row.branched ? <MacIcon name="GitBranch" size={16} color={palette.muted} strokeWidth={1.35} /> : null}
-      <Text numberOfLines={1} style={[row.branched ? styles.branchName : styles.chatTitle, { color: palette.ink }]}>{row.name}</Text>
-      <Text style={[styles.time, { color: palette.muted }]}>{[manualStatus, unread].filter(Boolean).join(" · ")}</Text>
-      <MutedMark hostId={hostId} sessionId={row.session.id} />
-      {row.state !== "done" ? <StateMark state={row.state} info={palette.info} warning={palette.warning} /> : many ? null : <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>}
-      {many ? <View style={[styles.count, { backgroundColor: palette.raised }]}>
-        <Text style={[styles.countText, { color: palette.muted }]}>{chats.length}</Text>
-        {open ? <ChevronDown size={13} color={palette.muted} /> : <ChevronRight size={13} color={palette.muted} />}
-      </View> : null}
-    </Pressable>
-    {many && open ? chats.map((chat) => <Pressable key={chat.id} accessibilityRole="button" accessibilityLabel={[chat.name, chat.state === "needs" ? "needs you" : chat.state === "working" ? "working" : "", chat.unread ? "Unread" : ""].filter(Boolean).join(", ")} onPress={() => onOpen(chat.id)} style={({ pressed }) => [styles.tabRow, pressed && { backgroundColor: palette.raised }]}>
-      <AgentMark id={chat.harness} size={14} color={palette.muted} />
-      <Text numberOfLines={1} style={[styles.tabName, { color: palette.ink }]}>{chat.name}</Text>
-      {chat.unread ? <Text style={[styles.time, { color: palette.muted }]}>Unread</Text> : null}
-      <StateMark state={chat.state} info={palette.info} warning={palette.warning} />
-    </Pressable>) : null}
-  </View>;
-}
-
-function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {
-  if (stage === "connected") return { title: "Live · end-to-end encrypted" };
-  if (stage === "disconnected-on-mac") return { title: "Disconnected on your Mac", hint: "This phone stays paired. Reconnect when you want it back." };
-  if (stage === "unreachable") return { title: "Unreachable", hint: "Check that the Mac is awake and reachable over Wi-Fi, VPN, or relay." };
-  if (stage === "cant-connect") return { title: `Can’t connect · attempt ${attempt}` };
-  return { title: "Reconnecting…" };
-}
 
 const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
   flex: { flex: 1 },
   screen: { flex: 1 },
-  content: {},
   sticky: { position: "absolute", top: 0, left: 0, right: 0 },
-  header: { gap: 10, paddingHorizontal: 20, paddingTop: 2, paddingBottom: 6 },
+  status: { position: "absolute", top: 0, left: 0, right: 0 },
+  header: { gap: 10, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 8 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10 },
   hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
+  hostTitles: { flexShrink: 1, gap: 1 },
   hostText: { flexShrink: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
   hostChevron: { height: 44, justifyContent: "center", marginLeft: -6 },
-  offline: { flexDirection: "row", alignItems: "center", gap: 12 },
-  offlineText: { flex: 1, fontSize: 13, lineHeight: 18 },
+  search: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12 },
+  searchInput: { flex: 1, fontSize: 16, paddingVertical: 8 },
+  filters: { flexDirection: "row", gap: 8 },
+  filter: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center" },
+  filterText: { fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] },
+  filterCount: { opacity: 0.6 },
   retry: { minHeight: 34, paddingHorizontal: 14 },
-  // As on the Mac: a project's folder at the edge, its branches a step in, quiet times at the end.
-  time: { fontSize: 12, letterSpacing: 0, fontVariant: ["tabular-nums"], fontFamily: MONO },
-  // Each level steps in to where its parent's name starts: project 20, branch 32, chat 58.
-  project: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 48, paddingHorizontal: 20, marginTop: 14 },
-  projectTitle: { flex: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.3 },
-  channel: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 50, paddingRight: 20 },
-  branchRow: { paddingLeft: 32 },
-  titleRow: { paddingLeft: 32 },
-  branchName: { flex: 1, fontSize: 15, fontFamily: MONO, letterSpacing: -0.2 },
-  chatTitle: { flex: 1, fontSize: 16, letterSpacing: -0.3 },
-  count: { flexDirection: "row", alignItems: "center", gap: 3, height: 22, borderRadius: 11, paddingLeft: 8, paddingRight: 5 },
-  countText: { fontSize: 12, fontWeight: "600", fontVariant: ["tabular-nums"] },
-  // A branch's chats, a step further in, their marks under the branch's name.
-  tabRow: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 44, paddingLeft: 58, paddingRight: 20 },
-  tabName: { flex: 1, fontSize: 15, letterSpacing: -0.2 },
+  // A section's name over its card, as 22.04: small capitals, quiet.
+  section: { fontSize: 12, fontWeight: "600", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 8, marginBottom: 8, marginHorizontal: 20 },
+  sectionGap: { height: 10 },
+  footnote: { fontSize: 14, textAlign: "center", marginTop: 8 },
 });

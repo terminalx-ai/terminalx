@@ -1,0 +1,162 @@
+import { useSyncExternalStore } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { api, errorMessage, invoke } from "@/lib/api";
+import type {
+  InspectedMachineCode,
+  MachineHostView,
+  MachinePairingCode,
+  MachinePairResult,
+  MachineRoute,
+  PairedMachine,
+} from "@/types/machines";
+
+/**
+ * The `machines_*` commands (docs/MACHINES.md "As built (PRO-342)"). On this
+ * Mac as the machine: the host's status, the operate switch, codes, Allow and
+ * revoke. On this Mac as the operating computer: inspect, pair, the store.
+ */
+export const machinesApi = {
+  hostStatus: () => invoke<MachineHostView>("machines_host_status"),
+  setAllowOperating: (enabled: boolean) => invoke<MachineHostView>("machines_set_allow_operating", { enabled }),
+  createCode: () => invoke<MachinePairingCode>("machines_create_code"),
+  approve: (requestId: string) => invoke<unknown>("machines_approve", { requestId }),
+  decline: (requestId: string) => invoke<unknown>("machines_decline", { requestId }),
+  revoke: (id: string) => invoke<unknown>("machines_revoke", { id }),
+  inspectCode: (code: string) => invoke<InspectedMachineCode>("machines_inspect_code", { code }),
+  pair: (code: string, route: MachineRoute) => invoke<MachinePairResult>("machines_pair", { code, route }),
+  cancelPairing: () => invoke<unknown>("machines_cancel_pairing"),
+  list: () => invoke<PairedMachine[]>("machines_list"),
+  setRoute: (machineId: string, route: MachineRoute) => invoke<unknown>("machines_set_route", { machineId, route }),
+};
+
+interface MachineHostState {
+  view: MachineHostView | null;
+  ready: boolean;
+  /** A command in flight: its controls wait. */
+  busy: boolean;
+  /** The last command's failure, or why the status could not be read. */
+  error: string | null;
+}
+
+let state: MachineHostState = { view: null, ready: false, busy: false, error: null };
+const listeners = new Set<() => void>();
+
+function set(patch: Partial<MachineHostState>) {
+  state = { ...state, ...patch };
+  for (const listener of [...listeners]) listener();
+}
+
+function apply(view: MachineHostView | null | undefined) {
+  if (view && typeof view === "object") set({ view, ready: true });
+}
+
+/** The machine host as it is now, outside React. */
+export function getMachineHost(): MachineHostState {
+  return state;
+}
+
+/** This Mac as a machine: the switch, its status, the computer asking to operate it. */
+export function useMachineHost(): MachineHostState {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => state,
+    () => state,
+  );
+}
+
+let booted: Promise<void> | null = null;
+/** Read the host once and follow `machines_host_changed`. Safe to call from every view that needs it. */
+export function bootMachineHost(): Promise<void> {
+  return (booted ??= (async () => {
+    try {
+      await listen<MachineHostView>("machines_host_changed", (event) => apply(event.payload));
+    } catch {
+      // No event bus (a test, the demo): the read below still answers.
+    }
+    try {
+      apply(await machinesApi.hostStatus());
+    } catch (error) {
+      set({ ready: true, error: errorMessage(error) });
+    }
+  })());
+}
+
+/** Read the host again, as after a change made elsewhere. */
+export async function refreshMachineHost(): Promise<void> {
+  try {
+    apply(await machinesApi.hostStatus());
+  } catch (error) {
+    set({ error: errorMessage(error) });
+  }
+}
+
+/** Run one command; its failure shows as the store's error, then the host is read again. */
+async function command(run: () => Promise<unknown>, answersView = false): Promise<boolean> {
+  set({ busy: true, error: null });
+  try {
+    const result = await run();
+    if (answersView) apply(result as MachineHostView);
+    else await refreshMachineHost();
+    return true;
+  } catch (error) {
+    set({ error: errorMessage(error) });
+    return false;
+  } finally {
+    set({ busy: false });
+  }
+}
+
+/** Let other computers operate this Mac (`machines.allowOperating`). */
+export function setAllowOperating(enabled: boolean): Promise<boolean> {
+  return command(() => machinesApi.setAllowOperating(enabled), true);
+}
+
+/** Let the waiting computer finish pairing: the person compared the fingerprints. */
+export function approveMachine(requestId: string): Promise<boolean> {
+  return command(() => machinesApi.approve(requestId));
+}
+
+/** Refuse the waiting computer. The code ends with it. */
+export function declineMachine(requestId: string): Promise<boolean> {
+  return command(() => machinesApi.decline(requestId));
+}
+
+/** End a computer's credential and close its connection. */
+export function revokeComputer(id: string): Promise<boolean> {
+  return command(() => machinesApi.revoke(id));
+}
+
+/**
+ * Keep this Mac awake while a computer (or phone) is connected: `pairing.keepAwake`,
+ * shared with phones. The switch moves at once and returns if the Mac refuses.
+ */
+export async function setMachinesKeepAwake(enabled: boolean): Promise<void> {
+  const before = state.view;
+  if (before) set({ view: { ...before, keepAwake: enabled }, error: null });
+  try {
+    const status = await api.pairingSetKeepAwake(enabled);
+    if (state.view) set({ view: { ...state.view, keepAwake: status.keepAwake } });
+  } catch (error) {
+    set({ view: before, error: errorMessage(error) });
+  }
+}
+
+/** Make a pairing code; the store keeps none of it, the caller shows it. */
+export async function createMachineCode(): Promise<MachinePairingCode> {
+  set({ error: null });
+  try {
+    return await machinesApi.createCode();
+  } finally {
+    void refreshMachineHost();
+  }
+}
+
+/** For tests: forget what was read. */
+export function resetMachineHostForTests() {
+  state = { view: null, ready: false, busy: false, error: null };
+  booted = null;
+  listeners.clear();
+}

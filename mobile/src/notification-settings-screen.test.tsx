@@ -7,7 +7,6 @@ const fake = vi.hoisted(() => ({
   storage: new Map<string, string>(),
   permission: { granted: true, status: "granted" } as { granted: boolean; status: string },
   openedSettings: 0,
-  pushed: [] as unknown[],
   app: {} as any,
 }));
 
@@ -29,9 +28,7 @@ vi.mock("expo-notifications", () => ({
   scheduleNotificationAsync: async () => "id",
   setNotificationCategoryAsync: async () => ({}),
 }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ push: (route: unknown) => fake.pushed.push(route) }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => fake.app }));
-vi.mock("@mobile/state/host-features", () => ({ useHostFeatures: () => null }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ name: "Ember", palette: {}, setName: vi.fn() }) }));
 vi.mock("./ui/theme", () => ({ useTheme: () => ({ name: "Ember", palette: {}, setName: vi.fn() }) }));
 vi.mock("@mobile/ui/primitives", () => primitives());
@@ -59,7 +56,6 @@ function primitives() {
   };
 }
 
-import SettingsScreen from "../app/(tabs)/settings";
 import { NotificationsPage, DELIVERY_NOTE } from "./ui/notifications/NotificationsPage";
 import { SessionNotificationsSheet } from "./ui/notifications/SessionNotifications";
 import { loadNotificationSettings, resetNotificationSettingsForTests, SETTINGS_KEY } from "./notifications/store";
@@ -85,36 +81,16 @@ beforeEach(() => {
   fake.storage.clear();
   fake.permission = { granted: true, status: "granted" };
   fake.openedSettings = 0;
-  fake.pushed = [];
   resetNotificationSettingsForTests();
   fake.app = {
     hosts: [host("mbp", "Studio MacBook"), host("mini", "Mac mini"), host("imac", "Office iMac")],
     activeHost: null, connectionStage: "idle", logs: [], session: null,
-    api: { onSettingsChanged: () => () => undefined, macSettings: async () => null },
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
-describe("the Settings row (22.07 frame 1)", () => {
-  it("replaces the old switch with a row saying what is on, and opens the page", async () => {
-    store({ allow: true });
-    await render(<SettingsScreen />);
-    await settle();
-    expect(text()).not.toContain("Local completion alerts");
-    const row = button("Notifications, Questions, approvals, finished, failed")!;
-    expect(row.textContent).toContain("Questions, approvals, finished, failed");
-    await click(row);
-    expect(fake.pushed).toEqual(["/notifications"]);
-  });
-
-  it("says Off while notifications are off", async () => {
-    store({ allow: false });
-    await render(<SettingsScreen />);
-    await settle();
-    expect(button("Notifications, Off")).toBeDefined();
-  });
-});
+// The Settings row (frame 1) is tested with the rest of Settings, in settings-screen.test.tsx.
 
 describe("the Notifications page (22.07 frames 2 and 3)", () => {
   it("lists the choices in the design's order, with its defaults", async () => {

@@ -46,7 +46,7 @@ function routed(rows: RoutingRows | undefined, patch: OrchestratorPatch): Routin
 
 let stored: OrchestratorSettings;
 beforeEach(() => {
-  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, projects: {} };
+  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, leadTakesOver: true, projects: {} };
   mocks.projects = [{ path: "/repo", name: "terminalx" }, { path: "/notes", name: "notes", kind: "folder" }];
   mocks.settings.mockReset().mockImplementation(async () => stored);
   mocks.tierModels.mockReset().mockImplementation(async () => installed());
@@ -83,6 +83,18 @@ describe("Settings → Orchestrator (PRO-274)", () => {
     for (const said of ["Show the plan and wait for Approve.", "A larger plan is refused, and the lead is told the limit.", "Push, merge and deploy stay blocked by deny rules in every mode."]) {
       expect(text).toContain(said);
     }
+  });
+
+  it("lets the lead take blocked pieces over unless turned off, for the whole app", async () => {
+    render(<OrchestratorTab />);
+    const lead = screen.getByRole("switch", { name: "Let the lead take over blocked pieces" });
+    await waitFor(() => expect(lead.hasAttribute("disabled")).toBe(false));
+    expect(lead.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("orchestrator-settings").textContent).toContain("Leaving a piece out and widening its files stay yours. Off, it asks you.");
+    fireEvent.click(lead);
+    await waitFor(() => expect(lead.getAttribute("aria-checked")).toBe("false"));
+    expect(mocks.setSettings.mock.calls.map(([patch]) => patch)).toEqual([{ leadTakesOver: false }]);
+    expect(stored.leadTakesOver).toBe(false);
   });
 
   it("saves each setting by itself, and shows what the Mac saved", async () => {
@@ -263,7 +275,7 @@ describe("Settings → Orchestrator in two cards, with tries and the effort ceil
   it("puts the rows in a Runs card and a Budget and stalls card, as design 18.05 has them", async () => {
     render(<OrchestratorTab />);
     await waitFor(() => expect(limit("Tries per piece").disabled).toBe(false));
-    expect(rows("Runs")).toEqual(["orchestrator.requireApproval", "orchestrator.workersPerRun", "orchestrator.workersAtOnce", "orchestrator.pieceLimit", "orchestrator.workerMode", "orchestrator.triesPerPiece"]);
+    expect(rows("Runs")).toEqual(["orchestrator.requireApproval", "orchestrator.workersPerRun", "orchestrator.workersAtOnce", "orchestrator.pieceLimit", "orchestrator.workerMode", "orchestrator.triesPerPiece", "orchestrator.leadTakesOver"]);
     expect(rows("Budget and stalls")).toEqual(["orchestrator.budgetDollars", "orchestrator.budgetPoints", "orchestrator.windowCeiling", "orchestrator.stallMinutes", "orchestrator.effortCeiling"]);
     expect(group("Runs").getByRole("spinbutton", { name: "Tries per piece" })).toBeTruthy();
     expect(group("Budget and stalls").getByRole("combobox", { name: "Raise effort no higher than" })).toBeTruthy();

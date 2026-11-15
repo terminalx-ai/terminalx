@@ -5,6 +5,7 @@ import type { ContextMode } from "@terminalx/portable/continuation";
 import type { AgentEvent } from "@terminalx/portable/events";
 import type { NewTabSettings, TabControls } from "../data/host-api";
 import { continueHere, continueInNewTab, recoveryState, retrySafely, settingsView } from "../data/session-controls";
+import { cacheEpoch, readSaved, writeSaved } from "../data/transcript-cache";
 import { useApp } from "../state/AppProvider";
 import { useHostFeatures } from "../state/host-features";
 import { Button, Card } from "./primitives";
@@ -48,32 +49,57 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
 }) {
   const app = useApp();
   const { palette } = useTheme();
+  const host = app.activeHost?.id;
   // Named by the Mac only while its runtime serves them (#730).
-  const supported = useHostFeatures(app.api, app.activeHost?.id)?.sessionControls === 1;
+  const supported = useHostFeatures(app.api, host)?.sessionControls === 1;
   const [tab, setTab] = useState<TabControls | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  // Until the Mac answers, the tab's model and mode as they were last time: the row stays in place,
+  // dimmed, instead of appearing once the phone connects (#983).
+  const tabKey = `tab:${JSON.stringify([sessionId, tabId])}`;
+  useEffect(() => {
+    if (!host) return;
+    let active = true;
+    void readSaved(host, tabKey, isTabControls).then((saved) => { if (active && saved) setTab((current) => current ?? saved); });
+    void readSaved(host, "models", isModelList).then((saved) => { if (active && saved) setModels((current) => current.length ? current : saved); });
+    return () => { active = false; };
+  }, [host, tabKey]);
   const [working, setWorking] = useState(false);
   const [feedback, setFeedback] = useState<{ error: boolean; text: string } | null>(null);
   const [picker, setPicker] = useState<{ title: string; choices: Choice[] } | null>(null);
   const [continuing, setContinuing] = useState(false);
 
   const refresh = useCallback(async () => {
-    const next = await app.api.tabControls(sessionId, tabId).catch(() => null);
-    setTab(next);
-  }, [app.api, sessionId, tabId]);
+    // Taken before the request: a Mac forgotten while it is under way is not saved again.
+    const epoch = host ? cacheEpoch(host) : 0;
+    try {
+      const next = await app.api.tabControls(sessionId, tabId);
+      setTab(next);
+      if (next && host) void writeSaved(host, tabKey, next, epoch);
+    } catch {
+      // The connection failed: what is shown stays, dimmed, until it is back.
+    }
+  }, [app.api, host, sessionId, tabId, tabKey]);
   // A setting applied, a turn begun or ended: each arrives as an event.
   useEffect(() => { if (supported && connected) void refresh(); }, [connected, events.length, refresh, supported]);
   useEffect(() => {
-    if (!supported) return;
+    if (!supported || !connected) return;
     let active = true;
-    void app.api.models().then((list) => { if (active) setModels(list); }).catch(() => undefined);
+    const epoch = host ? cacheEpoch(host) : 0;
+    void app.api.models().then((list) => {
+      if (!active || !list.length) return;
+      setModels(list);
+      if (host) void writeSaved(host, "models", list, epoch);
+    }).catch(() => undefined);
     return () => { active = false; };
-  }, [app.api, supported]);
+  }, [app.api, connected, host, supported]);
 
-  if (!supported || !tab || !connected) return children ? <>{children(null)}</> : null;
+  if (!supported || !tab) return children ? <>{children(null)}</> : null;
   const view = settingsView(tab, models);
   const { kind, offer } = recoveryState(events, asks, tab);
-  const busy = tab.status === "in_progress";
+  // What was saved may be out of date: the agent's state is not claimed, and nothing is asked of the Mac, until it answers.
+  const busy = connected && tab.status === "in_progress";
+  const locked = working || !connected;
 
   /** One action at a time; its error, or its outcome when that is news, is said under the controls. */
   const act = async (action: () => Promise<string | null>, success?: string) => {
@@ -107,14 +133,14 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   const interrupt = () => void act(async () => done(await app.api.interrupt(sessionId, tabId)));
   const stop = () => void act(async () => done(await app.api.stop(sessionId, tabId)));
   const settings = {
-    model: { label: view.modelName, disabled: working, open: () => { freshModels(); setPicker({ title: "Model", choices: modelChoices((model) => void act(async () => done(await app.api.setModel(sessionId, tabId, model.id)))) }); } },
-    effort: view.efforts.length ? { label: view.effortName ?? "Effort", disabled: working, open: () => setPicker({ title: "Effort", choices: view.efforts.map((effort) => ({ key: effort.id, label: effort.label, current: effort.id === tab.effort, pending: effort.pending, onSelect: () => void act(async () => done(await app.api.setEffort(sessionId, tabId, effort.id))) })) }) } : null,
-    mode: { label: view.modeName, bypass: (tab.requestedPermissionMode ?? tab.permissionMode) === BYPASS_MODE, disabled: working, open: () => setPicker({ title: "Permission mode", choices: view.modes.map((mode) => ({ key: mode.id, label: mode.label, hint: mode.hint, current: mode.current, pending: mode.pending, onSelect: () => chooseMode(mode.id) })) }) },
+    model: { label: view.modelName, disabled: locked, open: () => { freshModels(); setPicker({ title: "Model", choices: modelChoices((model) => void act(async () => done(await app.api.setModel(sessionId, tabId, model.id)))) }); } },
+    effort: view.efforts.length ? { label: view.effortName ?? "Effort", disabled: locked, open: () => setPicker({ title: "Effort", choices: view.efforts.map((effort) => ({ key: effort.id, label: effort.label, current: effort.id === tab.effort, pending: effort.pending, onSelect: () => void act(async () => done(await app.api.setEffort(sessionId, tabId, effort.id))) })) }) } : null,
+    mode: { label: view.modeName, bypass: (tab.requestedPermissionMode ?? tab.permissionMode) === BYPASS_MODE, disabled: locked, open: () => setPicker({ title: "Permission mode", choices: view.modes.map((mode) => ({ key: mode.id, label: mode.label, hint: mode.hint, current: mode.current, pending: mode.pending, onSelect: () => chooseMode(mode.id) })) }) },
   };
   const chips = <>
-    <Chip label={settings.model.label} disabled={working} onPress={settings.model.open} />
-    {settings.effort ? <Chip label={settings.effort.label} disabled={working} onPress={settings.effort.open} /> : null}
-    <Chip label={settings.mode.label} disabled={working} onPress={settings.mode.open} />
+    <Chip label={settings.model.label} disabled={locked} onPress={settings.model.open} />
+    {settings.effort ? <Chip label={settings.effort.label} disabled={locked} onPress={settings.effort.open} /> : null}
+    <Chip label={settings.mode.label} disabled={locked} onPress={settings.mode.open} />
   </>;
   const panel = <>
     {view.note ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: palette.muted }]}>{view.note}</Text> : null}
@@ -122,12 +148,12 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
       <Text style={[styles.title, { color: palette.ink }]}>{offer.title}</Text>
       <Text style={[styles.message, { color: palette.muted }]}>{offer.message}</Text>
       <View style={styles.actions}>
-        {offer.resend ? <Button label="Resend last prompt" disabled={working} onPress={() => void act(async () => sent(await app.api.resendUnsent(sessionId, tabId)))} /> : null}
-        {offer.retry ? <Button label={offer.retry} kind={kind === "signed_out" ? "secondary" : "primary"} disabled={working} onPress={() => void act(async () => sent(await retrySafely(app.api, sessionId, tabId)))} /> : null}
-        {offer.sendContinue ? <Button label="Continue here" kind="secondary" disabled={working} onPress={() => void act(async () => sent(await continueHere(app.api, tabId)))} /> : null}
-        {offer.chooseModel ? <Button label="Choose another model" kind="secondary" disabled={working} onPress={() => { freshModels(); setPicker({ title: "Retry on another model", choices: modelChoices((model) => void act(async () => sent(await retrySafely(app.api, sessionId, tabId, model.id)))) }); }} /> : null}
-        <Button label="Stop session" kind="secondary" disabled={working} onPress={stop} />
-        {offer.continueInNewSession ? <Button label="Continue in new session" kind="secondary" disabled={working} onPress={() => setContinuing(true)} /> : null}
+        {offer.resend ? <Button label="Resend last prompt" disabled={locked} onPress={() => void act(async () => sent(await app.api.resendUnsent(sessionId, tabId)))} /> : null}
+        {offer.retry ? <Button label={offer.retry} kind={kind === "signed_out" ? "secondary" : "primary"} disabled={locked} onPress={() => void act(async () => sent(await retrySafely(app.api, sessionId, tabId)))} /> : null}
+        {offer.sendContinue ? <Button label="Continue here" kind="secondary" disabled={locked} onPress={() => void act(async () => sent(await continueHere(app.api, tabId)))} /> : null}
+        {offer.chooseModel ? <Button label="Choose another model" kind="secondary" disabled={locked} onPress={() => { freshModels(); setPicker({ title: "Retry on another model", choices: modelChoices((model) => void act(async () => sent(await retrySafely(app.api, sessionId, tabId, model.id)))) }); }} /> : null}
+        <Button label="Stop session" kind="secondary" disabled={locked} onPress={stop} />
+        {offer.continueInNewSession ? <Button label="Continue in new session" kind="secondary" disabled={locked} onPress={() => setContinuing(true)} /> : null}
       </View>
     </Card> : null}
     {feedback ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: feedback.error ? palette.danger : palette.success }]}>{feedback.text}</Text> : null}
@@ -155,6 +181,15 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
     <View style={styles.row}>{chips}</View>
     {panel}
   </View>;
+}
+
+function isTabControls(value: unknown): value is TabControls {
+  const tab = value as TabControls | null;
+  return !!tab && typeof tab === "object" && typeof tab.harness === "string" && typeof tab.model === "string" && typeof tab.permissionMode === "string" && typeof tab.status === "string";
+}
+
+function isModelList(value: unknown): value is ModelInfo[] {
+  return Array.isArray(value) && value.every((model) => typeof model?.id === "string" && typeof model.harness === "string");
 }
 
 function Chip({ label, disabled, onPress }: { label: string; disabled?: boolean; onPress(): void }) {

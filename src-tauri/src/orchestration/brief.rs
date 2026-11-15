@@ -98,15 +98,22 @@ fn earlier_tries(piece: &Piece) -> Option<String> {
 pub fn take_over(run: &Run, piece: &Piece, head: &str, by_person: bool) -> String {
     let brief = &piece.brief;
     let who = if by_person { "The person asked you to take over" } else { "You took over" };
+    // Taken over by the lead itself on a plan a person approved: its files stay as approved.
+    let held = !by_person && run.approval.is_some();
+    let files = if held {
+        "You are held to the files it owns, as its workers were: a person approved them, and only they widen a piece. `terminalx runs finish` refuses a change outside them."
+    } else {
+        "You are not held to the files it owns: its workers were."
+    };
     let mut out = format!(
-        "{who} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
+        "{who} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. {files}\n\n",
         piece.id, piece.title, run.id
     );
     section(&mut out, "Goal", &brief.goal);
     if !brief.scope.trim().is_empty() {
         section(&mut out, "Scope", &brief.scope);
     }
-    section(&mut out, "Files it owned", &if piece.owns.is_empty() { "None: it was to change nothing.".to_string() } else { bullets(&piece.owns) });
+    section(&mut out, if held { "Files it owns" } else { "Files it owned" }, &if piece.owns.is_empty() { "None: it was to change nothing.".to_string() } else { bullets(&piece.owns) });
     let tries: Vec<String> = piece
         .tries
         .iter()
@@ -132,7 +139,12 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by_person: bool) -> Strin
         None => outside.path,
     }).collect();
     if !outside.is_empty() {
-        section(&mut out, "Outside its files", &format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside)));
+        let said = if held {
+            format!("Its last report or check names files it does not own, where the fix may lie:\n{}\n\nThey are not yours to change here. If the piece needs them, tell the person which and why: widening it is theirs.", bullets(&outside))
+        } else {
+            format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside))
+        };
+        section(&mut out, "Outside its files", &said);
     }
     section(&mut out, "Done when", &done_when(piece));
     out.push_str(&format!(

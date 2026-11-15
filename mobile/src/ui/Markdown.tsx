@@ -5,6 +5,7 @@ import { decodeHTML } from "entities";
 import { codexFileCitationLabel, isCodexFileOutput } from "@terminalx/portable/codexCitations";
 import { useTheme, type Palette } from "./theme";
 import { ChatLink, LinkedText, linkedText } from "./LinkedText";
+import { MarkdownTable } from "./MarkdownTable";
 import { markdownTokens, type CitationToken } from "./markdown-blocks";
 
 // Parse markdown once per changed text, then draw native views. No WebView or
@@ -46,7 +47,7 @@ function blocks(tokens: Token[] | undefined, palette: Palette): ReactNode[] {
       case "blockquote":
         return <View key={index} style={[styles.blocks, styles.quote, { borderColor: palette.accent }]}>{blocks(token.tokens, palette)}</View>;
       case "table":
-        return <MarkdownTable key={index} table={token as Tokens.Table} palette={palette} />;
+        return <MarkdownTable key={index} table={token as Tokens.Table} renderCell={(cell) => inline(cell.tokens, palette)} />;
       case "hr":
         return <View key={index} style={[styles.rule, { backgroundColor: palette.border }]} />;
       default:
@@ -99,15 +100,6 @@ function FileChip({ token, palette }: { token: CitationToken; palette: Palette }
   </View>;
 }
 
-function MarkdownTable({ table, palette }: { table: Tokens.Table; palette: Palette }) {
-  const rows = [table.header, ...table.rows];
-  return <ScrollView horizontal accessibilityLabel="Markdown table" style={styles.tableScroll}>
-    <View style={[styles.table, { borderColor: palette.border }]}>{rows.map((row, rowIndex) => <View key={rowIndex} style={[styles.tableRow, rowIndex === 0 && { backgroundColor: palette.raised }]}>{row.map((cell, cellIndex) => <View key={cellIndex} style={[styles.cell, { borderColor: palette.border }]}>
-      <Text selectable style={[styles.body, rowIndex === 0 && styles.strong, { color: palette.ink, textAlign: table.align[cellIndex] ?? "left" }]}>{inline(cell.tokens, palette)}</Text>
-    </View>)}</View>)}</View>
-  </ScrollView>;
-}
-
 const styles = StyleSheet.create({
   blocks: { gap: 10, minWidth: 0 },
   body: { fontSize: 16, lineHeight: 24 },
@@ -128,8 +120,4 @@ const styles = StyleSheet.create({
   rule: { height: StyleSheet.hairlineWidth },
   fileChip: { alignSelf: "flex-start", maxWidth: "100%", borderRadius: 8, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 6 },
   fileChipLink: { textDecorationLine: "none" },
-  tableScroll: { maxWidth: "100%" },
-  table: { borderWidth: StyleSheet.hairlineWidth },
-  tableRow: { flexDirection: "row" },
-  cell: { width: 180, padding: 10, borderRightWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth },
 });

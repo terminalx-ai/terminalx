@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { conversationKey, conversationRows } from "./conversations";
+import { conversationKey, conversationLabel, conversationRows, tabTitle } from "./conversations";
 import type { SessionSummary } from "./host-api";
 
 const session: SessionSummary = {
@@ -56,5 +56,21 @@ describe("mobile conversation rows", () => {
   it("scopes state by host, worktree and tab without delimiter collisions", () => {
     const keys = [conversationKey("a", "b", "c"), conversationKey("other", "b", "c"), conversationKey("a", "other", "c"), conversationKey("a", "b", "other"), conversationKey("a:b", "c", "d"), conversationKey("a", "b:c", "d")];
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("names a tab by its generated title once there is one, else by the first words of its request", () => {
+    const prompt = { id: "p", harness: "claude", status: "idle" as const, title: "You are the owner's chief of staff for" };
+    expect(tabTitle(prompt)).toBe("You are the owner's chief of staff for");
+    expect(tabTitle({ ...prompt, generatedTitle: " Triage the support inbox " })).toBe("Triage the support inbox");
+    expect(tabTitle({ ...prompt, generatedTitle: null })).toBe("You are the owner's chief of staff for");
+    expect(tabTitle({ ...prompt, generatedTitle: "  " })).toBe("You are the owner's chief of staff for");
+    expect(tabTitle({ id: "e", harness: "codex", status: "idle" })).toBeUndefined();
+    const titled = { ...prompt, generatedTitle: "Triage the support inbox" };
+    expect(conversationLabel(titled, [titled])).toBe("Claude Code · Triage the support inbox");
+    // Two tabs made the same name are told apart, as two of the same title are.
+    const twin = { ...titled, id: "q", title: "Something else" };
+    expect([titled, twin].map((tab) => conversationLabel(tab, [titled, twin]))).toEqual([
+      "Claude Code · Triage the support inbox (1)", "Claude Code · Triage the support inbox (2)",
+    ]);
   });
 });
