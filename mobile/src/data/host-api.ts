@@ -25,8 +25,23 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  /** `modified`: when the tab was last active (RFC 3339); absent from older Macs. */
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean; modified?: string }[];
+  tabs: {
+    id: string;
+    /** The tab's own title: the reader's, else the first words of its first request. */
+    title?: string | null;
+    /**
+     * The name made for the tab once its conversation has one: a lone tab's
+     * session title, else the ticket it names or the title its agent gave it.
+     * Absent while nothing has been made, for a tab the reader named, and
+     * from older Macs; `title` stands then.
+     */
+    generatedTitle?: string | null;
+    harness: string;
+    status: SessionStatus;
+    markedUnread?: boolean;
+    /** When the tab was last active (RFC 3339); absent from older Macs. */
+    modified?: string;
+  }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
