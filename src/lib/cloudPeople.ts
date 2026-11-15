@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { organizationMembers, type OrganizationMember } from "@/lib/organizationMembers";
+import { cachedOrganizationRosters, readOrganizationRoster, resetOrganizationRosters, rosterCacheEnabled, subscribeOrganizationRosters } from "@/lib/organizationRoster";
 
 /**
  * Names for the user ids a shared cloud workspace reports (presence, notes,
@@ -10,6 +11,7 @@ const known = new Map<string, string>();
 const listeners = new Set<() => void>();
 let version = 0;
 let roster: Promise<OrganizationMember[]> | null = null;
+let epoch = 0;
 
 function changed() {
   version++;
@@ -33,10 +35,13 @@ export function rememberPeople(people: { userId: string; name?: string | null; d
  * must not offer someone removed since (#501).
  */
 export function loadRoster(options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  if (rosterCacheEnabled()) return readOrganizationRoster(null, { ...options, active: true }).then((listed) => listed.members, () => []);
   if (roster && !options.fresh) return roster;
+  const current = epoch;
   const pending: Promise<OrganizationMember[]> = Promise.resolve()
     .then(() => organizationMembers.list())
     .then((listed) => {
+      if (current !== epoch) return [];
       rememberPeople(listed?.members ?? []);
       return listed?.members ?? [];
     })
@@ -60,11 +65,14 @@ const rosters = new Map<string, Promise<OrganizationMember[]>>();
  * offering nobody.
  */
 export function loadRosterIn(orgId: string, options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  if (rosterCacheEnabled(orgId)) return readOrganizationRoster(orgId, options).then((listed) => listed.members);
+  const current = epoch;
   let pending = options.fresh ? undefined : rosters.get(orgId);
   if (!pending) {
     pending = Promise.resolve()
       .then(() => organizationMembers.listIn(orgId))
       .then((listed) => {
+        if (current !== epoch) return [];
         rememberPeople(listed?.members ?? []);
         return listed?.members ?? [];
       });
@@ -76,14 +84,19 @@ export function loadRosterIn(orgId: string, options: { fresh?: boolean } = {}): 
   return pending;
 }
 
+subscribeOrganizationRosters(changed);
+
 export function personName(userId: string | null | undefined): string {
   if (!userId) return "Someone";
-  return known.get(userId) ?? `User ${userId.slice(0, 8)}`;
+  const member = cachedOrganizationRosters().flatMap((roster) => roster.members).find((person) => person.userId === userId);
+  return member?.displayName?.trim() || member?.email || known.get(userId) || `User ${userId.slice(0, 8)}`;
 }
 
 /** Forget names and the roster (sign-out, organization switch, tests). */
 export function resetPeople() {
+  epoch++;
   known.clear();
+  resetOrganizationRosters();
   roster = null;
   rosters.clear();
   changed();
