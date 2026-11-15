@@ -1507,6 +1507,25 @@ pub struct CloudScheduleTiming {
     pub timezone: String,
 }
 
+/// Selected organization repository row ID, never a GitHub numeric ID or URL.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleGithubTrigger {
+    pub repository_id: String,
+    pub event: String,
+    pub filters: Vec<CloudScheduleGithubFilter>,
+    #[serde(default)]
+    pub allow_fork_pull_requests: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleGithubFilter {
+    pub field: String,
+    pub operator: String,
+    pub value: String,
+}
+
 /// Upper bounds on what a schedule costs and occupies, from the workspace's
 /// own rate.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1519,6 +1538,8 @@ pub struct CloudScheduleEstimate {
     /// state it priced the limit alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_run_max_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_per_run_minutes: Option<u32>,
     pub per_run_max_micros: u64,
     pub monthly_runs: u32,
     pub monthly_max_micros: u64,
@@ -1538,7 +1559,17 @@ pub struct CloudScheduleRun {
     pub scheduled_for: i64,
     #[serde(default)]
     pub trigger: String,
-    /// queued | provisioning | working | completed | failed | skipped |
+    /// Own allocated workspace; absent before fresh allocation. Never use the template ID.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub work_branch: Option<String>,
+    #[serde(default)]
+    pub archive_at: Option<i64>,
+    /// Observed archival, not an archive request.
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    /// queued | creating-workspace | provisioning | working | completed | failed | skipped |
     /// canceled | expired.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1572,7 +1603,16 @@ pub struct CloudSchedule {
     pub mode: Option<String>,
     #[serde(default)]
     pub prompt_bytes: u64,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default)]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default)]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default = "existing_workspace_mode")]
+    pub workspace_mode: String,
+    #[serde(default)]
+    pub archive_after_days: Option<u32>,
+    #[serde(default)]
+    pub archive_on_pr_merge: bool,
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
@@ -1631,7 +1671,12 @@ pub struct CloudSchedulesPaused {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudScheduleEstimateInput {
     pub workspace_id: String,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub workspace_mode: Option<String>,
     pub completion_policy: String,
     pub max_run_minutes: u32,
 }
@@ -1650,7 +1695,16 @@ pub struct CloudScheduleCreateInput {
     pub effort: Option<String>,
     pub mode: String,
     pub prompt: String,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub workspace_mode: Option<String>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub archive_on_pr_merge: Option<bool>,
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
@@ -1689,6 +1743,62 @@ fn schedule_timing_body(timing: &CloudScheduleTiming) -> Option<Value> {
     if weekly {
         body["weekdays"] = json!(timing.weekdays);
     }
+    Some(body)
+}
+
+/// Optional request fields may be omitted, but explicit null is not accepted
+/// by the SaaS parser. Response DTOs remain nullable for compatibility.
+fn present_automation_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn existing_workspace_mode() -> String { "existing".into() }
+
+/// The server may retain the template as an internal pre-allocation placeholder.
+/// Expose no link until a fresh run has its own allocated workspace.
+fn automation_run_identity(schedule: &mut CloudSchedule, runs: &mut [CloudScheduleRun]) {
+    if schedule.workspace_mode != "fresh" { return; }
+    for run in runs.iter_mut().chain(schedule.last_run.iter_mut()) {
+        if run.workspace_id.as_deref() == Some(schedule.workspace_id.as_str()) {
+            run.workspace_id = None;
+        }
+    }
+}
+
+/// Validate before consulting account/provider state or making HTTP requests.
+fn automation_body(
+    timing: Option<&CloudScheduleTiming>, github: Option<&CloudScheduleGithubTrigger>,
+    mode: Option<&str>, archive_days: Option<u32>, archive_merge: Option<bool>,
+) -> Option<Value> {
+    let fresh = mode == Some("fresh");
+    if mode.is_some_and(|m| !matches!(m, "existing" | "fresh"))
+        || archive_days.is_some_and(|days| !fresh || !(1..=365).contains(&days))
+        || (archive_merge == Some(true) && !fresh)
+    { return None; }
+    let mut body = json!({});
+    match (timing, github) {
+        (Some(timing), None) => body["schedule"] = schedule_timing_body(timing)?,
+        (None, Some(trigger)) => {
+            if trigger.repository_id.is_empty() || trigger.repository_id.encode_utf16().count() > 255
+                || !matches!(trigger.event.as_str(), "opened" | "pushed" | "merged")
+                || trigger.filters.len() > 5
+                || trigger.filters.iter().any(|f| !matches!(f.field.as_str(), "label" | "author" | "baseBranch")
+                    || !matches!(f.operator.as_str(), "is" | "is-not") || f.value.trim().is_empty()
+                    || f.value.encode_utf16().count() > 255 || f.value.chars().any(|c| c < ' ' || c == '\u{7f}'))
+            { return None; }
+            let mut trigger = trigger.clone();
+            for filter in &mut trigger.filters { filter.value = filter.value.trim().to_owned(); }
+            body["githubTrigger"] = serde_json::to_value(trigger).ok()?;
+        }
+        _ => return None,
+    }
+    if let Some(mode) = mode { body["workspaceMode"] = json!(mode); }
+    if let Some(days) = archive_days { body["archiveAfterDays"] = json!(days); }
+    if let Some(merge) = archive_merge { body["archiveOnPrMerge"] = json!(merge); }
     Some(body)
 }
 
@@ -3086,11 +3196,12 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Read, |client, context| {
-            let result: CloudSchedules = client.request(context, &["cloud-schedules"], workspace_id.map(|id| ("workspaceId", id)), None, None, RequestRisk::Read)?;
+            let mut result: CloudSchedules = client.request(context, &["cloud-schedules"], workspace_id.map(|id| ("workspaceId", id)), None, None, RequestRisk::Read)?;
             // An answer about another workspace is not this workspace's list.
             if result.schedules.iter().any(|schedule| !valid_schedule_id(&schedule.id) || workspace_id.is_some_and(|id| schedule.workspace_id != id)) {
                 return Err(invalid_response());
             }
+            for schedule in &mut result.schedules { automation_run_identity(schedule, &mut []); }
             Ok(result)
         })
     }
@@ -3101,10 +3212,11 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Read, |client, context| {
-            let result: CloudScheduleDetail = client.request(context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read)?;
+            let mut result: CloudScheduleDetail = client.request(context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read)?;
             if result.schedule.id != schedule_id {
                 return Err(invalid_response());
             }
+            automation_run_identity(&mut result.schedule, &mut result.runs);
             Ok(result)
         })
     }
@@ -3112,11 +3224,17 @@ impl CloudWorkspaceService {
     /// What a schedule would cost and when it would first run. It writes
     /// nothing on the server, so it is asked like a read.
     pub fn schedule_estimate(&self, org: Option<&str>, input: &CloudScheduleEstimateInput) -> Result<CloudScheduleQuote, CloudWorkspaceClientError> {
-        let timing = schedule_timing_body(&input.schedule);
+        let timing = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), None, None);
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
-        let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
+            return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
+        }
+        let mut body = timing;
+        body["workspaceId"] = json!(input.workspace_id);
+        body["completionPolicy"] = json!(input.completion_policy);
+        body["maxRunMinutes"] = json!(input.max_run_minutes);
         self.run_in(org, RequestRisk::Read, |client, context| {
             client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
                 // A 404 that names no refusal is a server without the route
@@ -3136,7 +3254,7 @@ impl CloudWorkspaceService {
     pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
         let name = input.name.trim();
-        let Some(timing) = schedule_timing_body(&input.schedule) else { return invalid("cloud_workspace_request_invalid") };
+        let Some(trigger_body) = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge) else { return invalid("cloud_workspace_request_invalid") };
         // As the server reads it: printable ASCII, no space.
         let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x21..=0x7e).contains(&byte)));
         let effort_ok = input.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
@@ -3155,18 +3273,21 @@ impl CloudWorkspaceService {
         if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
         }
+        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
+            return invalid("cloud_schedule_runtime_unsupported");
+        }
         let mut body = json!({
             "workspaceId": input.workspace_id,
             "name": name,
             "agent": input.agent,
             "mode": input.mode,
             "prompt": input.prompt,
-            "schedule": timing,
             "missedRunPolicy": input.missed_run_policy,
             "completionPolicy": input.completion_policy,
             "maxRunMinutes": input.max_run_minutes,
             "confirmProviderSpend": true,
         });
+        body.as_object_mut().unwrap().extend(trigger_body.as_object().unwrap().clone());
         if let Some(model) = input.model.as_deref() {
             body["model"] = json!(model);
         }
@@ -3174,10 +3295,11 @@ impl CloudWorkspaceService {
             body["effort"] = json!(effort);
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
+            let mut result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
             if result.schedule.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.id) {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
+            automation_run_identity(&mut result.schedule, &mut []);
             Ok(result.schedule)
         })
     }
@@ -3188,14 +3310,39 @@ impl CloudWorkspaceService {
         if !valid_schedule_id(schedule_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
+        let (context, access) = self.context_in(org)?;
+        // Resume can start billed compute. While activation is held, inspect
+        // the saved trigger/mode through the existing authorized detail route
+        // before sending any spend mutation, regardless of the UI adapter.
+        if active && !self.phase2_enabled {
+            let detail: Result<CloudScheduleDetail, _> = self.client.request(&context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read);
+            if !self.account.is_current_in(&context, access) {
+                return Err(context_changed_error(RequestRisk::Read));
+            }
+            let saved = detail?.schedule;
+            if saved.id != schedule_id { return Err(invalid_response()); }
+            if saved.workspace_mode != "existing" || saved.github_trigger.is_some() || saved.schedule.is_none() {
+                return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
+            }
+        }
         let (action, body) = if active { ("resume", json!({ "confirmProviderSpend": true })) } else { ("pause", json!({})) };
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules", schedule_id, action], None, Some(body), None, RequestRisk::Mutation)?;
+        // Use the same captured authority for both requests; never recapture
+        // a different account/profile after the preflight authorized a timer.
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        let result = (|| {
+            let mut result: CloudScheduleAnswer = self.client.request(&context, &["cloud-schedules", schedule_id, action], None, Some(body), None, RequestRisk::Mutation)?;
             if result.schedule.id != schedule_id {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
+            automation_run_identity(&mut result.schedule, &mut []);
             Ok(result.schedule)
-        })
+        })();
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        result
     }
 
     /// Delete a scheduled task, its prompt and its runs.
@@ -6486,6 +6633,353 @@ mod tests {
         assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
         assert!(!error.requires_original_account_context);
     }
+    fn automation_github() -> Value {
+        json!({"repositoryId": "org-repository-row-1", "event": "pushed",
+            "filters": [{"field": "baseBranch", "operator": "is-not", "value": " main "}]})
+    }
+
+    fn automation_input(fork: Option<bool>) -> CloudScheduleCreateInput {
+        let mut input = schedule_input();
+        input.schedule = None;
+        input.workspace_mode = Some("fresh".into());
+        input.archive_after_days = Some(365);
+        input.archive_on_pr_merge = Some(true);
+        let mut github = automation_github();
+        if let Some(fork) = fork { github["allowForkPullRequests"] = json!(fork); }
+        input.github_trigger = Some(serde_json::from_value(github).unwrap());
+        input
+    }
+
+    fn automation_json() -> Value {
+        let mut view = schedule_json(SCHEDULE, "workspace-1");
+        view["schedule"] = Value::Null;
+        view.as_object_mut().unwrap().remove("nextRunAt");
+        view["workspaceMode"] = json!("fresh");
+        view["archiveAfterDays"] = json!(365);
+        view["archiveOnPrMerge"] = json!(true);
+        let mut github = automation_github();
+        github["filters"][0]["value"] = json!("main");
+        view["githubTrigger"] = github;
+        view
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_paths_never_reach_an_old_server() {
+        let (_, service) = test_service("http://127.0.0.1:1");
+        assert!(!service.phase2_contracts_available());
+        for fresh in [false, true] {
+            for github in [false, true] {
+                if !fresh && !github { continue; }
+                let mut input = schedule_input();
+                input.workspace_mode = fresh.then(|| "fresh".into());
+                if github {
+                    input.schedule = None;
+                    input.github_trigger = Some(serde_json::from_value(automation_github()).unwrap());
+                }
+                let error = service.schedule_create(None, &input).unwrap_err();
+                assert_eq!(error.code, "cloud_schedule_runtime_unsupported");
+                assert!(error.status.is_none() && !error.retryable);
+                let estimate = CloudScheduleEstimateInput {
+                    workspace_id: input.workspace_id, schedule: input.schedule, github_trigger: input.github_trigger,
+                    workspace_mode: input.workspace_mode, completion_policy: input.completion_policy, max_run_minutes: input.max_run_minutes,
+                };
+                assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_schedule_runtime_unsupported");
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_fresh_timer_cleanup_boundaries_and_no_github() {
+        for days in [1, 365] {
+            let mut input = schedule_input();
+            input.workspace_mode = Some("fresh".into());
+            input.archive_after_days = Some(days);
+            input.archive_on_pr_merge = Some(true);
+            let mut view = schedule_json(SCHEDULE, "workspace-1");
+            view["workspaceMode"] = json!("fresh");
+            view["archiveAfterDays"] = json!(days);
+            view["archiveOnPrMerge"] = json!(true);
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let created = service.schedule_create(None, &input).unwrap();
+            assert_eq!(created.workspace_mode, "fresh");
+            assert_eq!(created.archive_after_days, Some(days));
+            assert!(created.archive_on_pr_merge);
+            let sent = sent_body(&request.join().unwrap());
+            assert_eq!(sent["archiveAfterDays"], days);
+            assert_eq!(sent["archiveOnPrMerge"], true);
+            assert!(sent.get("githubTrigger").is_none());
+            assert_eq!(sent["schedule"]["preset"], "weekly");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_body_defaultforkoptin_and_persisted_optin() {
+        for fork in [None, Some(false), Some(true)] {
+            let mut view = automation_json();
+            view["githubTrigger"]["allowForkPullRequests"] = json!(fork.unwrap_or(false));
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let created = service.schedule_create(None, &automation_input(fork)).unwrap();
+            assert!(created.schedule.is_none() && created.next_run_at.is_none());
+            assert_eq!(created.github_trigger.unwrap().allow_fork_pull_requests, fork.unwrap_or(false));
+            let captured = request.join().unwrap();
+            assert!(!captured.extra_request);
+            let mut github = automation_github();
+            github["filters"][0]["value"] = json!("main");
+            github["allowForkPullRequests"] = json!(fork.unwrap_or(false));
+            assert_eq!(sent_body(&captured), json!({
+                "workspaceId": "workspace-1", "name": "Nightly triage", "agent": "claude", "model": "sonnet",
+                "mode": "acceptEdits", "prompt": "Triage the new issues.", "githubTrigger": github,
+                "workspaceMode": "fresh", "archiveAfterDays": 365, "archiveOnPrMerge": true,
+                "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 45, "confirmProviderSpend": true
+            }));
+            phase2_headers(&captured.text);
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_invalid_inputs_are_local_even_while_inactive() {
+        let (account, service) = test_service("http://127.0.0.1:1");
+        account.set_context_for_test(None);
+        assert!(!service.phase2_contracts_available());
+        let invalid = |edit: fn(&mut CloudScheduleCreateInput)| {
+            let mut input = automation_input(None);
+            edit(&mut input);
+            assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        };
+        invalid(|i| i.schedule = schedule_input().schedule);
+        invalid(|i| i.github_trigger = None);
+        invalid(|i| i.workspace_mode = Some("clone".into()));
+        invalid(|i| i.workspace_mode = None);
+        invalid(|i| i.workspace_mode = Some("existing".into()));
+        invalid(|i| i.archive_after_days = Some(0));
+        invalid(|i| i.archive_after_days = Some(366));
+        invalid(|i| i.github_trigger.as_mut().unwrap().event = "push".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().repository_id.clear());
+        invalid(|i| i.github_trigger.as_mut().unwrap().repository_id = "x".repeat(256));
+        invalid(|i| { let g = i.github_trigger.as_mut().unwrap(); g.filters = vec![g.filters[0].clone(); 6]; });
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].field = "headBranch".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].operator = "contains".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = " ".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = "x".repeat(256));
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = "a\nb".into());
+        invalid(|i| i.mode = "bypassPermissions".into());
+        // Serde rejects unknown nested keys and non-boolean fork opt-in.
+        for extra in [json!({"allowForkPullRequests": "true"}), json!({"webhook": true})] {
+            let mut g = automation_github();
+            g.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<CloudScheduleGithubTrigger>(g).is_err());
+        }
+        let mut g = automation_github();
+        g["filters"][0]["unknown"] = json!(true);
+        assert!(serde_json::from_value::<CloudScheduleGithubTrigger>(g).is_err());
+        for field in ["schedule", "githubTrigger", "workspaceMode"] {
+            let mut body = json!({"workspaceId": "workspace-1", "githubTrigger": automation_github(), "completionPolicy": "suspend", "maxRunMinutes": 60});
+            body[field] = Value::Null;
+            assert!(serde_json::from_value::<CloudScheduleEstimateInput>(body).is_err());
+        }
+        let estimate: CloudScheduleEstimateInput = serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "completionPolicy": "suspend", "maxRunMinutes": 60
+        })).unwrap();
+        assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_workspace_request_invalid");
+        let mut estimate_body = json!({"workspaceId": "workspace-1", "githubTrigger": automation_github(), "completionPolicy": "suspend", "maxRunMinutes": 60});
+        estimate_body["archiveAfterDays"] = json!(1);
+        assert!(serde_json::from_value::<CloudScheduleEstimateInput>(estimate_body).is_err());
+    }
+
+    #[test]
+    fn phase2_automation_contract_freshrunidentity_is_own_workspace_or_unavailable() {
+        for timer in [false, true] {
+            let mut view = automation_json();
+            if timer {
+                view["schedule"] = schedule_json(SCHEDULE, "workspace-1")["schedule"].clone();
+                view.as_object_mut().unwrap().remove("githubTrigger");
+            } else {
+                view.as_object_mut().unwrap().remove("schedule");
+            }
+            let pending = json!({"id": "run-pending", "scheduledFor": 1, "trigger": "github", "state": "creating-workspace", "workspaceId": "workspace-1"});
+            let allocated = json!({"id": "run-own", "scheduledFor": 2, "trigger": "github", "state": "working", "workspaceId": "fresh-workspace-2", "workBranch": "terminalx/triage-123", "archiveAt": 1792713600000_i64, "archivedAt": null});
+            view["lastRun"] = pending.clone();
+            let body = json!({"schedule": view, "runs": [pending, allocated]});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let detail = service.schedule(None, SCHEDULE).unwrap();
+            assert!(detail.runs[0].workspace_id.is_none());
+            assert!(detail.schedule.last_run.unwrap().workspace_id.is_none());
+            assert_eq!(detail.runs[0].state, "creating-workspace");
+            let pending = serde_json::to_value(&detail.runs[0]).unwrap();
+            for field in ["workspaceId", "workBranch", "archiveAt", "archivedAt"] { assert!(pending[field].is_null()); }
+            assert_eq!(detail.runs[1].workspace_id.as_deref(), Some("fresh-workspace-2"));
+            assert_eq!(detail.runs[1].work_branch.as_deref(), Some("terminalx/triage-123"));
+            let run = serde_json::to_value(&detail.runs[1]).unwrap();
+            assert_eq!(run["archiveAt"], 1792713600000_i64);
+            assert!(run["archivedAt"].is_null());
+            request.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_github_list_pause_resume_have_no_timer() {
+        let view = automation_json();
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &json!({"schedules": [view.clone()]}).to_string(), ""),
+            response("200 OK", &json!({"schedule": view.clone()}).to_string(), ""),
+            response("200 OK", &json!({"schedule": view}).to_string(), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let listed = service.schedules(None, Some("workspace-1")).unwrap();
+        assert!(listed.schedules[0].schedule.is_none());
+        assert!(!listed.schedules[0].github_trigger.as_ref().unwrap().allow_fork_pull_requests);
+        for active in [false, true] {
+            let changed = service.schedule_set_active(None, SCHEDULE, active).unwrap();
+            assert!(changed.schedule.is_none() && changed.next_run_at.is_none());
+        }
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
+        assert!(requests[1].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
+        assert!(requests[2].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(requests[1].split_once("\r\n\r\n").unwrap().1, "{}");
+        assert_eq!(serde_json::from_str::<Value>(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_fresh_or_github_resume_never_posts() {
+        for (fresh, github) in [(true, false), (false, true), (true, true)] {
+            let mut view = automation_json();
+            if !fresh { view["workspaceMode"] = json!("existing"); }
+            if !github {
+                view["schedule"] = schedule_json(SCHEDULE, "workspace-1")["schedule"].clone();
+                view.as_object_mut().unwrap().remove("githubTrigger");
+            }
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view, "runs": []}).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert!(!service.phase2_contracts_available());
+            let error = service.schedule_set_active(None, SCHEDULE, true).unwrap_err();
+            assert_eq!(error.code, "cloud_schedule_runtime_unsupported");
+            assert!(error.status.is_none() && !error.retryable);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+            assert!(!captured.extra_request, "held resume must not POST");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_resume_preflight_refusals_never_post() {
+        for (status, code) in [("403 Forbidden", "organization_admin_required"), ("404 Not Found", "cloud_workspace_not_found")] {
+            let (base, _, request) = serve_once(response(status, &json!({"error": code}).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(service.schedule_set_active(None, SCHEDULE, true).unwrap_err().code, code);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET "));
+            assert!(!captured.extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_delayed_resume_preflight_context_changes_never_post() {
+        for change in ["sign-out", "account", "organization", "profile", "membership"] {
+            let answer = json!({"schedule": schedule_json(SCHEDULE, "workspace-1"), "runs": []});
+            let (base, accepted, request) = serve_once(response("200 OK", &answer.to_string(), ""), Duration::from_millis(150));
+            let (account, service) = test_service(&base);
+            let target = if change == "membership" {
+                account.set_memberships_for_test(&["org-1", "org-2"], true);
+                "org-2"
+            } else { "org-1" };
+            let resume = thread::spawn(move || service.schedule_set_active(Some(target), SCHEDULE, true));
+            accepted.recv_timeout(Duration::from_secs(1)).unwrap();
+            if change == "sign-out" {
+                account.set_context_for_test(None);
+            } else if change == "membership" {
+                account.set_memberships_for_test(&["org-1"], true);
+            } else {
+                let mut replacement = context();
+                replacement.generation += 1;
+                match change {
+                    "account" => replacement.user_id = "another-user".into(),
+                    "organization" => replacement.organization_id = "org-2".into(),
+                    "profile" => replacement.profile_id = "another-profile".into(),
+                    _ => unreachable!(),
+                }
+                account.set_context_for_test(Some(replacement));
+            }
+            assert_eq!(resume.join().unwrap().unwrap_err().code, "account_context_changed");
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with(&format!("GET /v1/desktop/orgs/{target}/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+            assert!(!captured.extra_request, "context change during {change} preflight must prevent spend POST");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_automation_safety_controls_need_no_preflight() {
+        let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": automation_json()}).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.schedule_set_active(None, SCHEDULE, false).unwrap().schedule.is_none());
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
+        assert_eq!(sent_body(&captured), json!({}));
+        assert!(!captured.extra_request);
+
+        let (base, _, request) = serve_once(response("200 OK", "{\"ok\":true}", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.schedule_delete(None, SCHEDULE).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("DELETE "));
+        assert!(!captured.extra_request);
+
+        let (base, _, request) = serve_once(response("200 OK", "{\"paused\":1}", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.schedules_pause_all(None).unwrap().paused, 1);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules/pause-all HTTP/1.1"));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn phase2_automation_contract_numericcosts_fresh_ceiling_and_estimate_body() {
+        for keep in [false, true] {
+            let monthly = if keep { 62_208_000_000u64 } else { 410_400_000u64 };
+            let body = json!({"estimate": {"currency": "USD", "hourlyMicros": 120000,
+                "createPerRunMinutes": 20, "perRunMaxMinutes": 285, "perRunMaxMicros": 570000,
+                "monthlyRuns": 720, "monthlyMaxMicros": monthly, "keepsMachineRunning": keep, "runningSlots": 1, "maxRunsPerDay": 24},
+                "supported": false, "refusal": "cloud_schedule_runtime_unsupported", "nextRunAt": null});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
+                "workspaceId": "workspace-1", "workspaceMode": "fresh", "githubTrigger": automation_github(),
+                "completionPolicy": if keep {"keep"} else {"suspend"}, "maxRunMinutes": 240
+            })).unwrap();
+            let quote = service.schedule_estimate(None, &input).unwrap();
+            assert_eq!(quote.estimate.monthly_max_micros, monthly);
+            assert!(monthly > 120000 * 720, "fresh totals must not be clamped to one machine-month");
+            assert_eq!(quote.estimate.create_per_run_minutes, Some(20));
+            assert_eq!(quote.estimate.per_run_max_minutes, Some(285));
+            assert_eq!(quote.refusal.as_deref(), Some("cloud_schedule_runtime_unsupported"));
+            assert!(!quote.supported && quote.next_run_at.is_none());
+            let captured = request.join().unwrap();
+            let mut github = automation_github();
+            github["filters"][0]["value"] = json!("main");
+            github["allowForkPullRequests"] = json!(false);
+            assert_eq!(sent_body(&captured), json!({"workspaceId": "workspace-1", "workspaceMode": "fresh", "githubTrigger": github,
+                "completionPolicy": if keep {"keep"} else {"suspend"}, "maxRunMinutes": 240}));
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_inactive_org_and_server_refusals_are_retained() {
+        let (_, service) = phase2_service("http://127.0.0.1:1");
+        assert_eq!(service.schedule_create(Some("org-other"), &automation_input(None)).unwrap_err().code, "cloud_organization_unavailable");
+        for (status, code) in [("403 Forbidden", "organization_admin_required"), ("404 Not Found", "cloud_workspace_not_found"),
+            ("409 Conflict", "cloud_provider_connection_required"), ("409 Conflict", "cloud_schedule_runtime_unsupported"),
+            ("422 Unprocessable Entity", "cloud_workspace_request_invalid")] {
+            let (base, _, request) = serve_once(response(status, &json!({"error": code}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let error = service.schedule_create(None, &automation_input(None)).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
     fn schedule_json(id: &str, workspace_id: &str) -> Value {
         json!({
             "id": id, "workspaceId": workspace_id, "name": "Nightly triage", "createdBy": "user-1",
@@ -6515,13 +7009,15 @@ mod tests {
     }
 
     #[test]
-    fn schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
+    fn phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
         let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let listed = service.schedules(None, Some("workspace-1")).unwrap();
         assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
         let schedule = &listed.schedules[0];
+        assert_eq!(schedule.workspace_mode, "existing");
+        assert!(!schedule.archive_on_pr_merge && schedule.github_trigger.is_none());
         assert_eq!((schedule.estimate.per_run_max_micros, schedule.estimate.max_runs_per_day, schedule.estimate.keeps_machine_running), (120_000, 24, false));
         assert_eq!(schedule.last_run.as_ref().and_then(|run| run.category.as_deref()), Some("timed-out"));
         // Serialized for the webview in camelCase.
@@ -6537,7 +7033,7 @@ mod tests {
     }
 
     #[test]
-    fn a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
+    fn phase2_automation_contract_a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
         let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let error = service.schedules(None, None).unwrap_err();
@@ -6546,7 +7042,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
+    fn phase2_automation_contract_a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
         let body = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6567,7 +7063,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_that_the_server_would_refuse_is_not_sent() {
+    fn phase2_automation_contract_a_schedule_that_the_server_would_refuse_is_not_sent() {
         let (_, service) = test_service("http://127.0.0.1:1");
         let change = |edit: fn(&mut CloudScheduleCreateInput)| {
             let mut input = schedule_input();
@@ -6584,10 +7080,10 @@ mod tests {
         assert_eq!(change(|input| input.max_run_minutes = 4), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.max_run_minutes = 241), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.completion_policy = "forever".into()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.preset = "cron".into()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.weekdays = Vec::new()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.weekdays = vec!["mon".into(), "mon".into()]), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.hour = 24), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().preset = "cron".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().weekdays = Vec::new()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().weekdays = vec!["mon".into(), "mon".into()]), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().hour = 24), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.workspace_id = "../other".into()), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.prompt = " ".into()), "cloud_workspace_prompt_too_long");
         assert_eq!(change(|input| input.prompt = "x".repeat(MAX_PROMPT_BYTES + 1)), "cloud_workspace_prompt_too_long");
@@ -6596,7 +7092,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_times_are_sent_as_the_strict_parser_takes_them() {
+    fn phase2_automation_contract_schedule_times_are_sent_as_the_strict_parser_takes_them() {
         let timing = |preset: &str, weekdays: &[&str]| CloudScheduleTiming {
             preset: preset.into(),
             hour: 7,
@@ -6613,7 +7109,7 @@ mod tests {
     }
 
     #[test]
-    fn an_estimate_is_asked_without_a_prompt_and_read_back() {
+    fn phase2_automation_contract_an_estimate_is_asked_without_a_prompt_and_read_back() {
         let body = json!({
             "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMicros": 480_000, "monthlyRuns": 30, "monthlyMaxMicros": 86_400_000, "keepsMachineRunning": true, "runningSlots": 1, "maxRunsPerDay": 24 },
             "nextRunAt": 1_792_713_600_000i64, "supported": false
@@ -6648,7 +7144,7 @@ mod tests {
     }
 
     #[test]
-    fn an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
+    fn phase2_automation_contract_an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
         let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
             "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "suspend", "maxRunMinutes": 60
         }))
@@ -6667,7 +7163,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_delete_and_pause_all_send_what_the_server_expects() {
+    fn phase2_automation_contract_pause_resume_delete_and_pause_all_send_what_the_server_expects() {
         let answer = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6676,13 +7172,19 @@ mod tests {
         assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
         assert_eq!(sent_body(&captured), json!({}));
 
-        // Resuming starts billed compute by itself again, and says so.
-        let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
+        // Held activation reads the saved task first; legacy timer resume
+        // retains authorization and its exact spend-confirmation body.
+        let (base, requests) = serve_each(vec![response("200 OK", &answer, ""), response("200 OK", &answer, "")]);
         let (_, service) = test_service(&base);
         service.schedule_set_active(None, SCHEDULE, true).unwrap();
-        let captured = request.join().unwrap();
-        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
-        assert_eq!(sent_body(&captured), json!({ "confirmProviderSpend": true }));
+        let captured = requests.join().unwrap();
+        assert!(captured[0].starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+        assert!(captured[1].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(serde_json::from_str::<Value>(captured[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({ "confirmProviderSpend": true }));
+        for request in &captured {
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer native-secret-token"));
+            assert!(request.to_ascii_lowercase().contains("x-terminalx-cloud-workspace-contract: providers-v1"));
+        }
 
         let (base, _, request) = serve_once(response("200 OK", r#"{"ok":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6700,7 +7202,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_schedule_keeps_the_servers_reason() {
+    fn phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason() {
         for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
@@ -6709,10 +7211,14 @@ mod tests {
             assert_eq!(error.code, code);
         }
         // A resume of a task paused for an approval nobody could give.
-        let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": "cloud_schedule_needs_approval" }).to_string(), ""), Duration::ZERO);
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &json!({"schedule": schedule_json(SCHEDULE, "workspace-1")}).to_string(), ""),
+            response("409 Conflict", &json!({ "error": "cloud_schedule_needs_approval" }).to_string(), ""),
+        ]);
         let (_, service) = test_service(&base);
         let error = service.schedule_set_active(None, SCHEDULE, true).unwrap_err();
-        request.join().unwrap();
+        let captured = requests.join().unwrap();
+        assert!(captured[0].starts_with("GET ") && captured[1].contains("/resume HTTP/1.1"));
         assert_eq!(error.code, "cloud_schedule_needs_approval");
     }
 }
