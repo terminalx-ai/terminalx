@@ -10,6 +10,8 @@ vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { childr
 vi.mock("@/components/changes/ChangesPanel", () => ({ ChangesPanel: () => { gitPanelMounted(); return <div>Commit changes</div>; } }));
 vi.mock("@/components/changes/BranchTab", () => ({ BranchTab: ({ branch }: { branch: unknown }) => { gitPanelMounted(); return <div>{branch ? "Branch overview" : "Pull request only"}</div>; } }));
 vi.mock("@/components/files/FileTree", () => ({ FileTree: (props: { active: boolean; isGit: boolean }) => { filesMounted(props); return <div>Folder files</div>; } }));
+const { computerPanel } = vi.hoisted(() => ({ computerPanel: vi.fn() }));
+vi.mock("@/components/computer/ComputerPanel", () => ({ ComputerPanel: (props: unknown) => { computerPanel(props); return <div>Computer panel</div>; } }));
 const { RightPanel } = await import("./RightPanel");
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -40,4 +42,10 @@ it("keeps a Branch tab for a cloud workspace, its pull request alone", () => {
   render(<RightPanel cwd="/w" branch="main" gitSource={source} />);
   expect(screen.getByRole("button", { name: "Branch" })).toBeTruthy();
   expect(screen.getByText("Pull request only")).toBeTruthy();
+});
+
+it("attaches the Computer tab to the tab on screen and its own conversation (review 2)", () => {
+  render(<RightPanel cwd="/repo" isGit={false} computer sessionId="session" mentionTabId="persisted-tab" computerTab={{ tabId: "shown-tab", conversation: "shown-conversation" }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Computer" }));
+  expect(computerPanel).toHaveBeenLastCalledWith(expect.objectContaining({ context: { sessionId: "session", tabId: "shown-tab", conversation: "shown-conversation" } }));
 });

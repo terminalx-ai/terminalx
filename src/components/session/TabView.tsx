@@ -47,6 +47,8 @@ import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type Removabl
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
+import { LocalVmTasks } from "@/components/localVm/LocalVmTasks";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
@@ -141,6 +143,8 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  // Local VM task cards are behind Settings → Experimental → Local VM tasks (PRO-114).
+  const localVmTasks = useExperimentalSettings(local)?.localVmTasks === true;
   const setup = useWorkspaceSetup(local ? session.id : null);
   const isGit = useSessionIsGit(session, local);
   const forge = useProjectForge(local && isGit ? session.projectPath || session.cwd : null);
@@ -832,6 +836,9 @@ export function TabView({
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       footer={
+        <>
+        {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
+        {
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
           <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-6 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
@@ -926,6 +933,8 @@ export function TabView({
         />
         </>
         )
+        }
+        </>
       }
     />
     </RecoveryReports.Provider>

@@ -376,14 +376,14 @@ fn flag_and_value(args: &str) -> (String, String) {
 #[test]
 fn every_note_reaches_the_agent_in_one_appended_prompt() {
     let note = note_text(true, &["apps/web".into()]);
-    let vm = crate::local_vm::agent_note("claude");
+    let vm = crate::container_vm::agent_note("claude");
     assert!(vm.is_some());
     let claude = crate::cloud_config::prompt_args("claude", &[Some("Org rules."), vm, Some(&note)]);
     assert_eq!(claude.matches("--append-system-prompt").count(), 1, "Claude Code honours only one: {claude}");
     let (flag, value) = flag_and_value(&claude);
     assert_eq!(flag, "--append-system-prompt");
     assert_eq!(value, format!("Org rules.\n\n{}\n\n{note}", vm.unwrap()));
-    let codex = crate::cloud_config::prompt_args("codex", &[Some("Org rules."), crate::local_vm::agent_note("codex"), Some(&note)]);
+    let codex = crate::cloud_config::prompt_args("codex", &[Some("Org rules."), crate::container_vm::agent_note("codex"), Some(&note)]);
     assert_eq!(codex.matches("developer_instructions=").count(), 1, "{codex}");
     let (flag, value) = flag_and_value(&codex);
     assert_eq!(flag, "-c");
