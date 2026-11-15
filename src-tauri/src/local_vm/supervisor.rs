@@ -1067,7 +1067,6 @@ mod tests {
         drop(admit(&life).unwrap());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_call_marker_is_live_work_only_until_its_own_timeout() {
         let _home = crate::store::temp_home();
@@ -1126,6 +1125,7 @@ mod tests {
         assert!(handover_asks(now, refused + HANDOVER_PATIENCE * 2).is_empty());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn guest_agent_reload_waits_for_a_slow_existing_service_to_leave_launchd() {
         let directory = tempfile::tempdir().unwrap();
