@@ -65,11 +65,16 @@ pub enum TaskStatus {
     Failed,
     Canceled,
     OutcomeUnknown,
+    /// The person stopped waiting for a guest that could not answer (#978).
+    /// Terminal for the host's own holds, so Stop all and Delete VM proceed,
+    /// but its outcome is unknown: a stopped VM may resume the worker, so the
+    /// supervisor keeps polling and the guest's record replaces this status.
+    Abandoned,
 }
 
 impl TaskStatus {
     pub fn terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
+        matches!(self, Self::Completed | Self::Failed | Self::Canceled | Self::Abandoned)
     }
 
     pub fn holds_desktop(self) -> bool {
@@ -131,6 +136,20 @@ pub struct Task {
     pub event_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub events_dropped: u64,
+    /// How many retained events moved to this finished task's history file
+    /// (`HISTORY`), out of the journal every VM operation reads (#978).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub archived_events: u64,
+}
+
+impl Task {
+    /// Whether the supervisor still reads this task's guest record: every
+    /// unfinished task, and an abandoned one that reached its guest, whose
+    /// worker a resumed VM may still be running (#978). Polling only reads;
+    /// an abandoned task is never dispatched.
+    pub fn polled(&self) -> bool {
+        !self.status.terminal() || (self.status == TaskStatus::Abandoned && self.dispatch_started)
+    }
 }
 
 fn is_zero(value: &u64) -> bool { *value == 0 }
@@ -235,6 +254,7 @@ impl Journal {
             None => State::default(),
         };
         let result = f(&mut state)?;
+        compact(&self.dir, &mut state)?;
         let bytes = serde_json::to_vec(&state)?;
         if original.as_deref() != Some(bytes.as_slice()) {
             atomic_private_write(&path, &bytes)?;
@@ -429,6 +449,7 @@ impl Journal {
                 dispatch_started: false,
                 event_bytes: 0,
                 events_dropped: 0,
+                archived_events: 0,
             };
             state
                 .tasks
@@ -474,6 +495,9 @@ impl Journal {
     pub fn append_all(&self, target: &TaskTarget, events: &[TaskEvent], skipped_through: Option<u64>) -> Result<(Task, bool)> {
         self.transaction(|state| {
             let task = bound(state, target)?;
+            if task.archived_events > 0 {
+                bail!("This task finished and its history was archived; no further guest events are accepted");
+            }
             let within = task.events_dropped == 0;
             for event in events {
                 if event.seq <= task.last_event_seq {
@@ -611,6 +635,69 @@ pub fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Finished tasks' retained events, one file per task, beside the journal.
+pub(super) const HISTORY: &str = "task-history";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct History {
+    version: u32,
+    target: TaskTarget,
+    events: Vec<TaskEvent>,
+}
+
+/// Moves a finished task's events out of journal.json, which every poll of
+/// every running task reads, parses and rewrites under the lock that gates
+/// all VM operations (#978). Only a task nothing will append to again: not
+/// one the supervisor still polls, unless its VM was deleted. The history
+/// file is complete before the journal drops the events, so a crash between
+/// the two rewrites the same file on the next transaction.
+fn compact(dir: &Path, state: &mut State) -> Result<()> {
+    for task in state.tasks.values_mut() {
+        let deleted = state
+            .environments
+            .get(&task.target.environment_id)
+            .is_none_or(|env| env.deleted_at.is_some());
+        if task.events.is_empty() || !task.status.terminal() || (task.polled() && !deleted) {
+            continue;
+        }
+        // `append_all` refuses archived tasks; should events still appear,
+        // they extend the retained file rather than replace it.
+        let events = retained_events(dir, task)?;
+        private_directory(&dir.join(HISTORY))?;
+        let history = History { version: 1, target: task.target.clone(), events };
+        task.events.clear();
+        atomic_private_write(&history_path(dir, &task.target)?, &serde_json::to_vec(&history)?)?;
+        task.archived_events = history.events.len() as u64;
+    }
+    Ok(())
+}
+
+fn history_path(dir: &Path, target: &TaskTarget) -> Result<PathBuf> {
+    validate_id(&target.task_id)?;
+    Ok(dir.join(HISTORY).join(format!("{}.json", target.task_id)))
+}
+
+/// Every event the host retained for `task`, including those compacted to its
+/// history file. Read without the journal lock: the file is written once,
+/// complete, before the journal stops holding its events.
+pub(super) fn retained_events(dir: &Path, task: &Task) -> Result<Vec<TaskEvent>> {
+    if task.archived_events == 0 {
+        return Ok(task.events.clone());
+    }
+    let path = history_path(dir, &task.target)?;
+    let history: History = serde_json::from_slice(&fs::read(&path).with_context(|| {
+        format!("Retained history of task {} is missing", task.target.task_id)
+    })?)
+    .context("read retained task history")?;
+    if history.version != 1 || history.target != task.target || history.events.len() as u64 != task.archived_events {
+        bail!("Retained task history does not match the journal; refusing to use it");
+    }
+    let mut events = history.events;
+    events.extend(task.events.iter().cloned());
+    Ok(events)
+}
+
 pub fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let temporary = path.with_extension(format!("{}.tmp", new_id()));
@@ -665,11 +752,20 @@ const LOCK_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 /// holds it. Release semantics are unchanged: a deliberately inherited lease
 /// still keeps the lock for as long as that child lives.
 pub(crate) fn try_exclusive(file: &File) -> std::io::Result<bool> {
+    try_flock(file, libc::LOCK_EX)
+}
+
+/// Shared, non-blocking: any number of shared holders, no exclusive one.
+pub(crate) fn try_shared(file: &File) -> std::io::Result<bool> {
+    try_flock(file, libc::LOCK_SH)
+}
+
+fn try_flock(file: &File, operation: libc::c_int) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     let deadline = std::time::Instant::now() + LOCK_SETTLE;
     loop {
         // SAFETY: file owns the descriptor for this call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
             return Ok(true);
         }
         let error = std::io::Error::last_os_error();
@@ -895,6 +991,40 @@ mod tests {
         assert!(over);
         assert_eq!((kept.events.len(), kept.events_dropped), (3, 2));
         assert!(kept.event_bytes <= MAX_TASK_EVENT_BYTES);
+    }
+
+    /// #978: finished tasks' events leave the journal every poll rewrites.
+    #[test]
+    fn finished_task_history_leaves_the_journal_and_stays_readable() {
+        let (dir, journal, input) = setup();
+        let event = |seq: u64| TaskEvent { seq, timestamp: now(), payload: serde_json::json!({"text":"x".repeat(4096)}) };
+        let task = journal.submit("finished", input.clone()).unwrap();
+        let (appended, _) = journal.append_all(&task.target, &(1..=50).map(event).collect::<Vec<_>>(), None).unwrap();
+        let running = fs::metadata(dir.join("journal.json")).unwrap().len();
+        assert!(running > 50 * 4096, "a running task's events stay in the journal");
+        journal.transaction(|s| { let t = bound(s, &task.target)?; t.status = TaskStatus::Completed; t.dispatch_started = true; Ok(()) }).unwrap();
+        let compacted = journal.read().unwrap().tasks[&task.target.task_id].clone();
+        assert!(compacted.events.is_empty());
+        assert_eq!((compacted.archived_events, compacted.last_event_seq), (50, 50));
+        assert!(fs::metadata(dir.join("journal.json")).unwrap().len() < 16 * 1024);
+        let retained = retained_events(&dir, &compacted).unwrap();
+        assert_eq!(retained, appended.events);
+        assert!(journal.append_all(&task.target, &[event(51)], None).is_err(), "an archived task gains no events");
+        // An abandoned task is still polled, so its events stay until the guest answers,
+        // or until its VM is deleted and nothing can answer.
+        let abandoned = journal.submit("abandoned", input).unwrap();
+        journal.append_all(&abandoned.target, &[event(1)], None).unwrap();
+        journal.transaction(|s| { let t = bound(s, &abandoned.target)?; t.status = TaskStatus::Abandoned; t.dispatch_started = true; Ok(()) }).unwrap();
+        assert_eq!(journal.read().unwrap().tasks[&abandoned.target.task_id].events.len(), 1);
+        journal.transaction(|s| { s.environments.get_mut(&abandoned.target.environment_id).unwrap().deleted_at = Some(now()); Ok(()) }).unwrap();
+        let gone = journal.read().unwrap().tasks[&abandoned.target.task_id].clone();
+        assert_eq!((gone.events.len(), gone.archived_events), (0, 1));
+        // A history file that no longer matches is refused, never silently used.
+        fs::write(dir.join(HISTORY).join(format!("{}.json", task.target.task_id)), b"{\"version\":1,\"target\":null,\"events\":[]}").unwrap();
+        assert!(retained_events(&dir, &compacted).is_err());
+        let reopened = Journal::open_existing(&dir).unwrap();
+        assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id].archived_events, 50);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

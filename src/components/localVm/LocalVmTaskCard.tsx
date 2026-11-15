@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { errorMessage } from "@/lib/api";
 import { LOCAL_VM_STATUS, latestTaskProgress, localVmModelLabel, localVmRequest, pendingTaskApprovals, pendingTaskQuestions, taskFinished } from "@/lib/localVm";
 import { assertLocal, guestTaskPath } from "@/types/target";
-import type { LocalVmArtifact, LocalVmArtifactContent, LocalVmJson, LocalVmPatchResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifact, LocalVmArtifactContent, LocalVmJson, LocalVmPatchResult, LocalVmTask, LocalVmTaskEvent, LocalVmTaskTarget } from "@/types/localVm";
 import { localVmFieldClass } from "./fields";
 import { reconcileLocalVmState } from "./useLocalVmState";
 import { LocalVmTaskRecovery } from "./LocalVmTaskRecovery";
@@ -55,6 +55,22 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const [takeoverOpen, setTakeoverOpen] = useState(false);
   const [abandonOpen, setAbandonOpen] = useState(false);
   const lock = useRef(false);
+  // A finished task's events move to its history file (#978); read them only
+  // when the person opens them, not on every state poll.
+  const [history, setHistory] = useState<{ key: string; events: LocalVmTaskEvent[] | null; error: string | null }>({ key: "", events: null, error: null });
+  const historyKey = `${task.target.taskId}:${task.archivedEvents ?? 0}`;
+  const archived = history.key === historyKey ? history : { key: historyKey, events: null, error: null };
+  const retained = task.archivedEvents ? [...(archived.events ?? []), ...task.events] : task.events;
+  const retainedCount = (task.archivedEvents ?? 0) + task.events.length;
+  async function loadHistory() {
+    if (!task.archivedEvents || archived.events) return;
+    try {
+      const read = await localVmRequest("task.history", { target: task.target });
+      setHistory({ key: historyKey, events: read.events, error: null });
+    } catch (error) {
+      setHistory({ key: historyKey, events: null, error: errorMessage(error) });
+    }
+  }
   const finished = taskFinished(task.status);
   const canReply = !readOnly && !finished && task.status !== "canceling" && task.status !== "outcomeUnknown";
   const approvals = pendingTaskApprovals(task);
@@ -122,7 +138,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         <p className="break-all text-muted-foreground">SHA-256 {item.sha256}{item.expiresAt ? ` · expires ${item.expiresAt}` : ""}</p>
       </div>)}</section> : null}
       {artifact ? <section aria-label="Artifact preview" className="space-y-1"><h5 className="font-medium">{artifact.name}</h5>{typeof artifact.content === "string" ? <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words bg-well p-2">{artifact.content}</pre> : artifact.contentBase64 !== undefined ? <p>Binary artifact · {artifact.mediaType}</p> : null}{href ? <a className="underline" href={href} download={artifact.name} rel="noreferrer">{artifact.contentBase64 !== undefined ? "Download artifact" : "Open or save artifact"}</a> : <p>No safe downloadable content was returned by the guest.</p>}</section> : null}
-      {task.events.length ? <details><summary className="cursor-pointer text-muted-foreground">Retained task events · {task.events.length}</summary><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all">{task.events.map((event) => `${event.seq} · ${event.timestamp}\n${JSON.stringify(event.payload, null, 2)}`).join("\n")}</pre></details> : null}
+      {retainedCount ? <details onToggle={(event) => { if (event.currentTarget.open) void loadHistory(); }}><summary className="cursor-pointer text-muted-foreground">Retained task events · {retainedCount}</summary>{archived.error ? <p role="alert" className="text-destructive">{archived.error}</p> : task.archivedEvents && !archived.events ? <p role="status">Reading retained history…</p> : null}<pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all">{retained.map((event) => `${event.seq} · ${event.timestamp}\n${JSON.stringify(event.payload, null, 2)}`).join("\n")}</pre></details> : null}
       {busy ? <p role="status">{busy}…</p> : null}
       {error ? <p role="alert" className="text-destructive">{error}</p> : null}
       {result !== undefined ? <pre aria-label="Task action response" className="max-h-28 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(result, null, 2)}</pre> : null}
@@ -144,7 +160,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         }}>Stop task and take over</Button></DialogFooter>
       </DialogContent></Dialog>
       <Dialog open={abandonOpen} onOpenChange={setAbandonOpen}><DialogContent>
-        <DialogHeader><DialogTitle>Abandon this task?</DialogTitle><DialogDescription>Only when its guest can no longer answer, because the VM is gone or will not start. The task ends as failed with an unknown outcome: whatever its worker was doing is not undone or replayed, and the guest keeps its own record. Stop all and Delete VM then stop waiting for it. If the guest answers, cancel the task instead.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Abandon this task?</DialogTitle><DialogDescription>Only when its guest can no longer answer, because the VM is gone or will not start. The task is marked abandoned and its outcome stays unknown: whatever its worker was doing is not undone or replayed, and the guest keeps its own record. Stop all and Delete VM then stop waiting for it. If the VM starts again, the task shows what its worker did. If the guest answers, cancel the task instead.</DialogDescription></DialogHeader>
         <DialogFooter><Button variant="ghost" onClick={() => setAbandonOpen(false)}>Keep waiting</Button><Button variant="destructive" disabled={!!busy || readOnly} onClick={() => {
           setAbandonOpen(false);
           void run("Abandoning task", async () => { setResult(await localVmRequest("task.abandon", { target: task.target, confirm: true })); });

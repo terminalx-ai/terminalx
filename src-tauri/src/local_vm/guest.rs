@@ -81,6 +81,14 @@ const PAGE_BYTES: usize = 1024 * 1024;
 const INSTALL: &str = super::transport::LINUX_INSTALL;
 #[cfg(not(target_os = "linux"))]
 const INSTALL: &str = "/Users/lume/.terminalx-local";
+/// The runtime the guest itself launches. On Linux it is the root-sealed copy
+/// (#978), never the one under the account's own installation.
+fn runtime_executable() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    return PathBuf::from(super::transport::SEALED_RUNTIME);
+    #[cfg(not(target_os = "linux"))]
+    PathBuf::from(INSTALL).join("bin/terminalx-serve")
+}
 pub(super) fn installation() -> Result<PathBuf> {
     Ok(PathBuf::from(INSTALL))
 }
@@ -2661,7 +2669,7 @@ fn task_launch_config(
         ),
     ];
     let install = PathBuf::from(INSTALL);
-    let server = json!({"command":install.join("bin/terminalx-serve"),"args":["local-vm-computer","--stdio","--task",target],
+    let server = json!({"command":runtime_executable(),"args":["local-vm-computer","--stdio","--task",target],
         "env":{"TERMINALX_LOCAL_VM_ENVIRONMENT_ID":identity.environment_id,"TERMINALX_LOCAL_VM_GENERATION":identity.generation,
         "TERMINALX_HOME":install.join("runtime")}});
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));

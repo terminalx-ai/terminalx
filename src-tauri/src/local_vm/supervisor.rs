@@ -453,7 +453,7 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
         let mut tasks: Vec<Task> = state
             .tasks
             .values()
-            .filter(|t| t.target.environment_id == env.id && !t.status.terminal())
+            .filter(|t| t.target.environment_id == env.id && t.polled())
             .cloned()
             .collect();
         tasks.sort_by(|a, b| {
@@ -627,6 +627,9 @@ fn ensure_running(stopped: &AtomicBool) -> Result<()> {
 fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBool) -> Result<()> {
     ensure_running(stopped)?;
     let result = if !task.dispatch_started {
+        if task.status.terminal() {
+            bail!("A finished task is never dispatched");
+        }
         let description = host::guest_rpc(env, "describe", json!({}))?;
         if !description
             .get("capabilities")
@@ -717,7 +720,8 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     )?;
     journal.transaction(|s| {
         let t = journal::bound(s, &task.target)?;
-        if t.status.terminal() {
+        // An abandoned task's guest answered again: its record is the outcome.
+        if t.status.terminal() && t.status != TaskStatus::Abandoned {
             return Ok(());
         }
         t.worker_session_id = guest.worker_session_id;

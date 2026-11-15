@@ -465,7 +465,7 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     #[cfg(unix)]
-    let admission = attach(target, Some(CALL))?;
+    let admission = call_admission(target, CALL)?;
     let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], CALL);
     // A call that exited, even unsuccessfully, has ended in the container;
     // only one given up on leaves the container fenced (review 2).
@@ -498,7 +498,7 @@ pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
     };
     // Its capture and its copy, each with its own QUICK.
     #[cfg(unix)]
-    let admission = attach(target, Some(QUICK * 2))?;
+    let admission = call_admission(target, QUICK * 2)?;
     let inside = "/tmp/terminalx-screen.png";
     let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK)
         .context("capture the screen")
@@ -629,6 +629,13 @@ fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::loca
 #[cfg(unix)]
 fn attach(target: &Target, within: Option<Duration>) -> Result<crate::local_vm::admission::Guard> {
     crate::local_vm::admission::Guard::attach(&crate::local_vm::host::root()?, target, &crate::local_vm::host::journal()?, within)
+}
+
+/// A one-shot call or screenshot: shared with other calls, so a long
+/// `launch_app` no longer turns an agent's screenshot away (#978).
+#[cfg(unix)]
+fn call_admission(target: &Target, within: Duration) -> Result<crate::local_vm::admission::Guard> {
+    crate::local_vm::admission::Guard::call(&crate::local_vm::host::root()?, target, &crate::local_vm::host::journal()?, within)
 }
 
 /// The attached MCP proxy holds admission for its entire lifetime. A crash or
