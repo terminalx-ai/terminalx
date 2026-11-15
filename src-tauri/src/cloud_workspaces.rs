@@ -1437,12 +1437,13 @@ pub struct SelectedRepositories {
 }
 
 /// The collaboration role a share grants (contract §21.2): `viewer` reads,
-/// `driver` also sends to agents and types into terminals.
+/// `driver` also sends to agents and types into terminals; `manager` manages shares.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareRole {
     Viewer,
     Driver,
+    Manager,
 }
 
 /// Someone's effective role on a workspace (§21.1).
@@ -3119,12 +3120,44 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Only explicit shares use the accepted target-membership contract here.
+    /// Keep the initiating active context as well as target membership: neither
+    /// a late success nor an HTTP error may escape into a replacement session.
+    fn run_share_in<T>(&self, org: Option<&str>, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if org.is_some_and(|org| !valid_resource_id(org)) { return Err(inbox_invalid()); }
+        // An explicit member target does not require an active organization.
+        let active = self.account.context()
+            .ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        if org.is_none() && active.organization_id.is_empty() {
+            return Err(CloudWorkspaceClientError::local("account_organization_unavailable", false));
+        }
+        let target = org.unwrap_or(&active.organization_id);
+        if !valid_resource_id(target) { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(target)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        // is_current includes generation/user/profile/active org, but not token
+        // rotation. Fence the captured token too, even without a generation bump.
+        let session_is_current = || self.account.context().is_some_and(|now|
+            now.access_token == active.access_token && self.account.is_current(&active));
+        if context.generation != active.generation || context.user_id != active.user_id
+            || context.profile_id != active.profile_id || context.access_token != active.access_token
+            || !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+            return Err(context_changed_error(risk));
+        }
+        let result = operation(&self.client, &context);
+        if !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
     /// Who the workspace is shared with, and what the caller may do (§21.2).
     pub fn shares(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceShares, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Read, |client, context| {
+        self.run_share_in(org, RequestRisk::Read, |client, context| {
             let result: CloudWorkspaceShares = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "shares"],
@@ -3153,7 +3186,15 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
+        // Native v1 cannot enforce a manager without approval. Never upgrade the
+        // requested boolean, downgrade the role or retry with a different body.
+        if role == ShareRole::Manager {
+            if !can_approve {
+                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
+            }
+            self.phase2_gate(false)?;
+        }
+        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -3181,7 +3222,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "DELETE",
                 context,
@@ -3596,6 +3637,8 @@ fn known_error_code(code: &str) -> bool {
             | "github_installation_suspended"
             | "github_installation_revoked"
             | "organization_member_not_found"
+            | "cloud_workspace_last_admin"
+            | "cloud_workspace_share_unavailable"
             | "cloud_workspace_share_not_found"
             | "cloud_workspace_share_redundant"
             | "cloud_workspace_share_requires_organization_access"
@@ -6454,6 +6497,326 @@ mod tests {
             "userId": user_id, "email": format!("{user_id}@example.com"), "name": "Alice",
             "role": role, "canApprove": false, "createdBy": "user-1", "createdAt": 1, "updatedAt": 2
         })
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_get_mixed_nullable_rows_and_effective_you() {
+        for effective in ["manager", "driver", "viewer", "none"] {
+            let mut manager = share_json("user-2", "manager");
+            manager["name"] = Value::Null;
+            manager["canApprove"] = json!(true);
+            manager["createdAt"] = json!(1_731_000_000_123_i64);
+            manager["updatedAt"] = json!(1_731_000_000_456_i64);
+            let body = json!({"shares": [manager, share_json("user-3", "viewer"), share_json("user-4", "driver")],
+                "you": {"role": effective, "canApprove": true, "canManageShares": effective == "manager"}});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let listed = service.shares(None, "workspace-1").unwrap();
+            assert_eq!(serde_json::to_value(&listed).unwrap(), body);
+            assert_eq!(listed.shares[0].role, ShareRole::Manager);
+            assert_eq!(listed.shares[0].name, None);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares HTTP/1.1"));
+            phase2_headers(&captured.text);
+            assert_eq!(captured.text.split_once("\r\n\r\n").unwrap().1, "");
+            assert!(!captured.extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_enabled_manager_put_and_delete_receipts() {
+        for method in ["PUT", "DELETE"] {
+            for created in [true, false] {
+                let mut share = share_json("user-2", "manager");
+                share["name"] = Value::Null;
+                share["canApprove"] = json!(true);
+                let body = if method == "PUT" { json!({"share": share, "created": created}) }
+                    else { json!({"share": share}) };
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let receipt = if method == "PUT" {
+                    service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap()
+                } else { service.share_revoke(None, "workspace-1", "user-2").unwrap() };
+                assert_eq!(serde_json::to_value(receipt).unwrap(), body);
+                let captured = request.join().unwrap();
+                assert!(captured.text.starts_with(&format!("{method} /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1")));
+                phase2_headers(&captured.text);
+                let sent = captured.text.split_once("\r\n\r\n").unwrap().1;
+                if method == "PUT" {
+                    assert_eq!(serde_json::from_str::<Value>(sent).unwrap(), json!({"v": 1, "role": "manager", "canApprove": true}));
+                } else { assert_eq!(sent, ""); }
+                assert!(!captured.text.to_ascii_lowercase().contains("idempotency-key:"));
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_manager_holds_and_invalid_inputs_never_send() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (account, mut service) = test_service(&base);
+        // The production constructor and its HTTP fixture both start held.
+        assert!(!CloudWorkspaceService::new(account).phase2_contracts_available());
+        for enabled in [false, true] {
+            service.phase2_enabled = enabled;
+            let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, false).unwrap_err();
+            assert_eq!(error.code, "cloud_workspace_runtime_unsupported");
+            assert_eq!(serde_json::to_value(error).unwrap(), json!({"code": "cloud_workspace_runtime_unsupported",
+                "status": null, "retryable": false, "retryAfterSeconds": null,
+                "retryWithSameIdempotencyKey": false, "requiresOriginalAccountContext": false}));
+            if !enabled {
+                let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err();
+                assert_eq!(error.code, "cloud_workspace_runtime_not_ready");
+                assert!(error.status.is_none());
+            }
+            for invalid in ["", "../user", "user/2", "user?x", ".", ".."] {
+                assert_eq!(service.share_put(None, "workspace-1", invalid, ShareRole::Manager, true).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_revoke(None, "workspace-1", invalid).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.shares(None, invalid).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_put(None, invalid, "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_revoke(Some(invalid), "workspace-1", "user-2").unwrap_err().code, "cloud_workspace_request_invalid");
+            }
+        }
+        // Tauri deserializes this same type before invoking the service. Invalid
+        // wire roles must never coerce into a fallback grant or reach HTTP.
+        for role in ["admin", "owner", "Manager", "none", "", "writer"] {
+            assert!(serde_json::from_value::<ShareRole>(json!(role)).is_err());
+        }
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_legacy_production_put_approval_is_independent() {
+        for (role, wire) in [(ShareRole::Viewer, "viewer"), (ShareRole::Driver, "driver")] {
+            for can_approve in [false, true] {
+                let mut share = share_json("user-2", wire);
+                share["canApprove"] = json!(can_approve);
+                let body = json!({"share": share, "created": false});
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = test_service(&base);
+                assert!(!service.phase2_contracts_available());
+                let receipt = service.share_put(None, "workspace-1", "user-2", role, can_approve).unwrap();
+                assert_eq!(receipt.share.can_approve, can_approve);
+                assert_eq!(receipt.share.role, role);
+                assert_eq!(receipt.created, Some(false));
+                let captured = request.join().unwrap();
+                phase2_headers(&captured.text);
+                assert!(captured.text.starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
+                assert_eq!(serde_json::from_str::<Value>(captured.text.split_once("\r\n\r\n").unwrap().1).unwrap(),
+                    json!({"v": 1, "role": wire, "canApprove": can_approve}));
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_target_member_without_capability_or_active_org() {
+        for active_org in ["org-1", ""] {
+            let bodies = vec![
+                json!({"shares": [], "you": {"role": "none", "canApprove": false, "canManageShares": false}}),
+                json!({"share": share_json("user-2", "viewer"), "created": false}),
+                json!({"share": share_json("user-2", "manager")}),
+            ];
+            let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
+            let (account, service) = test_service(&base);
+            let mut current = context();
+            current.organization_id = active_org.into();
+            account.set_context_for_test(Some(current));
+            account.set_memberships_for_test(&["org-2"], false);
+            if active_org.is_empty() {
+                let error = service.shares(None, "workspace-1").unwrap_err();
+                assert_eq!(error.code, "account_organization_unavailable");
+                assert!(error.status.is_none());
+                assert_eq!(service.share_put(None, "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "account_organization_unavailable");
+                assert_eq!(service.share_revoke(None, "workspace-1", "user-2").unwrap_err().code, "account_organization_unavailable");
+            }
+            service.shares(Some("org-2"), "workspace-1").unwrap();
+            service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap();
+            service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap();
+            for (request, method) in requests.join().unwrap().iter().zip(["GET", "PUT", "DELETE"]) {
+                assert!(request.starts_with(&format!("{method} /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/shares")));
+                phase2_headers(request);
+            }
+            // The same target remains unavailable to legacy provider transport.
+            assert_eq!(service.teardown_status(Some("org-2")).unwrap_err().code, "cloud_organization_unavailable");
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_nonmembership_and_private_errors_fail_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (_, service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
+        assert_eq!(service.shares(Some("org-2"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        for method in ["GET", "PUT", "DELETE"] {
+            let (base, _, request) = serve_once(response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""), Duration::ZERO);
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], false);
+            let error = match method {
+                "GET" => service.shares(Some("org-2"), "private-workspace").unwrap_err(),
+                "PUT" => service.share_put(Some("org-2"), "private-workspace", "user-2", ShareRole::Viewer, false).unwrap_err(),
+                _ => service.share_revoke(Some("org-2"), "private-workspace", "user-2").unwrap_err(),
+            };
+            assert_eq!(error.code, "cloud_workspace_not_found");
+            assert_eq!(error.status, Some(404));
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_late_context_fences_success_and_error_for_all_routes() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for success in [false, true] {
+                for change in ["sign-out", "account", "profile", "organization", "session", "token-only", "A-B-A", "membership"] {
+                    let body = if !success { json!({"error": "cloud_workspace_last_admin"}) }
+                        else if method == "GET" { json!({"shares": [], "you": {"role": "manager", "canApprove": true, "canManageShares": true}}) }
+                        else { json!({"share": share_json("user-2", "manager"), "created": false}) };
+                    let (base, accepted, request) = serve_once(response(if success { "200 OK" } else { "409 Conflict" }, &body.to_string(), ""), Duration::from_millis(150));
+                    let (account, service) = phase2_service(&base);
+                    account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    let pending = thread::spawn(move || match method {
+                        "GET" => service.shares(Some("org-2"), "workspace-1").map(|_| ()),
+                        "PUT" => service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true).map(|_| ()),
+                        _ => service.share_revoke(Some("org-2"), "workspace-1", "user-2").map(|_| ()),
+                    });
+                    accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+                    if change == "sign-out" { account.set_context_for_test(None); }
+                    else if change == "membership" { account.set_memberships_for_test(&["org-1"], false); }
+                    else {
+                        let mut replacement = context();
+                        match change {
+                            "account" => replacement.user_id = "user-other".into(),
+                            "profile" => replacement.profile_id = "profile-other".into(),
+                            "organization" => replacement.organization_id = "org-other".into(),
+                            "session" => replacement.generation += 1,
+                            "token-only" => replacement.access_token = "rotated-token".into(),
+                            "A-B-A" => {
+                                let mut other = context();
+                                other.user_id = "user-other".into(); other.generation += 1;
+                                account.set_context_for_test(Some(other));
+                                replacement.generation += 2;
+                            }
+                            _ => unreachable!(),
+                        }
+                        account.set_context_for_test(Some(replacement));
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    }
+                    let error = pending.join().unwrap().unwrap_err();
+                    assert_eq!(error.code, "account_context_changed", "{method}/{success}/{change}");
+                    assert!(error.status.is_none());
+                    assert_eq!(error.requires_original_account_context, method != "GET");
+                    assert!(!request.join().unwrap().extra_request);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_foreign_user_and_unknown_response_roles_refuse() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for invalid in ["foreign-user", "unknown-role", "invalid-user-id"] {
+                // A different valid user is allowed in GET's roster, but never
+                // in the receipt for a specific PUT/DELETE target.
+                if method == "GET" && invalid == "foreign-user" { continue; }
+                let mut share = share_json(if invalid == "foreign-user" { "user-other" } else { "user-2" }, "manager");
+                if invalid == "unknown-role" { share["role"] = json!("admin"); }
+                if invalid == "invalid-user-id" { share["userId"] = json!("../user"); }
+                let body = if method == "GET" { json!({"shares": [share], "you": {"role": "manager", "canApprove": true, "canManageShares": true}}) }
+                    else { json!({"share": share, "created": false}) };
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert_eq!(error.code, if method == "GET" { "cloud_workspace_invalid_response" } else { "cloud_workspace_request_outcome_unknown" });
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+        let (base, _, request) = serve_once(response("200 OK", &json!({"shares": [], "you": {"role": "owner", "canApprove": true, "canManageShares": true}}).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.shares(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_safe_errors_status_retry_after_and_no_retry() {
+        for (status, number, code) in [
+            ("409 Conflict", 409, "cloud_workspace_last_admin"),
+            ("409 Conflict", 409, "cloud_workspace_runtime_unsupported"),
+            ("503 Service Unavailable", 503, "cloud_workspace_share_unavailable"),
+            ("403 Forbidden", 403, "cloud_workspace_share_forbidden"),
+            ("403 Forbidden", 403, "cloud_workspace_manager_required"),
+            ("401 Unauthorized", 401, "invalid_access_token"),
+            ("404 Not Found", 404, "cloud_workspace_not_found"),
+            ("404 Not Found", 404, "organization_member_not_found"),
+            ("404 Not Found", 404, "cloud_workspace_share_not_found"),
+            ("422 Unprocessable Entity", 422, "cloud_workspace_request_invalid"),
+            ("429 Too Many Requests", 429, "cloud_workspace_share_limit"),
+            ("409 Conflict", 409, "cloud_workspace_share_redundant"),
+            ("409 Conflict", 409, "cloud_workspace_share_requires_organization_access"),
+            ("409 Conflict", 409, "cloud_workspace_share_credential_restricted"),
+            ("409 Conflict", 409, "cloud_workspace_share_personal_route"),
+            ("503 Service Unavailable", 503, "machine0_unavailable"),
+        ] {
+            for method in ["GET", "PUT", "DELETE"] {
+                let (base, _, request) = serve_once(response(status, &json!({"error": code, "message": "private diagnostic must not cross"}).to_string(), "Retry-After: 17\r\n"), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, Some(number));
+                assert_eq!(error.retry_after_seconds, Some(17));
+                assert_eq!(error.retryable, method == "GET" && (number == 429 || number >= 500));
+                assert_eq!(error.requires_original_account_context, method != "GET" && (number == 429 || number >= 500));
+                assert!(!error.retry_with_same_idempotency_key);
+                assert!(!serde_json::to_string(&error).unwrap().contains("private diagnostic"));
+                let captured = request.join().unwrap();
+                phase2_headers(&captured.text);
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_bounded_timeout_body_and_unknown_error_capture() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for failure in ["timeout", "body-limit", "error-body-limit", "unknown-error"] {
+                let body = match failure {
+                    "body-limit" | "error-body-limit" => " ".repeat(RESPONSE_LIMIT_BYTES as usize + 1),
+                    "unknown-error" => r#"{"error":"raw_database_secret","message":"private"}"#.into(),
+                    _ => json!({"share": share_json("user-2", "manager")}).to_string(),
+                };
+                let status = if matches!(failure, "error-body-limit" | "unknown-error") { "503 Service Unavailable" } else { "200 OK" };
+                let (base, _, request) = serve_once(response(status, &body, ""), if failure == "timeout" { Duration::from_millis(200) } else { Duration::ZERO });
+                let (account, _) = test_service(&base);
+                let mut service = CloudWorkspaceService::for_test(account, &base, if failure == "timeout" { Duration::from_millis(50) } else { Duration::from_secs(2) });
+                service.phase2_enabled = true;
+                let started = Instant::now();
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert!(started.elapsed() < Duration::from_secs(2));
+                let http_error = matches!(failure, "error-body-limit" | "unknown-error");
+                assert_eq!(error.status, if http_error { Some(503) } else { None });
+                assert_eq!(error.code, if http_error || (failure == "timeout" && method == "GET") { "cloud_workspace_unavailable" }
+                    else if method == "GET" { "cloud_workspace_invalid_response" } else { "cloud_workspace_request_outcome_unknown" });
+                let serialized = serde_json::to_string(&error).unwrap();
+                assert!(!serialized.contains("raw_database_secret") && !serialized.contains("private"));
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
     }
 
     #[test]
