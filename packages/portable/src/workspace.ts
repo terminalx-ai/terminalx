@@ -55,10 +55,15 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   reader's own `gh` and moves a Linear issue to review with their key, and
  *   says so. `session.create` takes an issue only where it is granted.
  * `pipeline/2` adds paginated persistent reviewer identities (`pipeline.reviewers`).
+ * `agent-commands/1` (PRO-343): `session.steer`, `session.stop` and
+ * `session.decide`, and `session.send` held to the same rules, as live calls
+ * answered once per `clientRequestId` from the runtime's durable receipts.
+ * Only a runtime with no cloud mailbox (a machine) grants it; a cloud
+ * workspace's commands keep going through the mailbox.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -93,6 +98,9 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "workspace.holdMerged": "workspace/2",
   "workspace.removedRecords": "workspace/2",
   "workspace.restoreRemoved": "workspace/2",
+  "session.steer": "agent-commands/1",
+  "session.stop": "agent-commands/1",
+  "session.decide": "agent-commands/1",
 };
 
 /**
@@ -113,6 +121,9 @@ export const MUTATING_METHODS = new Set([
   "session.create",
   "session.close",
   "session.send",
+  "session.steer",
+  "session.stop",
+  "session.decide",
   "session.configure",
   "session.update",
   "session.addTab",

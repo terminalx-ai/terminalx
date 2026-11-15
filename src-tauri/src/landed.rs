@@ -82,6 +82,8 @@ pub enum MergedBy {
     Squash,
     /// The branch changes nothing relative to where it started.
     NoChanges,
+    /// A superseded try is backed up and its run PR is merged.
+    Superseded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +212,7 @@ impl Landed {
         } else {
             match self.merged {
                 None => State::Unmerged,
-                Some(MergedBy::Squash | MergedBy::Rebase) => State::Merged,
+                Some(MergedBy::Squash | MergedBy::Rebase | MergedBy::Superseded) => State::Merged,
                 Some(MergedBy::Ancestor | MergedBy::NoChanges) => State::Clean,
             }
         }
@@ -551,7 +553,7 @@ pub fn state_in_list(context: &ListContext, path: &Path, branch: Option<&str>, h
     };
     match merged {
         None => State::Unmerged,
-        Some(MergedBy::Squash | MergedBy::Rebase) => State::Merged,
+        Some(MergedBy::Squash | MergedBy::Rebase | MergedBy::Superseded) => State::Merged,
         Some(MergedBy::Ancestor | MergedBy::NoChanges) => State::Clean,
     }
 }
@@ -635,6 +637,15 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
             }
             None => landed.not_verified = Some(format!("Whether the branch's work is in {base} could not be established.")),
         }
+    }
+    // This exception concerns commit disposition only. All working-tree,
+    // stash, submodule and fresh-authority checks below still apply.
+    if fetch != Fetch::Skip && landed.merged.is_none() && landed.fresh
+        && landed.head.as_deref().is_some_and(|head| crate::orchestration::retirement::landed(project, path, head)) {
+        landed.merged = Some(MergedBy::Superseded);
+        landed.unmerged_commits = 0;
+        landed.pushed = true;
+        landed.not_verified = None;
     }
     if status.is_none() {
         landed.not_verified = Some("Git could not read the working tree's status.".to_string());

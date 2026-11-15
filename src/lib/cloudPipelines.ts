@@ -260,6 +260,7 @@ export async function setCloudPipelineResolveConflicts(pipeline: IssuePipeline, 
 }
 
 export async function actOnCloudPipeline(pipeline: IssuePipeline, action: Exclude<PipelineAction, "merge">): Promise<void> {
+  if (action === "restartResolve") throw new Error("Restarting a resolver is not supported by cloud workspaces yet.");
   const target = targetOf(pipeline);
   const lease = await wakeCloudConnection(target);
   try {

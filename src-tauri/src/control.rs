@@ -1758,7 +1758,7 @@ impl ControlService {
             // What the run's cleanup would do, asked without --yes: it removes nothing then.
             let mut verdicts: std::collections::HashMap<String, (Option<String>, String)> = std::collections::HashMap::new();
             let mut failed = None;
-            match merge::cleanup(&host, &run.id, false) {
+            match merge::cleanup_before_lead_removal(&host, &run.id, false) {
                 Err(error) if error.code == "confirmation_required" => {
                     for (list, going) in [("wouldRemove", true), ("wouldRefuse", false)] {
                         for fate in error.details[list].as_array().into_iter().flatten() {
@@ -1855,7 +1855,7 @@ impl ControlService {
         let host = crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone());
         let mut cleaned = Vec::new();
         for run in orphan_runs(&orphans) {
-            crate::orchestration::merge::cleanup(&host, &run, true).map_err(ControlError::of_run)?;
+            crate::orchestration::merge::cleanup_before_lead_removal(&host, &run, true).map_err(ControlError::of_run)?;
             cleaned.push(run);
         }
         // What the cleanup could not remove after all (a worker that wrote
