@@ -176,7 +176,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
   const flow = useAgentSetupFlow(harness.id);
   const [choice, setChoice] = useState<"subscription" | "api_key" | null>(null);
   // #980: read again at every sign-in change, which can move the default account.
-  const accounts = useAgentAccountsView(takesAccounts(harness.id) ? harness.id : "claude", status);
+  const accounts = useAgentAccountsView(takesAccounts(harness.id) ? harness.id : null, status);
   const [offer, setOffer] = useState<ShellKeyOffer | null>(null);
   const [busy, setBusy] = useState<"save" | "remove" | "import" | "mode" | "verify" | null>(null);
   const [error, setError] = useState<string | null>(null);

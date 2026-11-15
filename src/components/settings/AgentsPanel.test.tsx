@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, SessionEntry } from "@/types/session";
 import type { AgentReadiness } from "@/lib/agentReadiness";
@@ -16,6 +16,7 @@ vi.mock("@/lib/tabViews", () => ({ startTabAgent }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal-view" data-pane={id} /> }));
 import { AgentsPanel } from "./AgentsPanel";
 import { AgentLoginToasts } from "./AgentLoginToasts";
+import { useAgentAccountsView } from "./AgentAccounts";
 import { resetAgentSetupFlows } from "@/lib/agentSetupFlow";
 import { forgetAgentLoginNotices } from "@/lib/agentLogins";
 
@@ -365,6 +366,25 @@ describe("Agents · accounts (#980)", () => {
     expect(panel.queryByRole("list", { name: "Claude Code accounts" })).toBeNull();
     expect(panel.queryByText("Default")).toBeNull();
     expect(panel.getByRole("button", { name: "Add account" })).toBeTruthy();
+  });
+
+  it("asks for accounts only for the agents that have them", async () => {
+    show([claude, opencode]);
+    await waitFor(() => expect(statusLine().textContent).toBe("Signed in"));
+    fireEvent.click(screen.getByRole("tab", { name: /OpenCode/ }));
+    await waitFor(() => expect(statusLine().textContent).toBe("Not installed"));
+    expect(screen.queryByRole("button", { name: "Add account" })).toBeNull();
+    const asked = calls("agent_accounts_list").map((args) => (args as { harness: string }).harness);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((harness) => harness === "claude")).toBe(true);
+  });
+
+  it("lists nothing for an agent without accounts: no command, no view", async () => {
+    const { result } = renderHook(() => useAgentAccountsView(null, 1));
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.view).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(calls("agent_accounts_list")).toHaveLength(0);
   });
 
   it("keeps the PRO-306 key choice as it was while the saved key is the only other account", async () => {

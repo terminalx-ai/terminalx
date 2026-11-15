@@ -8,13 +8,17 @@ import { errorMessage } from "@/lib/api";
 import { AgentAccountAdd, MCP_NOTE } from "./AgentAccountAdd";
 import { AgentAccountRow } from "./AgentAccountRow";
 
-/** One agent's accounts (#980), read again whenever `revision` changes. */
-export function useAgentAccountsView(harness: AgentAccountAgent, revision: unknown) {
+/**
+ * One agent's accounts (#980), read again whenever `revision` changes.
+ * `null`: an agent without accounts; nothing is asked and the view stays empty.
+ */
+export function useAgentAccountsView(harness: AgentAccountAgent | null, revision: unknown) {
   const [view, setView] = useState<AgentAccounts | null>(null);
   const [error, setError] = useState<string | null>(null);
   const run = useRef(0);
   const reload = useCallback(async () => {
     const mine = ++run.current;
+    if (!harness) { setView(null); setError(null); return null; }
     try {
       const next = await agentAccounts.list(harness);
       if (mine === run.current) { setView(next); setError(null); }
