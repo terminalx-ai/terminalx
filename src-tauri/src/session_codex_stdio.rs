@@ -13,6 +13,7 @@ pub(super) struct Delivery {
     line: Outbound,
     sender: Option<Authority>,
     privacy: Option<crate::data_privacy::Ticket>,
+    collaboration: Option<CollaborationPermit>,
 }
 
 /// A command or continuation refused because Codex is still on a turn.
@@ -321,10 +322,10 @@ impl SessionManager {
                 author: prompt.author, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
             }, None);
             let privacy = crate::data_privacy::remote_ticket();
-            if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() {
+            if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() || prompt.collaboration.is_some() {
                 rt.stdio_followups.authorities.insert(event.seq, Authority {
                     session: rt.session_id.clone(), tab: rt.tab_id.clone(), seq: Some(event.seq),
-                    mobile: prompt.mobile, shared: prompt.shared_connection, privacy: privacy.clone(),
+                    collaboration: prompt.collaboration, mobile: prompt.mobile, shared: prompt.shared_connection, privacy: privacy.clone(),
                 });
             }
             rt.queued.push(PendingMessage {
@@ -357,9 +358,9 @@ impl SessionManager {
         // Every prompt replaces what the last one left: a desktop prompt is
         // held to nothing, a phone's or a share's to its permits.
         let privacy = crate::data_privacy::remote_ticket();
-        rt.stdio_authority = (privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some()).then(|| Authority {
+        rt.stdio_authority = (privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() || prompt.collaboration.is_some()).then(|| Authority {
             session: rt.session_id.clone(), tab: rt.tab_id.clone(),
-            seq: events.first().map(|event| event.seq), mobile: prompt.mobile, shared: prompt.shared_connection, privacy,
+            seq: events.first().map(|event| event.seq), collaboration: prompt.collaboration, mobile: prompt.mobile, shared: prompt.shared_connection, privacy,
         });
         // As for the PTY engine: the brief this tab was opened with, which
         // "Resend last prompt" prefers while Codex has not answered it. Only
@@ -422,6 +423,7 @@ impl SessionManager {
         let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone(), tab.provider_session_id.clone());
         let launch = engine.launch.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
+        rt.stdio_launch_permit = collaboration_v2::current();
         rt.engine = Engine::CodexStdio(engine);
         rt.stdio_starting = true;
         rt.stdio_writer = Some(tx);
@@ -431,13 +433,15 @@ impl SessionManager {
         let session = rt.session_id.clone();
         let tab = rt.tab_id.clone();
         let privacy = crate::data_privacy::remote_ticket();
+        let startup_policy = collaboration_v2::current();
         // Reserve the exact launch while admitted; no discovery, version wait,
         // spawn, rollback or reader join runs under admission/runtime locks.
         let spawned = std::thread::Builder::new().name("codex-stdio-owner".into()).spawn(move || {
             let Some(rt_arc) = runtime.upgrade() else { return };
             let result = (|| {
                 let _privacy = privacy.as_ref().map(|ticket| ticket.scope()).transpose()?;
-                manager.prepare_codex_stdio(&rt_arc, &launch, &session, &tab, &cwd)
+                let prepare = || manager.prepare_codex_stdio(&rt_arc, &launch, &session, &tab, &cwd);
+                match &startup_policy { Some(permit) => permit.with(prepare), None => prepare() }
             })();
             {
                 let mut rt = rt_arc.lock().unwrap();
@@ -452,8 +456,8 @@ impl SessionManager {
             drop(rt_arc);
             // Only this worker writes. It may wait for admission, but reader
             // settlement and the Host terminal receipt never wait for it.
-            while let Ok(Delivery { line, sender, privacy }) = rx.recv() {
-                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line, sender, privacy) {
+            while let Ok(Delivery { line, sender, privacy, collaboration }) = rx.recv() {
+                if let Err(error) = match collaboration { Some(permit) => permit.with(|| manager.write_codex_frame(&runtime, &launch, line, sender, privacy)), None => manager.write_codex_frame(&runtime, &launch, line, sender, privacy) } {
                     if let Some(rt_arc) = runtime.upgrade() {
                         let mut rt = rt_arc.lock().unwrap();
                         if same_launch(&rt, &launch) && !rt.stopping {
@@ -526,6 +530,11 @@ impl SessionManager {
         crate::cloud_grants::record_launch(&key, &grant);
         crate::agent_keys::record_launch(&key, "codex", session, tab);
         let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+        #[cfg(test)]
+        tests::before_native_spawn();
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { Self::check_collaboration_permit(permit, &rt_arc.lock().unwrap())?; }
         let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
         let cancelled = {
             let mut rt = rt_arc.lock().unwrap();
@@ -575,10 +584,13 @@ impl SessionManager {
         // Keep the remote barrier through every partial write of this frame.
         let privacy = control.as_ref().or_else(|| sender.as_ref().and_then(|sender| sender.privacy.as_ref().or_else(|| sender.shared.as_ref().map(|permit| &permit.privacy))
             .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy)))).map(|ticket| ticket.enter()).transpose();
+        let collaboration = sender.as_ref().and_then(|sender| sender.collaboration.clone()).or_else(collaboration_v2::current);
+        let mut policy_guard = None;
         let mut answered = None;
         while offset < bytes.len() {
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
             {
+                if policy_guard.is_none() { policy_guard = collaboration.as_ref().map(|permit| permit.collaboration.enter_admission()); }
                 let _admission = crate::issue_pipeline::admission::lock();
                 // Delivery that has begun under a current permit is finished:
                 // a stream takes no half frame back.
@@ -598,6 +610,7 @@ impl SessionManager {
                 self.accepting_work()?;
                 anyhow::ensure!(same_launch(&rt, launch) && !rt.stopping, "Codex launch was cancelled; input will not be replayed");
                 anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
+                let policy = collaboration.as_ref().map(|permit| Self::check_collaboration_permit(permit, &rt)).transpose();
                 let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
                 if !engine.write_is_current(&frame) {
                     anyhow::ensure!(offset == 0, "Codex frame expired after a partial write; delivery is uncertain and will not be replayed");
@@ -611,6 +624,8 @@ impl SessionManager {
                 // the handoff later refuses (for example, a missing rollout).
                 crate::issue_pipeline::admission::check(&rt.session_id, &rt.tab_id)?;
                 let Engine::CodexStdio(engine) = &mut rt.engine else { unreachable!() };
+                if offset > 0 && policy.is_err() { bail!("Codex authority changed during a partial frame; connection must be retired"); }
+                let admitted = admitted.and_then(|mobile| policy.map(|_| mobile));
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {
@@ -651,6 +666,7 @@ impl SessionManager {
                     }
                 }
             }
+            if offset == 0 { drop(policy_guard.take()); }
             #[cfg(test)]
             if offset == 0 { tests::after_empty_write(); }
             if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
@@ -671,7 +687,7 @@ impl SessionManager {
                     // The frame carries its sender, so the writer can check
                     // the sender's permits without holding this runtime.
                     let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
-                    let delivery = Delivery { line, sender, privacy: crate::data_privacy::remote_ticket() };
+                    let delivery = Delivery { line, sender, privacy: crate::data_privacy::remote_ticket(), collaboration: collaboration_v2::current().or_else(|| rt.stdio_launch_permit.clone()) };
                     let refused = match rt.stdio_writer.as_ref() {
                         Some(writer) => match writer.try_send(delivery) {
                             Ok(()) => None,
@@ -685,6 +701,9 @@ impl SessionManager {
                     }
                 }
                 StdioAction::ThreadReady(id) => {
+                    // Startup authority fences only startup. Every prompt and
+                    // decision owns its own permit; later local work stays local.
+                    rt.stdio_launch_permit = None;
                     let Engine::CodexStdio(engine) = &rt.engine else { bail!("Codex owner was replaced") };
                     let identity = compaction::Identity::Stdio { launch: engine.launch.clone(), epoch: rt.child.as_ref().context("Codex child missing")?.epoch };
                     // A resumed thread keeps the identity it was indexed under.
@@ -973,6 +992,7 @@ pub(super) struct Authority {
     /// The user message it was published as; none for a manual compaction.
     seq: Option<u64>,
     privacy: Option<crate::data_privacy::Ticket>,
+    collaboration: Option<CollaborationPermit>,
     mobile: Option<crate::local_runtime::mobile::WritePermit>,
     shared: Option<crate::local_sharing::WritePermit>,
 }

@@ -3539,7 +3539,7 @@ async fn escape_interrupts_a_running_turn_for_whoever_may_stop_it_and_stops_noth
     let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap();
     f.rpc.set_agents(agents.clone());
     // A message someone queued behind the running turn.
-    let queued = crate::cloud_agents::FollowUp { client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new() };
+    let queued = crate::cloud_agents::FollowUp { policy_stamp: None, client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new() };
     agents.follow_ups.push(&tab_id, queued).unwrap();
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager" },

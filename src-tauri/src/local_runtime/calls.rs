@@ -115,7 +115,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
                 // Queued, not written here: a program that is not reading
                 // must hold up neither this request nor the pane's gate (#661).
-                manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
+                manager.typing.send_guarded(manager, terminals, id, &bytes)?;
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
