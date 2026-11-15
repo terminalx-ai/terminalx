@@ -39,6 +39,7 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import { reportError, showError } from "@/lib/errorToasts";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, checkoutLabel, conversationBranch } from "@/lib/checkout";
 import { showDetachedRename } from "@/lib/branchToasts";
@@ -538,7 +539,7 @@ function ProjectGroup({
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const menu = useRowMenu();
   const prefs = usePrefs();
-  const { animations } = prefs;
+  const reduced = useReducedMotion();
   // A branch's sessions are tabs or sidebar rows, never both: as tabs, the branch is one row here whatever their number.
   const asTabs = branchSessionsAsTabs(prefs);
   // Orchestration (PRO-281), behind Settings → Experimental: a lead's workers nest under its row, whatever worktree
@@ -723,7 +724,7 @@ function ProjectGroup({
       </DropdownMenu>
       {/* The branches slide open and closed: a grid row that grows from nothing to its content's height, which a height alone cannot animate. */}
       <div
-        className={cn("grid", animations && "transition-[grid-template-rows,opacity] duration-200 ease-out", open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
+        className={cn("grid", !reduced && "transition-[grid-template-rows,opacity] duration-200 ease-out", open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
         aria-hidden={!open}
         inert={!open}
         data-testid="project-branches"

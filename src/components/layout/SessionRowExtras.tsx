@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Archive } from "@/icons";
+import { Archive, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DiffStats, RowTime } from "./SidebarRows";
@@ -85,8 +85,15 @@ export function useSessionDraft(sessions: readonly SessionEntry[]): string {
   );
 }
 
+/** A row's unsent composer text, led by a pencil named "Draft" (for screen readers and as its tooltip) in the line's own faint colour. */
 export function DraftPreview({ text }: { text: string }) {
-  return text ? <span className="block min-w-0 w-full truncate text-[11px] text-faint" data-testid="row-draft"><span className="text-warning">Draft:</span> {text}</span> : null;
+  if (!text) return null;
+  return (
+    <span className="flex min-w-0 w-full items-center gap-1 text-[11px] text-faint" data-testid="row-draft">
+      <span role="img" aria-label="Draft" title="Draft" className="inline-flex shrink-0"><Pencil aria-hidden className="size-3" /></span>
+      <span className="min-w-0 truncate">{text}</span>
+    </span>
+  );
 }
 
 /**

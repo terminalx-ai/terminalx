@@ -29,6 +29,39 @@ export function connectionProblem(cause: unknown): ConnectionProblem | null {
   return null;
 }
 
+/**
+ * Messages this side raises while making or keeping the connection
+ * (`HostConnection`, `RelayClient`, the E2EE handshake). They are for the
+ * connection log: the screen says the connection state instead (#983).
+ */
+const TRANSPORT_MESSAGES = [
+  /^Host is disconnected$/, /^Relay connection (unavailable|closed)$/, /^Connection attempt cancelled$/,
+  /^Relay endpoint unavailable$/, /^Relay director (returned|response)/, /^no answer \d+ s after Relay failed$/,
+  /^(Direct|Relay) handshake timed out/, /^WebSocket connection failed/, /^RPC timed out/,
+  /^Unexpected (direct connection state|relay credential kind)$/, /^Expected plaintext relay hello$/, /^Invalid relay (hello|JSON|binary frame)$/,
+  /^Relay resume (credential version mismatch|confirmation missing)$/, /^Invalid E2EE ready$/, /^Invalid or out-of-order E2EE frame$/,
+  /^E2EE device authentication rejected$/, /^relay_outer/, /^relay endpoint: /,
+];
+/** An address or a host name: never shown, whatever carried it. */
+const ADDRESS = /\b(wss?|https?):\/\/|\b\d{1,3}(\.\d{1,3}){3}\b|\[[0-9a-f:]+\]|\[redacted-endpoint\]/i;
+
+/** Whether a failure is the connection's own, worded for the log and not for the screen. */
+export function isTransportError(cause: unknown): boolean {
+  if (connectionProblem(cause) !== null) return true;
+  if (!(cause instanceof Error)) return false;
+  return TRANSPORT_MESSAGES.some((pattern) => pattern.test(cause.message)) || ADDRESS.test(cause.message);
+}
+
+/**
+ * What a screen may say about a failure: the Mac's own message as it is, and
+ * `fallback` for the connection's (which the connection state already shows)
+ * or for anything that is not an error.
+ */
+export function screenMessage(cause: unknown, fallback: string): string {
+  if (!(cause instanceof Error) || isTransportError(cause) || !cause.message.trim()) return fallback;
+  return cause.message;
+}
+
 const text: Record<ConnectionProblem, string> = {
   "pairing-invalid": "this phone is no longer paired with your Mac; pair it again from Machines",
   "mac-offline": "your Mac is offline",

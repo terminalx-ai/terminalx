@@ -30,7 +30,7 @@
   "orchestrator.workerMode": "Push, merge and deploy stay blocked by deny rules in every mode.",
   "orchestrator.workersAtOnce": "Across every run. Sessions you start by hand are not counted.",
   "orchestrator.workersPerRun": "The rest wait in a queue and start as workers finish.",
-  "preferences.animations": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
+  "preferences.animations": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
   "preferences.autocorrect": "Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed.",
   "preferences.branchSessions": "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
   "preferences.foldToolCalls": "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",

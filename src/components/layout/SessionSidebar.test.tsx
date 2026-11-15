@@ -962,7 +962,8 @@ describe("row extras and unread reminders (PRO-179)", () => {
     expect(await screen.findByText("+27")).toBeTruthy();
     expect(screen.getByText("−4")).toBeTruthy();
     act(() => setDraft("background-tab", "Finish the\nregression test"));
-    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Finish the regression test");
+    expect(screen.getByTestId("row-draft").textContent).toBe("Finish the regression test");
+    expect(within(screen.getByTestId("row-draft")).getByRole("img", { name: "Draft" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Archive Talk background" })).toBeTruthy();
     act(() => clearDrafts((id) => id === "background-tab"));
     expect(screen.queryByTestId("row-draft")).toBeNull();

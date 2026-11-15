@@ -19,7 +19,7 @@ vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     AppState: { currentState: "active" },
-    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" },
+    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div data-modal>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     // A long press is a right-click here: a different gesture from the press.
@@ -77,7 +77,7 @@ beforeEach(() => {
   const paired = host();
   mocks.app = {
     ready: true, session: { user: { email: "a@b.c" } }, hosts: [paired], availableHosts: [], installationState: "ready", activeHost: paired,
-    connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
+    connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, error: null,
     connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
     renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
     accountHosts: [], accountMachinePrefs: {}, renameAccountMachine: vi.fn(async () => undefined), hideAccountMachine: vi.fn(async () => undefined), pairAvailable: vi.fn(async () => undefined),
@@ -114,6 +114,27 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     expect(menuOpen()).toBe(true);
     // Opening the menu is not connecting.
     expect(mocks.app.connectHost).not.toHaveBeenCalled();
+  });
+
+  it("says the machine in use in the one connection state's words, in the menu and to VoiceOver (#983)", async () => {
+    const states: [object, string][] = [
+      [{ connectionStage: "cant-connect", connectionAttempt: 7 }, "Connecting…"],
+      [{ connectionStage: "unreachable", connectionAttempt: 9 }, "Connecting…"],
+      [{ connectionStage: "unreachable", connectionWaiting: true }, "Waiting for Mac…"],
+      [{ connectionStage: "reconnecting", online: false }, "No internet"],
+      [{ connectionStage: "connected", updating: true }, "Updating…"],
+    ];
+    for (const [facts, words] of states) {
+      mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionWaiting: false, online: true, updating: false, ...facts };
+      await show(screen());
+      await click("Device options for Paresh’s Mac mini");
+      const menu = container.querySelector("[data-modal]")!.textContent!;
+      expect(menu, words).toContain(words);
+      for (const old of ["attempt", "Can’t", "Reconnecting", "retrying"]) expect(menu).not.toContain(old);
+      await click("Cancel");
+      // The machine list's row is labelled for VoiceOver with the same words.
+      if (_where === "the device list") expect(container.querySelector("[data-testid='machine-row-host-aaaa1111'], button[aria-label^='Paresh’s Mac mini, active']")?.getAttribute("aria-label")).toBe(`Paresh’s Mac mini, active, ${words}`);
+    }
   });
 
   it("renames on the phone, bounded, and can go back to the computer's own name", async () => {

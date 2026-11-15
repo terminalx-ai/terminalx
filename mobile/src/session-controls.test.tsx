@@ -4,9 +4,17 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { CONTINUE_PROMPT, RECOVERY_PROMPT } from "@terminalx/portable/recovery";
+import { clearTranscriptCaches } from "./data/transcript-cache";
 import { SessionControls } from "./ui/SessionControls";
 
-const mocks = vi.hoisted(() => ({ app: {} as any, alerts: [] as { title: string; buttons: { text: string; onPress?: () => void }[] }[] }));
+const mocks = vi.hoisted(() => ({ app: {} as any, alerts: [] as { title: string; buttons: { text: string; onPress?: () => void }[] }[], storage: new Map<string, string>() }));
+vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
+  getItem: async (key: string) => mocks.storage.get(key) ?? null,
+  setItem: async (key: string, value: string) => { mocks.storage.set(key, value); },
+  removeItem: async (key: string) => { mocks.storage.delete(key); },
+  getAllKeys: async () => [...mocks.storage.keys()],
+  multiRemove: async (keys: string[]) => { for (const key of keys) mocks.storage.delete(key); },
+} }));
 vi.mock("./state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("./ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("react-native", () => {
@@ -33,8 +41,8 @@ const models = [
   { id: "gpt-5.6", label: "GPT-5.6", harness: "codex", efforts: ["medium"], defaultEffort: "medium", acceptsImages: true, isDefault: true, upgrade: null, description: null },
 ];
 const recovery = (kind: string): AgentEvent => ({ id: "r", sessionId: "s", tabId: "t", harness: "claude", seq: 2, ts: "2026-11-01T00:00:00Z", payload: { type: "recovery", kind } } as AgentEvent);
-const render = async (events: AgentEvent[] = [], asks = 0) => {
-  await act(async () => { root.render(<SessionControls sessionId="s" tabId="t" events={events} asks={asks} connected onOpenTab={openTab} />); });
+const render = async (events: AgentEvent[] = [], asks = 0, connected = true) => {
+  await act(async () => { root.render(<SessionControls sessionId="s" tabId="t" events={events} asks={asks} connected={connected} onOpenTab={openTab} />); });
   await act(async () => { await Promise.resolve(); });
 };
 const button = (label: string) => {
@@ -47,6 +55,7 @@ const click = async (label: string) => { await act(async () => { button(label).c
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.alerts = [];
+  mocks.storage.clear();
   openTab.mockClear();
   mocks.app = {
     refreshSessions: vi.fn(async () => {}),
@@ -191,5 +200,60 @@ describe("the controls handed to a composer", () => {
     mocks.app.api.tabControls.mockResolvedValue({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", requestedPermissionMode: "bypassPermissions", status: "idle" });
     await draw([recovery("none")]);
     expect(seen.at(-1)).toBe(true);
+  });
+});
+
+describe("the controls while the phone is not connected (#983)", () => {
+  const labels = () => ["Opus", "High", "Auto"].map((label) => [...container.querySelectorAll("button")].find((item) => item.textContent === label || item.getAttribute("aria-label") === label));
+
+  it("keeps the model, effort and mode in place, and unusable, until the phone is connected again", async () => {
+    await render();
+    expect(labels().every(Boolean)).toBe(true);
+    expect(labels().some((item) => item!.disabled)).toBe(false);
+    mocks.app.api.tabControls.mockRejectedValue(new Error("Host is disconnected"));
+    await render([], 0, false);
+    expect(labels().every(Boolean)).toBe(true);
+    expect(labels().every((item) => item!.disabled)).toBe(true);
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" });
+    await render([], 0, true);
+    expect(labels().some((item) => item!.disabled)).toBe(false);
+  });
+
+  it("shows them on the next open from what was saved, before the phone has connected", async () => {
+    await render();
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    // Not connected: the Mac answers nothing.
+    for (const method of ["features", "tabControls", "models"] as const) mocks.app.api[method].mockRejectedValue(new Error("Host is disconnected"));
+    await render([], 0, false);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(labels().every(Boolean)).toBe(true);
+    expect(labels().every((item) => item!.disabled)).toBe(true);
+  });
+
+  it("saves nothing for a Mac forgotten while its controls and models were being read", async () => {
+    let answerTab!: (value: unknown) => void;
+    let answerModels!: (value: unknown) => void;
+    mocks.app.api.tabControls.mockImplementation(() => new Promise((done) => { answerTab = done; }));
+    mocks.app.api.models.mockImplementation(() => new Promise((done) => { answerModels = done; }));
+    await render();
+    // Forgotten (or signed out) with both requests under way: the caches are cleared first.
+    await act(async () => { await clearTranscriptCaches("mac"); });
+    await act(async () => {
+      answerTab({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" });
+      answerModels(models);
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+    // Let the write queue drain.
+    await act(async () => { await clearTranscriptCaches("other"); });
+    expect([...mocks.storage.keys()].filter((key) => key.includes("mac"))).toEqual([]);
+  });
+
+  it("does not claim the agent is working from what was saved", async () => {
+    mocks.app.api.tabControls.mockResolvedValue({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "in_progress" });
+    await render();
+    expect(container.textContent).toContain("Interrupt");
+    await render([], 0, false);
+    expect(container.textContent).not.toContain("Interrupt");
   });
 });

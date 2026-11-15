@@ -20,6 +20,7 @@ import { cn } from "@/lib/cn";
 import { isUnread } from "@/lib/dashboard";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { addProject, conversationTitle, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { helperActivity, legacyReviewerSessions, useIssuePipelines } from "@/lib/issuePipeline";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
@@ -222,7 +223,7 @@ function ChatRow({
   const picked = isPicked(ids, pickedNow);
   const statusDescriptionId = useId();
   const status = sessionStatus(session);
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const summary = summaries.get(session.id);
   // A branch goes by the label the reader gave it, as on the project list.
   const branchName = link?.branch ? (link.project?.branchLabels?.[link.branch] ?? link.branch) : null;
@@ -256,7 +257,7 @@ function ChatRow({
             aria-describedby={statusDescriptionId}
             className="flex min-w-0 flex-1 items-center gap-3 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
-            <ChatMark session={session} project={link?.project ?? null} agent={agent} live={status === "in_progress" && animations} />
+            <ChatMark session={session} project={link?.project ?? null} agent={agent} live={status === "in_progress" && !reduced} />
             <span className="flex min-w-0 flex-1 flex-col">
               <span className="flex items-center gap-1.5">
                 <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>

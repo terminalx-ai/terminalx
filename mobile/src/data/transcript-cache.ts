@@ -61,12 +61,45 @@ export function clearTranscriptCaches(host?: string): Promise<void> {
   const operation = writes.catch(() => undefined).then(async () => {
     const keys = await AsyncStorage.getAllKeys();
     await AsyncStorage.multiRemove(keys.filter((k) => {
-      if (k.startsWith(prefix)) {
-        try { return !host || JSON.parse(k.slice(prefix.length))[0] === host; } catch { return true; }
+      for (const scoped of [prefix, savedPrefix]) if (k.startsWith(scoped)) {
+        try { return !host || JSON.parse(k.slice(scoped.length))[0] === host; } catch { return true; }
       }
       return k.startsWith(host ? `terminalx:transcript:${host}:` : "terminalx:transcript:") || k.startsWith(host ? `terminalx:draft:${host}:` : "terminalx:draft:");
     }));
   });
   writes = operation;
   return operation;
+}
+
+/**
+ * What a screen showed last time, kept per Mac so it shows again at once on
+ * the next open, before the phone has connected (#983): the session list,
+ * what the Mac offers, a tab's model and mode. Cleared with the transcripts,
+ * and written in the same order with them, so a forgotten Mac's are not
+ * written back by a save still on its way.
+ */
+const savedPrefix = "terminalx:saved:v1:";
+const savedKey = (host: string, name: string) => savedPrefix + JSON.stringify([host, name]);
+
+export async function readSaved<T>(host: string, name: string, valid: (value: unknown) => value is T): Promise<T | null> {
+  try {
+    const raw = await AsyncStorage.getItem(savedKey(host, name));
+    if (!raw) return null;
+    const value: unknown = JSON.parse(raw);
+    return valid(value) ? value : null;
+  } catch { return null; }
+}
+
+/**
+ * Saves a value for a Mac. `epoch` is `cacheEpoch(host)` taken before the request that read the value,
+ * so a Mac forgotten (or a sign-out) while that request was under way is not written back (#983).
+ */
+export function writeSaved(host: string, name: string, value: unknown, epoch: number): Promise<void> {
+  const data = JSON.stringify(value);
+  const operation = writes.catch(() => undefined).then(async () => {
+    if (epoch !== cacheEpoch(host)) return;
+    await AsyncStorage.setItem(savedKey(host, name), data);
+  });
+  writes = operation;
+  return operation.catch(() => undefined);
 }

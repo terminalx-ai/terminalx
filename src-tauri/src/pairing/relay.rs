@@ -440,6 +440,35 @@ pub(crate) struct ConnectionOpen {
     attach_deadline_ms: u64,
 }
 
+impl ConnectionOpen {
+    fn valid(&self) -> bool {
+        self.kind_name == "conn-open"
+            && valid_opaque_id(&self.conn_id)
+            && valid_base64url_32(&self.conn_ticket)
+            && matches!(self.kind.as_str(), "invite" | "resume")
+            && valid_opaque_id(&self.relay_device_id)
+            && self.attach_deadline_ms != 0
+            && self.attach_deadline_ms <= 60_000
+    }
+
+    /// A phone's relay connection that the runtime's registration passed to
+    /// this window (PRO-341, `crate::machine_wire::Forwarded::Relay`).
+    pub(super) fn forwarded(connection: crate::machine_wire::RelayConnection) -> Result<Self> {
+        let open = Self {
+            kind_name: "conn-open".into(),
+            conn_id: connection.conn_id,
+            conn_ticket: connection.conn_ticket,
+            kind: connection.kind,
+            relay_device_id: connection.relay_device_id,
+            attach_deadline_ms: connection.attach_deadline_ms,
+        };
+        if !open.valid() {
+            bail!("invalid relay connection request");
+        }
+        Ok(open)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InviteCreated {
@@ -926,7 +955,7 @@ async fn control_loop(
                     }
                     Some("conn-open") => {
                         let connection: ConnectionOpen = serde_json::from_value(value)?;
-                        if connection.kind_name != "conn-open" || !valid_opaque_id(&connection.conn_id) || !valid_base64url_32(&connection.conn_ticket) || !matches!(connection.kind.as_str(), "invite" | "resume") || !valid_opaque_id(&connection.relay_device_id) || connection.attach_deadline_ms == 0 || connection.attach_deadline_ms > 60_000 {
+                        if !connection.valid() {
                             bail!("invalid relay connection request");
                         }
                         // A phone that cannot connect must leave a trace on the Mac (#666).
