@@ -193,6 +193,15 @@ describe("mobile transcript presentation (#388)", () => {
   });
 });
 
+// #987: the session says which machine it is on, by the name it has on this phone.
+it("names the machine in the session subtitle with the name saved on this phone", async () => {
+  const host = { id: mocks.params.hostId, label: "This Mac", hostName: "Office iMac", customName: "Desk", publicKeyB64: "k", endpoint: "localhost", lastConnectedAt: 1, provenance: { kind: "explicit" } };
+  mocks.app = { ...mocks.app, hosts: [host], activeHost: host };
+  await render();
+  expect(container.textContent).toContain("TerminalX · Desk");
+  expect(container.textContent).not.toContain("Office iMac");
+});
+
 describe("mobile transcript ordering (#384)", () => {
   const at = (seq: number, ts: string, payload: AgentEvent["payload"]): AgentEvent => ({ ...event("claude", "", seq), ts, payload });
   // The native list is inverted; its data starts at the newest message.

@@ -4,8 +4,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
 import SessionsScreen from "../app/(tabs)/sessions";
+import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "./pairing/contracts";
 
-// PRO-87: the device menu (Rename, Reconnect, Remove) on the device list and on the sessions screen.
+// PRO-87, #987: the device menu on the machine list and on the sessions screen: every machine has one, online or offline.
 const mocks = vi.hoisted(() => ({ app: {} as any, navigate: vi.fn(), dismissTo: vi.fn() }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
@@ -40,9 +41,10 @@ vi.mock("react-native", () => {
     SectionList: ({ ListHeaderComponent }: any) => <div>{ListHeaderComponent}</div>,
   };
 });
+vi.mock("@mobile/ui/glass", () => ({ GlassIconButton: ({ label, onPress }: any) => <button aria-label={label} onClick={onPress} /> }));
 vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
-  Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children }: any) => <div>{children}</div>,
+  Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children, titleActions }: any) => <div>{titleActions}{children}</div>,
   SectionTitle: ({ children }: any) => <div>{children}</div>, EmptyState: () => null, StatusDot: () => null,
 }));
 
@@ -57,12 +59,12 @@ const click = (label: string) => act(async () => {
   button(label)!.click();
 });
 const longPress = (text: string) => act(async () => {
-  const target = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text) && !b.getAttribute("aria-label"));
+  const target = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text) && !b.getAttribute("aria-label")?.startsWith("Device options"));
   expect(target, text).toBeDefined();
   target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
 });
 const type = (value: string) => act(async () => {
-  const input = container.querySelector("input[aria-label='Name for this computer']") as HTMLInputElement;
+  const input = container.querySelector("input[aria-label='Name for this machine']") as HTMLInputElement;
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
 });
@@ -78,6 +80,7 @@ beforeEach(() => {
     connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
     connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
     renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
+    accountHosts: [], accountMachinePrefs: {}, renameAccountMachine: vi.fn(async () => undefined), hideAccountMachine: vi.fn(async () => undefined), pairAvailable: vi.fn(async () => undefined),
     api: { features: async () => ({}), onFeaturesChanged: () => () => {} },
   };
   container = document.createElement("div");
@@ -86,17 +89,25 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
+/** A machine's record on the account, with a real key and the id it gives. */
+const account = (seed: number, fields: object = {}) => {
+  const hostPublicKeyB64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(seed)));
+  return { hostId: hostIdForPublicKey(hostPublicKeyB64)!, hostPublicKeyB64, bindingGeneration: 1, displayName: `Machine ${seed}`, platform: "darwin", capabilities: [ACCOUNT_PAIRING_CAPABILITY], state: "active", reachability: "live", lastSeenAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), ...fields };
+};
+const menuItems = () => [...container.querySelectorAll("[data-modal] button")].map((b) => b.getAttribute("aria-label") ?? b.textContent).filter((label) => label !== "Close" && label !== "Cancel");
+const itemDisabled = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("[data-modal] button")].find((b) => b.getAttribute("aria-label") === label)!.disabled;
+
 const screens: [string, () => ReactNode][] = [["the device list", () => <MachinesScreen />], ["the sessions screen", () => <SessionsScreen />]];
 
 describe.each(screens)("the device menu on %s", (_where, screen) => {
-  it("shows the computer's real name, and opens from the three-dot button and from a long press", async () => {
+  it("shows the computer's real name, and opens from the options button and from a long press", async () => {
     await show(screen());
     expect(container.textContent).toContain("Paresh’s Mac mini");
     expect(container.textContent).not.toContain("Paired Mac");
     // The button is labelled for assistive technology with the name it acts on.
     await click("Device options for Paresh’s Mac mini");
     expect(menuOpen()).toBe(true);
-    for (const action of ["Rename", "Reconnect", "Remove"]) expect(button(action), action).toBeDefined();
+    for (const action of ["Rename", "Reconnect", "Forget this machine"]) expect(button(action), action).toBeDefined();
     await click("Cancel");
     expect(menuOpen()).toBe(false);
     await longPress("Paresh’s Mac mini");
@@ -109,9 +120,10 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     await show(screen());
     await click("Device options for Paresh’s Mac mini");
     await click("Rename");
-    const input = container.querySelector("input[aria-label='Name for this computer']") as HTMLInputElement;
+    const input = container.querySelector("input[aria-label='Name for this machine']") as HTMLInputElement;
     expect(input.value).toBe("Paresh’s Mac mini");
     expect(input.maxLength).toBe(64);
+    expect(container.textContent).toContain("The name is saved on this phone. It works while the machine is offline.");
     await type("   ");
     expect(button("Save")!.disabled).toBe(true);
     await type("Studio");
@@ -125,9 +137,9 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     await show(screen());
     expect(container.textContent).toContain("Studio");
     await click("Device options for Studio");
-    expect(container.textContent).toContain("The computer calls itself Paresh’s Mac mini.");
     await click("Rename");
-    await click("Use the computer's name (Paresh’s Mac mini)");
+    expect((container.querySelector("input[aria-label='Name for this machine']") as HTMLInputElement).value).toBe("Studio");
+    await click("Use its own name (Paresh’s Mac mini)");
     expect(mocks.app.renameHost).toHaveBeenLastCalledWith("host-aaaa1111", "");
   });
 
@@ -139,27 +151,157 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     expect(menuOpen()).toBe(false);
   });
 
-  it("removes only after a confirmation that says what happens on both sides", async () => {
+  it("forgets only after a confirmation that says what it does and does not change; Cancel changes nothing", async () => {
     await show(screen());
     await click("Device options for Paresh’s Mac mini");
-    await click("Remove");
+    await click("Forget this machine");
     expect(mocks.app.forgetHost).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("the computer is asked to remove this phone from its paired devices");
+    expect(container.textContent).toContain("Forget Paresh’s Mac mini?");
+    expect(container.textContent).toContain("This phone will no longer connect to it. Sessions on that machine are not changed. To use it again, pair it again.");
+    // Connected now: it is asked to drop this phone too.
+    expect(container.textContent).toContain("It is also asked to remove this phone from its paired devices.");
     await click("Cancel");
+    expect(menuOpen()).toBe(false);
     expect(mocks.app.forgetHost).not.toHaveBeenCalled();
+    expect(mocks.app.renameHost).not.toHaveBeenCalled();
     await click("Device options for Paresh’s Mac mini");
-    await click("Remove");
-    await click("Remove Paresh’s Mac mini");
+    await click("Forget this machine");
+    await click("Forget");
     expect(mocks.app.forgetHost).toHaveBeenCalledWith("host-aaaa1111");
   });
 });
 
-it("returns to the device list after removing from the sessions screen", async () => {
+it("returns to the device list after forgetting from the sessions screen", async () => {
   await show(<SessionsScreen />);
   await click("Device options for Paresh’s Mac mini");
-  await click("Remove");
-  await click("Remove Paresh’s Mac mini");
+  await click("Forget this machine");
+  await click("Forget");
   expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
+});
+
+describe("one list of machines (#987)", () => {
+  const signedIn = (paired: object[], accountHosts: object[], fields: object = {}) => {
+    mocks.app = { ...mocks.app, hosts: paired, activeHost: paired[0] ?? null, accountHosts, ...fields };
+  };
+
+  it("lists every machine once: paired first with one state line, the active one marked, then those available to pair", async () => {
+    const online = account(1, { displayName: "Mac mini" });
+    const offline = account(2, { displayName: "Office iMac", reachability: "unverifiable" });
+    const unpaired = account(3, { displayName: "Build server", platform: "linux" });
+    signedIn([
+      host({ id: "host-active", hostName: "Studio MacBook", publicKeyB64: "studio" }),
+      host({ id: online.hostId, hostName: "Mac mini", publicKeyB64: online.hostPublicKeyB64, lastConnectedAt: 5 }),
+      host({ id: offline.hostId, hostName: "Office iMac", publicKeyB64: offline.hostPublicKeyB64, lastConnectedAt: 9 }),
+    ], [online, offline, unpaired]);
+    await show(<MachinesScreen />);
+    const text = container.textContent!;
+    expect(text).toContain("Studio MacBookActiveConnected");
+    expect(text).toContain("Mac miniOnline · tap to switch");
+    expect(text).toContain("Office iMacOffline · last seen 2 days ago");
+    expect(text).toContain("Available to pairBuild serverSigned in to your account");
+    // Each machine once: a paired account machine is not also offered for pairing.
+    expect(text.match(/Mac mini/g)).toHaveLength(1);
+    expect(text.indexOf("Studio MacBook")).toBeLessThan(text.indexOf("Mac mini"));
+    expect(text.indexOf("Mac mini")).toBeLessThan(text.indexOf("Office iMac"));
+    expect(text).toContain("The phone talks to one machine at a time. Tap another one to switch.");
+    expect(text).not.toContain("Paired machines");
+    expect(text).not.toContain("Your machines");
+    // Every row has a menu; none is greyed out without one.
+    for (const name of ["Studio MacBook", "Mac mini", "Office iMac", "Build server"]) expect(button(`Device options for ${name}`), name).toBeDefined();
+  });
+
+  it("has one control to add a machine", async () => {
+    signedIn([host()], [account(3, { displayName: "Build server" })]);
+    await show(<MachinesScreen />);
+    const adds = [...container.querySelectorAll("button")].filter((b) => /pair|qr|add/i.test(`${b.textContent} ${b.getAttribute("aria-label") ?? ""}`) && !/^(Pair Build server|Pair|Device options.*)$/.test(b.getAttribute("aria-label") ?? b.textContent ?? ""));
+    expect(adds.map((b) => b.getAttribute("aria-label") ?? b.textContent)).toEqual(["Add a machine"]);
+    expect(container.textContent).not.toContain("Use QR code");
+  });
+
+  it.each([
+    ["paired, online", "online", ["Rename", "Connect", "Pair again", "Forget this machine"], []],
+    ["paired, offline", "offline", ["Rename", "Connect", "Pair again", "Forget this machine"], ["Connect"]],
+    ["available, online", "available-online", ["Rename", "Pair", "Hide on this phone"], []],
+    ["available, offline", "available-offline", ["Rename", "Pair", "Hide on this phone"], ["Pair"]],
+  ])("gives a %s machine its menu", async (_case, kind, items, disabled) => {
+    const record = account(4, { displayName: "Office iMac", reachability: kind.endsWith("online") ? "live" : "exited" });
+    const paired = kind === "online" || kind === "offline";
+    signedIn(paired ? [host(), host({ id: record.hostId, hostName: "Office iMac", publicKeyB64: record.hostPublicKeyB64 })] : [host()], [record]);
+    await show(<MachinesScreen />);
+    await click("Device options for Office iMac");
+    expect(menuItems()).toEqual(items);
+    for (const item of items) expect(itemDisabled(item), item).toBe(disabled.includes(item));
+    if (disabled.length) expect(container.textContent).toContain("Open TerminalX on that machine first");
+  });
+
+  it("renames, connects and forgets an offline paired machine; its row opens the menu rather than failing to connect", async () => {
+    const record = account(5, { displayName: "Office iMac", reachability: "exited" });
+    signedIn([host(), host({ id: record.hostId, hostName: "Office iMac", publicKeyB64: record.hostPublicKeyB64 })], [record]);
+    await show(<MachinesScreen />);
+    const row = container.querySelector(`[data-testid='machine-row-${record.hostId}']`) ?? [...container.querySelectorAll("button")].find((b) => b.dataset.actions === "options" && b.textContent?.includes("Office iMac"))!;
+    await act(async () => (row as HTMLButtonElement).click());
+    expect(mocks.app.connectHost).not.toHaveBeenCalled();
+    expect(menuOpen()).toBe(true);
+    await click("Rename");
+    await type("Old desk");
+    await click("Save");
+    expect(mocks.app.renameHost).toHaveBeenCalledWith(record.hostId, "Old desk");
+    await click("Device options for Office iMac");
+    await click("Forget this machine");
+    // Not connected to it: nothing is asked of it.
+    expect(container.textContent).not.toContain("It is also asked");
+    await click("Forget");
+    expect(mocks.app.forgetHost).toHaveBeenCalledWith(record.hostId);
+  });
+
+  it("renames and hides a machine that is only on the account, on this phone", async () => {
+    const record = account(6, { displayName: "Build server", reachability: "exited" });
+    signedIn([host()], [record]);
+    await show(<MachinesScreen />);
+    await click("Device options for Build server");
+    await click("Rename");
+    await type("CI box");
+    await click("Save");
+    expect(mocks.app.renameAccountMachine).toHaveBeenCalledWith(record.hostId, "CI box");
+    await click("Device options for Build server");
+    await click("Hide on this phone");
+    expect(mocks.app.hideAccountMachine).toHaveBeenCalledWith(record.hostId, true);
+
+    // Hidden: off the list, behind a link, and can be shown again.
+    mocks.app = { ...mocks.app, accountMachinePrefs: { [record.hostId]: { customName: "CI box", hidden: true } } };
+    await show(<MachinesScreen />);
+    expect(container.textContent).not.toContain("CI box");
+    await click("Show 1 hidden machine");
+    await click("Device options for CI box");
+    await click("Show on this phone");
+    expect(mocks.app.hideAccountMachine).toHaveBeenLastCalledWith(record.hostId, false);
+  });
+
+  it("pairs from the row's Pair button", async () => {
+    const record = account(7, { displayName: "Build server" });
+    signedIn([host()], [record]);
+    await show(<MachinesScreen />);
+    await click("Pair Build server");
+    expect(mocks.app.pairAvailable).toHaveBeenCalledWith(record);
+  });
+
+  it("names a machine that calls itself “This Mac” by what it is", async () => {
+    signedIn([host()], [account(8, { displayName: "This Mac", platform: "darwin" }), account(9, { displayName: "This Mac", platform: "linux" })]);
+    await show(<MachinesScreen />);
+    expect(container.textContent).not.toContain("This Mac");
+    expect(button("Device options for Mac")).toBeDefined();
+    expect(button("Device options for Linux machine")).toBeDefined();
+  });
+
+  it("shows a name typed on this phone in the list and the sessions header", async () => {
+    const renamed = host({ customName: "Desk" });
+    signedIn([renamed], []);
+    await show(<MachinesScreen />);
+    expect(button("Device options for Desk")).toBeDefined();
+    await show(<SessionsScreen />);
+    expect(button("Device options for Desk")).toBeDefined();
+    expect(container.textContent).not.toContain("Paresh’s Mac mini");
+  });
 });
 
 it.each([false, true])("selects Sessions when a Mac is tapped (signed in: %s)", async (signedIn) => {
@@ -183,7 +325,7 @@ it("keeps the fallback for a desktop that never sent its name, and tells two sam
   expect(button("Device options for Paresh’s Mac mini · 2222")).toBeDefined();
 });
 
-// Review of #310: nested in the row, the three-dot button was hidden from VoiceOver on the device list.
+// Review of #310: nested in the row, the options button was hidden from VoiceOver on the device list.
 it("keeps the options button out of the row that connects, and gives the row an options action too", async () => {
   await show(<MachinesScreen />);
   const options = button("Device options for Paresh’s Mac mini")!;

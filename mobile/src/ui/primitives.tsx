@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, type PressableProps, type ScrollViewProps, type ViewProps } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LargeTitle } from "./glass";
@@ -5,12 +6,13 @@ import { useTabBarInset } from "./tab-bar-inset";
 import { useTheme } from "./theme";
 
 /** A scrolling page; `title` is a tab's own large title, as tabs draw no header. */
-export function Screen({ children, contentContainerStyle, title, ...props }: ScrollViewProps & { title?: string }) {
+/** A tab's page. `titleActions` sit at the end of the large title (#987: Machines' one + to add a machine). */
+export function Screen({ children, contentContainerStyle, title, titleActions, ...props }: ScrollViewProps & { title?: string; titleActions?: ReactNode }) {
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
   // In a tab, the bar floats over the foot of the page: the last of it scrolls clear.
   const bar = useTabBarInset();
-  return <ScrollView automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.screen, { paddingBottom: (bar || insets.bottom) + 24 }, contentContainerStyle]} {...props}>{title ? <LargeTitle title={title} /> : null}{children}</ScrollView>;
+  return <ScrollView automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.screen, { paddingBottom: (bar || insets.bottom) + 24 }, contentContainerStyle]} {...props}>{title ? <LargeTitle title={title}>{titleActions}</LargeTitle> : null}{children}</ScrollView>;
 }
 
 export function Card({ style, ...props }: ViewProps) {
