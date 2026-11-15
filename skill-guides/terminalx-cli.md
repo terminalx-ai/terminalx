@@ -82,7 +82,7 @@ User-facing webview choices are under `preferences`, for example:
     "mode": "system"
   },
   "agents": { "idleStopMinutes": 60 },
-  "experimental": { "nativeCodex": false, "sessionCost": false, "orchestratorRuns": false },
+  "experimental": { "nativeCodex": false, "sessionCost": false, "orchestratorRuns": false, "localVmTasks": false },
   "orchestrator": {
     "requireApproval": true,
     "pieceLimit": 8,
