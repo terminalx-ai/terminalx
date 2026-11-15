@@ -2,7 +2,7 @@ import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
 import type { ComputerContext, ComputerInventory, ComputerSelection, ComputerTarget } from "@/types/computer";
 import type { LocalVmStatus } from "@/lib/api";
-import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskEvent, LocalVmTaskTarget } from "@/types/localVm";
 
 export interface LinuxInstallRecord {
   activation?: { id: string; status: "outcomeUnknown" | "owned" | "stopped"; ready: false; detail?: string };
@@ -58,6 +58,7 @@ interface Requests {
   "task.submit": { params: LocalVmSubmission; result: LocalVmTask };
   "task.cancel": { params: { target: LocalVmTaskTarget }; result: LocalVmJson };
   "task.abandon": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmJson };
+  "task.history": { params: { target: LocalVmTaskTarget }; result: { target: LocalVmTaskTarget; events: LocalVmTaskEvent[] } };
   "task.followup": { params: { target: LocalVmTaskTarget; text: string; idempotencyKey: string }; result: LocalVmJson };
   "task.recover": { params: LocalVmRecoveryRequest; result: LocalVmJson };
   "task.takeover": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmTakeoverResult };
@@ -102,10 +103,13 @@ export function localVmRequest<M extends keyof Requests>(method: M, params: Requ
 export const LOCAL_VM_STATUS = {
   queued: "Queued for guest", starting: "Starting", running: "Running", waiting: "Needs attention",
   canceling: "Stopping", completed: "Completed", failed: "Failed", canceled: "Canceled", outcomeUnknown: "Outcome unknown",
+  abandoned: "Abandoned · outcome unknown",
 } satisfies Record<LocalVmTask["status"], string>;
 
 export function taskFinished(status: LocalVmTask["status"]): boolean {
-  return status === "completed" || status === "failed" || status === "canceled";
+  // An abandoned task's outcome is unknown, but the host no longer waits for
+  // it; if its guest comes back, the task shows the guest's status again.
+  return status === "completed" || status === "failed" || status === "canceled" || status === "abandoned";
 }
 
 /** The parent-message identity is the durable task card in one conversation. */

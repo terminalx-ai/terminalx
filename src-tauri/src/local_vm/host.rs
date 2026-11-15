@@ -317,6 +317,14 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             Ok(result)
         }
         "task.abandon" => abandon(&journal, &params),
+        "task.history" => {
+            // A finished task's events live in its history file, not in the
+            // polled state (#978); the task card reads them when opened.
+            let target: TaskTarget =
+                serde_json::from_value(params.get("target").cloned().context("target required")?)?;
+            let task = journal::bound(&mut journal.read()?, &target)?.clone();
+            Ok(json!({"target":task.target,"events":journal::retained_events(&root()?, &task)?}))
+        }
         "task.artifact" => artifact(&journal, &params),
         "task.applyPatch" => apply_patch(&journal, &params),
         _ => bail!("Unknown local VM method"),
@@ -326,9 +334,10 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
 /// Ends a task whose guest can no longer answer (review 2): a VM that is gone
 /// or will not boot otherwise held Stop all and Delete VM refused for good.
 /// Only on the person's confirmation, only while the guest cannot be reached
-/// (one that answers is cancelled as usual), and the task ends failed with its
-/// outcome unknown: nothing is replayed and the guest keeps its own record,
-/// whose lease still keeps a later task from starting beside a live worker.
+/// (one that answers is cancelled as usual). The task ends Abandoned, its
+/// outcome unknown: nothing is replayed, the guest keeps its own record, whose
+/// lease still keeps a later task from starting beside a live worker, and the
+/// supervisor reads that record again if the guest comes back (#978).
 fn abandon(journal: &Journal, params: &Value) -> Result<Value> {
     confirm(params)?;
     let target: TaskTarget = serde_json::from_value(params.get("target").cloned().context("target required")?)?;
@@ -347,8 +356,17 @@ fn abandon_using(journal: &Journal, target: &TaskTarget, reached: Result<Value>)
     let task = journal.transaction(|state| {
         let task = journal::bound(state, target)?;
         if !task.status.terminal() {
-            task.status = journal::TaskStatus::Failed;
-            task.detail = Some(format!("Abandoned: the guest could not be reached ({error}). Whatever its worker was doing has an unknown outcome; nothing was replayed, and the guest keeps its own record."));
+            if task.dispatch_started {
+                // Not Failed (#978): an unreachable guest may be a stopped or
+                // suspended VM whose worker resumes when it starts again. The
+                // supervisor keeps polling, and the guest's record replaces this.
+                task.status = journal::TaskStatus::Abandoned;
+                task.detail = Some(format!("Abandoned: the guest could not be reached ({error}). The outcome is unknown: nothing was replayed, the guest keeps its own record, and if the VM comes back this task shows what its worker did."));
+            } else {
+                // No start request was ever sent, so nothing ran in the guest.
+                task.status = journal::TaskStatus::Canceled;
+                task.detail = Some(format!("Abandoned before it was sent to the guest ({error}). Nothing ran."));
+            }
             task.updated_at = journal::now();
         }
         Ok(task.clone())
@@ -1397,7 +1415,8 @@ pub(super) fn validate_quiescent_history(
         {
             bail!("Guest history is incomplete or rolled back");
         }
-        for event in &host.events {
+        let retained = if host.archived_events > 0 { journal::retained_events(&root()?, host)? } else { host.events.clone() };
+        for event in &retained {
             if events
                 .get(event.seq.saturating_sub(1) as usize)
                 .and_then(|e| e["digest"].as_str())
@@ -1427,6 +1446,7 @@ pub(super) fn validate_quiescent_history(
                     && t.provider_conversation_id.is_none()
                     && t.last_event_seq == 0
                     && t.events.is_empty()
+                    && t.archived_events == 0
             })
         {
             bail!("A guest tombstone cannot replace a dispatched task record or erase retained worker/history evidence");
@@ -1647,11 +1667,24 @@ mod tests {
         journal.transaction(|s| { let t = journal::bound(s, &task.target)?; t.status = journal::TaskStatus::OutcomeUnknown; t.dispatch_started = true; Ok(()) }).unwrap();
         assert!(abandon_using(&journal, &task.target, Ok(json!({}))).is_err(), "a guest that answers is cancelled instead");
         assert_eq!(journal.read().unwrap().tasks[&task.target.task_id].status, journal::TaskStatus::OutcomeUnknown);
-        let ended: Task = serde_json::from_value(abandon_using(&journal, &task.target, Err(anyhow::anyhow!("VM is gone"))).unwrap()).unwrap();
-        assert_eq!(ended.status, journal::TaskStatus::Failed);
-        assert!(ended.detail.unwrap().contains("unknown outcome"));
+        let ended: Task = serde_json::from_value(abandon_using(&journal, &task.target, Err(anyhow::anyhow!("VM is stopped"))).unwrap()).unwrap();
+        // #978: not Failed. A stopped VM's worker may resume, so the outcome
+        // stays unknown and the supervisor keeps reading the guest's record.
+        assert_eq!(ended.status, journal::TaskStatus::Abandoned);
+        assert!(ended.detail.as_deref().unwrap().contains("outcome is unknown"));
+        assert!(ended.polled(), "the supervisor resumes polling when the VM comes back");
         assert!(!super::super::supervisor::state_busy(&journal.read().unwrap()), "Stop all and Delete VM are no longer held");
         assert!(abandon(&journal, &json!({"target":task.target})).is_err(), "only on confirmation");
+        // A task never sent to its guest ran nothing: it ends canceled and is never dispatched later.
+        let mut queued = task.input.clone();
+        queued.prompt = "never sent".into();
+        let unsent = journal.submit("unsent", queued).unwrap();
+        journal.transaction(|s| { journal::bound(s, &unsent.target)?.status = journal::TaskStatus::Starting; Ok(()) }).unwrap();
+        let ended: Task = serde_json::from_value(abandon_using(&journal, &unsent.target, Err(anyhow::anyhow!("VM is gone"))).unwrap()).unwrap();
+        assert_eq!(ended.status, journal::TaskStatus::Canceled);
+        assert!(!ended.polled());
+        let reopened = Journal::open_existing(temp.path()).unwrap();
+        assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id].status, journal::TaskStatus::Abandoned);
     }
     /// Review 2: a stock Cua VM's shared account has a published password, so
     /// it is neither enrolled nor signed in to a provider, before any Cua call.

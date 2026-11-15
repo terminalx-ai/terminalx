@@ -22,6 +22,13 @@ class ActivationFixtures(unittest.TestCase):
         install = {"action": "install", "requestDigest": "b" * 64,
                    "inputDigest": digest(canonical(self.intent)), "intent": self.intent}
         transact(self.home, self.observed, install, bytes(binary))
+        global SEALED_ROOT, SEALED, SEALED_OWNER
+        sealed = tempfile.TemporaryDirectory()
+        self.addCleanup(sealed.cleanup)
+        SEALED_ROOT = pathlib.Path(sealed.name)
+        SEALED = SEALED_ROOT / "opt/terminalx-local/bin/terminalx-serve"
+        SEALED_OWNER = os.geteuid()
+        seal(bytes(binary), self.intent["runtimeSha256"])
         install["action"] = "receipt"
         self.header = {"action": "start", "activationId": str(uuid.uuid4()), "installation": install}
         self.spawns = 0
@@ -40,7 +47,7 @@ class ActivationFixtures(unittest.TestCase):
 
     def spawn(self, argv, **kwargs):
         self.spawns += 1
-        self.assertEqual(argv, [str(self.home / ".terminalx-local/bin/terminalx-serve"), "--data-dir",
+        self.assertEqual(argv, [str(SEALED), "--data-dir",
                                str(self.home / ".terminalx-local/runtime"), "--runtime-kind", "local"])
         self.assertEqual(set(kwargs["env"]), {"HOME", "USER", "LOGNAME", "PATH", "LANG",
                                              "TERMINALX_LINUX_ACTIVATION", "TERMINALX_LINUX_INSTANCE"})
@@ -113,6 +120,28 @@ class ActivationFixtures(unittest.TestCase):
         with self.assertRaises(ValueError):
             activation_supervise(self.home, self.observed, self.header,
                                  lambda *a, **k: self.fail("existing owner replaced"))
+
+    def test_owner_starts_only_from_the_unchanged_sealed_runtime(self):
+        # The account's own copy is not what runs: changing it alone is inert.
+        os.chmod(SEALED, 0o755)
+        with self.assertRaises(ValueError):
+            activation_supervise(self.home, self.observed, self.header,
+                                 lambda *a, **k: self.fail("writable runtime launched"))
+        os.chmod(SEALED, 0o555)
+        os.chmod(SEALED.parent, 0o775)
+        with self.assertRaises(ValueError):
+            activation_supervise(self.home, self.observed, self.header,
+                                 lambda *a, **k: self.fail("runtime in a writable directory launched"))
+        os.chmod(SEALED.parent, 0o755)
+        os.chmod(SEALED, 0o755)
+        SEALED.write_bytes(b"\x7fELF replacement")
+        os.chmod(SEALED, 0o555)
+        with self.assertRaises(ValueError):
+            activation_supervise(self.home, self.observed, self.header,
+                                 lambda *a, **k: self.fail("replaced runtime launched"))
+        # Each refusal came before any retained state, so nothing is fenced.
+        self.assertFalse((self.home / ".terminalx-local/runtime/activation.json").exists())
+        self.assertFalse((self.home / ".terminalx-local/runtime/activation-owner.lock").exists())
 
     def test_uncertain_spawn_and_changed_binding_never_replay(self):
         def failed(*a, **k):
