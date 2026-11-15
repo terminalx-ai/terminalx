@@ -68,6 +68,7 @@ import {
   refreshCloudFeed,
   refreshCloudWorkspaces,
   relistCloudCatalog,
+  resyncCloudInboxCatalog,
   rememberCreatedWorkspace,
   resetCloudCatalog,
   serializeCatalog,
@@ -1790,4 +1791,65 @@ it("filters a previously saved private row using the durable account denial befo
   expect(getCloudCatalog().loaded).toBe(true);
   expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
   setCloudAgentsAccess(scope, true); setCloudAgentAccount(null); resetCloudAgents();
+});
+
+describe("retained inbox catalog resync", () => {
+  function account() {
+    signIn();
+    mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:1", account: "a" } };
+  }
+  it("discards a pre-resync list and fetches current authorized markers beyond a coalesced hint", async () => {
+    account();
+    const { configureCloudReadMarkers, reconcileCloudReadMarker, cloudActivityRead } = await import("./cloudReadMarkers");
+    configureCloudReadMarkers("a", null);
+    reconcileCloudReadMarker(ORG, "w", { sessionId: "s", readAt: "2026-11-14T10:00:00Z" });
+    let finish!: (list: CloudWorkspaceList) => void;
+    mocks.api.cloudWorkspaces.mockReturnValueOnce(new Promise((done) => { finish = done; })).mockResolvedValue({ workspaces: [{ ...item("w", { name: "current" }), readMarkers: [{ sessionId: "s", readAt: "2026-11-14T12:00:00Z" }] }] });
+    const old = refreshCloudCatalog(ORG);
+    const current = resyncCloudInboxCatalog();
+    finish({ workspaces: [item("old-private")] });
+    await old; await current;
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    expect(getCloudCatalog().orgs[ORG].workspaces.map((row) => row.workspace.id)).toEqual(["w"]);
+    expect(cloudActivityRead(ORG, "w", "s", "2026-11-14T12:00:00Z")).toBe(true);
+    configureCloudReadMarkers(null, null);
+  });
+  it("lists every authorized live organization using full lists rather than a retained feed cursor", async () => {
+    signIn([
+      { id: ORG, name: "A", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } },
+      { id: "other", name: "B", role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } },
+      { id: "disabled", name: "C", role: "member", isPersonal: false, cloud: { enabled: false, flags: {} } },
+    ]);
+    mocks.account.status = { ...mocks.account.status, multiOrg: true, context: { scope: "s", revision: "s:1", account: "a" } };
+    await resyncCloudInboxCatalog();
+    expect(mocks.api.cloudWorkspaces.mock.calls).toEqual([[ORG], ["other"]]);
+    expect(mocks.api.cloudCatalogFeed).not.toHaveBeenCalled();
+  });
+  it("fences a queued resync across A -> B -> A instead of issuing a fresh old-context request", async () => {
+    account();
+    let finish!: (list: CloudWorkspaceList) => void;
+    mocks.api.cloudWorkspaces.mockReturnValueOnce(new Promise((done) => { finish = done; }));
+    const old = refreshCloudCatalog(ORG);
+    const current = resyncCloudInboxCatalog();
+    for (const [owner, revision] of [["b", "s:2"], ["a", "s:3"]]) {
+      mocks.account.status = { ...mocks.account.status, context: { scope: "s", account: owner, revision } };
+    }
+    finish({ workspaces: [item("old-private")] });
+    await old; await current;
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    expect(getCloudCatalog().orgs[ORG]?.workspaces ?? []).toEqual([]);
+  });
+  it("does not start a queued resync after privacy is enabled", async () => {
+    account();
+    let finish!: (list: CloudWorkspaceList) => void;
+    mocks.api.cloudWorkspaces.mockReturnValueOnce(new Promise((done) => { finish = done; }));
+    const old = refreshCloudCatalog(ORG);
+    const current = resyncCloudInboxCatalog();
+    mocks.privacyNative.mockResolvedValue({ enabled: true, managed: false });
+    await setDataPrivacy(true);
+    finish({ workspaces: [] }); await old; await current;
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    mocks.privacyNative.mockResolvedValue({ enabled: false, managed: false });
+    await setDataPrivacy(false);
+  });
 });

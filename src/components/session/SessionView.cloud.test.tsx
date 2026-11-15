@@ -358,6 +358,10 @@ let enqueued: { kind: string; tabId: string; payload: Record<string, unknown> }[
 
 function cloudHandlers() {
   guard.handlers = {
+    organization_members_in: ({ orgId }) => {
+      expect(orgId).toBe(ORG);
+      return guard.handlers.organization_members?.({}) ?? { members: [], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "" };
+    },
     phase2_desktop_contracts_available: () => false,
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
@@ -432,6 +436,7 @@ afterEach(() => {
   resetPanelTabs();
   resetPurged();
   client.close();
+  vi.useRealTimers();
 });
 
 const composer = () => screen.getByTestId("composer");
@@ -475,6 +480,7 @@ describe("the same SessionView for local and cloud sessions", () => {
   });
 
   it("renders a local session and a cloud session with one component", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     guard.handlers.session_share_status = () => ({ active: false, links: [], people: [], leases: [], notes: [], activity: [], queue: [] });
     guard.strict = false;
     guard.local = () => [];
@@ -515,6 +521,8 @@ describe("the same SessionView for local and cloud sessions", () => {
     expect(screen.getByText("acme/api")).toBeTruthy();
     // A VM path never becomes a local cwd.
     expect(composer().dataset.cwd).toBe("");
+    // Closing the local view must stop its branch polling before cloud takes over.
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(guard.violations).toEqual([]);
   });
 

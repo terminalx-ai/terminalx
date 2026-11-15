@@ -9,6 +9,10 @@ import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { LinkedText } from "@/components/chat/LinkedText";
 
+import { useFeatureFlag, featureFlags } from "@/lib/featureFlags";
+import { MemberProfile, memberName } from "@/components/people/MemberProfile";
+import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+
 const ROLE_BADGE: Record<string, string> = { manager: "Admin", driver: "Driver", viewer: "Viewer", none: "No access" };
 
 function codeOf(error: unknown): string {
@@ -31,7 +35,13 @@ export function useNowUntil(until: number | null | undefined): number {
 /** Who else is in the workspace, what they look at, and whether they are typing. */
 export function ParticipantsBar({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel: (tabId: string) => string | null }) {
   const collab = useCollab(collabKey);
-  const nameOf = usePeople();
+  const orgId = collabKey.startsWith("cloud:") ? collabKey.split(":")[1] : undefined;
+  const profiles = useFeatureFlag(featureFlags.teamRoster, orgId);
+  const fallbackName = usePeople(!profiles);
+  const { roster } = useOrganizationRoster(orgId, profiles);
+  useEffect(() => { if (profiles && orgId) void readOrganizationRoster(orgId).catch(() => {}); }, [orgId, profiles]);
+  const memberOf = (userId: string) => roster?.members.find((member) => member.userId === userId) ?? { userId, displayName: fallbackName(userId), email: "", role: "" };
+  const nameOf = (userId: string) => memberName(memberOf(userId));
   if (!collab.available || !collab.participants.length) return null;
   return (
     <div className="flex min-w-0 items-center gap-1.5" data-testid="cloud-participants" aria-label="People in this workspace">
@@ -48,9 +58,9 @@ export function ParticipantsBar({ collabKey, you, tabLabel }: { collabKey: strin
             data-testid="cloud-participant"
             title={`${name} · ${ROLE_BADGE[person.role] ?? person.role}${person.canApprove ? " · can approve" : ""}${person.surfaces > 1 ? ` · ${person.surfaces} windows` : ""}${where ? ` · on ${where}` : ""}`}
           >
-            <span className={cn("flex size-5 items-center justify-center rounded-full bg-well text-[9px] font-medium", typing && "ring-1 ring-accent")}>
-              {initials(nameOf(person.userId))}
-            </span>
+            {profiles ? <MemberProfile member={memberOf(person.userId)} online className={cn("size-5 text-[9px]", typing && "ring-1 ring-accent")} /> : (
+              <span className={cn("flex size-5 items-center justify-center rounded-full bg-well text-[9px] font-medium", typing && "ring-1 ring-accent")}>{initials(nameOf(person.userId))}</span>
+            )}
             <span className="max-w-24 truncate">{name}</span>
             <span className="rounded bg-well px-1 text-[10px] text-muted-foreground">{ROLE_BADGE[person.role] ?? person.role}</span>
             {person.surfaces > 1 && <span className="text-faint">×{person.surfaces}</span>}
@@ -76,7 +86,13 @@ const HEADER_FACES = 3;
  */
 export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel?: (tabId: string) => string | null }) {
   const collab = useCollab(collabKey);
-  const nameOf = usePeople();
+  const orgId = collabKey.startsWith("cloud:") ? collabKey.split(":")[1] : undefined;
+  const profiles = useFeatureFlag(featureFlags.teamRoster, orgId);
+  const fallbackName = usePeople(!profiles);
+  const { roster } = useOrganizationRoster(orgId, profiles);
+  useEffect(() => { if (profiles && orgId) void readOrganizationRoster(orgId).catch(() => {}); }, [orgId, profiles]);
+  const memberOf = (userId: string) => roster?.members.find((member) => member.userId === userId) ?? { userId, displayName: fallbackName(userId), email: "", role: "" };
+  const nameOf = (userId: string) => memberName(memberOf(userId));
   const others = collab.participants.filter((person) => person.userId !== you?.userId);
   if (!collab.available || !others.length) return null;
   const shown = others.slice(0, HEADER_FACES);
@@ -87,17 +103,18 @@ export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: strin
   return (
     <span className="ml-1 flex shrink-0 items-center -space-x-1" data-testid="session-presence" aria-label={`Also here: ${others.map((person) => nameOf(person.userId)).join(", ")}`}>
       {shown.map((person) => (
-        <span
+        profiles ? <MemberProfile
           key={person.userId}
-          className={cn(
-            "flex size-5 items-center justify-center rounded-full border border-background bg-well text-[9px] font-medium text-foreground",
-            person.activity === "typing" && "ring-1 ring-accent",
-          )}
+          member={memberOf(person.userId)}
+          online
+          className={cn("size-5 border border-background text-[9px]", person.activity === "typing" && "ring-1 ring-accent")}
           title={describe(person)}
           data-testid="session-presence-person"
-        >
-          {initials(nameOf(person.userId))}
-        </span>
+        /> : (
+          <span key={person.userId} className={cn("flex size-5 items-center justify-center rounded-full border border-background bg-well text-[9px] font-medium text-foreground", person.activity === "typing" && "ring-1 ring-accent")} title={describe(person)} data-testid="session-presence-person">
+            {initials(nameOf(person.userId))}
+          </span>
+        )
       ))}
       {others.length > shown.length && (
         <span className="flex h-5 items-center rounded-full border border-background bg-well px-1 text-[9px] text-muted-foreground" title={others.slice(HEADER_FACES).map(describe).join("\n")}>

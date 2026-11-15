@@ -29,7 +29,8 @@ export class CloudInboxSubscriber {
   private key = "";
   private retryStreamAt = 0;
   private failures = 0;
-  constructor(private transport: InboxTransport, private storage: InboxStorage, private apply: (event: InboxEvent) => void) {}
+  private resyncNeeded = false;
+  constructor(private transport: InboxTransport, private storage: InboxStorage, private apply: (event: InboxEvent) => void, private resync: () => void | Promise<void> = () => {}) {}
   start(account: string) {
     this.stop();
     this.key = `terminalx.inbox.v1:${encodeURIComponent(account)}`;
@@ -38,6 +39,7 @@ export class CloudInboxSubscriber {
       if (raw && validInboxCursor(raw.cursor) && Array.isArray(raw.seen) && Array.isArray(raw.receipts) && [...raw.seen, ...raw.receipts].every(validInboxCursor)) this.saved = raw;
     } catch { /* A damaged cache replays from zero. */ }
     const generation = this.generation;
+    this.refreshCatalog(generation);
     void this.receipts(generation);
     void this.run(generation);
   }
@@ -53,6 +55,12 @@ export class CloudInboxSubscriber {
     this.key = "";
     this.retryStreamAt = 0;
     this.failures = 0;
+    this.resyncNeeded = false;
+  }
+  private refreshCatalog(generation: number) {
+    if (generation !== this.generation) return;
+    // Catalog failures must not hold up receipts, replay or polling fallback.
+    try { void Promise.resolve(this.resync()).catch(() => {}); } catch { /* Existing catalog polling retries. */ }
   }
   private persist(next: Saved) {
     this.storage.setItem(this.key, JSON.stringify(next));
@@ -109,15 +117,22 @@ export class CloudInboxSubscriber {
           this.failures = 0;
         } catch {
           if (!current()) return;
+          this.resyncNeeded = true;
           this.retryStreamAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(this.failures++, 6));
           page = await this.transport.desktopInbox(this.saved.cursor, 25000);
         }
       } else page = await this.transport.desktopInbox(this.saved.cursor, 25000);
       if (!current()) return;
       this.take(page, generation);
+      if (!current()) return;
+      if (this.resyncNeeded) {
+        this.resyncNeeded = false;
+        this.refreshCatalog(generation);
+      }
       delay = page.hasMore ? 0 : 1000;
     } catch {
       if (!current()) return;
+      this.resyncNeeded = true;
       delay = Math.min(60_000, 1000 * 2 ** Math.min(this.failures++, 6));
     }
     if (current()) this.timer = setTimeout(() => { void this.run(generation); }, delay);

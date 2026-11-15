@@ -1033,6 +1033,25 @@ function onAccessChange(orgId: string) {
   );
 }
 
+/** Replay is retained for 30 days: reconnect must reauthorize from a full list.
+ * An old in-flight list/feed cannot substitute for this fresh snapshot. */
+export async function resyncCloudInboxCatalog(): Promise<void> {
+  const status = getAccount().status;
+  if (privacyEnabled() || status.state !== "signed-in" || !status.context?.account) return;
+  const account = status.context.account;
+  const revision = status.context.revision;
+  const generation = catalogGeneration;
+  ++inboxRevision;
+  feedCursor = null;
+  await Promise.all(liveCloudOrgIds(status).map(async (orgId) => {
+    await flights.get(orgId)?.catch(() => undefined);
+    const current = getAccount().status;
+    if (privacyEnabled() || catalogGeneration !== generation || current.state !== "signed-in"
+      || current.context?.account !== account || current.context.revision !== revision) return;
+    await refreshCloudCatalog(orgId);
+  }));
+}
+
 /** Inbox hints contain no display content. Revoke cached content before reauthorizing by list. */
 export function invalidateCloudInboxWorkspace(workspaceId: string, organizationId?: string, revoked = false) {
   ++inboxRevision;

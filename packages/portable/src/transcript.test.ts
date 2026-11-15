@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEvent, Goal, Payload } from "./events";
-import { buildTranscript, compactionStatus, ConversationView, conversationEvents, TranscriptReducer } from "./transcript";
+import type { AgentEvent, Goal, Payload, Question } from "./events";
+import { buildTranscript, compactionStatus, ConversationView, conversationEvents, questionAnswers, questionsLabel, toggleQuestionChoice, TranscriptReducer, type QuestionChoices } from "./transcript";
 
 describe("Codex goals", () => {
   const goal: Goal = { objective: "Reduce latency", status: "active", tokenBudget: 1000, tokensUsed: 0 };
@@ -403,5 +403,56 @@ describe("attached files (PRO-290)", () => {
   it("leaves a message without files without a files field", () => {
     const transcript = buildTranscript([event(1, { type: "user_message", text: "Hi", queued: false })], true);
     expect(transcript.turns[0].prompt && "files" in transcript.turns[0].prompt).toBe(false);
+  });
+});
+
+describe("an agent's question (#979)", () => {
+  const event = (seq: number, payload: Payload): AgentEvent => ({ id: `q-${seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-11-15T09:00:00Z", payload });
+  const questions: Question[] = [
+    { question: "Which checks should run?", header: "Checks", multiSelect: true, freeText: false, options: [{ label: "Lint, format", description: "Both" }, { label: "Tests" }, { label: "Build" }] },
+    { question: "Which branch?", multiSelect: false, freeText: true, options: [{ label: "main" }, { label: "next" }] },
+    { question: "Anything else?", multiSelect: false, freeText: true, options: [] },
+  ];
+
+  it("waits as a pending ask with its questions until a decision arrives, from whichever device answered", () => {
+    const asked = [
+      event(1, { type: "user_message", text: "Ship it", queued: false }),
+      event(2, { type: "questions_asked", requestId: "q1", toolUseId: "", questions }),
+      event(3, { type: "permission_requested", requestId: "p1", toolUseId: "tool", toolName: "Bash", input: {}, options: [] }),
+    ];
+    const waiting = buildTranscript(asked, true);
+    // A tab can hold a question and a permission request at once: each is its own ask.
+    expect(waiting.pendingAsks.map((ask) => [ask.requestId, ask.kind])).toEqual([["q1", "questions"], ["p1", "permission"]]);
+    expect(waiting.pendingAsks[0].questions).toEqual(questions);
+
+    const reducer = new TranscriptReducer();
+    for (const item of asked) reducer.push(item);
+    reducer.push(event(4, { type: "permission_decided", requestId: "q1", allowed: true, label: "Answered", automatic: false }));
+    expect(reducer.snapshot(true).pendingAsks.map((ask) => ask.requestId)).toEqual(["p1"]);
+    // A replay of the question after its decision does not bring the card back.
+    reducer.push(event(5, { type: "questions_asked", requestId: "q1", toolUseId: "", questions }));
+    expect(reducer.snapshot(true).pendingAsks.map((ask) => ask.requestId)).toEqual(["p1"]);
+  });
+
+  it("turns a card's choices into the one answer format every device sends", () => {
+    let chosen: QuestionChoices = {};
+    // Multi-select: in the order picked, and a label holding ", " is one choice (#703).
+    chosen = toggleQuestionChoice(chosen, 0, 1, true);
+    chosen = toggleQuestionChoice(chosen, 0, 0, true);
+    chosen = toggleQuestionChoice(chosen, 0, 2, true);
+    chosen = toggleQuestionChoice(chosen, 0, 2, true);
+    expect(chosen[0]).toEqual([1, 0]);
+    // Single-select: choosing one clears the other.
+    chosen = toggleQuestionChoice(chosen, 1, 0, false);
+    chosen = toggleQuestionChoice(chosen, 1, 1, false);
+    expect(chosen[1]).toEqual([1]);
+    expect(questionAnswers(questions, chosen, {})).toEqual({ "Which checks should run?": "Tests, Lint, format", "Which branch?": "next" });
+    // Taking back the label with ", " in it takes back that choice alone.
+    expect(questionAnswers(questions, toggleQuestionChoice(chosen, 0, 0, true), {})["Which checks should run?"]).toBe("Tests");
+    // A typed answer wins over the chosen options; blank typing does not.
+    expect(questionAnswers(questions, chosen, { 1: "  release/1.0 ", 2: "   " })).toEqual({ "Which checks should run?": "Tests, Lint, format", "Which branch?": "release/1.0" });
+    // Nothing chosen and nothing typed is what Skip sends.
+    expect(questionAnswers(questions, {}, {})).toEqual({});
+    expect([questionsLabel(1), questionsLabel(3)]).toEqual(["Question", "3 questions"]);
   });
 });

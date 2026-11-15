@@ -1,30 +1,37 @@
 import { useEffect, useState } from "react";
-import { Alert, Pressable, StyleSheet, Switch, Text, View } from "react-native";
-import { Check, ChevronDown, ChevronUp, Trash2 } from "lucide-react-native";
+import { Alert, Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
+import { useRouter } from "expo-router";
+import { Check, ChevronRight, Info } from "lucide-react-native";
 import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
 import type { MacSettings } from "@mobile/data/host-api";
+import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
 import { useHostFeatures } from "@mobile/state/host-features";
-import { hostDisplayName, hostDisplayNames } from "@mobile/store/host-name";
+import { useMachines } from "@mobile/state/useMachines";
+import { hostDisplayName } from "@mobile/store/host-name";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
-import { useTheme, type ThemeName } from "@mobile/ui/theme";
+import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
 
-const themes: ThemeName[] = ["Den", "Slate", "Moss", "Ember"];
-
+/**
+ * Settings (#987), in plain words. Machines are managed on the Machines tab
+ * only; what is here is the account, alerts, the look, the options of the
+ * machine in use, and where to read how data is kept.
+ */
 export default function SettingsScreen() {
   const app = useApp();
-  const names = hostDisplayNames(app.hosts);
+  const router = useRouter();
+  const scheme = useColorScheme();
   const { name, palette, setName } = useTheme();
+  const machine = useMachines().paired.find((item) => item.active);
   const [notifications, setNotifications] = useState(false);
-  const [logOpen, setLogOpen] = useState(false);
-  // This Mac's own settings: undefined while asking, null from a Mac that does not offer them.
+  // The machine's own settings: undefined while asking, null from a machine that does not offer them.
   const [mac, setMac] = useState<MacSettings | null | undefined>(undefined);
   const [macError, setMacError] = useState<string | null>(null);
   const connected = app.connectionStage === "connected";
   const [settingsRevision, setSettingsRevision] = useState(0);
   useEffect(() => app.api.onSettingsChanged(() => setSettingsRevision((value) => value + 1)), [app.api]);
 
-  // Asked again when the Mac starts or stops offering them (#730).
+  // Asked again when the machine starts or stops offering them (#730).
   const macOffered = useHostFeatures(app.api, app.activeHost?.id)?.macSettings === 1;
   useEffect(() => {
     let current = true;
@@ -61,51 +68,78 @@ export default function SettingsScreen() {
       return;
     }
     if (!app.activeHost || app.connectionStage !== "connected") {
-      Alert.alert("Connect a Mac", "Notifications are delivered over the active encrypted connection.");
+      Alert.alert("Connect to a machine first", "Alerts come from the machine this phone is connected to.");
       return;
     }
     setNotifications(await enableLocalNotifications(app.connection, app.activeHost.id));
   };
 
+  const user = app.session?.user;
+  const who = user ? user.displayName ?? user.email : null;
+  const machineName = machine?.name ?? (app.activeHost ? hostDisplayName(app.activeHost) : null);
+
   return <Screen title="Settings">
-    <SectionTitle>Account</SectionTitle>
-    <Card style={styles.block}>{app.session ? <><Text style={[styles.title, { color: palette.ink }]}>{app.session.user.displayName ?? "TerminalX account"}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.session.user.email}</Text><Button label="Sign out" kind="secondary" onPress={() => void app.signOut()} /></> : <><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to discover Macs bound to your account.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></>}</Card>
-
-    <SectionTitle>Paired machines</SectionTitle>
-    <Card>{app.hosts.length ? app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>{names.get(host.id) ?? hostDisplayName(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{host.provenance.kind === "explicit" ? "QR pairing · kept after sign-out" : "Account pairing · removed at sign-out"}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Forget ${names.get(host.id) ?? hostDisplayName(host)}`} hitSlop={10} onPress={() => Alert.alert("Forget this Mac?", "Its device credential will be deleted from this phone. Agents on the Mac keep running.", [{ text: "Cancel", style: "cancel" }, { text: "Forget", style: "destructive", onPress: () => void app.forgetHost(host.id) }])}><Trash2 size={19} color={palette.danger} /></Pressable></View>) : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>No paired Macs on this phone.</Text></View>}</Card>
-
-    {app.activeHost ? <><SectionTitle>{`This Mac · ${names.get(app.activeHost.id) ?? hostDisplayName(app.activeHost)}`}</SectionTitle>
-    <Card>{mac ? <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Native Codex</Text><Text style={[styles.detail, { color: palette.muted }]}>Experimental. New Codex sessions on this Mac connect to Codex directly, so the chat reliably shows when Codex is compacting its context. Opening a session's terminal view on the Mac moves it to Codex's own terminal for good. Needs Codex 0.164.0 or newer.</Text></View><Switch accessibilityLabel="Native Codex" value={mac.nativeCodex} onValueChange={(value) => void toggleNativeCodex(value)} trackColor={{ true: palette.accent }} /></View>
-      : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>{!connected ? "Connect to this Mac to change its settings." : mac === undefined ? "Reading this Mac's settings…" : macError ?? "Update TerminalX on this Mac to change its settings from your phone."}</Text></View>}
-      {mac && macError ? <Text accessibilityRole="alert" style={[styles.detail, styles.macError, { color: palette.danger }]}>{macError}</Text> : null}</Card></> : null}
-
-    <SectionTitle>Appearance</SectionTitle>
-    <Card style={styles.themeGrid}>{themes.map((theme) => <Pressable key={theme} accessibilityRole="button" accessibilityState={{ selected: theme === name }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: theme === name ? palette.selected : palette.raised }]}><Text style={[styles.rowTitle, { color: palette.ink }]}>{theme}</Text>{theme === name ? <Check size={17} color={palette.accent} /> : null}</Pressable>)}</Card>
+    <Card style={styles.block}>{user ? <>
+      <View style={styles.accountRow}>
+        <View style={[styles.avatar, { backgroundColor: palette.raised }]}><Text style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>
+        <View style={styles.flex}><Text style={[styles.title, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
+      </View>
+      <Button label="Sign out" kind="secondary" onPress={() => void app.signOut()} />
+    </> : <><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></>}</Card>
 
     <SectionTitle>Notifications</SectionTitle>
-    <Card><View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Local completion alerts</Text><Text style={[styles.detail, { color: palette.muted }]}>No push service. Alerts arrive while iOS lets TerminalX keep its encrypted socket open.</Text></View><Switch value={notifications} onValueChange={(value) => void toggleNotifications(value)} trackColor={{ true: palette.accent }} /></View></Card>
+    <Card>
+      <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Tell me when an agent finishes</Text><Text style={[styles.detail, { color: palette.muted }]}>An alert when an agent on the machine in use finishes its work.</Text></View><Switch accessibilityLabel="Tell me when an agent finishes" value={notifications} onValueChange={(value) => void toggleNotifications(value)} trackColor={{ true: palette.accent }} /></View>
+      <View style={[styles.noteRow, { borderTopColor: palette.border }]}><Info size={16} color={palette.warning} /><Text style={[styles.detail, styles.flex, { color: palette.muted }]}>Works while the app is open or recently used. It can miss alerts when iOS closes the app.</Text></View>
+    </Card>
 
-    <SectionTitle>Connection</SectionTitle>
-    <Card><Pressable accessibilityRole="button" onPress={() => setLogOpen((value) => !value)} style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Connection log</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.logs.length} redacted events on this phone</Text></View>{logOpen ? <ChevronUp color={palette.muted} /> : <ChevronDown color={palette.muted} />}</Pressable>{logOpen ? <View style={[styles.log, { borderTopColor: palette.border }]}>{app.logs.length ? [...app.logs].reverse().map((entry) => <View key={entry.id} style={styles.logRow}><Text style={[styles.logTime, { color: palette.faint }]}>{new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</Text><View style={styles.flex}><Text style={[styles.detail, { color: entry.level === "error" ? palette.danger : entry.level === "warning" ? palette.warning : palette.ink }]}>{entry.message}</Text>{entry.detail ? <Text style={[styles.logDetail, { color: palette.muted }]}>{entry.detail}</Text> : null}</View></View>) : <Text style={[styles.detail, { color: palette.muted }]}>No connection attempts yet.</Text>}</View> : null}</Card>
+    <SectionTitle>Appearance</SectionTitle>
+    <View style={styles.themeGrid}>{THEMES.map((theme) => {
+      const colours = themePalette(theme, scheme);
+      const selected = theme === name;
+      return <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`${theme} theme`} accessibilityState={{ selected }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: palette.card, borderColor: selected ? palette.accent : palette.border }]}>
+        <View testID={`theme-preview-${theme}`} style={[styles.swatch, { backgroundColor: colours.page, borderColor: palette.border }]}><View style={[styles.swatchAccent, { backgroundColor: colours.accent }]} /></View>
+        <View style={styles.themeName}><Text style={[styles.rowTitle, { color: palette.ink }]}>{theme}</Text>{selected ? <Check size={15} color={palette.accent} /> : null}</View>
+      </Pressable>;
+    })}</View>
 
-    <Card style={styles.privacy}><Text style={[styles.title, { color: palette.ink }]}>Mac is the source of truth</Text><Text style={[styles.detail, { color: palette.muted }]}>Transcripts are never uploaded. This phone caches only the bounded pages it displayed for offline reading. Pairing and RPC travel through relay.terminalx.ai as end-to-end encrypted ciphertext.</Text></Card>
+    {app.activeHost && machineName ? <><SectionTitle>{machineName}</SectionTitle>
+    <Card>{mac ? <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Native Codex</Text><Text style={[styles.detail, { color: palette.muted }]}>Experimental. A more reliable chat for new Codex sessions.</Text></View><Switch accessibilityLabel="Native Codex" value={mac.nativeCodex} onValueChange={(value) => void toggleNativeCodex(value)} trackColor={{ true: palette.accent }} /></View>
+      : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>{!connected ? "Connect to this machine to change its settings." : mac === undefined ? "Reading this machine’s settings…" : macError ?? "Update TerminalX on this machine to change its settings from your phone."}</Text></View>}
+      {mac && macError ? <Text accessibilityRole="alert" style={[styles.detail, styles.macError, { color: palette.danger }]}>{macError}</Text> : null}</Card></> : null}
+
+    <SectionTitle>Privacy and help</SectionTitle>
+    <Card>
+      <LinkRow label="How your data stays on your Mac" onPress={() => router.push("/privacy")} />
+      <LinkRow label="Connection log" divided onPress={() => router.push("/connection-log")} />
+      <View style={[styles.linkRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Text style={[styles.rowTitle, styles.flex, { color: palette.ink }]}>Version</Text><Text selectable style={[styles.detail, { color: palette.muted }]}>{appVersion()}</Text></View>
+    </Card>
   </Screen>;
+}
+
+function LinkRow({ label, divided, onPress }: { label: string; divided?: boolean; onPress(): void }) {
+  const { palette } = useTheme();
+  return <Pressable accessibilityRole="link" onPress={onPress} style={({ pressed }) => [styles.linkRow, divided && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.raised }]}>
+    <Text style={[styles.rowTitle, styles.flex, { color: palette.ink }]}>{label}</Text><ChevronRight size={18} color={palette.faint} />
+  </Pressable>;
 }
 
 const styles = StyleSheet.create({
   block: { padding: 16, gap: 10 },
+  accountRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  avatarText: { fontSize: 18, fontWeight: "600" },
   title: { fontSize: 17, fontWeight: "700" },
   rowTitle: { fontSize: 15, fontWeight: "600" },
   detail: { fontSize: 13, lineHeight: 19 },
   flex: { flex: 1 },
-  hostRow: { minHeight: 67, paddingHorizontal: 15, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
-  themeGrid: { padding: 8, flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  theme: { minHeight: 44, flexBasis: "47%", flexGrow: 1, paddingHorizontal: 12, borderRadius: 10, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  themeGrid: { flexDirection: "row", gap: 8 },
+  theme: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 7, gap: 7 },
+  swatch: { height: 34, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, justifyContent: "flex-end", padding: 6 },
+  swatchAccent: { width: 20, height: 4, borderRadius: 2 },
+  themeName: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 2 },
   settingRow: { minHeight: 72, padding: 15, flexDirection: "row", alignItems: "center", gap: 12 },
-  log: { borderTopWidth: StyleSheet.hairlineWidth, padding: 14, gap: 11 },
-  logRow: { flexDirection: "row", gap: 10 },
-  logTime: { width: 70, fontSize: 11, fontVariant: ["tabular-nums"] },
-  logDetail: { fontSize: 11, marginTop: 2 },
-  privacy: { padding: 16, gap: 7, marginTop: 8 },
+  noteRow: { flexDirection: "row", gap: 10, alignItems: "flex-start", paddingHorizontal: 15, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  linkRow: { minHeight: 50, paddingHorizontal: 15, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 10 },
   macError: { paddingHorizontal: 15, paddingBottom: 12 },
 });
