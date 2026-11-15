@@ -6,10 +6,12 @@
 //!   re-emit its `machine_host_changed` as [`HOST_CHANGED_EVENT`].
 //! - On the operating computer, this module decodes a code, shows the
 //!   fingerprint, pairs ([`pair`]) and keeps the machine ([`store`], with the
-//!   device token in the Keychain, [`secrets`]).
+//!   device token in the Keychain, [`secrets`]), then connects to it
+//!   ([`connect`], PRO-345).
 //!
 //! The shapes are `src/types/machines.ts`.
 
+pub mod connect;
 pub mod pair;
 pub mod secrets;
 pub mod store;
@@ -176,6 +178,8 @@ impl Machines {
             route,
             paired_at: now,
             last_seen_at: Some(now),
+            last_route: None,
+            relay: None,
             other: Default::default(),
         };
         let keep = self.clone();

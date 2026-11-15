@@ -130,6 +130,12 @@ pub enum ClientState {
         /// The person's collaboration role when `collab/1` was granted
         /// (`{ userId, role, canApprove }`, saas contract §21.5).
         you: Option<Value>,
+        /// A machine connection's link number (PRO-345): a new one while
+        /// connected means the connection moved to another route, and the
+        /// web view resubscribes from its cursors. Never set for a cloud
+        /// workspace, whose state keeps exactly its old shape.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        link: Option<u64>,
     },
     Reconnecting {
         attempt: u32,
@@ -150,7 +156,7 @@ pub enum ClientEvent {
     Message(Value),
 }
 
-enum Credential {
+pub(super) enum Credential {
     Invite(String),
     Resume(String),
 }
@@ -163,26 +169,28 @@ pub struct Closed {
 }
 
 impl Closed {
-    fn other(error: impl std::fmt::Display) -> Self {
+    pub(super) fn other(error: impl std::fmt::Display) -> Self {
         Self { code: None, reason: protocol::redact(&format!("{error:#}")) }
     }
 }
 
 type Socket = crate::data_privacy::Socket;
 
-struct Connection {
-    socket: Socket,
-    session: E2eeSession,
+/// One E2EE connection to a runtime, on any route: the cloud relay attach
+/// here, a machine's direct and relay routes in `machine_client`.
+pub(super) struct Connection {
+    pub(super) socket: Socket,
+    pub(super) session: E2eeSession,
 }
 
 impl Connection {
-    async fn send(&mut self, value: &Value) -> Result<()> {
+    pub(super) async fn send(&mut self, value: &Value) -> Result<()> {
         let frame = self.session.seal(value.to_string().as_bytes(), PayloadKind::Text)?;
         self.socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await?;
         Ok(())
     }
 
-    async fn next(&mut self) -> Result<Value, Closed> {
+    pub(super) async fn next(&mut self) -> Result<Value, Closed> {
         loop {
             match self.socket.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -208,9 +216,14 @@ impl Connection {
 
     /// One request before the app takes over the channel.
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, Closed> {
+        self.call_within(method, params, HANDSHAKE_TIMEOUT).await
+    }
+
+    /// One request before the app takes over the channel, answered within `limit`.
+    pub(super) async fn call_within(&mut self, method: &str, params: Value, limit: Duration) -> Result<Value, Closed> {
         let id = format!("supervisor-{}", uuid::Uuid::new_v4().simple());
         self.send(&json!({ "id": id, "method": method, "params": params })).await.map_err(Closed::other)?;
-        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + limit;
         loop {
             let value = tokio::time::timeout_at(deadline, self.next()).await.map_err(|_| Closed::other(format!("{method} timed out")))??;
             if value["id"] == id {
@@ -227,15 +240,37 @@ impl Connection {
 /// Relay attach (v2 with a ticket, else v1), then the E2EE handshake and
 /// the device-token proof.
 async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&AttachTicket>) -> Result<Connection, Closed> {
-    let url = websocket_url(&offer.relay.cell_url, &format!("/v1/connect/{}", offer.relay.relay_host_id)).map_err(Closed::other)?;
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    let relay = RelayRoute { cell_url: &offer.relay.cell_url, relay_host_id: &offer.relay.relay_host_id, public_key_b64: &offer.public_key_b64, client_secret: None };
+    let mut connection = relay_connect(&relay, credential, ticket, deadline).await?;
+    let auth = json!({ "deviceToken": offer.device_token });
+    match authenticate(&mut connection, auth, deadline).await? {
+        Authenticated::Yes => Ok(connection),
+        Authenticated::Refused(_) => Err(Closed::other("the runtime did not authenticate this device")),
+    }
+}
+
+/// Where a relay connection goes and with which keys.
+pub(super) struct RelayRoute<'a> {
+    pub cell_url: &'a str,
+    pub relay_host_id: &'a str,
+    /// The runtime's host key, which the handshake is pinned to.
+    pub public_key_b64: &'a str,
+    /// This installation's long-lived client key (a machine pins it); a
+    /// fresh one per connection when absent (a cloud attachment).
+    pub client_secret: Option<[u8; 32]>,
+}
+
+/// Through the relay with `credential` (relay-auth v2 with a ticket, else
+/// v1), then the E2EE handshake as the initiator, by `deadline`. A relay
+/// refusal is a [`Closed`] with the relay's code.
+pub(super) async fn relay_connect(route: &RelayRoute<'_>, credential: &Credential, ticket: Option<&AttachTicket>, deadline: tokio::time::Instant) -> Result<Connection, Closed> {
+    let url = websocket_url(route.cell_url, &format!("/v1/connect/{}", route.relay_host_id)).map_err(Closed::other)?;
     let request = url.into_client_request().map_err(Closed::other)?;
-    let (mut socket, _) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        crate::data_privacy::connect(request, Some(websocket_config()), false),
-    )
-    .await
-    .map_err(|_| Closed::other("relay connect timed out"))?
-    .map_err(Closed::other)?;
+    let (mut socket, _) = tokio::time::timeout_at(deadline, crate::data_privacy::connect(request, Some(websocket_config()), false))
+        .await
+        .map_err(|_| Closed::other("relay connect timed out"))?
+        .map_err(Closed::other)?;
     let (token, kind) = match credential {
         Credential::Invite(token) => (token, "invite"),
         Credential::Resume(token) => (token, "resume"),
@@ -245,7 +280,6 @@ async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&
         None => json!({ "type": "relay-auth", "v": 1, "mode": "connect", "credential": token }),
     };
     socket.send(Message::Text(auth.to_string().into())).await.map_err(Closed::other)?;
-    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     let hello = plaintext(&mut socket, deadline).await?;
     let hello: Value = serde_json::from_str(&hello).map_err(Closed::other)?;
     if hello["type"] != "relay-hello" {
@@ -257,24 +291,42 @@ async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&
     if hello["credentialKind"] != kind {
         return Err(Closed::other("relay accepted a different credential kind"));
     }
-    let handshake = E2eeClientHandshake::new(&offer.public_key_b64, "relay", Some(&offer.relay.relay_host_id)).map_err(Closed::other)?;
+    let handshake = match route.client_secret {
+        Some(secret) => E2eeClientHandshake::with_secret(secret, route.public_key_b64, "relay", Some(route.relay_host_id)),
+        None => E2eeClientHandshake::new(route.public_key_b64, "relay", Some(route.relay_host_id)),
+    }
+    .map_err(Closed::other)?;
     socket.send(Message::Text(serde_json::to_string(handshake.hello()).map_err(Closed::other)?.into())).await.map_err(Closed::other)?;
     let ready = plaintext(&mut socket, deadline).await?;
     let session = handshake.accept_ready(&ready).map_err(Closed::other)?;
-    let mut connection = Connection { socket, session };
-    let transcript = connection.session.transcript_hash_b64.clone();
-    connection
-        .send(&json!({ "type": "e2ee_auth", "v": 2, "transcriptHashB64": transcript, "deviceToken": offer.device_token }))
-        .await
-        .map_err(Closed::other)?;
-    let authenticated = tokio::time::timeout_at(deadline, connection.next()).await.map_err(|_| Closed::other("E2EE authentication timed out"))??;
-    if authenticated["type"] != "e2ee_authenticated" || authenticated["transcriptHashB64"] != transcript.as_str() {
-        return Err(Closed::other("the runtime did not authenticate this device"));
-    }
-    Ok(connection)
+    Ok(Connection { socket, session })
 }
 
-async fn plaintext(socket: &mut Socket, deadline: tokio::time::Instant) -> Result<String, Closed> {
+/// How the runtime answered `e2ee_auth`.
+pub(super) enum Authenticated {
+    Yes,
+    /// A machine's sealed `pairing_refused`, with its reason.
+    Refused(String),
+}
+
+/// Prove the device token inside E2EE: `auth` holds `deviceToken` and any
+/// fields the route adds (a machine's `label` and `platform`). The token is
+/// never anywhere but inside the sealed frame.
+pub(super) async fn authenticate(connection: &mut Connection, mut auth: Value, deadline: tokio::time::Instant) -> Result<Authenticated, Closed> {
+    let transcript = connection.session.transcript_hash_b64.clone();
+    auth["type"] = json!("e2ee_auth");
+    auth["v"] = json!(2);
+    auth["transcriptHashB64"] = json!(transcript);
+    connection.send(&auth).await.map_err(Closed::other)?;
+    let answer = tokio::time::timeout_at(deadline, connection.next()).await.map_err(|_| Closed::other("E2EE authentication timed out"))??;
+    match answer["type"].as_str() {
+        Some("e2ee_authenticated") if answer["transcriptHashB64"] == transcript.as_str() => Ok(Authenticated::Yes),
+        Some("pairing_refused") => Ok(Authenticated::Refused(answer["reason"].as_str().unwrap_or_default().to_string())),
+        _ => Err(Closed::other("the runtime did not authenticate this device")),
+    }
+}
+
+pub(super) async fn plaintext(socket: &mut Socket, deadline: tokio::time::Instant) -> Result<String, Closed> {
     loop {
         match tokio::time::timeout_at(deadline, socket.next()).await.map_err(|_| Closed::other("relay handshake timed out"))? {
             Some(Ok(Message::Text(text))) => return Ok(text.to_string()),
@@ -595,19 +647,36 @@ async fn establish(connection: &mut Connection, attached: &Attached, was_invite:
             capabilities: serde_json::from_value(hello["capabilities"].clone()).unwrap_or_default(),
             authority: hello["authority"].as_str().unwrap_or_default().to_string(),
             you: hello.get("you").filter(|you| you.is_object()).cloned(),
+            link: None,
         },
         installed,
     ))
 }
 
 async fn pump(
-    mut connection: Connection,
+    connection: Connection,
     shared: &Shared,
     events: &mpsc::UnboundedSender<ClientEvent>,
     stopped: &mut watch::Receiver<bool>,
 ) -> Closed {
     let (outbound, mut frames) = mpsc::unbounded_channel();
     *shared.outbound.lock().unwrap() = Some(outbound);
+    pump_frames(connection, &mut frames, |value| {
+        let _ = events.send(ClientEvent::Message(value));
+    }, stopped)
+    .await
+}
+
+/// Frames both ways on an established connection until it ends: `frames`
+/// go out sealed as they come (none left means stop), and every message the
+/// runtime sends goes to `deliver`. Pings keep a quiet link checked; one
+/// silent for a minute is over. Shared by every route of every runtime.
+pub(super) async fn pump_frames(
+    mut connection: Connection,
+    frames: &mut mpsc::UnboundedReceiver<Value>,
+    mut deliver: impl FnMut(Value),
+    stopped: &mut watch::Receiver<bool>,
+) -> Closed {
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut last_seen = tokio::time::Instant::now();
     loop {
@@ -656,9 +725,7 @@ async fn pump(
                     None => return Closed { code: None, reason: "connection closed".into() },
                 };
                 match value {
-                    Ok(value) => {
-                        let _ = events.send(ClientEvent::Message(value));
-                    }
+                    Ok(value) => deliver(value),
                     // A frame that fails authentication ends the session: the
                     // counters can no longer agree.
                     Err(error) => return Closed::other(error),
@@ -675,7 +742,7 @@ async fn sleep_or_stop(stopped: &mut watch::Receiver<bool>, delay: Duration) -> 
     }
 }
 
-fn random_token() -> String {
+pub(super) fn random_token() -> String {
     use rand_core::RngCore;
     let mut bytes = [0u8; 32];
     rand_core::OsRng.fill_bytes(&mut bytes);
@@ -798,6 +865,7 @@ mod tests {
                     capabilities: Vec::new(),
                     authority: "manage".into(),
                     you: None,
+                    link: None,
                 }));
                 let mut closes = self.closes.lock().await;
                 let closed = tokio::select! {

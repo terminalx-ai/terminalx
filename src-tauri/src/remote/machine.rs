@@ -74,7 +74,8 @@ pub struct Identity {
     pub has_window: bool,
 }
 
-/// `machine.describe`.
+/// `machine.describe`. `machine/2` adds `directEndpoints`, which only the
+/// runtime's machine host knows ([`MachineAccess::direct_endpoints`]).
 pub fn describe(identity: &Identity) -> Value {
     json!({
         "machineId": identity.machine_id,
@@ -84,6 +85,20 @@ pub fn describe(identity: &Identity) -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "hasWindow": identity.has_window,
     })
+}
+
+/// What a machine's host adds to its workspace RPC (`machine/2`, PRO-345):
+/// the addresses its direct listener answers on, and relay access for a
+/// paired computer. The runtime's `machine_host` answers both.
+pub trait MachineAccess: Send + Sync + 'static {
+    /// The machine's current `ws://…:6768/machine/1` addresses, computed as
+    /// for a pairing code; empty while nothing listens.
+    fn direct_endpoints(&self) -> Vec<String>;
+    /// `machine.relayAccess` for the connection of `device_id` (a paired
+    /// computer's id on the direct route, its relay device id on the
+    /// relay): `{ relay: {…} }` with a fresh single-use invite, or
+    /// `{ relay: null }` with no relay registration.
+    fn relay_access(&self, device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>>;
 }
 
 /// `macos` or `linux`, as Rust names them.

@@ -398,6 +398,8 @@ pub struct WorkspaceRpc {
     /// Raised when a machine's projects or settings may have changed; a
     /// change goes out as `machine.changed` to `machine/1` connections.
     machine_changed: Arc<tokio::sync::Notify>,
+    /// The machine host's direct endpoints and relay access (`machine/2`).
+    machine_access: OnceLock<Arc<dyn machine::MachineAccess>>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
@@ -444,14 +446,16 @@ impl WorkspaceRpc {
             let weak = Arc::downgrade(&rpc);
             let notify = rpc.machine_changed.clone();
             runtime.spawn(async move {
-                let mut last = tokio::task::spawn_blocking(machine::fingerprint).await.ok().flatten();
+                // The name, the project set and (`machine/2`) the direct addresses.
+                let look = |rpc: Option<Arc<WorkspaceRpc>>| move || machine::fingerprint().map(|known| format!("{known}\u{0}{:?}", rpc.map(|rpc| rpc.direct_endpoints()).unwrap_or_default()));
+                let mut last = tokio::task::spawn_blocking(look(weak.upgrade())).await.ok().flatten();
                 loop {
                     tokio::select! {
                         _ = notify.notified() => {}
                         _ = tokio::time::sleep(MACHINE_CHANGE_POLL) => {}
                     }
                     let Some(rpc) = weak.upgrade() else { return };
-                    let Ok(Some(now)) = tokio::task::spawn_blocking(machine::fingerprint).await else { continue };
+                    let Ok(Some(now)) = tokio::task::spawn_blocking(look(Some(rpc.clone()))).await else { continue };
                     if last.as_ref() != Some(&now) {
                         last = Some(now);
                         let _ = tokio::task::spawn_blocking(move || rpc.broadcast_machine()).await;
@@ -486,6 +490,7 @@ impl WorkspaceRpc {
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             machine_changed: Arc::new(tokio::sync::Notify::new()),
+            machine_access: OnceLock::new(),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -718,7 +723,27 @@ impl WorkspaceRpc {
                 return;
             }
         };
-        self.notify_granted(machine::MACHINE, "machine.changed", json!({ "machine": machine::describe(identity), "projects": projects["projects"] }));
+        self.notify_granted(machine::MACHINE, "machine.changed", json!({ "machine": self.describe_machine(identity), "projects": projects["projects"] }));
+    }
+
+    /// The machine host's direct endpoints and relay access (`machine/2`,
+    /// PRO-345). Set once, by the runtime that hosts the machine.
+    pub fn set_machine_access(&self, access: Arc<dyn machine::MachineAccess>) {
+        if self.machine_access.set(access).is_err() {
+            log::warn!("machine access was already set");
+        }
+        self.machine_changed.notify_one();
+    }
+
+    fn direct_endpoints(&self) -> Vec<String> {
+        self.machine_access.get().map(|access| access.direct_endpoints()).unwrap_or_default()
+    }
+
+    /// `machine.describe`, with `directEndpoints` (`machine/2`).
+    fn describe_machine(&self, identity: &machine::Identity) -> Value {
+        let mut described = machine::describe(identity);
+        described["directEndpoints"] = json!(self.direct_endpoints());
+        described
     }
 
     pub fn generation(&self) -> u64 {
@@ -1237,6 +1262,16 @@ impl WorkspaceRpc {
         if method.starts_with("ports.") {
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
         }
+        // A round trip to the relay, for a paired computer only (`machine/2`).
+        if method == "machine.relayAccess" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.relay_access(&peer.device_id).await,
+                None => Ok(json!({ "relay": null })),
+            };
+        }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
@@ -1292,7 +1327,7 @@ impl WorkspaceRpc {
                 Scope::Machine { .. } => crate::cloud_resources::observe(&crate::store::root().map_err(RpcError::internal)?),
             }),
             "machine.describe" => match &self.scope {
-                Scope::Machine { identity, .. } => Ok(machine::describe(identity)),
+                Scope::Machine { identity, .. } => Ok(self.describe_machine(identity)),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "machine.projects" => match &self.scope {

@@ -85,6 +85,12 @@ enum Rpc {
     Ready(Arc<WorkspaceRpc>),
 }
 
+impl Rpc {
+    fn is_build(&self) -> bool {
+        matches!(self, Rpc::Build(_))
+    }
+}
+
 /// The window's phone route.
 struct PhoneRoute {
     attachment: Arc<crate::local_runtime::Attachment>,
@@ -130,6 +136,9 @@ pub struct MachineHost {
     wake: Notify,
     settings_changed: Notify,
     next_connection: std::sync::atomic::AtomicU64,
+    /// The machine's relay registration, when it serves with `--relay-link`
+    /// (PRO-345): paired computers get relay access through it.
+    relay: Mutex<Option<std::sync::Weak<crate::remote::host::RelayHost>>>,
 }
 
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();
@@ -175,6 +184,7 @@ impl MachineHost {
             wake: Notify::new(),
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
+            relay: Mutex::new(None),
         });
         let weak = Arc::downgrade(&host);
         sink.listen(
@@ -198,9 +208,27 @@ impl MachineHost {
     }
 
     /// The relay host's RPC, which the direct listener serves too.
-    pub fn use_rpc(&self, rpc: Arc<WorkspaceRpc>) {
+    pub fn use_rpc(self: &Arc<Self>, rpc: Arc<WorkspaceRpc>) {
+        rpc.set_machine_access(Arc::new(HostAccess::new(self)));
         *self.rpc.lock().unwrap() = Rpc::Ready(rpc);
         self.wake.notify_one();
+    }
+
+    /// The relay host this machine registers through (`--relay-link`):
+    /// paired computers get relay access through it, and a revoked one's
+    /// relay credential ends with it.
+    pub fn use_relay(&self, relay: &Arc<crate::remote::host::RelayHost>) {
+        *self.relay.lock().unwrap() = Some(Arc::downgrade(relay));
+    }
+
+    fn relay(&self) -> Option<Arc<crate::remote::host::RelayHost>> {
+        self.relay.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
+    }
+
+    /// The direct listener's addresses (`machine/2` `directEndpoints`).
+    fn direct_endpoints(&self) -> Vec<String> {
+        let port = self.state.lock().unwrap().listening.as_ref().map(|listening| listening.address.port());
+        port.map(|port| crate::direct_endpoints::machine_endpoints(port, wire::MACHINE_PATH)).unwrap_or_default()
     }
 
     pub fn registry(&self) -> &registry::Registry {
@@ -386,6 +414,7 @@ impl MachineHost {
     }
 
     async fn serve(self: Arc<Self>) -> Result<()> {
+        let built = self.rpc.lock().unwrap().is_build();
         if self.state.lock().unwrap().keypair.is_none() {
             let keys = self.clone();
             match tokio::task::spawn_blocking(move || keys.keys.load()).await? {
@@ -406,6 +435,9 @@ impl MachineHost {
             return Ok(());
         }
         let Some(rpc) = self.rpc()? else { return Ok(()) };
+        if built {
+            rpc.set_machine_access(Arc::new(HostAccess::new(&self)));
+        }
         let listening = direct::listen(self.clone(), rpc, self.port)?;
         log::info!("machine host: listening on {}", listening.address);
         let mut state = self.state.lock().unwrap();
@@ -532,12 +564,56 @@ impl MachineHost {
     /// Remove a paired computer, then close its connections: one admitted
     /// meanwhile finds its record gone (`admit`). Whether it was paired.
     pub fn revoke(&self, id: &str) -> Result<bool> {
+        let relay_device_id = self.registry.list()?.into_iter().find(|computer| computer.id == id).and_then(|computer| computer.relay_device_id);
         let removed = self.registry.remove(id)?;
         for (_, cancel) in self.state.lock().unwrap().connections.remove(id).unwrap_or_default() {
             let _ = cancel.send(());
         }
+        // Its relay credential ends with it (`device-revoke`).
+        if let (Some(device), Some(relay)) = (relay_device_id, self.relay()) {
+            relay.revoke_device(&device);
+        }
         self.wake.notify_one();
         Ok(removed)
+    }
+
+    /// `machine.relayAccess` for the paired computer connected as
+    /// `device_id`: its relay device id (given once) and a fresh invite.
+    async fn relay_access(self: Arc<Self>, device_id: String) -> Result<Value, crate::remote::protocol::RpcError> {
+        use crate::remote::protocol::RpcError;
+        let lookup = self.clone();
+        let wanted = device_id.clone();
+        let computer = tokio::task::spawn_blocking(move || lookup.registry.list())
+            .await
+            .map_err(RpcError::internal)?
+            .map_err(RpcError::internal)?
+            .into_iter()
+            .find(|computer| computer.id == wanted || computer.relay_device_id.as_deref() == Some(wanted.as_str()))
+            .ok_or_else(|| RpcError::forbidden("relay access is for a paired computer"))?;
+        let Some(relay) = self.relay().filter(|relay| relay.is_registered()) else { return Ok(json!({ "relay": null })) };
+        let fresh = format!("computer-{}", uuid::Uuid::new_v4().simple());
+        let give = self.clone();
+        let id = computer.id.clone();
+        let relay_device_id = tokio::task::spawn_blocking(move || give.registry.give_relay_device(&id, &fresh))
+            .await
+            .map_err(RpcError::internal)?
+            .map_err(RpcError::internal)?
+            .ok_or_else(|| RpcError::forbidden("the computer was revoked"))?;
+        let Some(invite) = relay.invite(&relay_device_id).await.map_err(|error| RpcError::new("unavailable", format!("{error:#}")))? else {
+            return Ok(json!({ "relay": null }));
+        };
+        log::info!("machine host: computer {} was given relay access", computer.id);
+        Ok(json!({ "relay": {
+            "v": 1,
+            "directorUrl": invite.director_url,
+            "cellUrl": invite.cell_url,
+            "assignmentEpoch": invite.assignment_epoch,
+            "relayHostId": invite.relay_host_id,
+            "relayDeviceId": relay_device_id,
+            "inviteToken": invite.invite_token,
+            "inviteExpiresAt": invite.invite_expires_at,
+            "e2eeFraming": 2,
+        } }))
     }
 
     /// A host that serves on `port` (0: any) with `keypair`, the switch on,
@@ -556,7 +632,9 @@ impl MachineHost {
             wake: Notify::new(),
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
+            relay: Mutex::new(None),
         });
+        rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         let listening = direct::listen(host.clone(), rpc, 0)?;
         host.state.lock().unwrap().listening = Some(listening);
         Ok(host)
@@ -834,6 +912,46 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         #[cfg(not(unix))]
         let _ = (route, forwarded);
         cfg!(unix)
+    }
+}
+
+/// `machine/2` for the RPC every route serves: the direct addresses (read at
+/// most every few seconds: on macOS each read asks `scutil`) and relay access.
+struct HostAccess {
+    host: std::sync::Weak<MachineHost>,
+    endpoints: Mutex<Option<(std::time::Instant, Vec<String>)>>,
+}
+
+impl HostAccess {
+    const FRESH_FOR: Duration = Duration::from_secs(4);
+
+    fn new(host: &Arc<MachineHost>) -> Self {
+        Self { host: Arc::downgrade(host), endpoints: Mutex::new(None) }
+    }
+}
+
+impl crate::remote::machine::MachineAccess for HostAccess {
+    fn direct_endpoints(&self) -> Vec<String> {
+        let Some(host) = self.host.upgrade() else { return Vec::new() };
+        let mut cached = self.endpoints.lock().unwrap();
+        if let Some((at, endpoints)) = cached.as_ref().filter(|(at, _)| at.elapsed() < Self::FRESH_FOR) {
+            let _ = at;
+            return endpoints.clone();
+        }
+        let endpoints = host.direct_endpoints();
+        *cached = Some((std::time::Instant::now(), endpoints.clone()));
+        endpoints
+    }
+
+    fn relay_access(&self, device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, crate::remote::protocol::RpcError>> {
+        let host = self.host.upgrade();
+        let device_id = device_id.to_string();
+        Box::pin(async move {
+            match host {
+                Some(host) => host.relay_access(device_id).await,
+                None => Ok(json!({ "relay": null })),
+            }
+        })
     }
 }
 
