@@ -451,7 +451,7 @@ pub(super) fn dispatch(
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
         }
         "steerLease.release" => parse_params(params).and_then(|params| release_input(connection, params)),
-        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager, connection.owner.build())),
+        "sessions.options" => no_params(&params).and_then(|_| new_session_options(manager, connection.owner.build(), require_driver(device).is_ok())),
         "sessions.create" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| create_session(manager, connection, params)))
         }
@@ -1181,13 +1181,14 @@ fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
 /// choose the same: projects (by an id that is not their path), the agents
 /// with their models and efforts, and the permission modes. With `runtime`
 /// starting sessions on an agent account (#980), each agent with several
-/// accounts also lists them.
-fn new_session_options(manager: &PairingManager, runtime: &crate::local_runtime::client::Build) -> Result<Value> {
+/// accounts also lists them, to a device that may start sessions (`driver`):
+/// a read-only phone cannot choose one, so it is not told their labels.
+fn new_session_options(manager: &PairingManager, runtime: &crate::local_runtime::client::Build, driver: bool) -> Result<Value> {
     let projects = phone_projects()?;
     let codex = manager.mobile.codex_models.get().map(|cache| cache.get(false)).unwrap_or_default();
     let models = crate::models::offered(crate::harness::claude::models::get(false), codex);
     let offered: HashSet<String> = projects.iter().filter_map(|project| project["id"].as_str().map(str::to_string)).collect();
-    let lists_accounts = serves_accounts(runtime);
+    let lists_accounts = driver && serves_accounts(runtime);
     let agents: Vec<Value> = crate::harness::offered().into_iter().map(|agent| {
         let models: Vec<Value> = models.iter().filter(|model| model.harness == agent.id).map(|model| json!({
             "id": model.id, "label": model.label, "isDefault": model.is_default,
