@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Platform, Pressable, RefreshControl, SectionList, Settings, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
@@ -46,6 +46,18 @@ export default function CloudScreen() {
   }, [catalog]));
 
   const { sections, empty } = useMemo(() => cloudSections(snapshot.organizations), [snapshot.organizations]);
+
+  // `-openWorkspace <id>` at launch (with `-openRoute /cloud`) opens that workspace
+  // once the list has it, as a tap on its row does: for simulator screenshots.
+  const launchWorkspace = useRef(Platform.OS === "ios" ? Settings.get("openWorkspace") : undefined);
+  useEffect(() => {
+    const id = launchWorkspace.current;
+    if (typeof id !== "string" || !snapshot.refreshedAt) return;
+    const item = sections.flatMap((section) => section.data).find((entry) => entry.workspace.id === id);
+    if (!item) return;
+    launchWorkspace.current = undefined;
+    router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
+  }, [router, sections, snapshot]);
 
   if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
 
