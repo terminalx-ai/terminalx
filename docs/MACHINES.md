@@ -879,6 +879,113 @@ merges as it does today. A person can still merge the pull request with
 
 Five wrong or expired attempts in a minute pause pairing for a minute (PRO-342).
 
+#### As built (PRO-342)
+
+The owner settled four points against the screens on 2026-11-15: both dialogs
+show the four-group pairing fingerprint; 21.05's "won't" list says what
+TerminalX offers, with a line saying a shell runs as the machine's user; the
+controls live in a small Settings → Machines section behind Experimental →
+Machines until PRO-349 builds the page; and 21.04 shows only the pairing code,
+with no tab bar until PRO-344 and PRO-353 add their tabs.
+
+**The code.** `txm2.` followed by base64url (no padding) of this JSON:
+
+```json
+{
+  "v": 2, "kind": "machine", "scope": "runtime", "identityMode": "authenticate",
+  "deviceToken": "<random_token, 32 bytes, base64url>",
+  "publicKeyB64": "<host key, standard base64>",
+  "machine": { "machineId": "cs1uhCLEB_ttCYaQ", "name": "Mac mini",
+               "os": { "family": "macos", "version": "26.1" }, "version": "0.2.33" },
+  "directEndpoints": ["ws://192.168.1.20:6768/machine/1", "ws://mac-mini.local:6768/machine/1"],
+  "expiresAt": 1763200000000
+}
+```
+
+- `machine` carries what `machine.describe` would, so the operating computer
+  names the machine before it connects. `machineId` must equal
+  `host_id(publicKeyB64)`, or the code is refused.
+- `directEndpoints` are `advertised_endpoints` (moved to a module both builds
+  compile) with the path `/machine/1`, LAN and `.local` and Tailscale alike.
+- `relay` is absent. A desktop runtime has no relay registration of its own
+  until PRO-344, and minting a relay invite for a new device needs the account.
+  The decoder accepts an optional `relay` in the `RelayOffer` shape so PRO-344
+  adds it without a new version. "Relay and nearby" is kept with the machine and
+  uses the relay once there is one.
+- The code works once and lasts five minutes (`OFFER_TTL_MS`). Creating a new
+  code ends the one before. The token is kept only as its SHA-256, in memory:
+  a restarted runtime has no code.
+
+**The operating computer's key.** One long-lived X25519 key per installation,
+in the login Keychain (service `<app identifier>.machines`, account
+`client-e2ee-key`), used as the E2EE client key on every connection to every
+machine. The fingerprint binds it, and the machine pins it.
+
+**`e2ee_auth` from an operating computer** adds `label` (This Mac's name, 1–64
+characters, control characters stripped) and `platform` (`macos` or `linux`)
+beside `deviceToken`. The machine host reads them; the phone host never sees them.
+
+**The machine host answers `e2ee_auth`** in this order:
+
+1. While pairing is paused, a token that is not a paired computer's gets
+   `pairing_refused` `pairing-paused`.
+2. A paired computer's token is admitted only with the client key it paired
+   with (`clientPublicKeyB64`). Another key is a wrong attempt, refused with
+   close `4401`. A code that was used therefore cannot be replayed from
+   another computer. The relay route checks the same.
+3. The live code's token starts an approval: the host computes the fingerprint
+   from the connection's client key, publishes `pending` in its status, and
+   waits up to two minutes (`APPROVAL_TTL_MS`). More connections with the same
+   client key share the request; one with another key gets
+   `pairing_refused` `another-computer`.
+4. An expired, used or ended code's token, or one that matches nothing, is a
+   wrong attempt: `pairing_refused` `code-inactive`.
+
+`pairing_refused` is `{"type":"pairing_refused","v":1,"reason":…}`, sealed,
+then the socket closes. **Allow** writes the paired computer (token hash,
+client key, label, platform, fingerprint, `approvedAt`), spends the code and
+sends `e2ee_authenticated`; the connection then serves workspace RPC with
+`Authority::Manage`. **Don't allow**, two minutes with no answer, or the
+asking connection closing, ends the code and sends `not-approved`.
+
+**Attempt limit.** Five wrong attempts (rules 2 and 4) within 60 s pause
+pairing until 60 s after the fifth. While paused, `createCode` is refused
+(`pairing_paused`, with `pausedUntil`) and the status says `pausedUntil`. Paired
+computers with the right key still connect.
+
+**Runtime IPC** (`machine_wire`), each with the window's `epoch` and `lease`:
+
+| Command | Params | Result |
+| --- | --- | --- |
+| `runtime.machineHost.createCode` | none | `{ code, expiresAt }`, or `pairing_paused` / `not_enabled` |
+| `runtime.machineHost.approve` | `requestId` | `{ approved: true }`, or `not_found` |
+| `runtime.machineHost.decline` | `requestId` | `{ declined: true }` |
+
+The runtime fills `machine` as `machine.describe` does and computes the
+endpoints itself, so a headless runtime (PRO-353) makes the same code. `Status` gains
+`pending` (`{ requestId, label, platform, fingerprint, transport, requestedAt,
+expiresAt }` or null), `code` (`{ expiresAt }` or null; never the code) and
+`pausedUntil` (or null).
+
+**Tauri commands.** On the machine: `machines_host_status`,
+`machines_set_allow_operating { enabled }`, `machines_create_code`,
+`machines_approve { requestId }`, `machines_decline { requestId }`,
+`machines_revoke { id }`; the window re-emits the runtime's status as
+`machines_host_changed`. On the operating computer: `machines_inspect_code
+{ code }`, `machines_pair { code, route }`, `machines_cancel_pairing`,
+`machines_list`, `machines_set_route { machineId, route }`. The shapes are in
+`src/types/machines.ts`; `machines_pair` answers `{ paired: false, reason }`
+for a refusal, with the reasons of `pairing_refused` plus `unreachable`,
+`invalid-code` and `cancelled`.
+
+**The operating computer's store.** `machines.json` in the app's data
+directory, one record per `machineId` (name, os, version, pinned
+`publicKeyB64`, `directEndpoints`, `route` of `relayAndNearby` or
+`thisNetwork`, `pairedAt`, `lastSeenAt`), and the device token in the Keychain
+(service `<app identifier>.machines`, account `machine:<machineId>`).
+`machines_pair` tries each endpoint in order, five seconds each to connect,
+and waits up to 150 s for Allow. PRO-345 connects with what it stores.
+
 ### Pairing through the account
 
 1. Both computers are signed in to the same account. The machine has the switch
