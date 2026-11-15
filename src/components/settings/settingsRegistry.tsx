@@ -452,7 +452,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "general.animations", section: "general", title: "Pixel raccoon",
-    description: "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
+    description: "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
     searchTerms: ["general", "pixel", "raccoon"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.animations" },
   }),
