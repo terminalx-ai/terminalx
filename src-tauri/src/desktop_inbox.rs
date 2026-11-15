@@ -19,7 +19,7 @@ fn cursor<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum InboxEvent {
     #[serde(rename = "workspace.share-added")]
     ShareAdded {
