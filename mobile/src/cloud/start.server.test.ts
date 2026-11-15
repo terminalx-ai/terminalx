@@ -20,6 +20,10 @@ import { CloudCatalog } from "./catalog";
  * - `workspaceId`: a workspace of that organization, suspended.
  * - `managerToken`: a mobile access token of its creator.
  * - `driverToken`: a mobile access token of an organization member it is shared with as a driver.
+ * - `mobileLifecycleLocalDocker`: true once the server's mobile lifecycle routes serve the stack's
+ *   local-docker provider. Today they take a fixed provider set (`MOBILE_SUPPORTED_PROVIDERS`: box,
+ *   hetzner, machine0) and ignore the providers header, so a manager's resume of a local-docker
+ *   workspace is `cloud_workspace_not_found` there, and the manager's Start cannot run on the stack.
  */
 interface TestServer {
   origin: string;
@@ -27,6 +31,7 @@ interface TestServer {
   workspaceId: string;
   managerToken: string;
   driverToken: string;
+  mobileLifecycleLocalDocker?: boolean;
 }
 
 const configPath = process.env.TERMINALX_CLOUD_TEST_SERVER;
@@ -69,23 +74,29 @@ async function until(what: string, ready: () => boolean | Promise<boolean>, time
 }
 
 describe.skipIf(!server)("starting a stopped workspace from the phone, against the cloud test server (#988)", () => {
-  it("refuses a driver, and starts it for a manager until it runs", async () => {
+  it("refuses a driver's Start, and leaves the workspace stopped", async () => {
     const driver = phone(server!.driverToken);
-    const manager = phone(server!.managerToken);
     try {
       await driver.refresh();
-      await manager.refresh();
-      expect(stateOf(manager)).toBe("suspended");
-      expect(manager.workspace(server!.orgId, server!.workspaceId)?.you?.role).toBe("manager");
       // A driver sees it, as a driver, and the server will not start it for them with Start: only by a message (§11.2).
+      expect(stateOf(driver)).toBe("suspended");
       expect(driver.workspace(server!.orgId, server!.workspaceId)?.you?.role).toBe("driver");
       const refused = await driver.start(server!.orgId, server!.workspaceId).then(() => null, (error: unknown) => error);
       expect(refused).toBeInstanceOf(CloudApiError);
       expect(refused).toMatchObject({ code: "cloud_workspace_manager_required", status: 403 });
       await driver.refresh();
       expect(stateOf(driver)).toBe("suspended");
+    } finally {
+      driver.close();
+    }
+  });
 
-      // The manager's Start: the server's 202 answer is taken as it is, and the list then says it runs.
+  it.skipIf(!server?.mobileLifecycleLocalDocker)("starts it for a manager, from the server's 202 answer, until it runs", async () => {
+    const manager = phone(server!.managerToken);
+    try {
+      await manager.refresh();
+      expect(stateOf(manager)).toBe("suspended");
+      expect(manager.workspace(server!.orgId, server!.workspaceId)?.you?.role).toBe("manager");
       await manager.start(server!.orgId, server!.workspaceId);
       expect(["resuming", "ready"]).toContain(stateOf(manager));
       expect(manager.workspace(server!.orgId, server!.workspaceId)?.latestOperation).toMatchObject({ action: "resume" });
@@ -94,7 +105,6 @@ describe.skipIf(!server)("starting a stopped workspace from the phone, against t
         return stateOf(manager) === "ready";
       }, 4 * 60_000);
     } finally {
-      driver.close();
       manager.close();
     }
   }, 5 * 60_000);
