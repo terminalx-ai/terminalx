@@ -498,12 +498,13 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
     Ok(())
 }
 /// An abandoned task is polled so that a VM which comes back can report what
-/// its worker did. A stopped or unreachable guest keeps it polled; a guest
-/// that answers and refuses has no record to give, so polling ends there,
-/// the outcome still unknown (#978 review).
+/// its worker did. Every failure keeps it polled, including a refusal from a
+/// guest whose owner has not restarted yet; only the guest's own task.poll
+/// verdict that it holds no record ends polling, the outcome still unknown
+/// (#978 review).
 fn settle_abandoned(task: &mut Task, error: &anyhow::Error) {
     if task.status != TaskStatus::Abandoned || task.guest_unaccounted
-        || error.downcast_ref::<super::transport::GuestRefused>().is_none()
+        || error.downcast_ref::<super::transport::GuestTaskAbsent>().is_none()
     {
         return;
     }
@@ -685,11 +686,18 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
         host::guest_rpc(env, "task.start", json!({"task":dispatch,"files":files}))?
     } else {
         ensure_running(stopped)?;
-        host::guest_rpc(
+        let polled = host::guest_rpc(
             env,
             "task.poll",
             json!({"target":task.target,"after":task.last_event_seq}),
-        )?
+        )?;
+        if polled["absent"] == true {
+            if polled["target"] != json!(task.target) {
+                bail!("Guest absence verdict names another task");
+            }
+            return Err(super::transport::GuestTaskAbsent.into());
+        }
+        polled
     };
     let guest: Task = serde_json::from_value(result).context("Guest task protocol mismatch")?;
     if guest.computer != task.computer
@@ -780,14 +788,20 @@ mod tests {
         task.dispatch_started = true;
         settle_abandoned(&mut task, &anyhow::anyhow!("Guest VM is stopped or unavailable"));
         assert!(task.polled(), "a stopped VM may still resume the worker");
-        settle_abandoned(&mut task, &super::super::transport::GuestRefused("Unknown task".into()).into());
+        // A refusal is not a verdict: an owner not yet listening, a missing
+        // token, a control timeout or a sealed-launcher check all answer so.
+        for refused in ["app_unavailable: No running app is listening", "timeout: The app did not answer", "Sealed runtime does not match"] {
+            settle_abandoned(&mut task, &super::super::transport::GuestRefused(refused.into()).into());
+            assert!(task.polled(), "{refused}");
+        }
+        settle_abandoned(&mut task, &anyhow::Error::from(super::super::transport::GuestTaskAbsent).context("poll"));
         assert!(!task.polled() && task.guest_unaccounted);
         assert_eq!(task.status, TaskStatus::Abandoned, "the outcome stays unknown");
         assert!(task.detail.as_deref().unwrap().contains("no record of this task"));
         let mut running = task.clone();
         running.status = TaskStatus::Running;
         running.guest_unaccounted = false;
-        settle_abandoned(&mut running, &super::super::transport::GuestRefused("x".into()).into());
+        settle_abandoned(&mut running, &super::super::transport::GuestTaskAbsent.into());
         assert!(!running.guest_unaccounted, "only abandoned tasks settle this way");
     }
 

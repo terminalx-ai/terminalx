@@ -305,10 +305,11 @@ pub struct Guest {
 /// activated owner, runs as the same account as the workers it supervises.
 /// Marked non-dumpable first thing, its /proc entries (the stdin pipe at
 /// fd/0, mem, environ) become root's and same-account ptrace is refused, so a
-/// worker cannot read the key out of it (#978 review). Residual: a worker
-/// that wins the race between exec and this call, or that can impersonate
-/// the owner's socket as the same account, still could; closing that needs
-/// the owner under its own account.
+/// worker cannot read the key out of it (#978 review). Known residual,
+/// tracked in #1000: `local-vm-rpc` forwards the key to the owner's control
+/// socket and token under the account's own runtime directory, which a
+/// worker as that account can replace; and one can race exec-to-prctl.
+/// Closing both needs the owner under its own account.
 #[cfg(target_os = "linux")]
 pub fn seal_key_holder() {
     let rpc = std::env::args().nth(1).as_deref() == Some("local-vm-rpc");
@@ -551,6 +552,14 @@ impl Guest {
                     .as_u64()
                     .context("A nonnegative sequence cursor is required")?;
                 let state = self.state.lock().unwrap();
+                // The guest's own verdict that it holds no record of this
+                // bound task, distinct from any failure to answer (#978
+                // review): only this lets the host stop polling an abandoned
+                // task. Identity and generation are checked first.
+                validate_target(&state.identity, &target)?;
+                if !state.records.contains_key(&target.task_id) {
+                    return Ok(json!({"absent":true,"target":target}));
+                }
                 let record = bound(&state, &target)?;
                 serde_json::to_value(page(&record.task, after)?).map_err(Into::into)
             }
@@ -4890,8 +4899,8 @@ mod tests {
                 "task.poll",
                 json!({"target":task.target,"after":0}),
             ))
-            .unwrap_err();
-        assert!(missing.to_string().contains("outcomeUnknown"));
+            .unwrap();
+        assert_eq!(missing, json!({"absent":true,"target":task.target}));
         assert!(!Path::new(&task.guest_cwd).exists());
     }
 

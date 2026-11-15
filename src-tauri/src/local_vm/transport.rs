@@ -148,6 +148,17 @@ impl std::fmt::Display for GuestRefused {
 }
 impl std::error::Error for GuestRefused {}
 
+/// The guest answered `task.poll` that it holds no record of the task: its
+/// explicit verdict, never inferred from a failure to answer (#978 review).
+#[derive(Debug)]
+pub struct GuestTaskAbsent;
+impl std::fmt::Display for GuestTaskAbsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "outcomeUnknown: the guest has no record of this task; no start was replayed")
+    }
+}
+impl std::error::Error for GuestTaskAbsent {}
+
 /// A guest runtime's reply, on either transport: only `ok: true` with a
 /// result acknowledges the request (review 2: the legacy route also took any
 /// reply that was not `ok: false`, the whole object standing in for a result).

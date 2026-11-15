@@ -51,9 +51,10 @@ def runtime_main(argv, stdin, execute=os.execve, drop=drop_to_account):
     # fexecve: the inode just hashed, not whatever the path names next. The
     # runtime runs as cua, like the workers; its first act is to make itself
     # non-dumpable (guest.rs seal_key_holder), which closes /proc/<pid>/fd/0,
-    # mem and ptrace to them. Known residual: a same-account worker racing
-    # that first instruction, or impersonating the owner's socket. Closing it
-    # needs the key-verifying owner under its own account.
+    # mem and ptrace to them. Known residual (#1000): the key is forwarded to
+    # the owner's socket under cua's own runtime directory, which a worker as
+    # cua can replace, and a worker can race that first instruction. Closing
+    # it needs the key-verifying owner under its own account.
     execute(fd, [str(SEALED), "local-vm-rpc", "-"], env)
     raise ValueError("Sealed runtime did not execute")
 
