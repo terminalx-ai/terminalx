@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   storage: new Map<string, string>(),
   app: {} as any,
   push: vi.fn(),
+  alert: vi.fn(),
   setParams: vi.fn(),
   sessionListeners: new Map<string, (event: unknown) => void>(),
   sessionReady: new Map<string, () => void>(),
@@ -56,10 +57,12 @@ vi.mock("react-native", () => {
     Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => mocks.keyboardDismissed() },
     PanResponder: { create: () => ({ panHandlers: {} }) },
     ActivityIndicator: () => null,
+    Alert: { alert: (...args: unknown[]) => mocks.alert(...args) },
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress}>{children}</button>,
+    // A long press is a right-click here.
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress} onContextMenu={onLongPress ? (event) => { event.preventDefault(); onLongPress(); } : undefined}>{children}</button>,
     TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur, autoFocus }: any) => <input value={value} autoFocus={autoFocus} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
@@ -1345,6 +1348,39 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     await click("Stop");
     expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
     expect(mocks.app.api.stop).not.toHaveBeenCalled();
+  });
+
+  it("keeps Send in the composer while the agent works; Stop on the line, held, stops the session after asking (22.03)", async () => {
+    takesControls();
+    mocks.alert.mockReset();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Working · 3 min");
+    expect(() => button("Interrupt")).toThrow();
+    expect(button("Send").disabled).toBe(true);
+    await act(async () => { button("Stop").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    expect(mocks.alert).toHaveBeenCalledTimes(1);
+    const [title, , choices] = mocks.alert.mock.calls[0] as [string, string, { text: string; onPress?: () => void }[]];
+    expect(title).toBe("Stop this session?");
+    expect(mocks.app.api.stop).not.toHaveBeenCalled();
+    await act(async () => { choices.find((choice) => choice.text === "Stop")!.onPress!(); });
+    expect(mocks.app.api.stop).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.app.api.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("drops the status line while not connected; the composer keeps its buttons (22.01)", async () => {
+    takesControls();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Working · 3 min");
+    mocks.app = { ...mocks.app, connectionStage: "reconnecting" };
+    await render();
+    expect(text()).not.toContain("Working");
+    expect(() => button("Stop")).toThrow();
+    expect(button("Send")).toBeDefined();
+    expect(button("Add attachment")).toBeDefined();
   });
 
   it("offers no Stop to a Mac that takes no controls from the phone", async () => {

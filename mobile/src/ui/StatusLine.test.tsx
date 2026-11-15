@@ -7,12 +7,14 @@ import { buildTranscript, messageTime } from "@terminalx/portable/transcript";
 import { elapsed, StatusLine, statusLineState, statusLineText, type StatusLineState } from "./StatusLine";
 
 vi.mock("./theme", () => ({ useTheme: () => ({ palette: {} }) }));
+vi.mock("./Spinner", () => ({ Spinner: () => <i data-spinner /> }));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityLabel }: { children?: ReactNode; accessibilityLabel?: string }) => <div aria-label={accessibilityLabel}>{children}</div>;
   return {
     View: Box, Text: Box,
     StyleSheet: { create: (styles: unknown) => styles },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    // A long press is a right-click here.
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress} onContextMenu={onLongPress ? (event) => { event.preventDefault(); onLongPress(); } : undefined}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
   };
 });
 
@@ -161,6 +163,18 @@ describe("StatusLine", () => {
     await render(<StatusLine state={{ kind: "done", at: ago(1) }} onStop={() => undefined} />);
     expect(stop()).toBeUndefined();
     expect(container.textContent).toContain("Done · ");
+  });
+
+  it("turns its ring while working, and a long press on Stop offers to stop the session (22.03)", async () => {
+    const onStop = vi.fn();
+    const onStopSession = vi.fn();
+    await render(<StatusLine state={{ kind: "working", since: NOW }} onStop={onStop} onStopSession={onStopSession} />);
+    expect(container.querySelector("[data-spinner]")).not.toBeNull();
+    await act(async () => { stop()!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    expect(onStopSession).toHaveBeenCalledTimes(1);
+    expect(onStop).not.toHaveBeenCalled();
+    await render(<StatusLine state={{ kind: "done", at: ago(1) }} />);
+    expect(container.querySelector("[data-spinner]")).toBeNull();
   });
 
   it("draws nothing without a state", async () => {

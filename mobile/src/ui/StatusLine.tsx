@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { Check, CircleAlert, CircleHelp, CircleX, LoaderCircle, ShieldAlert, Square } from "lucide-react-native";
+import { Check, CircleAlert, CircleHelp, CircleX, ShieldAlert, Square } from "lucide-react-native";
+import { Spinner } from "./Spinner";
 import type { AgentEvent, RecoveryKind } from "@terminalx/portable/events";
 import { recoveryFromEvents } from "@terminalx/portable/recovery";
 import { sessionStatus, type StatusTab } from "@terminalx/portable/sessionStatus";
@@ -137,9 +138,10 @@ function useNow(since: number | undefined): number {
 /**
  * The line itself: Working with how long and Stop, the amber ask under its
  * card, or how the turn ended. `onStop` stops the turn; without it (a Mac
- * that takes no controls from a phone) the line offers none.
+ * that takes no controls from a phone) the line offers none. A long press on
+ * Stop (`onStopSession`) offers to stop the whole session.
  */
-export function StatusLine({ state, onStop, stopping = false }: { state: StatusLineState | null; onStop?: () => void; stopping?: boolean }) {
+export function StatusLine({ state, onStop, onStopSession, stopping = false }: { state: StatusLineState | null; onStop?: () => void; onStopSession?: () => void; stopping?: boolean }) {
   const { palette } = useTheme();
   const since = state && (state.kind === "working" || state.kind === "needs_answer" || state.kind === "needs_approval") ? state.since : undefined;
   const now = useNow(since);
@@ -147,7 +149,7 @@ export function StatusLine({ state, onStop, stopping = false }: { state: StatusL
   const { label, detail } = statusLineText(state, now);
   const waiting = state.kind === "needs_answer" || state.kind === "needs_approval" || state.kind === "needs_you";
   const labelColor = waiting ? palette.warning : state.kind === "failed" ? palette.danger : palette.ink;
-  const icon = state.kind === "working" ? <LoaderCircle size={16} color={palette.info} />
+  const icon = state.kind === "working" ? <Spinner size={14} color={palette.info} />
     : state.kind === "needs_answer" ? <CircleHelp size={16} color={palette.warning} />
       : state.kind === "needs_approval" ? <ShieldAlert size={16} color={palette.warning} />
         : state.kind === "needs_you" ? <CircleAlert size={16} color={palette.warning} />
@@ -162,18 +164,18 @@ export function StatusLine({ state, onStop, stopping = false }: { state: StatusL
         <Text style={[styles.label, { color: labelColor }]}>{label}</Text>{detail ? ` · ${detail}` : ""}
       </Text>
     </View>
-    {state.kind === "working" && onStop ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" accessibilityHint="Stops the agent's turn" disabled={stopping} hitSlop={6} onPress={onStop} style={({ pressed }) => [styles.stop, { backgroundColor: palette.raised, opacity: stopping ? 0.4 : pressed ? 0.7 : 1 }]}>
-      <Square size={13} color={palette.ink} fill={palette.ink} />
+    {state.kind === "working" && onStop ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" accessibilityHint={onStopSession ? "Stops the agent's turn. Long press to stop the session" : "Stops the agent's turn"} disabled={stopping} hitSlop={6} onPress={onStop} onLongPress={onStopSession} style={({ pressed }) => [styles.stop, { backgroundColor: palette.raised, opacity: stopping ? 0.4 : pressed ? 0.7 : 1 }]}>
+      <Square size={14} color={palette.ink} strokeWidth={2} />
       <Text style={[styles.stopText, { color: palette.ink }]}>Stop</Text>
     </Pressable> : null}
   </View>;
 }
 
 const styles = StyleSheet.create({
-  line: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 32, paddingHorizontal: 8 },
+  line: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 34, paddingHorizontal: 6, paddingBottom: 2 },
   words: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8 },
   text: { flex: 1, fontSize: 14, lineHeight: 19 },
   label: { fontWeight: "600" },
-  stop: { flexDirection: "row", alignItems: "center", gap: 6, height: 32, borderRadius: 16, paddingHorizontal: 12 },
+  stop: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 34, borderRadius: 10, borderCurve: "continuous", paddingHorizontal: 12 },
   stopText: { fontSize: 14, fontWeight: "600" },
 });

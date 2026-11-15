@@ -11,7 +11,7 @@ import { Settings } from "react-native";
 import type { AgentEvent, Payload } from "@terminalx/portable/events";
 import type { SessionStatusInput } from "@terminalx/portable/sessionStatus";
 import { HostApi, type SessionSummary } from "../../src/data/host-api";
-import { writeCache } from "../../src/data/transcript-cache";
+import { cacheEpoch, writeCache, writeSaved } from "../../src/data/transcript-cache";
 import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../../src/pairing/contracts";
 import type { AccountHost } from "../../src/pairing/account-client";
 import type { StoredHost } from "../../src/store/hosts";
@@ -157,6 +157,8 @@ const CONVERSATIONS: Record<string, AgentEvent[]> = {
 
 const MODELS = [{ id: "claude-opus-5-5", label: "Opus 5.5", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }];
 const answer = <T,>(value: T) => ({ ok: true as const, value });
+/** What Studio MacBook offers; saved as from an earlier connection too, as on a phone that has used it before. */
+const FEATURES = { transcript: 1, sessionControls: 1, closeTab: 1, questions: 1, macSettings: 1, terminal: 1, sendIds: 1 };
 /** The Mac's cursor digest is a SHA-256 in hex. */
 const DIGEST = "0".repeat(64);
 const never = new Promise<never>(() => undefined);
@@ -170,7 +172,7 @@ class FixtureConnection {
     if (!this.connected()) return { ok: false, refusal: { code: "disconnected", message: "Not connected" } };
     const reply = (value: unknown) => answer(value as T);
     switch (method) {
-      case "sync.capabilities": return reply({ transcript: 1, sessionControls: 1, closeTab: 1, questions: 1, macSettings: 1, terminal: 1, sendIds: 1 });
+      case "sync.capabilities": return reply(FEATURES);
       case "sessions.summaries": return reply({ sessions: SESSIONS });
       case "session.sync": {
         // The read that "updating" keeps under way.
@@ -238,7 +240,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, []);
   // What the phone saved from earlier visits: shown at once while it connects.
   useEffect(() => {
-    void Promise.all(Object.entries(CONVERSATIONS).map(([tabId, events]) => writeCache(studio.id, "review", tabId, { events, hasEarlier: false }))).then(() => setReady(true));
+    void Promise.all([
+      ...Object.entries(CONVERSATIONS).map(([tabId, events]) => writeCache(studio.id, "review", tabId, { events, hasEarlier: false })),
+      writeSaved(studio.id, "features", FEATURES, cacheEpoch(studio.id)),
+    ]).then(() => setReady(true));
   }, []);
   const refreshSessions = useCallback(async () => { if (scenario === "slow-refresh") await pause(6_000); }, []);
   const value: Value = {

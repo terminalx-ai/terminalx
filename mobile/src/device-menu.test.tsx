@@ -62,7 +62,8 @@ const click = (label: string) => act(async () => {
   button(label)!.click();
 });
 const longPress = (text: string) => act(async () => {
-  const target = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text) && !b.getAttribute("aria-label")?.startsWith("Device options"));
+  // The row (or the Sessions header's name) that shows the text; the "…" button shows none.
+  const target = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text));
   expect(target, text).toBeDefined();
   target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
 });
