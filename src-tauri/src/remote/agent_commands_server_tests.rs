@@ -11,6 +11,7 @@ use crate::remote::agent_commands::{self, Journal};
 /// What the agent was handed, in order.
 #[derive(Default)]
 struct Seen {
+    configurations: usize,
     sends: Vec<String>,
     stops: usize,
     decisions: Vec<(String, String)>,
@@ -95,6 +96,7 @@ impl AgentOps for Ops {
         self.0.decide(request_id, serde_json::to_string(&answers).unwrap())
     }
     fn configure(&self, _: &str, _: &str, _: &Settings) -> anyhow::Result<()> {
+        self.0.seen.lock().unwrap().configurations += 1;
         Ok(())
     }
     fn note(&self, _: &str, _: &str, _: &str) {}
@@ -185,6 +187,94 @@ async fn command(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params
 fn refusal(result: Result<Value, (String, Value)>) -> (String, Value) {
     let (code, data) = result.expect_err("expected a refusal");
     (code, data["reason"].clone())
+}
+
+fn v2_policy(revision: &str, role: &str, approve: bool, source: Value) -> collab::v2::Snapshot {
+    serde_json::from_value(json!({"v": 2, "revision": revision, "members": [
+        {"userId": "admin", "role": role, "canApprove": approve, "writeSource": source}
+    ]})).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_durable_rpc_preserves_independent_manager_approval_and_manage_reports() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    m.rpc.collab.install_v2(v2_policy("1", "manager", false, json!("explicit"))).unwrap();
+    let (peer, _events) = Peer::for_user("v2-manager".into(), Authority::Manage, Some("admin".into()));
+    let hello = call(&m.rpc, &peer, "rpc.hello", json!({"protocol": PROTOCOL,
+        "want": ["session/1", "agent-commands/1", "collab/1", "collab/2", "environment/1", "pty/1"]})).await.unwrap();
+    assert_eq!(hello["authority"], "manage");
+    assert_eq!(hello["you"]["role"], "manager");
+    assert_eq!(hello["you"]["canApprove"], false);
+    assert!(!hello["capabilities"].as_array().unwrap().iter().any(|v| v == "collab/2"));
+    assert!(!crate::cloud_bootstrap::CAPABILITIES.split(',').any(|v| v == "collaboration-v2"));
+    m.agent.seen.lock().unwrap().pending.push("r1".into());
+    let decision = m.params("v2-decide-0001", json!({"requestId": "r1", "optionId": "allow"}));
+    assert!(command(&m.rpc, &peer, "session.decide", decision).await.is_err());
+    assert!(m.agent.seen.lock().unwrap().decisions.is_empty());
+    let configure = m.params("v2-configure-0001", json!({"mode": "bypassPermissions"}));
+    assert_eq!(code(call(&m.rpc, &peer, "session.configure", configure).await), "forbidden");
+    assert_eq!(code(call(&m.rpc, &peer, "pty.create", json!({"clientRequestId": "v2-shell-0001"})).await), "forbidden");
+    // Reports are a separate Manage authority, not approval or configuration.
+    assert!(call(&m.rpc, &peer, "environment.cancel", json!({"requestId": uuid::Uuid::new_v4().to_string()})).await.is_ok());
+    assert_eq!(code(call(&m.rpc, &peer, "environment.report", json!({"requestId": "bad", "command": "env"})).await), "invalid_params");
+    let send = m.params("v2-send-0001", json!({"text": "review", "mode": "bypassPermissions"}));
+    let first = command(&m.rpc, &peer, "session.send", send.clone()).await.unwrap();
+    assert_eq!(first["settingsIgnored"], true);
+    assert_eq!(command(&m.rpc, &peer, "session.send", send).await.unwrap(), first);
+    assert_eq!(m.agent.sends(), vec!["review"]);
+    assert_eq!(m.agent.seen.lock().unwrap().configurations, 0);
+    assert!(command(&m.rpc, &peer, "session.send", m.params("v2-send-0001", json!({"text": "changed"}))).await.is_err());
+    // Explicit and implicit approval remain distinct from the false grant.
+    for (revision, source) in [("2", "explicit"), ("3", "implicit")] {
+        m.rpc.collab.install_v2(v2_policy(revision, "manager", true, json!(source))).unwrap();
+        let request = format!("request-{revision}");
+        m.agent.seen.lock().unwrap().pending.push(request.clone());
+        let params = m.params(&format!("v2-decision-000{revision}"), json!({"requestId": request, "optionId": "allow"}));
+        command(&m.rpc, &peer, "session.decide", params).await.unwrap();
+        call(&m.rpc, &peer, "session.configure", m.params(&format!("v2-configure-000{revision}"), json!({"mode": "plan"}))).await.unwrap();
+    }
+    assert_eq!(m.agent.seen.lock().unwrap().decisions.len(), 2);
+    assert_eq!(m.agent.seen.lock().unwrap().configurations, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_durable_command_rejects_stale_stamp_before_journal_mark_or_agent_input() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    m.rpc.collab.install_v2(v2_policy("10", "driver", false, json!("explicit"))).unwrap();
+    let (peer, _events) = Peer::for_user("v2-driver".into(), Authority::Participate, Some("admin".into()));
+    call(&m.rpc, &peer, "rpc.hello", json!({"protocol": PROTOCOL, "want": ["session/1", "agent-commands/1"]})).await.unwrap();
+    let stamp = m.rpc.collab.runtime_policy.stamp("admin");
+    m.rpc.collab.install_v2(v2_policy("11", "driver", false, json!("everyone"))).unwrap();
+    let params = m.params("v2-stale-0001", json!({"text": "stale explicit input"}));
+    assert!(m.rpc.agent_command(&peer, "session.send", params.clone(), stamp).is_err());
+    let key = agent_commands::Key { device: peer.device_id.clone(), id: "v2-stale-0001".into() };
+    assert!(matches!(m.rpc.agent_commands.get().unwrap().known(&key, crate::cloud_agents::now_ms()), agent_commands::Known::New));
+    assert!(m.agent.sends().is_empty());
+    // The production ManagerOps equivalent has no raw witness yet; no
+    // inference from saved default mode or zero pending approvals is allowed.
+    assert!(command(&m.rpc, &peer, "session.send", params).await.is_err());
+    assert!(m.agent.sends().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phase2_collaboration_v2_production_refresh_and_capabilities_stay_v1() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    m.rpc.set_collaboration(members(json!([{"userId": "admin", "role": "manager", "canApprove": false}])));
+    let (peer, _events) = Peer::for_user("v1-admin".into(), Authority::Manage, Some("admin".into()));
+    let hello = call(&m.rpc, &peer, "rpc.hello", json!({"protocol": PROTOCOL, "want": ["collab/1", "collab/2", "session/1", "agent-commands/1"]})).await.unwrap();
+    assert_eq!(hello["you"]["canApprove"], true, "v1 managers still always approve");
+    assert!(!hello["capabilities"].as_array().unwrap().iter().any(|v| v == "collab/2"));
+    assert!(!crate::cloud_bootstrap::CAPABILITIES.contains("collaboration-v2"));
+    // An unsolicited v2 response never enables the internal fixture path.
+    m.rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 2, "revision": "1", "members": [
+        {"userId": "admin", "role": "manager", "canApprove": false, "writeSource": "explicit"}
+    ]})).unwrap()));
+    assert_eq!(m.rpc.access(&peer), Access::NONE);
+    assert!(command(&m.rpc, &peer, "session.send", m.params("v2-unsolicited-0001", json!({"text": "no"}))).await.is_err());
+    assert!(m.agent.sends().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

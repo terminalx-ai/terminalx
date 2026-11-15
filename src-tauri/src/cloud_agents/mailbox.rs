@@ -114,6 +114,9 @@ fn settle(agents: &CloudAgents, lease: &Lease, receipt: &Receipt) -> Result<(), 
 
 /// The receipt for a lease: stored, or made by applying it now.
 pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
+    // Capture before decrypt/judge/apply: a concurrent policy replacement
+    // cannot silently restamp this invocation with new provenance.
+    let policy_stamp = agents.collab().and_then(|collab| collab.runtime_policy.stamp(&lease.actor.user_id));
     let id = lease.client_command_id.as_str();
     match agents.receipts.known(id) {
         Known::Receipt(receipt) => return receipt,
@@ -123,6 +126,9 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
             return finish(agents, lease, "outcome-unknown", Some("runtime-interrupted"), json!({}));
         }
         Known::Interrupted | Known::New => {}
+    }
+    if agents.collab().is_some_and(|collab| collab.runtime_policy.is_v2()) && lease.runtime_generation != agents.generation() {
+        return finish(agents, lease, "rejected", Some("collaboration-generation-changed"), json!({}));
     }
     let plaintext = match decrypt(agents, lease) {
         Ok(plaintext) => plaintext,
@@ -137,6 +143,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         actor_id: &lease.actor.user_id,
         leases: true,
         access: agents.actor_access(&lease.actor),
+        policy_stamp,
         plaintext: &plaintext,
     };
     match decide(agents, &command, || agents.receipts.applying(id)) {
@@ -163,6 +170,7 @@ pub struct Command<'a> {
     pub leases: bool,
     /// What they may do now.
     pub access: crate::remote::collab::Access,
+    pub(crate) policy_stamp: Option<crate::remote::collab::v2::Stamp>,
     /// The command's body: `text`, `images` and settings for a send or
     /// steer, `requestId` with `optionId` or `answers` for a decision.
     pub plaintext: &'a Value,
@@ -185,6 +193,9 @@ pub enum Decided {
 /// durable `applying` record and runs only once every check has passed,
 /// right before the agent is touched.
 pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow::Result<()>) -> Decided {
+    // Same lock as policy/member replacement. Keep it through the durable
+    // applying mark and synchronous ops, including settings and queue push.
+    let _admission = agents.collab().map(|collab| collab.enter_admission());
     let decided = judge(agents, command, mark);
     // A message that was refused is never typed: the images its sender
     // uploaded for it are done with (PRO-22). Only their own: naming someone
@@ -206,7 +217,24 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     let Some(tab) = agents.tab(command.tab_id) else {
         return refused("tab-unknown", json!({}));
     };
-    let access = command.access;
+    let access = match agents.collab() {
+        Some(collab) if collab.known() => command.access.meet(collab.access_of(Some(command.actor_id))),
+        _ => command.access,
+    };
+    if let Some(collab) = agents.collab() {
+        let action = if command.kind == "permission-decision" { crate::remote::collab::v2::Action::Approve } else { crate::remote::collab::v2::Action::Drive };
+        let witness = agents.ops.collaboration_v2_witness(&tab.session_id, command.tab_id);
+        if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), action, witness.as_ref()).is_err() {
+            return refused("collaboration-policy-changed", json!({}));
+        }
+        if collab.runtime_policy.is_v2() && matches!(command.kind, "send" | "steer") && slash::is_command(command.plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+            // Everyone-provenance input cannot use commands to change stance,
+            // even when explicit approval independently remains authorized.
+            if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), crate::remote::collab::v2::Action::Configure, None).is_err() {
+                return refused("approval-required", json!({}));
+            }
+        }
+    }
     let allowed = match command.kind {
         "permission-decision" => access.can_approve,
         _ => access.can_drive(),
@@ -254,7 +282,8 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
-    let may_configure = access.can_configure();
+    let may_configure = access.can_configure() && agents.collab().is_none_or(|collab|
+        collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), crate::remote::collab::v2::Action::Configure, None).is_ok());
     let (outcome, category, extra) = apply(agents, command, &tab.session_id, may_configure);
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), true, "applied", "send" | "steer") = (agents.collab(), command.leases, outcome, command.kind) {
@@ -341,6 +370,7 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
             let queue = command.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
             if queue {
                 let follow_up = FollowUp {
+                    policy_stamp: command.policy_stamp.clone(),
                     client_command_id: command.client_command_id.to_string(),
                     session_id: session_id.to_string(),
                     text,

@@ -21,6 +21,11 @@ use serde_json::Value;
 
 use super::protocol::Authority;
 
+// Internal foundation only. Bootstrap and RPC capabilities remain v1 until
+// every final writer and native mutation path carries the v2 admission permit.
+#[path = "collab_v2.rs"]
+pub(crate) mod v2;
+
 /// A driver lease lapses this long after its holder last sent, unless the
 /// tab's turn is still running.
 pub const LEASE_IDLE_MS: u64 = 2 * 60 * 1000;
@@ -60,9 +65,10 @@ impl Access {
 
     /// May decide what the agent does on its own: its model, effort and
     /// permission mode, the slash commands that change them, and a shell
-    /// (PRO-88). A manager, or a driver who may approve permissions.
+    /// (PRO-88). Role and approval are independent. The v1 parser still
+    /// grants managers approval, preserving that version's semantics.
     pub fn can_configure(self) -> bool {
-        self.role == Role::Manager || (self.can_drive() && self.can_approve)
+        self.can_drive() && self.can_approve
     }
 
     /// The narrower of two views of the same person.
@@ -157,6 +163,10 @@ pub struct Diff {
 }
 
 pub struct Collaboration {
+    /// Serializes policy replacement with mailbox judgment and application.
+    /// Final asynchronous writers still need their own permit (v2 withheld).
+    admission: Mutex<()>,
+    pub(crate) runtime_policy: v2::RuntimePolicy,
     /// `None` until the API has listed the members (an older API never
     /// does): participate attachments then have no access, as before PRO-30.
     members: Mutex<Option<HashMap<String, Access>>>,
@@ -176,6 +186,8 @@ impl Default for Collaboration {
 impl Collaboration {
     pub fn new() -> Self {
         Self {
+            admission: Mutex::new(()),
+            runtime_policy: v2::RuntimePolicy::default(),
             members: Mutex::new(None),
             leases: Mutex::new(HashMap::new()),
             released: Mutex::new(HashMap::new()),
@@ -205,6 +217,31 @@ impl Collaboration {
 
     /// Replace the member list; returns who lost or narrowed access.
     pub fn set_members(&self, next: HashMap<String, Access>) -> Diff {
+        let _admission = self.admission.lock().unwrap();
+        // A v1/unknown response cannot downgrade a previously installed v2
+        // policy and remove its provenance restrictions.
+        let next = if self.runtime_policy.invalidate_for_legacy() { HashMap::new() } else { next };
+        self.replace_members(next)
+    }
+
+    pub(crate) fn enter_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.admission.lock().unwrap()
+    }
+
+    /// Deliberately has no production bootstrap caller or activation setting.
+    #[allow(dead_code)]
+    pub(crate) fn install_v2(&self, snapshot: v2::Snapshot) -> Result<Diff> {
+        let _admission = self.enter_admission();
+        match self.runtime_policy.install(snapshot) {
+            Ok(map) => Ok(self.replace_members(map)),
+            Err(error) => {
+                self.replace_members(HashMap::new());
+                Err(error)
+            }
+        }
+    }
+
+    fn replace_members(&self, next: HashMap<String, Access>) -> Diff {
         let mut members = self.members.lock().unwrap();
         let previous = members.clone().unwrap_or_default();
         let mut diff = Diff::default();
@@ -253,10 +290,7 @@ impl Collaboration {
     /// `manage` attachment without a person has no access (review N1).
     pub fn access_for(&self, authority: Authority, user_id: Option<&str>) -> Access {
         match (authority, user_id) {
-            (Authority::Manage, Some(user)) if self.known() => match self.access_of(Some(user)) {
-                access if access.role == Role::Manager => Access::MANAGER,
-                access => access,
-            },
+            (Authority::Manage, Some(user)) if self.known() => self.access_of(Some(user)),
             // A manage attachment saved before attachments named their person
             // (an older device record): once the API has listed who has
             // access, nobody can be matched to it, so it gets nothing.

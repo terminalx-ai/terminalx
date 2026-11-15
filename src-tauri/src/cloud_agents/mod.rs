@@ -130,6 +130,12 @@ pub enum DecisionError {
 /// What the mailbox and checkpoints need from the agents. The real one is
 /// [`ManagerOps`]; tests stand in for it.
 pub trait AgentOps: Send + Sync {
+    /// A raw current engine witness, not a launch setting or approval count.
+    /// Until ManagerOps and its final writers carry this atomically, Everyone
+    /// driving fails closed and collaboration-v2 must remain unadvertised.
+    fn collaboration_v2_witness(&self, _session_id: &str, _tab_id: &str) -> Option<collab::v2::TabWitness> {
+        None
+    }
     /// Agent tabs of this workspace, without follow-ups.
     fn tabs(&self) -> Vec<AgentTabInfo>;
     fn busy(&self, session_id: &str, tab_id: &str) -> bool;
@@ -505,6 +511,11 @@ impl CloudAgents {
     /// Use the workspace RPC's roles and leases, and keep notes next to the
     /// rest of the agent state.
     pub fn share_collaboration(&self, collab: Arc<Collaboration>) {
+        let _admission = collab.enter_admission();
+        if let Err(error) = collab.runtime_policy.bind(&self.dir, self.generation()) {
+            log::error!("bind collaboration policy store: {error:#}");
+        }
+        drop(_admission);
         collab.store_notes_in(&self.dir.join("notes"));
         let _ = self.collab.set(collab);
     }
@@ -593,6 +604,12 @@ impl CloudAgents {
     /// shell command and they no longer approve. One queued before sharing
     /// existed, or before the API listed anyone, is kept.
     fn follow_up_refusal(&self, tab_id: &str, follow_up: &FollowUp) -> Option<&'static str> {
+        if let Some(collab) = self.collab.get() {
+            let witness = self.ops.collaboration_v2_witness(&follow_up.session_id, tab_id);
+            if collab.runtime_policy.admit(&follow_up.actor_id, follow_up.policy_stamp.as_ref(), collab::v2::Action::Drive, witness.as_ref()).is_err() {
+                return Some("Dropped a queued message whose collaboration policy or tab safety changed.");
+            }
+        }
         let access = match self.collab.get() {
             Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)),
             _ => return None,
@@ -663,6 +680,10 @@ impl CloudAgents {
     }
 
     pub fn set_generation(&self, generation: u64) {
+        if let Some(collab) = self.collab.get() {
+            let _admission = collab.enter_admission();
+            collab.runtime_policy.set_generation(generation);
+        }
         self.generation.store(generation, Ordering::SeqCst);
     }
 
@@ -775,6 +796,7 @@ impl CloudAgents {
         let tabs: Vec<String> = std::mem::take(&mut *self.dispatch.lock().unwrap());
         let mut sent = 0;
         for tab_id in tabs {
+            let _admission = self.collab.get().map(|collab| collab.enter_admission());
             let Some(next) = self.follow_ups.list(&tab_id).into_iter().next() else { continue };
             if self.ops.busy(&next.session_id, &tab_id) {
                 continue;

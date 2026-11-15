@@ -1041,6 +1041,8 @@ impl WorkspaceRpc {
 
     /// Follow the relay host when it registers a newer generation.
     pub fn set_generation(&self, generation: u64) {
+        let _admission = self.collab.enter_admission();
+        self.collab.runtime_policy.set_generation(generation);
         self.generation.store(generation, Ordering::SeqCst);
     }
 
@@ -1216,7 +1218,11 @@ impl WorkspaceRpc {
     fn may_use_ports(&self, peer: &Peer) -> bool {
         let spec = protocol::find_method("ports.open").expect("ports.open is a method");
         let authority = self.authority(peer);
-        authority >= spec.authority && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
+        let user = peer.user_id.as_deref().unwrap_or("");
+        let stamp = self.collab.runtime_policy.stamp(user);
+        authority >= spec.authority && self.access(peer).can_configure()
+            && self.collab.runtime_policy.admit(user, stamp.as_ref(), collab::v2::Action::Configure, None).is_ok()
+            && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
     }
 
     /// Answer `ports.open` in order with the connection's notifications, and
@@ -1233,6 +1239,9 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        // Native stamp, captured before handing work to the blocking pool.
+        // Never read a stamp or generation supplied in request params.
+        let policy_stamp = peer.user_id.as_deref().and_then(|user| self.collab.runtime_policy.stamp(user));
         if method == "environment.cancel" {
             return super::environment::cancel(peer.id(), &params);
         }
@@ -1262,14 +1271,23 @@ impl WorkspaceRpc {
                 let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
                 if let Some(hook) = hook { hook(); }
             }
-            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp))
         })
             .await
             .map_err(RpcError::internal)?
     }
 
-    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         self.check_named_project(method, &params)?;
+        let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
+        let _configuration_admission = configuration.then(|| self.collab.enter_admission());
+        if configuration {
+            if !self.access(peer).can_configure() {
+                return Err(RpcError::forbidden("Agent settings and terminal input need independent approval rights"));
+            }
+            self.collab.runtime_policy.admit(peer.user_id.as_deref().unwrap_or(""), policy_stamp.as_ref(), collab::v2::Action::Configure, None)
+                .map_err(|_| RpcError::forbidden("Agent settings and terminal input require current explicit configuration authority"))?;
+        }
         // The project a call names, resolved once and checked before it runs.
         let project = || self.project(peer, &params);
         match method {
@@ -1349,10 +1367,10 @@ impl WorkspaceRpc {
             },
             "session.close" => self.session_close(params),
             "session.send" if self.durable_command(peer, protocol::find_method("session.send").expect("session.send is a method")) => {
-                self.agent_command(peer, "session.send", params)
+                self.agent_command(peer, "session.send", params, policy_stamp)
             }
             "session.send" => self.session_send(peer, params),
-            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params),
+            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params, policy_stamp),
             "session.interrupt" => self.session_interrupt(peer, params),
             "session.toTerminal" => self.session_to_terminal(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
@@ -3492,6 +3510,9 @@ impl WorkspaceRpc {
     }
 
     fn session_send(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        if self.collab.runtime_policy.is_v2() {
+            return Err(RpcError::new("unavailable", "This send path has no collaboration-v2 final-writer permit"));
+        }
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let tab_id = required_str(&params, "tabId")?;
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
@@ -3585,7 +3606,7 @@ impl WorkspaceRpc {
     ///   twice. A steer goes into the running turn.
     /// - A decision names its `requestId`; one already answered, or gone,
     ///   is refused (`conflict`, `request-not-pending`).
-    fn agent_command(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn agent_command(&self, peer: &Peer, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         use super::agent_commands::{self as receipts, Known};
         let journal = self.agent_commands.get().ok_or_else(|| RpcError::new("method_not_found", format!("{method} is not a workspace method")))?;
         let agents = self.agents()?;
@@ -3629,6 +3650,7 @@ impl WorkspaceRpc {
             // in tab leases.
             leases: peer.user_id.is_some(),
             access: self.access(peer),
+            policy_stamp,
             plaintext: &params,
         };
         match crate::cloud_agents::mailbox::decide(agents, &command, || journal.applying(&key, &digest, now)) {
