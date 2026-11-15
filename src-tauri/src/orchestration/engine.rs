@@ -1964,6 +1964,8 @@ pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By, from_lead: b
             let mut attempt = Try::planned(Step::Lead, lead.as_ref().map_or("", |lead| lead.model.as_str()), None, None);
             attempt.worker = Some(run.lead.clone());
             attempt.from_commit = Some(head.clone());
+            // Nobody widened it: on a plan a person approved, the lead that took it over itself keeps its files.
+            attempt.held_to_owns = by == By::Cli && run.approval.is_some();
             attempt.started = Some(at.clone());
             piece.tries.push(attempt);
             piece.state = PieceState::Lead;
@@ -2020,6 +2022,20 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
     if !work.uncommitted.is_empty() {
         let mut error = EngineError::new("uncommitted", format!("The lead's checkout has changes that are not committed: {}. A piece is finished as a commit.", work.uncommitted.iter().take(8).cloned().collect::<Vec<_>>().join(", ")), Some("Commit them, then finish the piece again."));
         error.details = json!({"piece": piece_id, "files": work.uncommitted});
+        return Err(error);
+    }
+    // The lead took it over itself on an approved plan: a change outside the files the piece
+    // owns would widen it, and that is the person's (`person_only`).
+    let held = piece.tries.last().is_some_and(|attempt| attempt.held_to_owns);
+    let outside: Vec<String> = if held { work.changes.iter().map(|change| change.path.clone()).filter(|path| !super::plan::owns(&piece.owns, path)).collect() } else { Vec::new() };
+    if !outside.is_empty() {
+        let owned = if piece.owns.is_empty() { "no files".to_string() } else { piece.owns.join(", ") };
+        let mut error = EngineError::new(
+            "person_only",
+            format!("A person approved the plan of run {}: piece {piece_id} owns {owned}, and the lead's commits since it took the piece over change {} outside them: {}. Only the person widens a piece, in the session's Run view.", run.id, if outside.len() == 1 { "a file" } else { "files" }, outside.iter().take(8).cloned().collect::<Vec<_>>().join(", ")),
+            Some("Take those changes out of the piece's commits and finish it again. If the piece cannot be done within its files, tell the person which files it needs and why, then end your turn."),
+        );
+        error.details = json!({"piece": piece_id, "files": outside, "owns": piece.owns});
         return Err(error);
     }
     if work.changes.is_empty() {

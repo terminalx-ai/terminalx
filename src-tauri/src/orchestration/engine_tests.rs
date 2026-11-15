@@ -3212,22 +3212,49 @@ fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_f
     let piece = run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.tries.last().map(|attempt| attempt.step)), (PieceState::Lead, Some(Step::Lead)));
     assert_eq!(run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.as_str()), Some("cli"));
-    // It is told it took the piece over, and that leaving it out stays the person's.
+    // It is told it took the piece over, that it keeps the piece's files, and that leaving it out stays the person's.
     let told = host.world().told.last().cloned().unwrap();
     assert!(told.starts_with("You took over piece cli") && told.contains("they can skip it in the Run view") && !told.contains("terminalx runs skip"), "{told}");
+    assert!(told.contains("You are held to the files it owns") && !told.contains("You are not held") && told.contains("## Files it owns\n\n- src/cli.rs"), "{told}");
+    assert!(told.contains("They are not yours to change here"), "the files its report names outside are the person's to give: {told}");
+    assert!(run.piece("cli").unwrap().tries.last().unwrap().held_to_owns);
 
     // A piece with the lead is still the person's to leave out.
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
     assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Lead, "nothing changed");
 
-    // The lead finishes it from the CLI: the plan was approved, so its commands run in the lead's checkout.
-    let changes = vec![verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
-    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes, uncommitted: Vec::new() });
+    // A finish that changed files outside what the piece owns would widen it: refused, naming them, and nothing is run.
+    let outside = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: outside, uncommitted: Vec::new() });
     host.world().lead_mode = Some("default".into());
+    let error = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone(), error.details["piece"].as_str()), ("person_only", json!(["src/store/projects.rs"]), Some("cli")));
+    assert!(error.message.contains("src/store/projects.rs") && error.message.contains("owns src/cli.rs"), "{}", error.message);
+    let piece = store::get(&id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!((piece.state, piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).is_none()), (PieceState::Lead, true), "still with the lead, nothing checked");
+
+    // Within its files it passes: the plan was approved, so its commands run in the lead's checkout.
+    let changes = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes, uncommitted: Vec::new() });
     let finished = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap();
     assert_eq!((finished.commit.as_str(), finished.checks.len()), ("9b02f3d11", 1));
     assert_eq!(finished.run.piece("cli").unwrap().state, PieceState::Done);
     assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+}
+
+#[test]
+fn a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_blocked_cli("lead");
+    // The person decided: the lead may change what the piece needs, as before.
+    let run = engine::take_over(&host, &id, "cli", engine::By::Person, false).unwrap();
+    assert!(!run.piece("cli").unwrap().tries.last().unwrap().held_to_owns);
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.contains("You are not held to the files it owns") && told.contains("## Files it owned"), "{told}");
+    let changes = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes, uncommitted: Vec::new() });
+    let finished = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap();
+    assert_eq!(finished.run.piece("cli").unwrap().state, PieceState::Done);
 }
 
 #[test]
