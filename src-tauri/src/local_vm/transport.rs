@@ -10,6 +10,9 @@ use crate::computer_targets::{Capability, Runtime, Target};
 use super::{journal::Environment, process};
 
 pub const LINUX_INSTALL: &str = "/home/cua/.terminalx-local";
+/// The root-owned, read-only runtime the host key is delivered to (#978). The
+/// copy under `LINUX_INSTALL/bin` is the guest account's and never runs.
+pub const SEALED_RUNTIME: &str = "/opt/terminalx-local/bin/terminalx-serve";
 
 pub(super) fn validate_runtime_sha(value: &str) -> Result<()> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -128,14 +131,33 @@ fn linux_rpc_at(path: &Path, env: &Environment, method: &str, mut params: Value,
     let key = super::guest_key::read(&super::host::root()?, &env.id)?;
     let input = zeroize::Zeroizing::new(serde_json::to_vec(&json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha256,"hostKey":key.as_str()}))?);
     if input.len() > super::guest::MAX_RPC_BYTES { bail!("Guest RPC exceeds the request limit"); }
-    let mut command = std::process::Command::new(path);
-    // No -e NAME, env-file, mounts, shell interpolation, root or host tokens.
-    // Docker/Podman exec -i carries only this bounded request to the helper.
-    command.args(["exec", "-i", "--user", "cua", "--workdir", "/home/cua", &id,
-        "/home/cua/.terminalx-local/bin/terminalx-serve", "local-vm-rpc", "-"]);
-    process::remove_control_credentials(&mut command);
+    // No -e NAME, env-file, mounts, shell interpolation or host tokens. The
+    // root program proves the sealed runtime matches the digest this host
+    // recorded, drops to cua and executes that inode; only then is the key on
+    // stdin read. A worker that can write the account's files cannot swap it.
+    let mut command = super::linux_install::runtime_command(path, &id, &json!({"action":"rpc","runtimeSha256":runtime_sha256}))?;
     decode(&process::run(&mut command, &input, budget)?)
 }
+
+/// The guest runtime answered and refused the request: unlike a stopped VM
+/// or a lost exec, this is the guest's own verdict (#978 review).
+#[derive(Debug)]
+pub struct GuestRefused(pub String);
+impl std::fmt::Display for GuestRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Guest request refused: {}", self.0) }
+}
+impl std::error::Error for GuestRefused {}
+
+/// The guest answered `task.poll` that it holds no record of the task: its
+/// explicit verdict, never inferred from a failure to answer (#978 review).
+#[derive(Debug)]
+pub struct GuestTaskAbsent;
+impl std::fmt::Display for GuestTaskAbsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "outcomeUnknown: the guest has no record of this task; no start was replayed")
+    }
+}
+impl std::error::Error for GuestTaskAbsent {}
 
 /// A guest runtime's reply, on either transport: only `ok: true` with a
 /// result acknowledges the request (review 2: the legacy route also took any
@@ -144,7 +166,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Value> {
     let response: Value = serde_json::from_slice(bytes).context("Invalid guest response")?;
     if response.get("ok") == Some(&Value::Bool(false)) {
         let error = &response["error"];
-        bail!("Guest request refused: {}", error["message"].as_str().map(String::from).unwrap_or_else(|| error.to_string()));
+        return Err(GuestRefused(error["message"].as_str().map(String::from).unwrap_or_else(|| error.to_string())).into());
     }
     if response.get("ok") != Some(&Value::Bool(true)) {
         bail!("Guest response did not acknowledge the authenticated RPC");
@@ -197,7 +219,10 @@ if a[0]=='inspect':
  assert a==['inspect','--format','{{json .}}','a'*64]
  print((p/'inspection.json').read_text())
 elif a[0]=='exec':
- assert a==['exec','-i','--user','cua','--workdir','/home/cua','a'*64,'/home/cua/.terminalx-local/bin/terminalx-serve','local-vm-rpc','-']
+ assert a[:10]==['exec','-i','--user','0:0','--workdir','/','a'*64,'/usr/bin/python3','-I','-c'] and len(a)==12
+ assert 'def runtime_main' in a[10] and 'def open_sealed' in a[10]
+ import base64
+ assert json.loads(base64.b64decode(a[11]))=={'action':'rpc','runtimeSha256':'e'*64}
  req=json.load(sys.stdin)
  (p/'request.json').write_text(json.dumps(req))
  print((p/'reply.json').read_text())
@@ -213,7 +238,8 @@ else: sys.exit(72)
             assert_eq!(result, serde_json::to_value(&task).unwrap());
             let request: Value = serde_json::from_slice(&std::fs::read(dir.path().join("request.json")).unwrap()).unwrap();
             assert_eq!(request["expectedRuntimeSha256"], "e".repeat(64));
-            // The host's key goes on stdin; argv is checked exactly above.
+            // The host's key goes on stdin, to the sealed-runtime launcher;
+            // argv carries only the digest the root program verifies.
             assert_eq!(request["hostKey"], key.as_str());
             assert_eq!(request["params"]["environmentId"], env.id);
             assert_eq!(request["params"]["generation"], env.generation);

@@ -1,7 +1,7 @@
 import { CircleAlert, CircleCheck, CircleDashed, CircleX, Hourglass, LoaderCircle, ScanSearch, SkipForward, Sparkles, Square } from "@/icons";
 import { cn } from "@/lib/cn";
 import { PIECE_STATE_LABEL } from "@/lib/orchestration";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import type { PieceState } from "@/types/orchestration";
 
 /** One glyph and colour per piece state: the Run view's labels and the sidebar's worker rows (PRO-281) draw the same. */
@@ -27,11 +27,11 @@ export function PieceStateMark({ state }: { state: PieceState }) {
 
 /** The mark alone, as a worker row leads with it; the state is its name. */
 export function PieceStateIcon({ state, className }: { state: PieceState; className?: string }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const { icon: Icon, className: colour } = PIECE_STATE_STYLE[state];
   return (
     <span role="img" aria-label={PIECE_STATE_LABEL[state]} title={PIECE_STATE_LABEL[state]} data-piece-mark={state} className={cn("inline-flex shrink-0", colour, className)}>
-      <Icon aria-hidden className={cn("size-3.5", state === "running" && animations && "animate-spin")} />
+      <Icon aria-hidden className={cn("size-3.5", state === "running" && !reduced && "animate-spin")} />
     </span>
   );
 }

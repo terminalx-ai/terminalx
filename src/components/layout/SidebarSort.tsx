@@ -7,7 +7,7 @@ import { StatusGroups } from "./StatusGroups";
 import { conversationTitle } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
 import { GripVertical } from "@/icons";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { editLocalSection, useLocalSections } from "@/lib/localSections";
 import { reportError } from "@/lib/errorToasts";
@@ -99,7 +99,7 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
   const scope = useMemo<Scope>(() => ({ lists, moves }), [lists, moves]);
   const latestSections = useRef(sections);
   latestSections.current = sections;
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const [active, setActive] = useState<DragData | null>(null);
   // The source list's rows when the drag began: a drop is refused if they changed meanwhile.
   const dragRows = useRef<SidebarSortItem[]>([]);
@@ -264,7 +264,7 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
         }}>
         {main ? <MainListZone active={moves ? active : null}>{children}</MainListZone> : children}
         {!main && mainTarget && moves && <MainListTarget active={active} />}
-        {moves && createPortal(<DragOverlay dropAnimation={animations ? undefined : null}>{overlay}</DragOverlay>, document.body)}
+        {moves && createPortal(<DragOverlay dropAnimation={!reduced ? undefined : null}>{overlay}</DragOverlay>, document.body)}
       </DndContext>
     </ScopeContext.Provider>
   );
@@ -337,9 +337,9 @@ function usePointerDrag(enabled: boolean, listeners: ReturnType<typeof useSortab
 export function useSidebarSortable(id: string) {
   const list = useContext(Items);
   const item = list.byId.get(id);
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const data = useMemo<RowData | undefined>(() => item && { type: "row", kind: list.kind, list: list.list, section: list.section, name: item.name, members: item.members ?? [item.id] }, [item, list]);
-  const sortable = useSortable({ id, disabled: !item, data, transition: animations ? undefined : null });
+  const sortable = useSortable({ id, disabled: !item, data, transition: !reduced ? undefined : null });
   const ref = usePointerDrag(!!item && list.rowDrag, sortable.listeners, sortable.setNodeRef);
   const overlaid = list.rowDrag && sortable.isDragging;
   const style: CSSProperties = { transform: CSS.Translate.toString(sortable.transform), transition: sortable.transition, position: "relative", zIndex: sortable.isDragging ? 10 : undefined, opacity: overlaid ? 0.4 : undefined };
@@ -365,9 +365,9 @@ export function SidebarSectionOrder({ ids, children }: { ids: string[]; children
  * keyboard grip; `over` is true while a session from elsewhere is held over it.
  */
 export function useSidebarSectionDrag(section: { id: string; name: string }, sortable: boolean) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const scope = useContext(ScopeContext);
-  const sort = useSortable({ id: sectionSortId(section.id), disabled: !scope || !sortable, data: useMemo<SectionData>(() => ({ type: "section", id: section.id, name: section.name }), [section.id, section.name]), transition: animations ? undefined : null });
+  const sort = useSortable({ id: sectionSortId(section.id), disabled: !scope || !sortable, data: useMemo<SectionData>(() => ({ type: "section", id: section.id, name: section.name }), [section.id, section.name]), transition: !reduced ? undefined : null });
   const zone = useDroppable({ id: `zone:${section.id}`, disabled: !scope?.moves, data: useMemo<ZoneData>(() => ({ type: "zone", section: section.id, name: section.name }), [section.id, section.name]) });
   const { active, over } = useDndContext();
   const from = dataOf(active);
