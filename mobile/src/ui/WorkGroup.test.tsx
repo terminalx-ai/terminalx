@@ -14,7 +14,7 @@ vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("./TranscriptList", () => ({ useTranscriptReveal: () => vi.fn() }));
 vi.mock("./PromptImages", () => ({ PromptImages: () => null }));
 vi.mock("lucide-react-native", () => {
-  const icon = (name: string) => () => <i data-icon={name} />;
+  const icon = (name: string) => Object.assign(() => <i data-icon={name} />, { displayName: name });
   return { Check: icon("check"), CheckCheck: icon("check-check"), Terminal: icon("terminal") };
 });
 vi.mock("react-native", () => {

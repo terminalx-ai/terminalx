@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Check, CircleAlert, CircleHelp, CircleX, LoaderCircle, ShieldAlert, Square } from "lucide-react-native";
 import type { AgentEvent, RecoveryKind } from "@terminalx/portable/events";
@@ -113,18 +113,25 @@ export function statusLineText(state: StatusLineState, now: number, locales?: st
 
 /**
  * The clock while the line counts minutes from `since`; a settled line never
- * ticks. A new `since` (Working, then a question) is counted from the clock
- * read then, not the one the line before it last read.
+ * ticks. Each render reads the clock afresh (to the second), so a new `since`
+ * (Working, then a question) is counted from the clock read then, not the one
+ * the line before it last read.
  */
+let clock = 0;
+function readClock(): number {
+  // Held for a second so React reads one value per render; rounded up, never
+  // behind, so a wait begun exactly three minutes ago reads 3 min, not 2.
+  const now = Date.now();
+  if (now > clock || clock - now >= 1_000) clock = Math.ceil(now / 1_000) * 1_000;
+  return clock;
+}
 function useNow(since: number | undefined): number {
-  const [read, setRead] = useState(() => ({ since, now: Date.now() }));
-  useEffect(() => {
-    if (since === undefined) return;
-    setRead({ since, now: Date.now() });
-    const timer = setInterval(() => setRead({ since, now: Date.now() }), 15_000);
+  const subscribe = useCallback((changed: () => void) => {
+    if (since === undefined) return () => undefined;
+    const timer = setInterval(changed, 15_000);
     return () => clearInterval(timer);
   }, [since]);
-  return read.since === since ? read.now : Date.now();
+  return useSyncExternalStore(subscribe, readClock);
 }
 
 /**
