@@ -234,6 +234,9 @@ pub struct Verifier {
     /// or its block could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// A permission or question needs attention; the same session can resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
 }
@@ -1322,8 +1325,8 @@ mod tests {
         let verifiers = said.iter().enumerate().map(|(index, said)| {
             let session = Some(SessionRef { session_id: "w1".into(), tab_id: Some(format!("v{index}")) });
             match said {
-                Some((decision, evidence)) => Verifier { session, model: "sonnet".into(), effort: None, verdict: Some(*decision), evidence: if evidence.is_empty() { Vec::new() } else { vec![evidence.to_string()] }, problem: None, tokens: None },
-                None => Verifier { session, model: "sonnet".into(), effort: None, verdict: None, evidence: Vec::new(), problem: Some("The reply has no `terminalx-verdict` block.".into()), tokens: None },
+                Some((decision, evidence)) => Verifier { session, model: "sonnet".into(), effort: None, verdict: Some(*decision), evidence: if evidence.is_empty() { Vec::new() } else { vec![evidence.to_string()] }, problem: None, waiting: None, tokens: None },
+                None => Verifier { session, model: "sonnet".into(), effort: None, verdict: None, evidence: Vec::new(), problem: Some("The reply has no `terminalx-verdict` block.".into()), waiting: None, tokens: None },
             }
         }).collect();
         Review { reasons: Vec::new(), voters, threshold, verifiers, prompt_chars: 0 }

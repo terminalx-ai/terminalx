@@ -265,8 +265,7 @@ pub fn check(session_id: &str, tab_id: &str) -> Result<()> {
             bail!("TerminalX is running checks on this checkout. Wait for them to finish before starting another turn.");
         }
         if pipeline.resolution.is_none() { continue; }
-        let Some(resolver) = pipeline.resolver.as_ref() else { continue };
-        if resolver.session_id == session_id && resolver.tab_id == tab_id { continue; }
+        if pipeline.resolver.as_ref().is_some_and(|resolver| resolver.session_id == session_id && resolver.tab_id == tab_id) { continue; }
         let owner = index::get(&pipeline.author.session_id)?;
         if same_checkout(&owner.cwd, &session.cwd) {
             bail!("This checkout is reserved for conflict resolution. Wait for the resolver to finish before starting another turn.");
@@ -308,6 +307,11 @@ mod tests {
         assert!(check("other", "t1").is_err());
         assert!(check("author", "resolver").is_ok());
         assert!(check("elsewhere", "t1").is_ok());
+        // Missing identity is not evidence that the checkout owner exited.
+        pipeline.resolver = None;
+        super::super::store::commit(&mut pipeline).unwrap();
+        assert!(check("author", "t1").is_err());
+        assert!(check("author", "resolver").is_err());
         pipeline.resolution = None;
         pipeline.checking_locally = true;
         super::super::store::commit(&mut pipeline).unwrap();

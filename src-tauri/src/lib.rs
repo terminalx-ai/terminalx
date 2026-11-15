@@ -201,6 +201,7 @@ mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
 mod orchestration;
+mod orchestration_archive;
 mod worker_report;
 mod workspaces;
 mod workspace_restore;

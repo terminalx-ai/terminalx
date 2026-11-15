@@ -44,6 +44,15 @@ use crate::worker_report::Status;
 /// One start at a time: two callers must not both find the same piece ready.
 static STARTING: Mutex<()> = Mutex::new(());
 
+/// Wait for the state transition which queued retirement, then release admission
+/// before any network or scanner work. Other runs can start during retirement.
+pub(super) fn after_starting(work: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        drop(STARTING.lock().unwrap_or_else(|error| error.into_inner()));
+        work();
+    })
+}
+
 /// The session a run is created for.
 pub struct Lead {
     pub project_path: String,
@@ -104,7 +113,9 @@ pub enum VerifierNow {
     Working,
     /// Its last turn ended with this reply.
     Replied(String),
-    /// It stopped without a reply, or waits on a person: why, in a sentence.
+    /// A permission request or question needs attention; it can resume.
+    Waiting(String),
+    /// It stopped without a reply: why, in a sentence.
     Stuck(String),
     /// Its conversation was closed.
     Gone,
@@ -121,7 +132,49 @@ pub struct Cost {
     pub output_tokens: Option<u64>,
 }
 
+/// Normal stop handling must run even when an agent process has already exited:
+/// it also clears stale turn/spinner state. Terminal and by-hand tabs stay alone.
+/// The host supplies its manager's `is_running` and `stop` methods. A missing
+/// session should be handled by the adapter before calling this helper.
+pub fn stop_worker_agents(
+    tabs: &[crate::store::index::TabEntry],
+    is_running: &dyn Fn(&str) -> bool,
+    stop: &dyn Fn(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    let mut stopped = false;
+    for tab in tabs.iter().filter(|tab| !tab.is_terminal() && !tab.by_hand()) {
+        stopped |= is_running(&tab.id);
+        stop(&tab.id)?;
+    }
+    Ok(stopped)
+}
+
 pub trait Host: Send + Sync {
+    /// Production queues this snapshot; network and scanning never run under STARTING.
+    fn retire_workers_later(&self, run: &Run) {
+        super::end_workers(run, &|w| self.stop_worker_for_cleanup(w), &|w| self.preserve_worker(run, w), &|w| self.archive_worker(run, w));
+    }
+
+    /// Stop for ended-run cleanup, including stale turn state on idle tabs.
+    /// Production hosts should use `stop_worker_agents` with their session manager.
+    /// The legacy stop hook alone does not guarantee idle UI state is cleared, so
+    /// the default stops processes but refuses preservation/archival until wired.
+    fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        self.stop_worker(worker)?;
+        anyhow::bail!("Worker cleanup stop handling is not configured")
+    }
+
+    /// Preserve all recoverable worker state before hiding its conversation. Must
+    /// be idempotent; failure keeps it visible and will be retried on cleanup.
+    fn preserve_worker(&self, _run: &Run, _worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::bail!("Worker preservation is not configured")
+    }
+    /// Archive the conversation only, retaining its worktree and branch. Called
+    /// only after a successful preservation; must be safe to repeat.
+    fn archive_worker(&self, _run: &Run, _worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::bail!("Worker archival is not configured")
+    }
+
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError>;
     /// The agents a worker can be here.
     fn worker_agents(&self) -> Vec<String>;
@@ -962,7 +1015,15 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()).and_then(|check| check.review.as_mut()) else { continue };
             let Some(verifier) = review.verifiers.get_mut(index).filter(|verifier| verifier.session.as_ref() == Some(&session) && !verifier.settled()) else { continue };
             match now {
-                VerifierNow::Working => continue,
+                VerifierNow::Working => {
+                    verifier.waiting = None;
+                    continue;
+                }
+                VerifierNow::Waiting(why) => {
+                    verifier.waiting = Some(why);
+                    verifier.tokens = tokens;
+                    continue;
+                }
                 VerifierNow::Replied(reply) => match checks::verdict(&reply) {
                     Ok(verdict) => (verifier.verdict, verifier.evidence) = (Some(verdict.decision), verdict.evidence),
                     Err(problem) => verifier.problem = Some(problem),
@@ -970,6 +1031,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 VerifierNow::Stuck(why) => verifier.problem = Some(why),
                 VerifierNow::Gone => verifier.problem = Some("Its conversation was closed before it gave a verdict.".into()),
             }
+            verifier.waiting = None;
             verifier.tokens = tokens;
         }
         for piece in run.pieces.iter_mut().filter(|piece| piece.state == PieceState::Verifying) {
@@ -993,7 +1055,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     })
     .map_err(EngineError::internal)?;
     // A runtime that restarted has no watcher yet for the workers it found running.
-    if after.in_turn() > 0 || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
+    if after.in_turn() > 0 || after.pieces.iter().any(|piece| piece.state == PieceState::Verifying) || after.pause.as_ref().is_some_and(|pause| pause.resume_at.is_some()) {
         host.watch();
     }
     // Past its budget: nothing new starts from here on, but what this read found is still
@@ -1060,8 +1122,14 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
 /// Count the verdicts of a piece's review once every verifier has given
 /// one or stopped without, and end the check with what they come to.
 fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules) {
-    let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()) else { return };
+    let Some(attempt) = piece.tries.last_mut() else { return };
+    let Some(check) = attempt.verification.as_mut().filter(|check| check.review_open()) else { return };
     let Some(review) = check.review.as_ref() else { return };
+    piece.note = if review.verifiers.iter().any(|verifier| verifier.waiting.is_some()) {
+        Some("A verifier needs you: open its conversation to answer its permission request or question. Verification resumes there.".into())
+    } else {
+        attempt.report.as_ref().map(|report| report.result.clone())
+    };
     let passes = review.verifiers.iter().filter(|verifier| verifier.verdict == Some(checks::Decision::Pass)).count();
     let (outcome, said) = match checks::tally(review) {
         Tally::Open => return,
@@ -1147,7 +1215,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             .map(|number| {
                 let made = host.create_verifier(&run, piece, &worker, &chosen.model, chosen.effort.as_deref(), number);
                 let problem = made.as_ref().err().map(|error| format!("It could not be started: {error:#}"));
-                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, tokens: None }
+                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, waiting: None, tokens: None }
             })
             .collect();
         // Stored before anything is sent: a verifier is known as one, and held to reading, from its first turn.
@@ -1193,17 +1261,20 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         })
         .map_err(EngineError::internal)?;
         announce(host, &after, &last);
+        if last.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
+            host.watch();
+        }
     }
     stored(id)
 }
 
 /// Say that a stored run changed. Every change the engine stores is said
 /// through here, so a run that has just ended (done, failed or stopped) has the
-/// agents of its finished workers stopped on every path that ends it
-/// ([`super::stop_finished`]); workers still under way are left running.
+/// finished workers stopped and eligible conversations preserved and archived
+/// on every path that ends it; workers still under way are left running.
 fn changed(host: &dyn Host, run: &Run) {
     host.changed(run);
-    super::stop_finished(run, &|worker| host.stop_worker(worker));
+    host.retire_workers_later(run);
 }
 
 /// Say that a run changed, and ask for the next try of a piece that now waits for one.
@@ -2076,8 +2147,8 @@ pub struct Stop {
 }
 
 /// Stop every running worker and mark the run stopped. A plan nobody
-/// approved is discarded the same way. Workers' sessions, worktrees and
-/// branches stay as they are.
+/// approved is discarded the same way. Finished workers are preserved and
+/// archived; their worktrees and branches stay recoverable.
 pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
     let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     // Read the workers first: a piece whose worker has just reported done is done, not stopped.
@@ -2124,7 +2195,7 @@ pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
         }
     } else {
         // Stopped already: a finished worker started again since is stopped once more, as any.
-        super::stop_finished(&after, &|worker| host.stop_worker(worker));
+        host.retire_workers_later(&after);
     }
     // Its workers' slots are free for other runs, which start under the same lock.
     drop(starting);
@@ -2276,10 +2347,15 @@ pub fn watch(host: &dyn Host) -> bool {
                 None => {}
             }
         }
+        if run.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
+            if let Err(error) = refreshed(host, &run.id) {
+                log::warn!("read the verifiers of run {}: {error}", run.id);
+            }
+        }
         if let Err(error) = mark_stalls(host, &run.id, now) {
             log::warn!("check run {} for stalled workers: {error}", run.id);
         }
-        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0);
+        more |= stored(&run.id).is_ok_and(|run| run.in_turn() > 0 || run.pieces.iter().any(|piece| piece.state == PieceState::Verifying || capacity_held(piece)));
         fill |= matches!(run.state, RunState::Running | RunState::Failed) && run.pieces.iter().any(|piece| matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit)));
     }
     // What waits for a slot is looked at on every tick, not only when a turn ends: a slot can
@@ -2374,6 +2450,16 @@ pub fn worker_turn_ended(host: &dyn Host, session_id: &str) -> Option<String> {
     None
 }
 
+fn capacity_held(piece: &Piece) -> bool {
+    matches!(piece.queued_for, Some(Hold::RunLimit | Hold::AppLimit))
+}
+
+fn verifier_waiting(piece: &Piece) -> bool {
+    piece.state == PieceState::Verifying && piece.tries.last().and_then(|attempt| attempt.verification.as_ref())
+        .filter(|check| check.review_open()).and_then(|check| check.review.as_ref())
+        .is_some_and(|review| review.verifiers.iter().any(|verifier| verifier.waiting.is_some() && !verifier.settled()))
+}
+
 /// Why a lead that waits on its run is woken, or `None` while there is
 /// nothing for it to do. `began` is the run when the wait began.
 ///
@@ -2390,16 +2476,19 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     let settled = |state: PieceState| matches!(state, PieceState::Done | PieceState::Blocked | PieceState::Failed | PieceState::Stopped | PieceState::Skipped);
     let changed: Vec<&Piece> = now.pieces.iter().filter(|piece| settled(piece.state) && began.piece(&piece.id).is_none_or(|before| before.state != piece.state)).collect();
     // A piece whose next try waits is started without the lead: it is not the lead's to start.
-    let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits()).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
-    let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits());
+    let ready: Vec<String> = if matches!(now.state, RunState::Planned | RunState::Running) { now.ready().into_iter().filter(|piece| !piece.retry_waits() && !capacity_held(piece)).map(|piece| piece.id.clone()).collect() } else { Vec::new() };
+    // Capacity queues are started automatically, including when another run frees an app slot.
+    let under_way = now.pieces.iter().any(|piece| matches!(piece.state, PieceState::Running | PieceState::Verifying) || piece.retry_waits() || capacity_held(piece));
     // Every result accepted: the lead is woken to merge them.
     let to_merge = now.state == RunState::Merging;
     let ended = now.state != RunState::Running;
+    // A prompt already present when this wait began is not a new reason to wake the lead.
+    let attention: Vec<&Piece> = now.pieces.iter().filter(|piece| verifier_waiting(piece) && began.piece(&piece.id).is_none_or(|before| !verifier_waiting(before))).collect();
     let woken = match all {
         true => ended || !under_way,
         // Nothing under way and nothing to start: whatever holds the run up (a blocked piece,
         // from before this wait began) will not change by waiting.
-        false => ended || !changed.is_empty() || !ready.is_empty() || !under_way,
+        false => ended || !changed.is_empty() || !ready.is_empty() || !attention.is_empty() || !under_way,
     };
     if !woken {
         return None;
@@ -2409,6 +2498,9 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
         PieceState::Blocked if piece.gave_up() => format!("{} is blocked after {} tries.", piece.id, piece.tries.len()),
         state => format!("{} is {}.", piece.id, name(state)),
     }).collect();
+    for piece in attention {
+        why.push(format!("{} has a verifier that needs you: open its conversation to answer its permission request or question.", piece.id));
+    }
     if !ready.is_empty() {
         why.push(format!("Ready to start with `terminalx runs start`: {}.", ready.join(", ")));
     }
@@ -2442,7 +2534,7 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
 pub fn shown(run: &Run) -> Value {
     let (estimate, unestimated) = run.estimate();
     let mut value = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
-    value["ready"] = json!(if matches!(run.state, RunState::Planned | RunState::Running) { run.ready().iter().map(|piece| piece.id.clone()).collect() } else { Vec::<String>::new() });
+    value["ready"] = json!(if matches!(run.state, RunState::Planned | RunState::Running) { run.ready().into_iter().filter(|piece| !capacity_held(piece)).map(|piece| piece.id.clone()).collect() } else { Vec::<String>::new() });
     value["waiting"] = json!(waiting(run));
     value["estimate"] = json!(estimate);
     value["unestimated"] = json!(unestimated);
@@ -2483,4 +2575,28 @@ pub fn shown(run: &Run) -> Value {
 
 fn state_name(state: RunState) -> String {
     serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod retirement_admission_tests {
+    use super::*;
+
+    #[test]
+    fn retirement_waits_for_starting_but_does_not_hold_it_during_io() {
+        let _home = crate::store::temp_home();
+        let starting = STARTING.lock().unwrap();
+        let (begun, began) = std::sync::mpsc::channel();
+        let (finish, finished) = std::sync::mpsc::channel();
+        let task = after_starting(move || {
+            begun.send(()).unwrap();
+            finished.recv().unwrap(); // stand in for a blocked scan or remote
+        });
+        assert!(began.try_recv().is_err());
+        drop(starting);
+        began.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let other_run = STARTING.try_lock().expect("network retirement must not hold run admission");
+        drop(other_run);
+        finish.send(()).unwrap();
+        task.join().unwrap();
+    }
 }

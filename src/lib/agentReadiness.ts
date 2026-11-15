@@ -117,8 +117,8 @@ export function forgetReadiness() {
   known.clear();
 }
 
-/** Keep every local setup surface current; only Settings requests periodic checks. */
-function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll = false) {
+/** Keep local setup surfaces current; Settings and pending sign-ins request polling. */
+function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, poll: boolean | number = false) {
   useEffect(() => {
     if (!enabled) return;
     const recheck = () => { void refresh(); };
@@ -133,7 +133,7 @@ function useReadinessRefresh(enabled: boolean, refresh: () => Promise<unknown>, 
     }).catch(() => { /* outside a webview */ });
     const timer = poll ? setInterval(() => {
       if (!document.hidden) recheck();
-    }, 2 * 60_000) : undefined;
+    }, typeof poll === "number" ? poll : 2 * 60_000) : undefined;
     return () => {
       disposed = true;
       stopResume();
@@ -172,6 +172,43 @@ export function useAgentReadiness(harness: string | null, poll = false) {
   }, [refresh]);
   useReadinessRefresh(!!harness, refresh, poll);
   return { value: answer?.harness === harness ? answer.value : null, checking, refresh };
+}
+
+/** Observe fresh login checks only, while an interrupted turn awaits sign-in. */
+export function useSignInReadiness(harness: string | null, onReady: () => void) {
+  const ready = useRef(onReady);
+  ready.current = onReady;
+  const generation = useRef(0);
+  const pending = useRef<{ harness: string; promise: Promise<void> } | null>(null);
+  const refresh = useCallback(async () => {
+    if (!harness) { generation.current++; return; }
+    // A slow probe must finish before polling again, or every result could
+    // be discarded as stale while authentication is already complete.
+    if (pending.current?.harness === harness) return pending.current.promise;
+    const run = ++generation.current;
+    const request = { harness, promise: Promise.resolve() };
+    request.promise = (async () => {
+      try {
+        const value = await checkAgentReadiness(harness);
+        if (run === generation.current && value.state === "ready") ready.current();
+      } finally {
+        if (pending.current === request) pending.current = null;
+      }
+    })();
+    pending.current = request;
+    return request.promise;
+  }, [harness]);
+  useEffect(() => {
+    void refresh();
+    const stop = onReadiness((id, value) => {
+      if (!harness || id !== harness) return;
+      generation.current++;
+      if (value.state === "ready") ready.current();
+    });
+    return () => { generation.current++; stop(); };
+  }, [harness, refresh]);
+  useReadinessRefresh(!!harness, refresh, 5_000);
+  return refresh;
 }
 
 export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;

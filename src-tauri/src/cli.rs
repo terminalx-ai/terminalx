@@ -132,6 +132,7 @@ Usage:
   terminalx pipelines list [--project PROJECT] [--json]
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
+  terminalx pipelines resolve PIPELINE --restart [--project PROJECT] [--json]
   terminalx pipelines resolve-conflicts PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
   terminalx runs create --from PLAN.json|- [--lead SESSION] [--json]
@@ -1251,6 +1252,16 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let method = if command == "auto-merge" { "pipelines.autoMerge" } else { "pipelines.resolveConflicts" };
             Ok(Action::Rpc { command: method.into(), params: json!({"pipeline": pipeline, "project": project, "value": value, "caller": issue_caller()}), timeout: PIPELINE_TIMEOUT })
         }
+        "resolve" => {
+            let project = tokens.option("--project")?;
+            let restart = tokens.flag("--restart")?;
+            let pipeline = tokens.required_front("pipeline")?;
+            if !restart { return Err(invalid("pipelines resolve requires --restart.")); }
+            tokens.finish()?;
+            let mut params = json!({"pipeline": pipeline, "project": project, "action": "restartResolve"});
+            if let Some(caller) = calling_session() { params["caller"] = caller; }
+            Ok(Action::Rpc { command: "pipelines.act".into(), params, timeout: PIPELINE_TIMEOUT })
+        }
         "stop" | "resume" | "advance" | "review" | "merge" | "refresh" => {
             let project = tokens.option("--project")?;
             let pipeline = tokens.required_front("pipeline")?;
@@ -2187,6 +2198,16 @@ mod tests {
         assert!(parse(&args(&["pipelines", "start"])).is_err());
         assert!(parse(&args(&["pipelines", "start", "s", "--auto-merge", "--no-auto-merge"])).is_err());
         assert!(parse(&args(&["pipelines", "start", "s", "--force"])).is_err());
+    }
+
+    #[test]
+    fn resolver_restart_routes_through_authenticated_pipeline_actions() {
+        let (command, params, timeout) = rpc_of(&["pipelines", "resolve", "938", "--restart", "--project", "terminalx"]);
+        assert_eq!(command, "pipelines.act");
+        assert_eq!(params, json!({"pipeline": "938", "project": "terminalx", "action": "restartResolve"}));
+        assert_eq!(timeout, PIPELINE_TIMEOUT);
+        assert!(parse(&args(&["pipelines", "resolve", "938"])).is_err());
+        assert!(parse(&args(&["pipelines", "resolve", "--restart"])).is_err());
     }
 
     #[test]

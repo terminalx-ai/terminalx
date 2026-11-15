@@ -438,7 +438,9 @@ impl Pass<'_> {
         };
         let mut fetched = Fetched::NotYet;
         for (entry, path, branch) in &worktrees {
-            let Some(pr) = prs.get(branch).filter(|pr| pr.state == "MERGED" && pr.base != *branch) else { continue };
+            let inherited = crate::orchestration::retirement::owner(&repository.root, path)
+                .and_then(|(run, _)| crate::orchestration::retirement::merged_pr(&run).ok().flatten());
+            let Some(pr) = prs.get(branch).filter(|pr| pr.state == "MERGED" && pr.base != *branch).or(inherited.as_ref()) else { continue };
             self.workspace(repository, entry, path, branch, pr, &mut fetched);
         }
     }
@@ -630,13 +632,14 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         }
         Ok(())
     };
+    let superseded = crate::orchestration::retirement::owner(&repository.root, Path::new(&candidate.path)).is_some();
     let archive_started = Cell::new(false);
     let on_archive_started = || archive_started.set(true);
     let request = WorkspaceRemoval {
         project_path: &repository.project.path,
         path: &candidate.path,
-        sessions: if scope.delete_sessions { SessionsFate::Delete } else { SessionsFate::Keep },
-        delete_branch: true,
+        sessions: if scope.delete_sessions && !superseded { SessionsFate::Delete } else { SessionsFate::Keep },
+        delete_branch: !superseded,
         // Only what is found clean and merged goes: nothing confirms more.
         confirmation: Confirmation::Single,
         expected_sessions: Some(&expected),
@@ -666,7 +669,7 @@ fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, e
         _ => BranchFate::Kept { reason: "the local branch was kept".into() },
     };
     let ids: Vec<String> = removed.sessions.iter().map(|session| session.id.clone()).collect();
-    let (sessions_kept, sessions_deleted) = if scope.delete_sessions { (Vec::new(), ids) } else { (ids, Vec::new()) };
+    let (sessions_kept, sessions_deleted) = if scope.delete_sessions && !superseded { (Vec::new(), ids) } else { (ids, Vec::new()) };
     Ok(Record {
         id: uuid::Uuid::now_v7().to_string(),
         // Not before the sessions were filed under the project, which is

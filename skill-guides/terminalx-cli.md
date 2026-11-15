@@ -867,12 +867,28 @@ A piece with a passing `command` check, a small diff, no security area and a kin
 command that really proves it, and keep pieces small: that is what keeps checking free.
 
 A verifier is a conversation of its own in the worker's worktree that cannot edit files and
-runs only commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`); anything else, and every
-tool of a connected server, is refused. It
+runs only vetted commands that read (`git diff`, `cat`, `rg`, `grep`, `ls`, `head`, and
+`sed -n '41,60p' file`). `sed` accepts only a positive numeric line or range followed by `p`,
+with `-n`; general scripts and other options are refused. Pipelines and semicolon lists work
+only when every stage is vetted; redirects, substitutions and writes are refused with a
+reason and a supported alternative. TerminalX runs the vetted programs directly, without a
+shell, only when read-only commands are enabled and provider sandbox settings cannot narrow
+their reads. Otherwise use the provider's native `Read`, `Grep`, or `Glob` tools on permitted
+files, or the supplied diff. Those file tools retain provider permissions: allowing one
+outside-worktree Read does not authorize other calls. A hook response distinguishes a policy
+refusal (nothing ran), a provider permission denial, and an executed command's exit status
+(search status 1 can mean no matches). The app's failed-tool row may show a generic recovery
+message; the model receives the hook's reason or execution report. Every tool of a connected
+server is refused. It
 is sent the piece's goal, its done-checks, the diff and what the gates printed, and none of
 the worker's transcript or report. It runs on the routing table's `verify` row (mid, at
 medium, unless the person changed it), not on the worker's model, and ends with a verdict:
 pass, or fail with `file:line` evidence.
+
+A verifier waiting for a permission decision or question remains in verification. The run
+shows that the verifier needs you and links to its conversation. Answer there; the same
+verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
+invalid final reply still leaves the review inconclusive.
 
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not
@@ -1175,13 +1191,28 @@ A run that is `needsYou` when its last piece is accepted, with no merge to resol
 A piece whose merge failed the integration check is not checked again until its commit or
 your branch has changed; `--recheck` runs the check again all the same (a flaky test).
 
-`terminalx runs cleanup --yes --json` removes the workers' worktrees, each with its
-session, once you no longer need them. It is separate and explicit: without `--yes` it
-removes nothing and lists what would go. It refuses, per worktree and with the reason, one
-with uncommitted work, one with commits that are not in your branch (a try that fell
-short, a worker that went on after its result was accepted), one whose piece is still
-being worked on or checked, and one with an agent running in it. Branches are always kept.
-It returns `removed` and `refused`.
+When a run ends, TerminalX queues retirement outside run-start admission. It preserves
+eligible workers before stopping idle agents through normal stop handling, including stale
+turn indicators. A new turn is left running. Successful runs archive superseded tries and retain the
+lead and final tries in the sidebar. Failed or stopped runs archive their workers but keep
+their worktrees for inspection. Before archiving, unpublished commits pass the secret scan
+and are pushed to `refs/heads/raccoon/archive/<run>/<piece>-tryN`. Every archived try gets its own
+archive ref, even if another remote branch already contains its commits. A failed scan or
+backup keeps the conversation visible and records the reason on the try. Automatic attempts
+back off until HEAD changes; `runs cleanup --yes` retries manually.
+
+`terminalx runs cleanup --yes --json` retries preservation and archival. For a successful
+run whose PR is verified merged, it removes clean superseded worktrees while retaining
+their archived conversations and backups. The ordinary worktree deletion and merged
+cleanup paths recognize the same exact-commit preservation proof. Dirty files, stashes,
+active agents and other normal deletion guards still prevent removal. A failed run's
+worktrees remain recoverable. Cleanup works from the saved project and run information
+even when the lead session or checkout is gone. Without `--yes`, it reports what would
+be removed without pushing, archiving or removing anything. It returns `removed` and
+`refused`, with a reason for each refusal. Recovered (unarchived) conversations are excluded
+from bulk cleanup; remove their workspace explicitly if desired. Branches are always kept by
+`runs cleanup`. Explicitly deleting the lead's worktree also cleans its merged final workers
+first; those final workers keep the local-only cleanup path without archive scripts or fetches.
 
 #### What a worker may not do
 
@@ -1452,9 +1483,19 @@ terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
+terminalx pipelines resolve <pipeline> --restart [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`resolve --restart` closes the old resolver after confirming its process exited, releases its
+checkout reservation, and starts a fresh resolver conversation with the current sign-in. It can
+restart stopped resolution even when automatic conflict resolution is off, without changing
+that switch or consuming another automatic resolution round. A restart also allows a fresh
+independent review if the previous attempt exhausted its review rounds. Inspect unfinished changes
+if restart asks for help. `advance` rechecks the remote head and latest base before deciding a
+resolver is still running; a remotely resolved branch continues through the existing review
+and merge gates.
 
 `start` (`attach` is an alias) activates Autopilot in an existing local session. A session
 selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the
