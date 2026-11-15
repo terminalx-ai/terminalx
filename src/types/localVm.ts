@@ -29,7 +29,7 @@ export interface LocalVmTaskInput {
   desktop: boolean;
 }
 
-export type LocalVmTaskStatus = "queued" | "starting" | "running" | "waiting" | "canceling" | "completed" | "failed" | "canceled" | "outcomeUnknown";
+export type LocalVmTaskStatus = "queued" | "starting" | "running" | "waiting" | "canceling" | "completed" | "failed" | "canceled" | "outcomeUnknown" | "abandoned";
 
 export interface LocalVmTaskEvent {
   seq: number;
@@ -64,6 +64,8 @@ export interface LocalVmTask {
   dispatchStarted?: boolean;
   /** Guest events past the host's per-task budget: counted, not kept. */
   eventsDropped?: number;
+  /** Events of a finished task kept in its history file, not in `events`; read with `task.history`. */
+  archivedEvents?: number;
   events: LocalVmTaskEvent[];
   artifacts: LocalVmArtifact[];
   outcome: string | null;

@@ -500,6 +500,13 @@ impl ControlService {
                 if command == "runtime.dataPrivacy.refresh" {
                     return serde_json::to_value(crate::data_privacy::owner_status(lifetime.epoch())).map_err(ControlError::internal);
                 }
+                // Operating computers (PRO-341, `machine_wire`).
+                if command.starts_with("runtime.machineHost.") {
+                    return match crate::machine_host::installed() {
+                        Some(host) => host.execute(command, params),
+                        None => Err(ControlError::new("unsupported", "This runtime does not host operating computers.", None::<String>)),
+                    };
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }

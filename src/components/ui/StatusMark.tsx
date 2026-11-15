@@ -1,5 +1,5 @@
 import { cn } from "@/lib/cn";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 
 /**
  * TerminalX's own "working" sign: three bars that rise and fall in turn,
@@ -7,7 +7,8 @@ import { usePrefs } from "@/lib/prefs";
  * a row, where a time would be, so the row's own icon keeps its place.
  */
 export function Working({ className, label = "Working" }: { className?: string; label?: string }) {
-  const { animations } = usePrefs();
+  // The bars move while the work goes on; only the system's Reduce motion stills them (not the Pixel raccoon switch).
+  const animated = !useReducedMotion();
   // Each bar breathes between a short and a tall state; the three are a third of a beat apart.
   const bars = [
     { x: 4.5, begin: "0s" },
@@ -25,11 +26,11 @@ export function Working({ className, label = "Working" }: { className?: string; 
       strokeWidth={1.75}
       strokeLinecap="round"
       data-testid="working-mark"
-      data-animated={animations || undefined}
+      data-animated={animated || undefined}
     >
       {bars.map((bar, index) => (
-        <line key={bar.x} x1={bar.x} x2={bar.x} y1={animations ? 9.5 : [8.5, 5.5, 10][index]} y2={12}>
-          {animations && <animate attributeName="y1" values="9.5;4;9.5" dur="0.8s" begin={bar.begin} repeatCount="indefinite" calcMode="spline" keySplines="0.45 0 0.55 1;0.45 0 0.55 1" />}
+        <line key={bar.x} x1={bar.x} x2={bar.x} y1={animated ? 9.5 : [8.5, 5.5, 10][index]} y2={12}>
+          {animated && <animate attributeName="y1" values="9.5;4;9.5" dur="0.8s" begin={bar.begin} repeatCount="indefinite" calcMode="spline" keySplines="0.45 0 0.55 1;0.45 0 0.55 1" />}
         </line>
       ))}
     </svg>
