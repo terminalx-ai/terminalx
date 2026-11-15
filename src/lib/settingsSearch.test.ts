@@ -136,7 +136,7 @@ describe("settings row search", () => {
     expect(behind.every((row) => settingOffered(row))).toBe(true);
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms").every((row) => settingOffered(row))).toBe(true);
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("finds Local VMs rows only while their Experimental switch is on", () => {
@@ -147,6 +147,15 @@ describe("settings row search", () => {
     expect(named()).toContain("localVms.tasks");
     localVmTasks(false);
     expect(named()).not.toContain("localVms.tasks");
+  });
+
+  it("finds Settings → Machines rows only while Experimental → Machines is on", () => {
+    const named = () => searchSettings("pairing code").map((match) => match.id);
+    expect(named()).not.toContain("machines.pairingCode");
+    noteExperimentalSettings({ nativeCodex: false, machines: true });
+    expect(named()).toContain("machines.pairingCode");
+    noteExperimentalSettings({ nativeCodex: false, machines: false });
+    expect(named()).not.toContain("machines.pairingCode");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {

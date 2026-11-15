@@ -52,8 +52,13 @@ impl HostKeypair {
     }
 
     pub fn host_id(&self) -> String {
-        general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(self.public))[..16].into()
+        host_id_of(&self.public)
     }
+}
+
+/// The relay host id (and `machineId`) of a host public key.
+pub fn host_id_of(public: &[u8; 32]) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(public))[..16].into()
 }
 
 pub fn random_token() -> String {

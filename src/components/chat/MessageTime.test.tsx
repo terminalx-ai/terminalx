@@ -62,8 +62,10 @@ it("shows one time per message across mobile markdown chunks and queued/absorbed
   const text = turn.work.find((item) => item.kind === "text")!;
   if (text.kind === "text") text.text = "First paragraph\n\nSecond paragraph";
   const rows = turnRows(turn);
-  expect(rows.filter((row) => row.ts).map((row) => row.ts)).toEqual([sent, replied, replied]);
-  expect(rows.filter((row) => row.kind === "work" && row.item.kind === "queued" && row.item.messageTs === sent)).toHaveLength(1);
+  // The prompt, the reply's first chunk, then the queued and the absorbed message, each drawn
+  // as the reader's own message (#985) with its time once.
+  expect(rows.filter((row) => row.ts).map((row) => row.ts)).toEqual([sent, replied, sent, replied]);
+  expect(rows.filter((row) => row.kind === "prompt" && row.text === "Queued").map((row) => row.ts)).toEqual([sent]);
 });
 
 it.each([undefined, "/synthetic/repo"])("omits valid-looking legacy import times after upgrade and reload (cwd %s)", (cwd) => {
