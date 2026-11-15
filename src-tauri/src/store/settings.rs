@@ -155,6 +155,13 @@ pub struct OrchestratorSettings {
     /// `orchestration::routing::EFFORTS`. A run keeps the value it was made with.
     #[serde(deserialize_with = "effort_ceiling")]
     pub effort_ceiling: String,
+    /// The run's own lead may take a blocked piece over with `terminalx runs
+    /// take-over`, also in a run a person approved: it changes where the piece
+    /// is finished, not its goal or what else the plan holds. On unless a
+    /// person turned it off; app-wide, read when the lead asks. Leaving a
+    /// piece out and widening its files stay the person's.
+    #[serde(deserialize_with = "switch_on")]
+    pub lead_takes_over: bool,
     /// The rows of the routing table a person changed (PRO-275): which tier
     /// and effort a kind of piece starts on, per agent. A row that is not
     /// here is the built-in one (`orchestration::routing::default_route`).
@@ -213,8 +220,15 @@ pub struct OrchestratorLimits {
     pub review_diff_lines: u32,
     pub tries_per_piece: u32,
     pub effort_ceiling: String,
+    /// The app's `lead_takes_over` switch.
+    pub lead_takes_over: bool,
     /// The routing table in force: every kind, every agent.
     pub routing: RoutingTable,
+}
+
+/// A switch a file holds as anything but `false` is on: only a person's Off turns one off.
+fn switch_on<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool().unwrap_or(true))
 }
 
 /// Eight: a lead can still read eight reports and hold eight briefs apart;
@@ -413,6 +427,7 @@ impl Default for OrchestratorSettings {
             review_diff_lines: DEFAULT_REVIEW_DIFF_LINES,
             tries_per_piece: DEFAULT_TRIES_PER_PIECE,
             effort_ceiling: DEFAULT_EFFORT_CEILING.into(),
+            lead_takes_over: true,
             routing: Default::default(),
             projects: Default::default(),
         }
@@ -436,6 +451,7 @@ impl OrchestratorSettings {
             review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
             tries_per_piece: project.and_then(|p| p.tries_per_piece).unwrap_or(self.tries_per_piece),
             effort_ceiling: project.and_then(|p| p.effort_ceiling.clone()).unwrap_or_else(|| self.effort_ceiling.clone()),
+            lead_takes_over: self.lead_takes_over,
             routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }
@@ -773,6 +789,21 @@ mod tests {
         }
         let future: Settings = serde_json::from_str(r#"{"quitBehavior":"new-policy"}"#).unwrap();
         assert_eq!(future.quit_behavior, Some(QuitBehavior::KeepRunning));
+    }
+
+    #[test]
+    fn the_lead_may_take_blocked_pieces_over_unless_a_person_turned_it_off() {
+        // A file from before the switch lets the lead.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(legacy.orchestrator.lead_takes_over && legacy.orchestrator.for_project("/repo").lead_takes_over);
+        // Off is a person's `false`, for the whole app; anything else in the file is on.
+        let off: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {"leadTakesOver": false}})).unwrap();
+        assert!(!off.orchestrator.for_project("/repo").lead_takes_over);
+        assert_eq!(serde_json::to_value(&off.orchestrator).unwrap()["leadTakesOver"], serde_json::json!(false));
+        for odd in [serde_json::json!(null), serde_json::json!("no"), serde_json::json!(0)] {
+            let read: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {"leadTakesOver": odd}})).unwrap();
+            assert!(read.orchestrator.lead_takes_over, "{odd}");
+        }
     }
 
     #[test]

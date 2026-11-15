@@ -381,6 +381,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.triesPerPiece" },
   }),
   defineSetting({
+    id: "orchestrator.leadTakesOver", section: "orchestrator", title: "Let the lead take over blocked pieces",
+    description: "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
+    searchTerms: ["orchestrator", "lead", "take over", "takeover", "blocked", "piece", "finish", "approval", "approved", "person", "ask"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.leadTakesOver" },
+  }),
+  defineSetting({
     id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",
     description: "Dollars spent on an API key; then the run pauses and asks you.",
     searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money", "no limit", "unlimited"], scope: "user",

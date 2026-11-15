@@ -19,6 +19,7 @@
   "orchestrator.budgetDollars": "Dollars spent on an API key; then the run pauses and asks you.",
   "orchestrator.budgetPoints": "Points of a usage window one run may use.",
   "orchestrator.effortCeiling": "Past this, the next model up is tried.",
+  "orchestrator.leadTakesOver": "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
   "orchestrator.pieceLimit": "A larger plan is refused, and the lead is told the limit.",
   "orchestrator.projects": "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
   "orchestrator.requireApproval": "Show the plan and wait for Approve. Off, the workers start at once.",

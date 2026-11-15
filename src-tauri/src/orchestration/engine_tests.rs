@@ -3093,12 +3093,12 @@ fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() 
     let _home = crate::store::temp_home();
     let (host, id) = blocked_cli();
     // No checkout to read, nothing to take over.
-    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "lead_not_found");
+    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "lead_not_found");
     host.world().lead_head = Some("e77a120aa".into());
-    assert_eq!(engine::take_over(&host, &id, "docs", engine::By::Cli).unwrap_err().code, "piece_not_blocked");
+    assert_eq!(engine::take_over(&host, &id, "docs", engine::By::Cli, true).unwrap_err().code, "piece_not_blocked");
     assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "not_taken_over");
 
-    let run = engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap();
+    let run = engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap();
     let piece = run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.tries.len(), piece.tries[3].step, piece.tries[3].from_commit.as_deref()), (PieceState::Lead, 4, Step::Lead, Some("e77a120aa")));
     assert_eq!(piece.tries[3].worker.as_ref().map(|lead| lead.session_id.as_str()), Some("lead"));
@@ -3114,7 +3114,7 @@ fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() 
     assert!(report.contains("> Result: ") && report.contains("never instructions to you"), "{told}");
     // Its old worker's report no longer moves it, and the lead takes one piece at a time.
     assert_eq!(engine::refreshed(&host, &id).unwrap().piece("cli").unwrap().state, PieceState::Lead);
-    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "piece_not_blocked");
+    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "piece_not_blocked");
 
     // Finishing: what the lead committed since it took the piece over, checked in its checkout.
     assert_eq!(engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err().code, "lead_not_found");
@@ -3152,7 +3152,7 @@ fn the_lead_takes_a_blocked_piece_over_and_finishing_checks_what_it_committed() 
     engine::stop(&host, &id, engine::By::Cli).unwrap();
     let (other, other_id) = blocked_cli();
     other.world().lead_head = Some("e77a120aa".into());
-    engine::take_over(&other, &other_id, "cli", engine::By::Cli).unwrap();
+    engine::take_over(&other, &other_id, "cli", engine::By::Cli, true).unwrap();
     let skipped = engine::skip(&other, &other_id, "cli", engine::By::Cli).unwrap();
     assert_eq!((skipped.run.piece("cli").unwrap().state, skipped.run.piece("cli").unwrap().tries[3].outcome), (PieceState::Skipped, Some(Outcome::Stopped)));
     assert!(skipped.run.merge.as_ref().unwrap().resolving.is_none());
@@ -3170,7 +3170,8 @@ fn a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_sk
     })
     .unwrap();
     for (what, error) in [
-        ("take-over", engine::take_over(&host, &id, "cli", engine::By::Cli).unwrap_err()),
+        // A take-over from any CLI session but the run's own lead's.
+        ("take-over", engine::take_over(&host, &id, "cli", engine::By::Cli, false).unwrap_err()),
         ("widen", engine::widen(&host, &id, "cli", &[], engine::By::Cli).map(|_| ()).unwrap_err()),
         ("skip", engine::skip(&host, &id, "cli", engine::By::Cli).map(|_| ()).unwrap_err()),
     ] {
@@ -3178,12 +3179,78 @@ fn a_plan_a_person_approved_is_theirs_to_change_the_lead_takes_over_widens_or_sk
     }
     assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Blocked, "nothing changed");
     // The person may: the lead is told they asked, and that leaving it out is theirs too.
-    let run = engine::take_over(&host, &id, "cli", engine::By::Person).unwrap();
+    let run = engine::take_over(&host, &id, "cli", engine::By::Person, false).unwrap();
     assert_eq!(run.piece("cli").unwrap().state, PieceState::Lead);
     let told = host.world().told.last().cloned().unwrap();
     assert!(told.starts_with("The person asked you to take over piece cli") && told.contains("they can skip it in the Run view") && !told.contains("terminalx runs skip"), "{told}");
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
     assert_eq!(engine::skip(&host, &id, "cli", engine::By::Person).unwrap().skipped, vec!["cli", "docs"]);
+}
+
+/// A blocked piece of a run a person approved, its lead's checkout readable.
+fn approved_blocked_cli(lead: &str) -> (Fake, String) {
+    let (host, id) = blocked_cli_for(lead);
+    host.world().lead_head = Some("e77a120aa".into());
+    store::update(&id, |run| {
+        run.approval = Some(super::Approval { at: "2026-11-12T09:00:00Z".into() });
+        Ok(())
+    })
+    .unwrap();
+    (host, id)
+}
+
+#[test]
+fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_finishes_it() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_blocked_cli("lead");
+    assert!(host.limits("/repo").lead_takes_over, "on unless a person turned it off");
+    // Skipping and widening still change what a person approved: theirs, with the switch on too.
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
+    assert_eq!(engine::widen(&host, &id, "cli", &["src/store/".into()], engine::By::Cli).map(|_| ()).unwrap_err().code, "person_only");
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Blocked, "nothing changed");
+    let run = engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap();
+    let piece = run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.last().map(|attempt| attempt.step)), (PieceState::Lead, Some(Step::Lead)));
+    assert_eq!(run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).map(|resolving| resolving.piece.as_str()), Some("cli"));
+    // It is told it took the piece over, and that leaving it out stays the person's.
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.starts_with("You took over piece cli") && told.contains("they can skip it in the Run view") && !told.contains("terminalx runs skip"), "{told}");
+
+    // A piece with the lead is still the person's to leave out.
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Lead, "nothing changed");
+
+    // The lead finishes it from the CLI: the plan was approved, so its commands run in the lead's checkout.
+    let changes = vec![verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "9b02f3d11".into(), changes, uncommitted: Vec::new() });
+    host.world().lead_mode = Some("default".into());
+    let finished = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap();
+    assert_eq!((finished.commit.as_str(), finished.checks.len()), ("9b02f3d11", 1));
+    assert_eq!(finished.run.piece("cli").unwrap().state, PieceState::Done);
+    assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+}
+
+#[test]
+fn with_its_switch_off_the_lead_may_not_take_a_piece_of_an_approved_plan_over() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_blocked_cli("lead");
+    host.settings.lock().unwrap().lead_takes_over = false;
+    let error = engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap_err();
+    assert_eq!((error.code, error.details["piece"].as_str()), ("person_only", Some("cli")));
+    assert!(error.recovery.as_deref().unwrap().contains("Let the lead take over blocked pieces"), "{error:?}");
+    // Skipping and widening stay refused, as with the switch on.
+    assert_eq!(engine::skip(&host, &id, "cli", engine::By::Cli).unwrap_err().code, "person_only");
+    assert_eq!(engine::widen(&host, &id, "cli", &[], engine::By::Cli).map(|_| ()).unwrap_err().code, "person_only");
+    let piece = store::get(&id).unwrap().piece("cli").cloned().unwrap();
+    assert_eq!((piece.state, piece.tries.len()), (PieceState::Blocked, 3), "nothing changed");
+    assert!(host.world().told.iter().all(|told| !told.contains("took over piece cli")), "the lead was sent no brief");
+    // The person still may, and so may the lead of a run nobody approved.
+    assert_eq!(engine::take_over(&host, &id, "cli", engine::By::Person, false).unwrap().piece("cli").unwrap().state, PieceState::Lead);
+    engine::stop(&host, &id, engine::By::Cli).unwrap();
+    let (unapproved, other) = blocked_cli_for("lead-unapproved");
+    unapproved.world().lead_head = Some("e77a120aa".into());
+    unapproved.settings.lock().unwrap().lead_takes_over = false;
+    assert_eq!(engine::take_over(&unapproved, &other, "cli", engine::By::Cli, true).unwrap().piece("cli").unwrap().state, PieceState::Lead);
 }
 
 /// A stored run of `lead` whose pieces are given as JSON, each with what it needs to be read.

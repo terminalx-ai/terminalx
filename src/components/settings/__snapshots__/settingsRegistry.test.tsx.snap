@@ -47,6 +47,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "orchestrator.pieceLimit",
   "orchestrator.workerMode",
   "orchestrator.triesPerPiece",
+  "orchestrator.leadTakesOver",
   "orchestrator.budgetDollars",
   "orchestrator.budgetPoints",
   "orchestrator.windowCeiling",

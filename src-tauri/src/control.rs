@@ -952,7 +952,10 @@ impl ControlService {
                 match command {
                     "runs.takeOver" => {
                         self.manager.accepting_work().map_err(ControlError::internal)?;
-                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
+                        // Only the run's own lead, from its own conversation, takes a piece over itself.
+                        let from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str())
+                            && run.lead.tab_id.as_deref().is_none_or(|tab| params["caller"]["tab"].as_str() == Some(tab));
+                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
                         Ok(json!({"run": engine::shown(&run), "piece": piece}))
                     }
                     "runs.finish" => {

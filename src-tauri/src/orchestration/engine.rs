@@ -1919,17 +1919,27 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
 }
 
 /// A person has the lead take a blocked piece over (18.03's Take over in
-/// lead): the lead is sent the piece's brief, what its tries came to and where
+/// lead), or the lead takes it over itself with `terminalx runs take-over`
+/// (`from_lead`: the run's own lead asked, from its own conversation): the lead is sent the piece's brief, what its tries came to and where
 /// their work is (`brief::take_over`), and finishes it in its own checkout,
 /// where it may change any file. `finish` then checks that and makes the
 /// piece done. Like resolving a conflict in the lead, it is a model call the
 /// run's budget counts: a run past it does not start it.
-pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Run, EngineError> {
+pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By, from_lead: bool) -> Result<Run, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = refreshed(host, id)?;
     let piece = blocked(&run, piece_id, "hand a piece to the lead")?;
-    // It lifts the piece out of the files a person approved for it.
-    person_only(&run, piece_id, by, "hand a piece to the lead")?;
+    // It lifts the piece out of the files a person approved for it. The run's own lead may
+    // still take it over itself (Settings → Orchestration, on unless a person turned it off):
+    // the goal and the rest of the plan stay as approved. Anyone else from the CLI may not.
+    if !(by == By::Cli && from_lead && host.limits(&run.project_path).lead_takes_over) {
+        person_only(&run, piece_id, by, "hand a piece to the lead").map_err(|mut error| {
+            if from_lead {
+                error.recovery = Some("The person turned off \"Let the lead take over blocked pieces\" in Settings → Orchestration. Tell them what the piece needs and why, then end your turn. You are told here when they decide.".into());
+            }
+            error
+        })?;
+    }
     if let Some(other) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).filter(|resolving| run.piece(&resolving.piece).is_some_and(|other| other.state == PieceState::Lead || other.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict))) {
         let mut error = EngineError::new("lead_busy", format!("The lead is already working on piece {} for you: it takes one piece at a time.", other.piece), Some("Wait until that piece is settled, or skip it."));
         error.details = json!({"piece": piece_id, "busyWith": other.piece});
