@@ -139,6 +139,10 @@ creation and reconnect admission; a late invite cannot revive a retired grant.
 On restart, saved v2 attachments without current native provenance are retired
 conservatively and must be paired again. V1 reconnect behavior is unchanged.
 
+Independent device revocations are applied and durably acknowledged even when
+the accompanying policy is malformed, unsupported or unnegotiated. Policy
+rejection still prevents new pairing; it never postpones revoking an old token.
+
 The refresh-route tests fetch through RuntimeLink, apply the same host method as
 the refresh loop, create invites through the relay control channel, persist device
 credentials, and exercise actual device admission/cancellation. They include an
