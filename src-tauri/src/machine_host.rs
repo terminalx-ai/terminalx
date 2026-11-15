@@ -70,7 +70,7 @@ pub struct Parts {
 
 enum Rpc {
     /// Built here once the key is known.
-    Build(Parts),
+    Build(Box<Parts>),
     /// The relay host builds it (`remote::host::serve_machine`) and hands it
     /// over: every route serves the same one.
     Awaiting,
@@ -156,7 +156,7 @@ impl MachineHost {
             keys: key::KeyStore::for_runtime(data_dir),
             registry: registry::Registry::in_data_dir(data_dir),
             sink: sink.clone(),
-            rpc: Mutex::new(if awaiting_rpc { Rpc::Awaiting } else { Rpc::Build(parts) }),
+            rpc: Mutex::new(if awaiting_rpc { Rpc::Awaiting } else { Rpc::Build(Box::new(parts)) }),
             state: Mutex::new(State::default()),
             lifetime,
             port: configured_port(),
@@ -301,7 +301,7 @@ impl MachineHost {
             tokio::select! {
                 _ = tick.tick() => {
                     ticks += 1;
-                    read = ticks % SETTINGS_EVERY == 0;
+                    read = ticks.is_multiple_of(SETTINGS_EVERY);
                 }
                 _ = self.settings_changed.notified() => read = true,
                 _ = self.wake.notified() => read = false,
@@ -443,6 +443,25 @@ impl MachineHost {
         Ok(id)
     }
 
+    /// Let a computer in: track its connection, then check it is still
+    /// paired. A revocation removes the record before it closes the tracked
+    /// connections, so one racing this admission is either seen here or
+    /// finds the connection and closes it. Blocking: reads the registry.
+    pub(crate) fn admit(&self, computer_id: &str, cancel: mpsc::UnboundedSender<()>) -> Result<u64> {
+        let tracked = self.track(computer_id, cancel)?;
+        match self.registry.list() {
+            Ok(computers) if computers.iter().any(|known| known.id == computer_id) => Ok(tracked),
+            Ok(_) => {
+                self.untrack(computer_id, tracked);
+                bail!("the computer was revoked")
+            }
+            Err(error) => {
+                self.untrack(computer_id, tracked);
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn untrack(&self, computer_id: &str, id: u64) {
         {
             let mut state = self.state.lock().unwrap();
@@ -566,7 +585,7 @@ impl crate::remote::host::MachineRoutes for MachineHost {
 
     fn admit_computer(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
         let Some(computer) = self.registry.find_by_relay_device(relay_device_id, token)? else { return Ok(None) };
-        let tracked = self.track(&computer.id, cancel)?;
+        let tracked = self.admit(&computer.id, cancel)?;
         if let Err(error) = self.registry.touch(&computer.id, chrono::Utc::now().timestamp_millis()) {
             log::debug!("machine host: note when {} connected: {error:#}", computer.id);
         }

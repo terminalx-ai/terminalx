@@ -81,7 +81,7 @@ pub struct Computer {
 }
 
 pub enum Outcome {
-    In(Computer),
+    In(Box<Computer>),
     Refused(Option<u16>),
 }
 
@@ -103,7 +103,7 @@ pub async fn connect(port: u16, host_public_key_b64: &str, token: &str) -> Outco
             let reply: Value = serde_json::from_slice(&session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
             assert_eq!(reply["type"], "e2ee_authenticated");
             assert_eq!(reply["transcriptHashB64"], transcript.as_str());
-            Outcome::In(Computer { socket, session, next: 1 })
+            Outcome::In(Box::new(Computer { socket, session, next: 1 }))
         }
         Some(Ok(Message::Close(frame))) => Outcome::Refused(frame.map(|frame| u16::from(frame.code))),
         Some(Ok(other)) => panic!("unexpected frame {other:?}"),
@@ -143,7 +143,7 @@ impl Computer {
 
 pub fn computer(outcome: Outcome) -> Computer {
     match outcome {
-        Outcome::In(computer) => computer,
+        Outcome::In(computer) => *computer,
         Outcome::Refused(code) => panic!("the paired computer was refused ({code:?})"),
     }
 }

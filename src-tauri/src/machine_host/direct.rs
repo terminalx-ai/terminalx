@@ -196,9 +196,11 @@ async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost
         bail!("a device credential this machine does not know");
     };
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-    // Tracked before it is told it is in, so turning the switch off or a
+    // Admitted before it is told it is in, so turning the switch off or a
     // revocation meanwhile either refuses it here or finds it and closes it.
-    let tracked = match host.track(&computer.id, cancel_tx) {
+    let admit = host.clone();
+    let id = computer.id.clone();
+    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&id, cancel_tx)).await? {
         Ok(tracked) => tracked,
         Err(error) => {
             refuse(&mut socket).await;
@@ -206,13 +208,6 @@ async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost
         }
     };
     let result = async {
-        // Removed between the lookup and the tracking.
-        let check = host.clone();
-        let id = computer.id.clone();
-        if !tokio::task::spawn_blocking(move || check.registry.list().map(|list| list.iter().any(|known| known.id == id))).await?? {
-            refuse(&mut socket).await;
-            bail!("the computer was revoked");
-        }
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         crate::remote::host::send_sealed(&mut socket, &mut session, &authenticated).await?;
         let touch = host.clone();
