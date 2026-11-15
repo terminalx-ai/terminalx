@@ -1,9 +1,9 @@
 import "react-native-gesture-handler";
 import { useEffect } from "react";
-import { Stack, useRouter } from "expo-router";
+import { Stack, useRouter, type Href } from "expo-router";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
-import { useColorScheme } from "react-native";
+import { Platform, Settings, useColorScheme } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { CloudProvider } from "@mobile/cloud/CloudProvider";
 import { AppProvider } from "@mobile/state/AppProvider";
@@ -24,5 +24,12 @@ function Navigation() {
     const tabId = response?.notification.request.content.data?.tabId;
     if (typeof sessionId === "string" && sessionId && typeof tabId === "string" && tabId) router.push({ pathname: "/session/[sessionId]", params: { sessionId, tabId } });
   }, [response, router]);
+  // A screen to open at launch, as a link would but without iOS asking first:
+  // `xcrun simctl launch booted <bundle id> -openRoute /cloud`, for screenshots
+  // and checks on a simulator. iOS keeps a launch argument for that launch only.
+  useEffect(() => {
+    const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;
+    if (typeof route === "string" && route.startsWith("/")) router.navigate(route as Href);
+  }, [router]);
   return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /></Stack></>;
 }
