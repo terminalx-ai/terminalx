@@ -49,6 +49,10 @@ pub enum WorkKind {
     Processes,
     /// An issue pipeline step under way, or waiting on checks.
     Pipeline,
+    /// Local VM work a runtime handover would cut short, named in `title`:
+    /// a setup or provisioning it drives, or a container operation inside
+    /// its own timeout. Asked about only once the handover has waited on it.
+    LocalVm,
 }
 
 impl Work {
