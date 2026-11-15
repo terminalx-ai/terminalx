@@ -34,6 +34,9 @@
   `TERMINALX_UPDATER_KEY`) and its password from
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Every step stops with a message naming
   the missing file or variable when a credential is absent.
+- Runtime releases (`terminalx-serve` for headless servers) are signed with an
+  OpenSSH Ed25519 key at `~/.tauri/terminalx-runtime-signing`, separate from
+  the updater key. See [Signing runtime releases](#signing-runtime-releases).
 - `plugins.updater.endpoints` in `tauri.conf.json` points at
   `https://github.com/terminalx-ai/raccoon/releases/latest/download/latest.json`
   — the `latest.json` below, attached to whichever GitHub Release is marked
@@ -458,8 +461,10 @@ It then:
    `runtime-v<serve crate version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
    e.g. `runtime-v0.2.2-20260929121810-3001736`, with
    `terminalx-serve-linux-x64`, `terminalx-serve-linux-arm64`,
-   `terminalx-serve.json` and `SHA256SUMS`;
-4. deletes runtime prereleases (and their tags) beyond the newest 10.
+   `terminalx-serve-macos-arm64`, `terminalx-serve.json` and `SHA256SUMS`,
+   **unsigned**;
+4. deletes runtime prereleases (and their tags) beyond the newest 10, except
+   the newest signed one, which headless servers install.
 
 The timestamp is the commit's, not the run's, so a tag says when its code was
 committed. Runtime prereleases are created with `--prerelease
@@ -478,6 +483,83 @@ reason), run the workflow from `main`; it applies the same rules:
 ```sh
 gh workflow run release-serve.yml --ref main
 ```
+
+### Signing runtime releases
+
+Headless servers (`scripts/install/install.sh`, served as
+`https://terminalx.ai/install.sh`, and `terminalx-serve update`) install only
+runtime releases whose `SHA256SUMS` carries a valid SSH signature,
+`SHA256SUMS.sig`, by the key in `scripts/install/allowed_signers`. CI cannot
+sign: the key stays on the owner's machine, never on GitHub. Each release is
+published unsigned and offered to headless servers only once it is signed.
+Releases without a signature are skipped; the cloud server does not use it.
+
+After the release workflow publishes, sign the release from a checkout of
+`main`:
+
+```sh
+scripts/release/sign-runtime.py                 # the newest runtime prerelease
+scripts/release/sign-runtime.py runtime-v0.2.27-20261115120000-abcdef0
+scripts/release/sign-runtime.py --dry-run       # sign and check, upload nothing
+```
+
+It needs `gh` signed in with write access and OpenSSH 8.1 or later. The
+script:
+
+1. downloads the three binaries, `terminalx-serve.json` and `SHA256SUMS`;
+2. checks that `SHA256SUMS` lists exactly those files and that each one
+   matches, and that the manifest's version is the tag's;
+3. signs `SHA256SUMS` with
+   `ssh-keygen -Y sign -f ~/.tauri/terminalx-runtime-signing -n terminalx-runtime`
+   (ssh-keygen asks for the key's passphrase; `--key` names another file);
+4. verifies the signature as the installer will:
+   `ssh-keygen -Y verify -f scripts/install/allowed_signers -I release@terminalx -n terminalx-runtime -s SHA256SUMS.sig < SHA256SUMS`;
+5. uploads `SHA256SUMS.sig` to the release and checks that the release serves
+   the same file.
+
+A release that is already signed is left alone; `--resign` replaces its
+signature. Sign before the next run can prune the release: pruning always keeps
+the newest signed release, but deletes unsigned ones beyond the newest 10.
+
+Only the signature is uploaded. If a release's assets do not match its
+`SHA256SUMS`, the script refuses to sign it. Do not sign it by hand: publish a
+new release.
+
+#### The signing key
+
+Made once:
+
+```sh
+ssh-keygen -t ed25519 -C release@terminalx -f ~/.tauri/terminalx-runtime-signing
+```
+
+Give it a passphrase and keep a copy somewhere safe. The public half is in two
+places that must stay equal (a Rust test and `scripts/install/test.sh` check):
+
+- `scripts/install/allowed_signers`, as
+  `release@terminalx namespaces="terminalx-runtime" ssh-ed25519 AAAA…`, with
+  the same line embedded in `scripts/install/install.sh` (`TRUSTED_SIGNERS`);
+- `RUNTIME_SIGNING_KEY` in `src-tauri/src/serve_cli/mod.rs`, which
+  `terminalx-serve update` checks against.
+
+Replacing the key means shipping a runtime and installer that trust the new
+one before signing with it. An installed runtime only updates to releases
+signed by a key it trusts.
+
+#### Testing the installer
+
+```sh
+sh scripts/install/test.sh
+```
+
+runs offline in under a minute. It makes a throwaway key, builds fake releases
+signed with `sign-runtime.py --local-dir`, serves them on 127.0.0.1, and checks
+that a good release installs and swaps `current`. It also checks that a
+tampered binary, a tampered `SHA256SUMS`, another key's signature and a missing
+signature are each refused without changing the install. The installer's test
+overrides (`TERMINALX_INSTALL_API_URL`, `TERMINALX_INSTALL_BASE_URL`,
+`TERMINALX_INSTALL_TAG`, `TERMINALX_INSTALL_ALLOWED_SIGNERS`) print a warning
+whenever they are used.
 
 ### `terminalx-serve.json` and the runtime protocol
 
