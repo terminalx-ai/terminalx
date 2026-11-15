@@ -968,14 +968,21 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   (then it is refused with `person_only`, and taking it over is theirs):
   you are sent its goal, what each try came to and where its work is, its worker's last
   report and the files it names outside the piece's own. The piece is `lead`. Finish it in
-  your own checkout (you are not held to its files), commit, then run
+  your own checkout, commit, then run
   `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
   your checkout, and when they pass the piece is `done` and what waits for it can start. It
   is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
   `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
   run's budget from the moment you are asked until the piece is settled. Nothing is merged
   while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
-  counts only what you committed.
+  counts only what you committed since you took the piece over. When that is nothing because
+  you brought the piece's branch in just before, it counts what that branch changed since its
+  try started, once your branch holds its tip. A piece the person asked you to take over is
+  not held to its files. One you took over yourself in a run they approved is: `finish`
+  refuses a change outside the files it owns (both sides of a rename count) with
+  `person_only`, naming them, and nothing is checked. Widening it is theirs, so tell them
+  which files it needs and why. Once a piece is with you, its earlier worker's reports no
+  longer move it.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
   (step `widened`), briefed with what went before. Without `--own` it takes the files the

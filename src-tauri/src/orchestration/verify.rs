@@ -274,6 +274,20 @@ pub fn numstat(text: &str) -> Vec<FileChange> {
         .collect()
 }
 
+/// `git diff --numstat --no-renames -z` as each file it changed: a path is never quoted, and a
+/// rename is the file it removed and the file it added, so both are named. What the lead
+/// changed for a piece it is held to is read this way: a file renamed into the piece's
+/// files from outside them still changes a file outside them.
+pub fn numstat_z(text: &str) -> Vec<FileChange> {
+    text.split('\0')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\t');
+            let (added, removed, path) = (fields.next()?, fields.next()?, fields.next()?);
+            (!path.is_empty()).then(|| FileChange { path: path.to_string(), added: added.parse().ok(), removed: removed.parse().ok() })
+        })
+        .collect()
+}
+
 /// What a verifier's session used.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

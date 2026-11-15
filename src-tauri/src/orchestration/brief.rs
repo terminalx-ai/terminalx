@@ -108,9 +108,17 @@ pub enum TakenBy<'a> {
 /// `by`: who asked for it (a person from the Run view, the lead with `terminalx runs take-over`, or the run by itself).
 pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
     let brief = &piece.brief;
+    // Taken over by the lead itself, or handed to it by the run, on a plan a person approved:
+    // nobody widened it, so its files stay as approved. Only a person's take-over lifts them.
+    let held = !matches!(by, TakenBy::Person) && run.approval.is_some();
+    let files = if held {
+        "You are held to the files it owns, as its workers were: a person approved them, and only they widen a piece. `terminalx runs finish` refuses a change outside them."
+    } else {
+        "You are not held to the files it owns: its workers were."
+    };
     let mut out = match by {
         TakenBy::Person | TakenBy::Lead => format!(
-            "{} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
+            "{} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. {files}\n\n",
             if matches!(by, TakenBy::Person) { "The person asked you to take over" } else { "You took over" },
             piece.id, piece.title, run.id
         ),
@@ -120,7 +128,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
                 super::LeadFor::NoModelAbove => "Its tries fell short and there is no model above the last one to try it on. Finish it yourself, in your own checkout.",
             };
             format!(
-                "TerminalX handed you piece {} (\"{}\") of run {} by itself: {} {what} You are not held to the files it owns: its workers were. Nobody asked the person: this needs no judgment of theirs.\n\n",
+                "TerminalX handed you piece {} (\"{}\") of run {} by itself: {} {what} {files} Nobody asked the person: this needs no judgment of theirs.\n\n",
                 piece.id, piece.title, run.id, to_lead.stuck.trim_end_matches('.'),
             )
         }
@@ -149,7 +157,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
     if !brief.scope.trim().is_empty() {
         section(&mut out, "Scope", &brief.scope);
     }
-    section(&mut out, "Files it owned", &if piece.owns.is_empty() { "None: it was to change nothing.".to_string() } else { bullets(&piece.owns) });
+    section(&mut out, if held { "Files it owns" } else { "Files it owned" }, &if piece.owns.is_empty() { "None: it was to change nothing.".to_string() } else { bullets(&piece.owns) });
     let tries: Vec<String> = piece
         .tries
         .iter()
@@ -175,7 +183,12 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
         None => outside.path,
     }).collect();
     if !outside.is_empty() {
-        section(&mut out, "Outside its files", &format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside)));
+        let said = if held {
+            format!("Its last report or check names files it does not own, where the fix may lie:\n{}\n\nThey are not yours to change here. If the piece needs them, tell the person which and why: widening it is theirs.", bullets(&outside))
+        } else {
+            format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside))
+        };
+        section(&mut out, "Outside its files", &said);
     }
     section(&mut out, "Done when", &done_when(piece));
     out.push_str(&format!(

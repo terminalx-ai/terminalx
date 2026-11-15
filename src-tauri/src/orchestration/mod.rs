@@ -565,6 +565,11 @@ pub struct Try {
     /// work is counted from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_commit: Option<String>,
+    /// A try the lead took over itself on a plan a person approved: it is held
+    /// to the files the piece owns, as its workers were. Widening them is the
+    /// person's, so `finish` refuses a change outside them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_to_owns: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,7 +579,7 @@ pub struct Try {
 impl Try {
     /// A try that has no worker yet.
     pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
-        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, base_commit: None, outcome: None, detail: None, archive_failure: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, base_commit: None, outcome: None, detail: None, archive_failure: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, held_to_owns: false, started: None, ended: None }
     }
 }
 
