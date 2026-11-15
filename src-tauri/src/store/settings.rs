@@ -549,6 +549,11 @@ pub struct ExperimentalSettings {
     /// with the plan to approve, and Settings → Orchestrator. The `terminalx
     /// runs` commands work either way.
     pub orchestrator_runs: bool,
+    /// Local VM tasks and chosen computers (PRO-114): Settings → Local VMs,
+    /// a tab's computer choice and its Local VM task cards. Off, every agent
+    /// gets the Local VM's tools while it runs, as before, and a choice kept
+    /// from while it was on is not read. `terminalx vm` works either way.
+    pub local_vm_tasks: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -776,7 +781,7 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false}));
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
@@ -786,6 +791,9 @@ mod tests {
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex && !cost.experimental.orchestrator_runs);
+        assert!(!legacy.experimental.local_vm_tasks);
+        let vms: Settings = serde_json::from_value(serde_json::json!({"experimental":{"localVmTasks":true}})).unwrap();
+        assert!(vms.experimental.local_vm_tasks && !vms.experimental.orchestrator_runs);
     }
 
     #[test]
