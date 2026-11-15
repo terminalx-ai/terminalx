@@ -467,6 +467,12 @@ export const api = {
   cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeedDto>("cloud_catalog_feed", { cursor: cursor ?? null }).then(projectCloudCatalogFeed),
   /** Held until SaaS integration/live readiness is explicitly confirmed. */
   phase2DesktopContractsAvailable: () => invoke<boolean>("phase2_desktop_contracts_available"),
+  /** Internal PRO-133/137 transport; production refuses locally while phase 2 is held. */
+  cloudWorkspaceFollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_put", { orgId, workspaceId, input: {} }),
+  cloudWorkspaceUnfollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_delete", { orgId, workspaceId, input: {} }),
+  cloudWorkspaceReassign: (orgId: string, workspaceId: string, input: WorkspaceReassignInput) => invoke<WorkspaceReassignResponse>("cloud_workspace_reassign", { orgId, workspaceId, input }),
+  desktopPresencePut: (orgId: string, input: PresencePutInput) => invoke<PresencePutResponse>("desktop_presence_put", { orgId, input }),
+  desktopPresenceRead: (orgId: string, input: PresenceReadInput) => invoke<PresenceReadResponse>("desktop_presence_read", { orgId, input }),
   desktopInbox: (after = "0", waitMs = 25000) => invoke<DesktopInboxPage>("desktop_inbox", { after, waitMs }),
   /** One SSE page through its checkpoint; apply/dedupe events before saving cursor. */
   desktopInboxStream: (after: string, lastEventId?: string | null) => invoke<DesktopInboxStreamPage>("desktop_inbox_stream", { after, lastEventId: lastEventId ?? null }),
@@ -1650,6 +1656,21 @@ export interface CloudSelectedRepositories {
   repositories: CloudSelectedRepository[];
 }
 
+/** Held PRO-137 transport: UUID/payload ownership and retries belong to a future caller. */
+export interface WorkspaceReassignInput { targetUserId: string; expectedOwnerId: string; requestId: string; confirmPrivate?: boolean; note?: string }
+export interface WorkspaceFollowingResponse { workspaceId: string; following: boolean }
+/** reassigned=false is a committed request receipt, not current ownership. */
+export interface WorkspaceReassignResponse { workspaceId: string; ownerId: string; previousOwnerId: string; reassigned: boolean }
+
+export interface PresencePutInput { deviceId: string; sequence: number; workspaceId: string | null }
+export interface PresenceReadInput { workspaceIds: string[] }
+export interface PresencePerson { userId: string; displayName: string | null; photoUrl: string | null }
+/** Owner follows current created_by; identities never use an email fallback. */
+export interface PresenceWorkspace { workspaceId: string; owner: PresencePerson; activeMembers: PresencePerson[] }
+export interface PresencePutResponse { applied: boolean; ttlSeconds: 45 }
+/** Workspaces are a requested-visible subset; activeMembers spans all visible workspaces. */
+export interface PresenceReadResponse { ttlSeconds: 45; activeMembers: PresencePerson[]; workspaces: PresenceWorkspace[] }
+
 export interface CloudWorkspaceClientError {
   code: CloudWorkspaceSafeErrorCode;
   status: number | null;
@@ -1660,6 +1681,21 @@ export interface CloudWorkspaceClientError {
 }
 
 export type CloudWorkspaceSafeErrorCode =
+  | "workspace_owner_changed"
+  | "workspace_reassign_same_owner"
+  | "workspace_reassign_private_confirmation_required"
+  | "workspace_reassign_target_not_visible"
+  | "workspace_reassign_busy"
+  | "workspace_reassign_personal_route_held"
+  | "workspace_reassign_credential_restricted"
+  | "workspace_reassign_runtime_unsupported"
+  | "workspace_reassign_idempotency_conflict"
+  | "cloud_workspace_last_admin"
+  | "workspace_following_unavailable"
+  | "presence_rate_limited"
+  | "presence_device_limit"
+  | "presence_capacity_exceeded"
+  | "presence_unavailable"
   | "inbox_unavailable"
   | "invalid_access_token"
   | "organization_admin_required"
