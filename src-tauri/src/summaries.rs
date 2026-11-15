@@ -311,12 +311,12 @@ pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> 
 
 /// The first top-level request of the conversation a tab holds now, read
 /// forwards: `conversation` is its marker in the log, absent for the one the
-/// tab began with. Only the head of a log is read for that one, where its
-/// first request always is.
+/// tab began with. This runs on every list the phone asks for, so only the
+/// head of a log is read: a conversation that begins further in than that
+/// gets no name here, and its tab keeps its own title.
 fn first_request(path: &Path, conversation: Option<&str>) -> Option<String> {
     use std::io::BufRead;
-    let scan = if conversation.is_some() { u64::MAX } else { MAX_SCAN };
-    let reader = io::BufReader::new(fs::File::open(path).ok()?.take(scan));
+    let reader = io::BufReader::new(fs::File::open(path).ok()?.take(MAX_SCAN));
     let mut under: Option<String> = None;
     for line in reader.lines() {
         let line = line.ok()?;
