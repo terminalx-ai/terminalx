@@ -149,7 +149,8 @@ function startBarShown(listedState: string | null, starting: boolean): boolean {
 
 /**
  * In place of the composer while a workspace is stopped: Start, for its
- * managers (the server lets only them), and who can start it for anyone else.
+ * managers (the server lets only them), and who can start it for a viewer. A
+ * driver keeps the composer, whose message starts it (see `Conversation`).
  * Starting it is billed, so it is asked first. When it runs, the composer is back.
  */
 function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { catalog: CloudCatalog; orgId: string; workspaceId: string; role: CloudRole | null; creatorId: string | null; starting: boolean }) {
@@ -212,6 +213,10 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
   // Written earlier and still on the phone, for a workspace that is stopped now: held until the person says to start it.
   // Also what the server holds for a workspace that stopped before it was delivered: nothing starts it until the person says so.
   const held = stopped ? outbox.filter((entry) => entry.state === "unsent" || entry.asleep) : [];
+  const roleHere: CloudRole | null = snapshot.role ?? catalog.workspace(orgId, workspaceId)?.you?.role ?? null;
+  // A driver may not start a stopped workspace with Start (/resume is for its managers), but a message they
+  // queue wakes it (contract §11.2): for them the composer stays, and sending asks first, as it always has.
+  const sendStarts = stopped && !starting && roleHere === "driver";
   const working = tab?.status === "in_progress";
   // Stop is Escape first (#427), as on the desktop: the turn is interrupted and the agent's process stays. While the
   // turn it was sent to is still the one running, the same button is the stop that ends the process. A runtime that
@@ -332,8 +337,8 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
         {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
-    {startBarShown(listedState, starting)
-      ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={snapshot.role ?? catalog.workspace(orgId, workspaceId)?.you?.role ?? null} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
+    {startBarShown(listedState, starting) && !sendStarts
+      ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
       : mayWrite && listedState !== "archived" && listedState !== null
       ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
         {!snapshot.hasKey ? <Text style={[styles.notice, { color: palette.muted }]}>{codeText("no-key")}</Text> : null}

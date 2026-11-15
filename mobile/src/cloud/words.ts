@@ -36,10 +36,12 @@ export function rolePhrase(role: CloudRole | null | undefined): string | null {
 /**
  * Who may start a stopped workspace, for someone who may not: its managers,
  * which the server takes to be its creator and the organization's owners and
- * admins (`cloud_workspace_manager_required`).
+ * admins (`cloud_workspace_manager_required`), and anyone who may send to
+ * it, whose queued message wakes it (contract §11.2).
  */
 export function whoCanStart(creator: string | null): string {
-  return creator ? `${creator}, its creator, or an organization owner or admin can start it.` : "Its creator or an organization owner or admin can start it.";
+  const starters = creator ? `${creator}, its creator, or an organization owner or admin can start it.` : "Its creator or an organization owner or admin can start it.";
+  return `${starters} Anyone who can send to it starts it by sending a message.`;
 }
 
 /**

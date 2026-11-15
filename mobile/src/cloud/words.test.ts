@@ -87,8 +87,8 @@ describe("a stopped workspace, in words (#988)", () => {
     expect(rolePhrase("viewer")).toBe("You can view");
     expect(rolePhrase("none")).toBeNull();
     expect(rolePhrase(null)).toBeNull();
-    expect(whoCanStart("Alice")).toBe("Alice, its creator, or an organization owner or admin can start it.");
-    expect(whoCanStart(null)).toBe("Its creator or an organization owner or admin can start it.");
+    expect(whoCanStart("Alice")).toBe("Alice, its creator, or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+    expect(whoCanStart(null)).toBe("Its creator or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
   });
 
   it("says a workspace in the list as the Sessions list says a session", () => {

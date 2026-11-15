@@ -363,22 +363,46 @@ describe("a cloud workspace screen", () => {
     expect(container.querySelector("input")).not.toBeNull();
   });
 
-  it("tells someone whose role may not start a stopped workspace who can, instead of the button (#988)", async () => {
-    const { snapshot } = world({ state: "suspended", role: "driver" });
+  it("tells a viewer of a stopped workspace who can start it, instead of the button (#988)", async () => {
+    const { snapshot } = world({ state: "suspended", role: "viewer" });
     // Its creator is someone this phone knows by name.
     const listed = mocks.catalog.workspace();
     listed.createdBy = "u-alice";
     await show(<CloudWorkspaceScreen />);
-    expect(stateLine().textContent).toBe("Stopped · You can send");
-    expect(startBar().textContent).toBe("This workspace is stoppedAlice, its creator, or an organization owner or admin can start it.");
+    expect(stateLine().textContent).toBe("Stopped · You can view");
+    expect(startBar().textContent).toBe("This workspace is stoppedAlice, its creator, or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
     expect(() => button("Start")).toThrow();
     expect(container.querySelector("input")).toBeNull();
-    // A viewer of a workspace whose creator is not known by name.
-    snapshot.role = "viewer";
+    // A workspace whose creator is not known by name.
     listed.createdBy = null;
+    snapshot.role = "viewer";
     await show(<CloudWorkspaceScreen />);
-    expect(startBar().textContent).toBe("This workspace is stoppedIts creator or an organization owner or admin can start it.");
+    expect(startBar().textContent).toBe("This workspace is stoppedIts creator or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+  });
+
+  it("lets a driver start a stopped workspace by sending, only after they confirm, with no Start bar (contract §11.2)", async () => {
+    const { session } = world({ state: "suspended", role: "driver" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopped · You can send");
+    expect(text()).toContain("run the tests");
+    // /resume is for managers: no Start and no "who can start it" for someone who can start it by sending.
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
     expect(() => button("Start")).toThrow();
+    expect(text()).not.toContain("can start it");
+    expect(container.querySelector("input")!.placeholder).toBe("Message (starts the workspace)");
+    expect(container.querySelector("input")!.getAttribute("aria-label")).toBe("Message for the agent. Sending starts the workspace.");
+    await type("continue");
+    await click("Send");
+    // Asked first; nothing sent yet.
+    expect(session.send).not.toHaveBeenCalled();
+    const [title, message, buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    expect(message).toContain("billed");
+    expect(buttons.map((entry: { text: string }) => entry.text)).toEqual(["Cancel", "Start and send"]);
+    buttons[0].onPress?.();
+    expect(session.send).not.toHaveBeenCalled();
+    await act(async () => buttons[1].onPress());
+    expect(session.send).toHaveBeenCalledWith("t1", "continue", { allowWake: true });
   });
 
   it("says a workspace is starting once Start was pressed, and the server's word when it would not start it (#988)", async () => {
