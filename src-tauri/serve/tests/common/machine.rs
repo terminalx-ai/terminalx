@@ -101,6 +101,13 @@ pub async fn connect(port: u16, host_public_key_b64: &str, token: &str) -> Outco
     match tokio::time::timeout(Duration::from_secs(15), socket.next()).await.unwrap() {
         Some(Ok(Message::Text(text))) => {
             let reply: Value = serde_json::from_slice(&session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
+            if reply["type"] == "pairing_refused" {
+                // A token the machine does not know: the reason, then the close.
+                return match tokio::time::timeout(Duration::from_secs(15), socket.next()).await.unwrap() {
+                    Some(Ok(Message::Close(frame))) => Outcome::Refused(frame.map(|frame| u16::from(frame.code))),
+                    _ => Outcome::Refused(None),
+                };
+            }
             assert_eq!(reply["type"], "e2ee_authenticated");
             assert_eq!(reply["transcriptHashB64"], transcript.as_str());
             Outcome::In(Box::new(Computer { socket, session, next: 1 }))
