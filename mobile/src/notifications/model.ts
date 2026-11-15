@@ -166,21 +166,25 @@ export function withStartedSession(settings: NotificationSettings, hostId: strin
   return { ...settings, started: { ...settings.started, [hostId]: [...ids, sessionId].slice(-STARTED_LIMIT) } };
 }
 
-const KIND_LABELS: Record<NotificationKind, string> = {
-  question: "questions",
-  approval: "approvals",
-  finished: "finished",
-  failed: "failed",
-  usage_limit: "usage limits",
-  pr_checks_failed: "checks fail",
-  pr_merged: "merged",
-};
+/** The agent events, as the Settings row lists them (the first section of the page). */
+const AGENT_KIND_LABELS: [NotificationKind, string][] = [
+  ["question", "questions"],
+  ["approval", "approvals"],
+  ["finished", "finished"],
+  ["failed", "failed"],
+  ["usage_limit", "usage limits"],
+];
 
-/** The Settings row's second line: "Questions, approvals, finished, failed, checks fail", or "Off". */
+/**
+ * The Settings row's second line (22.07): the agent events switched on, as
+ * "Questions, approvals, finished, failed" for the defaults; "Off" when the
+ * master switch is off. Pull request events are not listed, unless they are
+ * all that is on.
+ */
 export function settingsSummary(settings: NotificationSettings): string {
   if (!settings.allow) return "Off";
-  const on = NOTIFICATION_KINDS.filter((kind) => settings.kinds[kind]).map((kind) => KIND_LABELS[kind]);
-  if (!on.length) return "No events chosen";
+  const on = AGENT_KIND_LABELS.filter(([kind]) => settings.kinds[kind]).map(([, label]) => label);
+  if (!on.length) return settings.kinds.pr_checks_failed || settings.kinds.pr_merged ? "Pull requests only" : "No events chosen";
   const text = on.join(", ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }

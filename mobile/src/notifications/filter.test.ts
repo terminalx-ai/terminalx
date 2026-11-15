@@ -16,7 +16,11 @@ describe("notification settings model", () => {
     expect(settings.quietHours).toEqual({ on: false, start: 1320, end: 420, stillNotifyNeedsMe: false });
     expect(settings.lockScreen).toEqual({ show: "everything", sound: true });
     expect(settingsSummary(settings)).toBe("Off");
-    expect(settingsSummary(on())).toBe("Questions, approvals, finished, failed, checks fail");
+    expect(settingsSummary(on())).toBe("Questions, approvals, finished, failed");
+    expect(settingsSummary(on({ kinds: { ...defaultSettings().kinds, usage_limit: true, question: false } }))).toBe("Approvals, finished, failed, usage limits");
+    const none = { question: false, approval: false, finished: false, failed: false, usage_limit: false, pr_checks_failed: false, pr_merged: false };
+    expect(settingsSummary(on({ kinds: { ...none, pr_merged: true } }))).toBe("Pull requests only");
+    expect(settingsSummary(on({ kinds: none }))).toBe("No events chosen");
   });
 
   it("reads back what it wrote as plain JSON, and defaults what is missing or wrong", () => {

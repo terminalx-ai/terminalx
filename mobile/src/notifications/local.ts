@@ -4,9 +4,9 @@ import { readHosts } from "../store/hosts";
 import { hostDisplayName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import type { HostConnection } from "../transport/connection";
 import { present, shouldShow, subscribeFilter, type HostNotification, type SubscribeFilter } from "./filter";
-import { deliveryOn, type NotificationSettings } from "./model";
+import { deliveryOn } from "./model";
 import { notificationPermission, requestNotificationPermission, type PermissionState } from "./permissions";
-import { bindConnectionHost, loadNotificationSettings, onNotificationSettingsChanged, setMachineNotifications, updateNotificationSettings } from "./store";
+import { bindConnectionHost, connectionHost, loadNotificationSettings, onNotificationSettingsChanged, setMachineNotifications, updateNotificationSettings } from "./store";
 
 /** One Mac's live notification stream on this phone. */
 interface Delivery {
@@ -19,6 +19,7 @@ interface Delivery {
 
 const notificationQueues = new Map<string, Promise<void>>();
 const deliveries = new Map<string, Delivery>();
+const reconcileQueues = new Map<string, Promise<boolean>>();
 const watchedConnections = new WeakSet<HostConnection>();
 
 Notifications.setNotificationHandler({
@@ -31,8 +32,8 @@ Notifications.setNotificationHandler({
 });
 
 // A change of choices reaches every connected Mac: it subscribes, resubscribes with the new filter, or stops.
-onNotificationSettingsChanged((settings) => {
-  for (const [hostId, delivery] of deliveries) void reconcile(hostId, delivery.connection, settings);
+onNotificationSettingsChanged(() => {
+  for (const hostId of deliveries.keys()) void reconcile(hostId);
 });
 
 /**
@@ -40,22 +41,16 @@ onNotificationSettingsChanged((settings) => {
  * on and iOS allows them. Resolves whether it subscribed.
  */
 export async function restoreLocalNotifications(connection: HostConnection, hostId: string): Promise<boolean> {
-  bindConnectionHost(connection, hostId);
-  // One connection reaches one Mac at a time: a stream for the Mac it reached before is stale.
-  for (const [other, delivery] of deliveries) if (other !== hostId && delivery.connection === connection) stop(other);
-  deliveries.set(hostId, { ...deliveries.get(hostId), connection });
-  watchCapabilities(connection);
-  return reconcile(hostId, connection, await loadNotificationSettings(), true);
+  attach(connection, hostId);
+  return reconcile(hostId, true);
 }
 
 /** The pre-#990 per-Mac switch turned on: asks iOS, then turns on notifications and this Mac. */
 export async function enableLocalNotifications(connection: HostConnection, hostId: string): Promise<boolean> {
   if ((await requestNotificationPermission()) !== "granted") return false;
-  bindConnectionHost(connection, hostId);
-  deliveries.set(hostId, { ...deliveries.get(hostId), connection });
-  watchCapabilities(connection);
+  attach(connection, hostId);
   await updateNotificationSettings((settings) => ({ ...settings, allow: true, machines: { ...settings.machines, [hostId]: true } }));
-  return reconcile(hostId, connection, await loadNotificationSettings(), true);
+  return reconcile(hostId, true);
 }
 
 /** The pre-#990 per-Mac switch turned off: this Mac's notifications stop. */
@@ -85,8 +80,7 @@ export async function setNotificationsAllowed(on: boolean): Promise<PermissionSt
  * notifications on or off in iOS Settings meanwhile. Resolves the iOS state.
  */
 export async function refreshLocalNotifications(): Promise<PermissionState> {
-  const settings = await loadNotificationSettings();
-  await Promise.all([...deliveries].map(([hostId, delivery]) => reconcile(hostId, delivery.connection, settings)));
+  await Promise.all([...deliveries.keys()].map((hostId) => reconcile(hostId)));
   return notificationPermission();
 }
 
@@ -103,22 +97,61 @@ export async function handleNotificationEvent(hostId: string, value: unknown): P
   });
 }
 
-/** Subscribe, resubscribe or stop, as the settings and iOS now say. */
-async function reconcile(hostId: string, connection: HostConnection, settings: NotificationSettings, catchUp = false): Promise<boolean> {
+/**
+ * `connection` now reaches `hostId`. One connection reaches one Mac at a time
+ * (the app reuses it when the person switches Mac), so the entry of any other
+ * Mac on the same connection is removed, not only unsubscribed: kept, a later
+ * settings change or foreground refresh would subscribe that connection again
+ * under the old host id, and the new Mac's notifications would be shown with
+ * the old Mac's settings, watermark and name.
+ */
+function attach(connection: HostConnection, hostId: string): void {
+  bindConnectionHost(connection, hostId);
+  for (const [other, delivery] of [...deliveries]) {
+    if (other !== hostId && delivery.connection === connection) {
+      delivery.unsubscribe?.();
+      deliveries.delete(other);
+    }
+  }
+  const existing = deliveries.get(hostId);
+  if (existing?.connection === connection) return;
+  // The same Mac over a new connection: the old stream belongs to the old one.
+  existing?.unsubscribe?.();
+  deliveries.set(hostId, { connection });
+  watchCapabilities(connection);
+}
+
+/**
+ * Subscribe, resubscribe or stop, as the settings and iOS now say. Runs one
+ * at a time per Mac and reads the settings when it runs, so a slower earlier
+ * run cannot subscribe with choices a later change replaced.
+ */
+function reconcile(hostId: string, catchUp = false): Promise<boolean> {
+  const previous = reconcileQueues.get(hostId) ?? Promise.resolve(false);
+  const next = previous.catch(() => false).then(() => reconcileNow(hostId, catchUp));
+  reconcileQueues.set(hostId, next);
+  void next.catch(() => false).finally(() => { if (reconcileQueues.get(hostId) === next) reconcileQueues.delete(hostId); });
+  return next;
+}
+
+async function reconcileNow(hostId: string, catchUp: boolean): Promise<boolean> {
+  const delivery = deliveries.get(hostId);
+  if (!delivery) return false;
+  // Still this Mac's entry, on a connection that still reaches it.
+  const current = () => deliveries.get(hostId) === delivery && connectionHost(delivery.connection) === hostId;
+  const settings = await loadNotificationSettings();
   if (!deliveryOn(settings, hostId) || (await notificationPermission()) !== "granted") {
-    stop(hostId);
+    if (current()) stop(hostId);
     return false;
   }
-  const delivery = deliveries.get(hostId);
-  if (!delivery || delivery.connection !== connection) return false;
-  const filter = (await takesFilters(connection)) ? subscribeFilter(settings, hostId) : null;
+  const filter = (await takesFilters(delivery.connection)) ? subscribeFilter(await loadNotificationSettings(), hostId) : null;
+  if (!current()) return false;
   const filterKey = filter ? JSON.stringify(filter) : null;
   if (delivery.unsubscribe && delivery.filterKey === filterKey && !catchUp) return true;
-  if (catchUp || !delivery.unsubscribe) await catchUpMissed(hostId, connection, filter);
-  // The connection may have moved to another Mac meanwhile.
-  if (deliveries.get(hostId)?.connection !== connection) return false;
+  if (catchUp || !delivery.unsubscribe) await catchUpMissed(hostId, delivery.connection, filter, current);
+  if (!current()) return false;
   delivery.unsubscribe?.();
-  delivery.unsubscribe = connection.subscribe("notifications.subscribe", filter ? { filter } : {}, (value) => {
+  delivery.unsubscribe = delivery.connection.subscribe("notifications.subscribe", filter ? { filter } : {}, (value) => {
     const event = value && typeof value === "object" && "event" in value ? (value as { event?: unknown }).event : value;
     void handleNotificationEvent(hostId, event);
   });
@@ -126,20 +159,22 @@ async function reconcile(hostId: string, connection: HostConnection, settings: N
   return true;
 }
 
+/** This Mac's stream stops; its entry stays, so turning it back on subscribes again. */
 function stop(hostId: string): void {
   const delivery = deliveries.get(hostId);
   delivery?.unsubscribe?.();
   if (delivery) { delete delivery.unsubscribe; delete delivery.filterKey; }
 }
 
-async function catchUpMissed(hostId: string, connection: HostConnection, filter: SubscribeFilter | null): Promise<void> {
+async function catchUpMissed(hostId: string, connection: HostConnection, filter: SubscribeFilter | null, current: () => boolean): Promise<void> {
   await serialized(hostId, async () => {
     const watermark = await readWatermark(hostId);
     const missed = await connection.request<unknown>("notifications.missedSince", { ...(watermark ?? { lastSeenSeq: 0, epoch: null }), ...(filter ? { filter } : {}) });
-    if (!missed.ok) return;
+    // Answered by another Mac when the connection moved meanwhile: not this Mac's events.
+    if (!missed.ok || !current()) return;
     for (const event of notificationList(missed.value)) {
-      const current = await readWatermark(hostId);
-      if (current?.epoch === event.epoch && event.seq <= current.lastSeenSeq) continue;
+      const latest = await readWatermark(hostId);
+      if (latest?.epoch === event.epoch && event.seq <= latest.lastSeenSeq) continue;
       await deliver(hostId, event);
       await writeWatermark(hostId, event);
     }
@@ -162,13 +197,11 @@ function watchCapabilities(connection: HostConnection): void {
   watchedConnections.add(connection);
   connection.onEvent((event) => {
     if (event.method !== "sync.capabilitiesChanged") return;
-    void loadNotificationSettings().then((settings) => {
-      for (const [hostId, delivery] of deliveries) {
-        if (delivery.connection !== connection || !delivery.unsubscribe) continue;
-        delete delivery.filterKey;
-        void reconcile(hostId, connection, settings);
-      }
-    });
+    for (const [hostId, delivery] of deliveries) {
+      if (delivery.connection !== connection || !delivery.unsubscribe) continue;
+      delete delivery.filterKey;
+      void reconcile(hostId);
+    }
   });
 }
 

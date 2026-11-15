@@ -36,17 +36,21 @@ interface FakeMac {
   capabilities: Record<string, unknown>;
   missedEvents: unknown[];
   emit: (method: string) => void;
+  /** Hold the next request of a method until the test releases it. */
+  gates: Map<string, Promise<void>>;
 }
 
 function mac(capabilities: Record<string, unknown> = {}): FakeMac {
   const events = new Set<(event: { method: string }) => void>();
   const state: FakeMac = {
-    subscribes: [], missed: [], capabilities, missedEvents: [],
+    subscribes: [], missed: [], capabilities, missedEvents: [], gates: new Map(),
     emit: (method) => { for (const listener of events) listener({ method }); },
     connection: {} as HostConnection,
   };
   state.connection = {
     request: vi.fn(async (method: string, params: unknown) => {
+      const gate = state.gates.get(method);
+      if (gate) { state.gates.delete(method); await gate; }
       if (method === "sync.capabilities") return { ok: true, value: state.capabilities };
       if (method === "notifications.missedSince") { state.missed.push(params); return { ok: true, value: { events: state.missedEvents } }; }
       if (method === "sessions.create") return { ok: true, value: { sessionId: "s-new", tabId: "t-new", title: "Hi", sent: { status: "sent", queued: false } } };
@@ -60,6 +64,12 @@ function mac(capabilities: Record<string, unknown> = {}): FakeMac {
     onEvent: (listener: (event: { method: string }) => void) => { events.add(listener); return () => events.delete(listener); },
   } as unknown as HostConnection;
   return state;
+}
+
+function gate(state: FakeMac, method: string): () => void {
+  let release = () => undefined as void;
+  state.gates.set(method, new Promise<void>((resolve) => { release = resolve; }));
+  return () => release();
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -176,6 +186,67 @@ describe("subscribing", () => {
     fake.permission = { granted: false, status: "denied" };
     await expect(local.refreshLocalNotifications()).resolves.toBe("denied");
     expect(live(state)).toEqual([]);
+  });
+});
+
+describe("one connection moving between Macs", () => {
+  const both = () => {
+    fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+    fake.storage.set("terminalx:notifications-enabled:mini", "enabled");
+  };
+
+  it("drops the old Mac's entry: later changes and refreshes do not subscribe it again under the old host", async () => {
+    both();
+    const state = mac({ notificationFilters: 1 });
+    const { store, local } = await modules();
+    await local.restoreLocalNotifications(state.connection, "mac");
+    await local.restoreLocalNotifications(state.connection, "mini");
+    expect(live(state)).toHaveLength(1);
+    // A change for the old Mac, one for every Mac, and a foreground refresh.
+    await store.setSessionOverride("mac", "s-2", "mute");
+    await store.updateNotificationSettings((settings) => ({ ...settings, kinds: { ...settings.kinds, pr_merged: true } }));
+    await flush(); await flush();
+    await local.refreshLocalNotifications();
+    await flush();
+    // Only mini's stream, with mini's filter (no mac override), resubscribed once for the new kind.
+    expect(live(state).map((entry) => entry.params)).toEqual([{ filter: { kinds: ["question", "approval", "finished", "failed", "pr_checks_failed", "pr_merged"], sessions: { scope: "all" }, overrides: {} } }]);
+    expect(state.missed).toHaveLength(2);
+    // What the connection now delivers is mini's: its watermark moves, mac's does not.
+    live(state)[0]!.listener({ event: { seq: 7, epoch: "m", title: "Done", body: "Finished", kind: "finished", sessionId: "s-1", tabId: "t-1" } });
+    await flush(); await flush();
+    expect(JSON.parse(fake.storage.get("terminalx:notifications:mini")!)).toEqual({ lastSeenSeq: 7, epoch: "m" });
+    expect(fake.storage.has("terminalx:notifications:mac")).toBe(false);
+    expect(fake.scheduled.map((request) => (request.content.data as { hostId: string }).hostId)).toEqual(["mini"]);
+  });
+
+  it("does not keep a catch-up the old Mac answered after the connection moved", async () => {
+    both();
+    const state = mac();
+    const release = gate(state, "notifications.missedSince");
+    state.missedEvents = [{ seq: 3, epoch: "e", title: "Done", body: "Finished", sessionId: "s-1", tabId: "t-1" }];
+    const { local } = await modules();
+    const first = local.restoreLocalNotifications(state.connection, "mac");
+    await flush();
+    const second = local.restoreLocalNotifications(state.connection, "mini");
+    release();
+    await expect(first).resolves.toBe(false);
+    await expect(second).resolves.toBe(true);
+    expect(fake.storage.has("terminalx:notifications:mac")).toBe(false);
+    expect(live(state)).toHaveLength(1);
+    expect(fake.scheduled.map((request) => (request.content.data as { hostId: string }).hostId)).toEqual(["mini"]);
+  });
+
+  it("subscribes with the latest choices when an earlier resubscribe answers late", async () => {
+    fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+    const state = mac({ notificationFilters: 1 });
+    const { store, local } = await modules();
+    await local.restoreLocalNotifications(state.connection, "mac");
+    const release = gate(state, "sync.capabilities");
+    await store.setSessionOverride("mac", "s-2", "mute");
+    await store.setSessionOverride("mac", "s-2", "default");
+    release();
+    await flush(); await flush(); await flush();
+    expect(live(state).map((entry) => entry.params)).toEqual([{ filter: { kinds: ["question", "approval", "finished", "failed", "pr_checks_failed"], sessions: { scope: "all" }, overrides: {} } }]);
   });
 });
 
