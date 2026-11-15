@@ -10,10 +10,12 @@ import {
   agentLogins, keepLine, KEY_PAGES, showAgentLoginNotice, tabsKeepingOlderLogin, takesApiKey, useAgentLogin,
   type AgentLoginStatus, type ShellKeyOffer,
 } from "@/lib/agentLogins";
+import { LOCAL_ACCOUNT, SAVED_KEY_ACCOUNT, takesAccounts } from "@/lib/agentAccounts";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
+import { addedAccounts, AgentAccountsSection, useAgentAccountsView } from "./AgentAccounts";
 
 const BADGES: Record<AgentReadiness["state"], string> = {
   missing: "Not installed",
@@ -173,6 +175,8 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
   const status = login.status;
   const flow = useAgentSetupFlow(harness.id);
   const [choice, setChoice] = useState<"subscription" | "api_key" | null>(null);
+  // #980: read again at every sign-in change, which can move the default account.
+  const accounts = useAgentAccountsView(takesAccounts(harness.id) ? harness.id : "claude", status);
   const [offer, setOffer] = useState<ShellKeyOffer | null>(null);
   const [busy, setBusy] = useState<"save" | "remove" | "import" | "mode" | "verify" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -192,7 +196,10 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     agentLogins.shellOffer(harness.id).then((found) => live && setOffer(found)).catch(() => live && setOffer(null));
     return () => { live = false; };
   }, [harness.id, askShell]);
-  const chosen = choice ?? (status?.mode === "api_key" && saved ? "api_key" : "subscription");
+  // An added account as the default (#980): neither This Mac's login nor the saved key is what new tabs use.
+  const defaultAccount = accounts.view?.defaultAccount;
+  const addedDefault = !!defaultAccount && defaultAccount !== LOCAL_ACCOUNT && defaultAccount !== SAVED_KEY_ACCOUNT && addedAccounts(accounts.view).some((account) => account.id === defaultAccount);
+  const chosen = choice ?? (addedDefault ? null : status?.mode === "api_key" && saved ? "api_key" : "subscription");
   const usingKey = status?.mode === "api_key" && !!saved;
   const subscription = SUBSCRIPTION[harness.id];
 
@@ -326,6 +333,8 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
       ["Executable", harness.path ? <Mono>{shortPath(harness.path)}</Mono> : null],
     ]} />
     {needsSetup && <div className="mt-3"><AgentSetup harness={harness} value={own} checking={checking} onRefresh={recheck} headless /></div>}
+    {takesAccounts(harness.id) && <AgentAccountsSection harness={harness.id} agentName={harness.name} accounts={accounts} localReadiness={own} login={status}
+      onChanged={() => { void login.refresh(); void refresh?.(); }} />}
   </div>;
 }
 
@@ -395,7 +404,8 @@ function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, b
   harness: HarnessInfo;
   status: AgentLoginStatus | null;
   readiness: AgentReadiness | null;
-  chosen: "subscription" | "api_key";
+  /** `null`: an added account is the default (#980). */
+  chosen: "subscription" | "api_key" | null;
   /** New tabs use the saved key: the only login a custom provider applies to. */
   usingKey: boolean;
   onChoose: (mode: "subscription" | "api_key") => void;
