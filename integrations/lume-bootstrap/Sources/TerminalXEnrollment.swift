@@ -38,17 +38,25 @@ enum TXEnrollment {
         return HKDF<SHA256>.deriveKey(inputKeyMaterial: key, salt: salt,
             info: Data("\(prefix) session \(challengeSha256)".utf8), outputByteCount: 32)
     }
-    static func acceptance(_ challengeSha256: String) -> [String: Any] {
-        ["accountAuthenticated": false, "challengeSha256": challengeSha256, "helperAuthenticated": true,
-         "ready": false, "trustAccepted": false]
+    /// `resumes`: the challenge digest of the enrollment this proof resumes,
+    /// when it is not the enrollment itself. The helper then continues that
+    /// enrollment and makes no second one.
+    static func acceptance(_ challengeSha256: String, resumes: String? = nil) -> [String: Any] {
+        var body: [String: Any] = ["accountAuthenticated": false, "challengeSha256": challengeSha256,
+            "helperAuthenticated": true, "ready": false, "trustAccepted": false]
+        if let resumes { body["resumes"] = resumes }
+        return body
     }
     /// One attempt on a connected stream. `journal` durably records the
     /// challenge before it is sent; `commit` durably records a verified proof
     /// before the helper is told it was accepted. If either throws, the helper
-    /// receives nothing further.
+    /// receives nothing further. `commit` returns nil when this proof is the
+    /// VM's enrollment, or the challenge digest of the enrollment it resumes.
+    /// The session is then that enrollment's: its frames use this proof's
+    /// fresh key, and its records name the original challenge.
     static func accept(fd: Int32, key: SymmetricKey, binding: TXEnrollmentBinding,
                        journal: (Data) throws -> Void,
-                       commit: (TXEnrollmentSession) throws -> Void = { _ in }) throws -> TXEnrollmentSession {
+                       commit: (_ challengeSha256: String, _ claims: [String: Any]) throws -> String? = { _, _ in nil }) throws -> TXEnrollmentSession {
         try TXWire.configureStream(fd)
         let hello = try txObject(TXWire.read(fd), keys: ["bootstrapId", "clientNonce", "seedId", "version"])
         try txRequire(hello["version"] as? Int == 2 && txString(hello, "bootstrapId") == binding.bootstrapId
@@ -68,10 +76,10 @@ enum TXEnrollment {
         try txRequire(txString(proof, "challengeSha256") == challengeSha256)
         let expected = tag(key, "enrollment", [challengeSha256, txDigest(try txJSON(claims))])
         try txRequire(txEqualTag(expected, try txString(proof, "proof")))
+        let resumes = try commit(challengeSha256, claims)
         let session = TXEnrollmentSession(key: try sessionKey(key, clientNonce: clientNonce, serverNonce: serverNonce,
-            challengeSha256: challengeSha256), challengeSha256: challengeSha256, claims: claims)
-        try commit(session)
-        try session.send(fd, acceptance(challengeSha256))
+            challengeSha256: challengeSha256), challengeSha256: resumes ?? challengeSha256, claims: claims)
+        try session.send(fd, acceptance(challengeSha256, resumes: resumes))
         return session
     }
 }
@@ -79,6 +87,8 @@ enum TXEnrollment {
 /// Strictly sequenced frames, tagged per direction under the session key.
 final class TXEnrollmentSession {
     private let key: SymmetricKey
+    /// The enrollment this session belongs to, which every record names: this
+    /// proof's challenge, or for a resumed session the original one.
     let challengeSha256: String
     let claims: [String: Any]
     private(set) var sent: UInt64 = 0
@@ -103,31 +113,53 @@ final class TXEnrollmentSession {
     }
 }
 
-/// Admits one attempt at a time. A failed attempt spends one unit of a bounded
-/// refusal budget and never claims. The first valid proof claims this VM's only
-/// enrollment. Once claimed, or once the budget is spent (fenced for
-/// inspection), nothing more is admitted.
+/// Admits one connection at a time. A failed attempt spends one unit of a
+/// bounded refusal budget and never claims. The first valid proof claims this
+/// VM's only enrollment, and no later proof makes another.
+///
+/// A claimed enrollment can be resumed. Its one session can end early: the
+/// guest restarts, the person answers after the wait ran out, or the
+/// acceptance was lost. Then nothing could reach the helper again, and only
+/// deleting the VM recovered it (review 2 of #672). So once claimed, and only
+/// while no session is live, a connection may prove the same key again and
+/// continue that enrollment. A failed proof spends the same refusal budget,
+/// resumptions are bounded too, and a spent budget fences the gate for
+/// inspection before or after the claim.
 final class TXEnrollmentGate: @unchecked Sendable {
+    enum Admission: Sendable { case enrollment, resumption }
     let limit: Int
+    let resumptionLimit: Int
     private let lock = NSLock()
     private var busy = false
     private var claimedState = false
     private var refusalCount = 0
-    init(limit: Int) { self.limit = limit }
-    func begin() -> Bool {
+    private var resumptionCount = 0
+    init(limit: Int, resumptionLimit: Int = 8) { self.limit = limit; self.resumptionLimit = resumptionLimit }
+    func begin() -> Admission? {
         lock.lock(); defer { lock.unlock() }
-        guard !busy, !claimedState, refusalCount < limit else { return false }
+        guard !busy, refusalCount < limit, !claimedState || resumptionCount < resumptionLimit else { return nil }
         busy = true
-        return true
+        return claimedState ? .resumption : .enrollment
     }
+    /// The outcome of an admitted connection's proof. A failed one frees the
+    /// gate; a verified one holds it for the session until `sessionEnded`.
     func finish(authenticated: Bool) {
         lock.lock(); defer { lock.unlock() }
+        guard authenticated else { busy = false; refusalCount += 1; return }
+        if claimedState { resumptionCount += 1 } else { claimedState = true }
+    }
+    /// The verified connection's session is over, however it ended.
+    func sessionEnded() {
+        lock.lock(); defer { lock.unlock() }
         busy = false
-        if authenticated { claimedState = true } else { refusalCount += 1 }
     }
     var state: (claimed: Bool, refusals: Int, fenced: Bool) {
         lock.lock(); defer { lock.unlock() }
-        return (claimedState, refusalCount, !claimedState && refusalCount >= limit)
+        return (claimedState, refusalCount, refusalCount >= limit)
+    }
+    var resumptions: Int {
+        lock.lock(); defer { lock.unlock() }
+        return resumptionCount
     }
 }
 
@@ -139,13 +171,30 @@ final class TXEnrollmentGate: @unchecked Sendable {
 /// the key, and never claims account authentication, trust or readiness.
 final class TXEnrollmentService: @unchecked Sendable {
     static let refusalLimit = 8
+    static let resumptionLimit = 8
     static let attemptNames = Swift.Set((0...refusalLimit).map { "enrollment-attempt-\($0).json" })
-    let gate = TXEnrollmentGate(limit: refusalLimit)
+    /// One per admitted connection after the claim: at most every resumption
+    /// and every refusal the budget allows.
+    static let resumptionNames = Swift.Set((0..<(refusalLimit + resumptionLimit)).map { "enrollment-resumption-\($0).json" })
+    static let receiptKeys: Swift.Set<String> = ["version", "bindingDigest", "ownerEpoch", "bootstrapId", "seedId",
+        "seedReceiptSha256", "attempt", "challengeSha256", "claimsSha256", "helperAuthenticated", "accountAuthenticated",
+        "trustAccepted", "ready"]
+    /// An admitted connection: which proof it may make, and where its
+    /// challenge is journaled.
+    struct Admitted: Sendable {
+        let admission: TXEnrollmentGate.Admission
+        let index: Int
+        var journal: String {
+            admission == .enrollment ? "enrollment-attempt-\(index).json" : "enrollment-resumption-\(index).json"
+        }
+    }
+    let gate = TXEnrollmentGate(limit: refusalLimit, resumptionLimit: resumptionLimit)
     private let launch: TerminalXBootstrapLaunch
     private let key: SymmetricKey
     private let binding: TXEnrollmentBinding
     private let lock = NSLock()
     private var attempts = 0
+    private var resumptions = 0
     private var retained: TXEnrollmentSession?
     private let confirmationWait: Double
     private let relayed = DispatchSemaphore(value: 0)
@@ -164,45 +213,71 @@ final class TXEnrollmentService: @unchecked Sendable {
             bindingDigest: launch.bindingDigest, ownerEpoch: launch.binding.ownerEpoch, seedReceiptSha256: receipt)
         self.launch = launch
     }
-    /// The attempt number for an admitted connection, or nil once claimed,
-    /// fenced or while another attempt is in flight.
-    func admit() -> Int? {
-        guard gate.begin() else { return nil }
+    /// An admitted connection, or nil while another is in flight or its
+    /// session is live, and once fenced or out of resumptions.
+    func admit() -> Admitted? {
+        guard let admission = gate.begin() else { return nil }
         lock.lock(); defer { lock.unlock() }
-        attempts += 1
-        return attempts - 1
+        switch admission {
+        case .enrollment:
+            attempts += 1
+            return Admitted(admission: admission, index: attempts - 1)
+        case .resumption:
+            resumptions += 1
+            return Admitted(admission: admission, index: resumptions - 1)
+        }
     }
     /// The verified session, retained for the authenticated relay that consumes it.
     var session: TXEnrollmentSession? {
         lock.lock(); defer { lock.unlock() }
         return retained
     }
-    func run(fd: Int32, attempt: Int, view: TXOwnedVM) {
+    func run(fd: Int32, attempt: Admitted, view: TXOwnedVM) {
         let operation = launch.pins["operation"]!
         var committed = false
         var finished = false
         do {
             try launch.check(); try view.check()
             let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding, journal: {
-                try operation.writeNew("enrollment-attempt-\(attempt).json", $0)
-            }, commit: { session in
+                try operation.writeNew(attempt.journal, $0)
+            }, commit: { challengeSha256, claims in
                 try self.launch.check(); try view.check()
-                try operation.writeNew("enrollment.json", txJSON(["version": 2, "bindingDigest": self.binding.bindingDigest,
-                    "ownerEpoch": self.binding.ownerEpoch, "bootstrapId": self.binding.bootstrapId, "seedId": self.binding.seedId,
-                    "seedReceiptSha256": self.binding.seedReceiptSha256, "attempt": attempt,
-                    "challengeSha256": session.challengeSha256, "claimsSha256": txDigest(try txJSON(session.claims)),
-                    "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false]))
-                committed = true
+                let claimsSha256 = txDigest(try txJSON(claims))
+                switch attempt.admission {
+                case .enrollment:
+                    try operation.writeNew("enrollment.json", txJSON(["version": 2, "bindingDigest": self.binding.bindingDigest,
+                        "ownerEpoch": self.binding.ownerEpoch, "bootstrapId": self.binding.bootstrapId, "seedId": self.binding.seedId,
+                        "seedReceiptSha256": self.binding.seedReceiptSha256, "attempt": attempt.index,
+                        "challengeSha256": challengeSha256, "claimsSha256": claimsSha256,
+                        "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false]))
+                    committed = true
+                    return nil
+                case .resumption:
+                    // The one receipt is never rewritten. The same helper
+                    // proves the same key and claims again, and its session
+                    // continues the records that receipt's challenge names.
+                    let receipt = try txObject(operation.receipt("enrollment.json"), keys: Self.receiptKeys)
+                    try txRequire(txString(receipt, "bindingDigest") == self.binding.bindingDigest
+                        && txString(receipt, "ownerEpoch") == self.binding.ownerEpoch
+                        && txString(receipt, "claimsSha256") == claimsSha256)
+                    committed = true
+                    return try txString(receipt, "challengeSha256")
+                }
             })
             lock.lock(); retained = session; lock.unlock()
             gate.finish(authenticated: true)
             finished = true
+            defer { gate.sessionEnded() }
             try converse(fd: fd, session: session, view: view)
         } catch {
             // A durable receipt claims even if the acceptance reply was lost: the
-            // enrollment is never repeated or replaced, and its session is gone.
+            // enrollment is never repeated or replaced. That session is gone,
+            // and the helper may resume the enrollment on a later connection.
             // Later journals record how far the account conversation got.
-            if !finished { gate.finish(authenticated: committed) }
+            if !finished {
+                gate.finish(authenticated: committed)
+                if committed { gate.sessionEnded() }
+            }
         }
     }
     /// Wakes the session once the host journals a relay.
@@ -210,13 +285,19 @@ final class TXEnrollmentService: @unchecked Sendable {
     /// After enrollment: journal the helper's account observation, wait for the
     /// person's confirmation to be journaled by the owner channel, relay it over
     /// the session, and journal the helper's answer. Nothing here chooses.
+    ///
+    /// A resumed session runs the same steps from the start. The helper
+    /// reports each one again, and a report that is already journaled must be
+    /// identical to it; the host's relays are sent as journaled.
     private func converse(fd: Int32, session: TXEnrollmentSession, view: TXOwnedVM) throws {
         let operation = launch.pins["operation"]!
         _ = try TXAccountRelay.observe(try session.receive(fd), launch: launch, challengeSha256: session.challengeSha256)
         let deadline = DispatchTime.now() + confirmationWait
         var relay = try? operation.receipt("account-confirmation-relay.json")
         while relay == nil {
-            try txRequire(DispatchTime.now() < deadline)
+            // A helper that has gone ends the session now, not at the
+            // deadline, so that it can resume when it returns.
+            try txRequire(DispatchTime.now() < deadline && !TXWire.ended(fd))
             _ = relayed.wait(timeout: .now() + 1)
             relay = try? operation.receipt("account-confirmation-relay.json")
         }
@@ -227,7 +308,7 @@ final class TXEnrollmentService: @unchecked Sendable {
         guard (try JSONSerialization.jsonObject(with: answer) as? [String: Any])?["outcome"] as? String == "confirmed" else { return }
         var grant = try? operation.receipt("key-grant-relay.json")
         while grant == nil {
-            try txRequire(DispatchTime.now() < deadline)
+            try txRequire(DispatchTime.now() < deadline && !TXWire.ended(fd))
             _ = relayed.wait(timeout: .now() + 1)
             grant = try? operation.receipt("key-grant-relay.json")
         }

@@ -35,7 +35,9 @@ def hkdf(ikm, salt, info, n=32):
 def session_key(key, client, server, challenge_sha):
     return hkdf(key, bytes.fromhex(client) + bytes.fromhex(server), f'{PREFIX} session {challenge_sha}'.encode())
 def frame(key, direction, seq, body): return {'body': body, 'seq': seq, 'tag': tag(key, 'frame', [direction, str(seq), digest(wire(body))])}
-def acceptance(sha): return {'accountAuthenticated': False, 'challengeSha256': sha, 'helperAuthenticated': True, 'ready': False, 'trustAccepted': False}
+def acceptance(sha, resumes=None):
+    body = {'accountAuthenticated': False, 'challengeSha256': sha, 'helperAuthenticated': True, 'ready': False, 'trustAccepted': False}
+    return body if resumes is None else {**body, 'resumes': resumes}
 def send_raw(s, data): s.sendall(struct.pack('!I', len(data)) + data)
 def send(s, v): send_raw(s, wire(v))
 def read_raw(s):
@@ -85,8 +87,9 @@ class Fixture:
         return not any(f in t for f in forms for t in texts)
     def hello(self, **change): return {'bootstrapId': self.binding['bootstrapId'], 'clientNonce': os.urandom(32).hex(), 'seedId': self.binding['seedId'], 'version': 2, **change}
 
-def honest_helper(f, s, key=None, claims=None, before_proof=None, session=True):
-    """A conforming helper. Returns the challenge bytes and the owner's echo."""
+def honest_helper(f, s, key=None, claims=None, before_proof=None, session=True, resumes=None):
+    """A conforming helper. Returns the challenge bytes and the owner's echo.
+    `resumes`: the enrollment the owner is expected to say this proof resumes."""
     key = key or f.key
     hello = f.hello(); send(s, hello)
     challenge_bytes = read_raw(s); challenge = json.loads(challenge_bytes)
@@ -97,7 +100,7 @@ def honest_helper(f, s, key=None, claims=None, before_proof=None, session=True):
     send(s, proof)
     k = session_key(key, hello['clientNonce'], challenge['serverNonce'], sha)
     accepted = json.loads(read_raw(s))
-    assert accepted == frame(k, 'owner', 0, acceptance(sha)), accepted
+    assert accepted == frame(k, 'owner', 0, acceptance(sha, resumes)), accepted
     if not session: return challenge_bytes, None, k
     send(s, frame(k, 'helper', 0, {'hello': 'reference'}))
     return challenge_bytes, json.loads(read_raw(s)), k
@@ -127,7 +130,37 @@ class OwnerAndHelper(unittest.TestCase):
         challenge = json.loads(journaled)
         self.assertEqual({k: challenge[k] for k in f.binding}, f.binding)
         self.assertEqual((owner['sent'], owner['received']), (2, 1))
-        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False})
+        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'resumptions': 0})
+        self.assertTrue(f.secret_free())
+
+    def test_the_rust_helper_resumes_its_enrollment_with_the_swift_owner_and_so_does_the_reference(self):
+        f = Fixture()
+        process, ends = f.owner(limit=3, count=3)
+        def rust(end):
+            helper = subprocess.run([str(HELPER), str(end.fileno()), str(f.seed)], pass_fds=[end.fileno()],
+                                    capture_output=True, timeout=30)
+            end.close(); f.outputs += [helper.stdout, helper.stderr]
+            self.assertEqual(helper.returncode, 0, helper.stdout)
+            return json.loads(helper.stdout)
+        first = rust(ends[0])
+        self.assertEqual((first['authenticated'], first['resumed']), (True, False))
+        # Its session is over. The same helper proves the key again, and the
+        # owner resumes the enrollment it holds: no second one is made.
+        again = rust(ends[1])
+        self.assertEqual((again['authenticated'], again['resumed'], again['challengeSha256']),
+                         (True, True, first['challengeSha256']))
+        self.assertEqual(again['echo'], {'echo': {'hello': 'rust helper'}}, 'frames use the new connection\'s own key')
+        # The reference helper with that helper's claims interoperates the same way.
+        _, echo, k = honest_helper(f, ends[2], claims={'euid': os.geteuid(), 'fixture': True}, resumes=first['challengeSha256'])
+        self.assertEqual(echo, frame(k, 'owner', 1, {'echo': {'hello': 'reference'}}))
+        ends[2].close()
+        attempts, state = f.finish(process)
+        self.assertEqual([(a['authenticated'], a['resumed'], a['challengeSha256']) for a in attempts],
+                         [(True, False, first['challengeSha256'])] + [(True, True, first['challengeSha256'])] * 2)
+        challenges = [(f.journal / f'challenge-{i}.json').read_bytes() for i in range(3)]
+        self.assertEqual(digest(challenges[0]), first['challengeSha256'])
+        self.assertEqual(len({json.loads(c)['serverNonce'] for c in challenges}), 3, 'a fresh challenge for every proof')
+        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'resumptions': 2})
         self.assertTrue(f.secret_free())
 
     def test_reference_helper_interoperates_with_the_swift_owner(self):
@@ -151,7 +184,7 @@ class OwnerRefusals(unittest.TestCase):
         for s in sockets: s.close()
         attempts, state = f.finish(process)
         self.assertEqual([a.get('authenticated') for a in attempts], [False, False, True])
-        self.assertEqual(state, {'claimed': True, 'refusals': 2, 'fenced': False})
+        self.assertEqual(state, {'claimed': True, 'refusals': 2, 'fenced': False, 'resumptions': 0})
         self.assertTrue(f.secret_free())
 
     def test_spent_budget_fences_before_a_valid_proof(self):
@@ -162,17 +195,46 @@ class OwnerRefusals(unittest.TestCase):
         for s in sockets: s.close()
         attempts, state = f.finish(process)
         self.assertEqual(attempts[2], {'attempt': 2, 'admitted': False})
-        self.assertEqual(state, {'claimed': False, 'refusals': 2, 'fenced': True})
+        self.assertEqual(state, {'claimed': False, 'refusals': 2, 'fenced': True, 'resumptions': 0})
 
-    def test_a_claimed_enrollment_admits_nothing_more(self):
+    def test_a_claimed_enrollment_is_resumed_only_by_the_same_key_and_claims_and_never_made_twice(self):
         f = Fixture()
-        process, sockets = f.owner(limit=3, count=2)
-        honest_helper(f, sockets[0]); sockets[0].close()
-        attempt_quietly(lambda: honest_helper(f, sockets[1]))
-        sockets[1].close()
+        process, sockets = f.owner(limit=3, count=5)
+        first, _, _ = honest_helper(f, sockets[0]); sockets[0].close()
+        enrollment = digest(first)
+        _, echo, k = honest_helper(f, sockets[1], resumes=enrollment); sockets[1].close()
+        self.assertEqual(echo, frame(k, 'owner', 1, {'echo': {'hello': 'reference'}}))
+        # Another key, or this key with other claims, resumes nothing; each spends the refusal budget.
+        attempt_quietly(lambda: honest_helper(f, sockets[2], key=os.urandom(32), resumes=enrollment)); sockets[2].close()
+        attempt_quietly(lambda: honest_helper(f, sockets[3], claims={'euid': 501, 'reference': True}, resumes=enrollment)); sockets[3].close()
+        honest_helper(f, sockets[4], resumes=enrollment); sockets[4].close()
         attempts, state = f.finish(process)
-        self.assertEqual(attempts[1], {'attempt': 1, 'admitted': False})
-        self.assertEqual((state['claimed'], state['refusals']), (True, 0))
+        self.assertEqual([(a['admitted'], a['authenticated'], a.get('resumed'), a.get('challengeSha256')) for a in attempts],
+            [(True, True, False, enrollment), (True, True, True, enrollment), (True, False, None, None),
+             (True, False, None, None), (True, True, True, enrollment)])
+        self.assertEqual(state, {'claimed': True, 'refusals': 2, 'fenced': False, 'resumptions': 2})
+        self.assertTrue(f.secret_free())
+
+    def test_resumptions_are_bounded_and_a_spent_budget_fences_them_too(self):
+        f = Fixture()
+        process, sockets = f.owner(limit=3, count=10)
+        enrollment = digest(honest_helper(f, sockets[0])[0]); sockets[0].close()
+        for s in sockets[1:9]:
+            honest_helper(f, s, resumes=enrollment); s.close()
+        attempt_quietly(lambda: honest_helper(f, sockets[9], resumes=enrollment)); sockets[9].close()
+        attempts, state = f.finish(process)
+        self.assertEqual(attempts[9], {'attempt': 9, 'admitted': False})
+        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'resumptions': 8})
+
+        g = Fixture()
+        process, sockets = g.owner(limit=2, count=4)
+        enrollment = digest(honest_helper(g, sockets[0])[0]); sockets[0].close()
+        for s in sockets[1:3]:
+            attempt_quietly(lambda s=s: honest_helper(g, s, key=os.urandom(32), resumes=enrollment)); s.close()
+        attempt_quietly(lambda: honest_helper(g, sockets[3], resumes=enrollment)); sockets[3].close()
+        attempts, state = g.finish(process)
+        self.assertEqual(attempts[3], {'attempt': 3, 'admitted': False})
+        self.assertEqual(state, {'claimed': True, 'refusals': 2, 'fenced': True, 'resumptions': 0})
 
     def test_replayed_and_redirected_proofs_refuse(self):
         f = Fixture()
@@ -220,7 +282,7 @@ class OwnerRefusals(unittest.TestCase):
         attempts, state = f.finish(process)
         self.assertLess(time.monotonic() - started, 20)
         self.assertEqual([a.get('authenticated') for a in attempts], [False, False, False, False, True])
-        self.assertEqual(state, {'claimed': True, 'refusals': 4, 'fenced': False})
+        self.assertEqual(state, {'claimed': True, 'refusals': 4, 'fenced': False, 'resumptions': 0})
 
     def test_session_frames_out_of_sequence_or_tampered_end_the_session_only(self):
         for name, change in [('sequence', lambda k: frame(k, 'helper', 1, {'x': 1})),
@@ -262,8 +324,23 @@ class HelperRefusals(unittest.TestCase):
 
     def test_a_conforming_reference_owner_is_accepted(self):
         code, result, proof = self.hostile_owner()
-        self.assertEqual((code, result['authenticated']), (0, True))
+        self.assertEqual((code, result['authenticated'], result['resumed']), (0, True, False))
         self.assertEqual(set(proof), {'challengeSha256', 'claims', 'proof'})
+
+    def test_a_resumption_is_followed_only_in_its_exact_form(self):
+        original = os.urandom(32).hex()
+        code, result, _ = self.hostile_owner(mutate_accept=lambda k, sha, f: frame(k, 'owner', 0, acceptance(sha, original)))
+        self.assertEqual((code, result['authenticated'], result['resumed'], result['challengeSha256']), (0, True, True, original))
+        bodies = [lambda sha: {**acceptance(sha, original), 'trustAccepted': True},
+                  lambda sha: {**acceptance(sha, original), 'accountAuthenticated': True},
+                  lambda sha: acceptance(sha, sha),
+                  lambda sha: acceptance(sha, original.upper()),
+                  lambda sha: acceptance(sha, original[:-2]),
+                  lambda sha: {**acceptance(sha), 'resumes': None},
+                  lambda sha: {**acceptance(sha, original), 'also': 1}]
+        for body in bodies:
+            code, result, _ = self.hostile_owner(mutate_accept=lambda k, sha, f, body=body: frame(k, 'owner', 0, body(sha)))
+            self.assertEqual((code, result['authenticated']), (3, False), body('c' * 64))
 
     def test_challenges_for_another_seed_or_hello_get_no_proof(self):
         for change in [{'seedId': os.urandom(16).hex()}, {'bootstrapId': str(uuid.uuid4())}, {'clientNonce': os.urandom(32).hex()}, {'version': 1}]:

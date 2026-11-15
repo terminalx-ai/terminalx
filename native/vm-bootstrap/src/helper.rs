@@ -15,12 +15,24 @@
 //! key or changes sshd, and it exits 0 on every path so `KeepAlive
 //! {SuccessfulExit: false}` cannot turn a refusal into a restart loop.
 //!
+//! The enrollment is made once, but its session can end early: the guest
+//! restarts, the person answers after a wait ran out, or the owner's
+//! acceptance was lost. A later launch, or the next try of this one, then
+//! resumes that enrollment. It proves the seeded key again over a fresh
+//! challenge, the owner answers that the proof resumes the enrollment it
+//! holds, and the conversation runs again from its start. Nothing is done
+//! twice by that: the owner keeps each report it has only if the new one is
+//! identical, and the key install returns its own journaled receipt.
+//! Resumptions are journaled before they start and bounded across launches,
+//! as attempts are. (Before this, a session that ended early left the VM
+//! unreachable for good; review 2 of #672.)
+//!
 //! After the host-key report, only the owner's acknowledgement under the same
-//! session, bound to this session's challenge and that exact report, starts
+//! session, bound to the enrollment's challenge and that exact report, starts
 //! retirement (design stage 9, `retire`): the three seeded items as this
-//! launch recorded them are removed and the outcome is reported back. Without
-//! it, or after a refused, partial or interrupted retirement, the remaining
-//! items stay for inspection and no later launch connects again.
+//! launch recorded them are removed and the outcome is reported back. A
+//! refused, partial or interrupted retirement leaves the remaining items for
+//! inspection, and no later launch connects again.
 use crate::{
     account,
     child::{self, Installer},
@@ -64,6 +76,8 @@ pub struct Schedule {
     pub person: Duration,
     /// Enrollment attempts for this seed, counted across launches.
     pub attempts: u32,
+    /// Resumptions of this seed's one enrollment, counted across launches.
+    pub resumptions: u32,
 }
 
 impl Schedule {
@@ -76,6 +90,7 @@ impl Schedule {
         exchange: Duration::from_secs(3),
         person: Duration::from_secs(6 * 3600),
         attempts: 3,
+        resumptions: 8,
     };
 }
 
@@ -145,9 +160,9 @@ pub enum Outcome {
     /// The state directory, seed or seeded items failed their checks;
     /// nothing was attempted.
     Refused(String),
-    /// An earlier launch was accepted. The owner admits nothing more, and
-    /// enrollment is never repeated.
-    EnrolledEarlier,
+    /// The enrollment was accepted, and every journaled resumption of it
+    /// ended without the owner resuming it. Nothing more is tried.
+    ResumptionsSpent(Option<String>),
     /// An earlier launch journaled its retirement outcome; nothing more is
     /// done.
     RetirementRecorded,
@@ -197,28 +212,68 @@ fn read_seed(state: &Dir, owner: u32) -> io::Result<Seed> {
 }
 
 /// What an earlier launch's journals already settle, before anything is read
-/// or tried.
+/// or tried. An enrollment alone settles nothing: its session may have ended
+/// early, and it is resumed. A retirement that started is never resumed.
 fn settled(state: &Dir) -> io::Result<Option<Outcome>> {
     Ok(if state.stat_at(retire::RESULT)?.is_some() {
         Some(Outcome::RetirementRecorded)
     } else if state.stat_at(retire::INTENT)?.is_some() {
         Some(Outcome::RetirementInterrupted)
-    } else if state.stat_at(ENROLLED)?.is_some() {
-        Some(Outcome::EnrolledEarlier)
     } else {
         None
     })
+}
+
+/// The challenge digest of the enrollment an earlier connection journaled, if
+/// one did. The journal is this helper's own: one private, bounded link.
+fn enrolled(state: &Dir, owner: u32) -> io::Result<Option<String>> {
+    if state.stat_at(ENROLLED)?.is_none() {
+        return Ok(None);
+    }
+    let (file, stat) = state.open_regular(ENROLLED)?;
+    if stat.st_uid != owner || stat.st_mode & 0o077 != 0 || stat.st_nlink != 1 {
+        return Err(refused("the enrollment journal is not private to root"));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut &file)
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| refused("the enrollment journal is not JSON"))?;
+    match value["challengeSha256"].as_str() {
+        Some(digest)
+            if bytes.len() <= 4096
+                && value["version"] == 1
+                && digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            Ok(Some(digest.to_owned()))
+        }
+        _ => Err(refused("the enrollment journal is malformed")),
+    }
 }
 
 fn attempt_name(attempt: u32) -> String {
     format!("enrollment-attempt-{attempt}.json")
 }
 
-/// The first unused attempt number, or `None` once all are spent.
-fn next_attempt(state: &Dir, limit: u32) -> io::Result<Option<u32>> {
-    for attempt in 1..=limit {
-        if state.stat_at(&attempt_name(attempt))?.is_none() {
-            return Ok(Some(attempt));
+fn resumption_name(resumption: u32) -> String {
+    format!("enrollment-resumption-{resumption}.json")
+}
+
+/// A resumed session's own result; the first session's is `RESULT`.
+fn result_name(resumption: u32) -> String {
+    format!("session-result-{resumption}.json")
+}
+
+/// The first unused number in `1..=limit` for the journal `name` gives, or
+/// `None` once all are spent.
+fn next_unused(state: &Dir, limit: u32, name: fn(u32) -> String) -> io::Result<Option<u32>> {
+    for number in 1..=limit {
+        if state.stat_at(&name(number))?.is_none() {
+            return Ok(Some(number));
         }
     }
     Ok(None)
@@ -258,8 +313,9 @@ pub struct Reached {
 /// installed by `installer` as the confirmed account, and, only after that
 /// install, the existing public host key in `ssh_dir` (which, like the key,
 /// must belong to `ssh_owner`), followed by the owner's acknowledgement of
-/// that report under this session (`challenge_sha256`). The session ends at
-/// the first refusal.
+/// that report under this session. `challenge_sha256` is the enrollment's
+/// challenge, which the acknowledgement names; for a resumed session that is
+/// the original one. The session ends at the first refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn converse(
     session: &mut Session,
@@ -349,10 +405,32 @@ pub fn run(
             Ok(Some(outcome)) => return outcome,
             Err(error) => return Outcome::Refused(error.to_string()),
         }
-        let attempt = match next_attempt(&state, schedule.attempts) {
-            Ok(Some(attempt)) => attempt,
-            Ok(None) => return Outcome::AttemptsSpent(last_error),
+        // Until an acceptance is journaled this is an enrollment attempt;
+        // after it, a resumption of that enrollment. Both are bounded across
+        // launches, and each is journaled before its proof is sent.
+        let earlier = match enrolled(&state, owner) {
+            Ok(earlier) => earlier,
             Err(error) => return Outcome::Refused(error.to_string()),
+        };
+        let (number, journal, started) = match &earlier {
+            None => match next_unused(&state, schedule.attempts, attempt_name) {
+                Ok(Some(attempt)) => (
+                    attempt,
+                    attempt_name(attempt),
+                    json!({"attempt": attempt, "version": 1}),
+                ),
+                Ok(None) => return Outcome::AttemptsSpent(last_error),
+                Err(error) => return Outcome::Refused(error.to_string()),
+            },
+            Some(_) => match next_unused(&state, schedule.resumptions, resumption_name) {
+                Ok(Some(resumption)) => (
+                    resumption,
+                    resumption_name(resumption),
+                    json!({"resumption": resumption, "version": 1}),
+                ),
+                Ok(None) => return Outcome::ResumptionsSpent(last_error),
+                Err(error) => return Outcome::Refused(error.to_string()),
+            },
         };
         // Nothing to report until the person has finished Setup Assistant.
         while !(layout.setup_done() && !guest.accounts().is_empty()) {
@@ -362,23 +440,41 @@ pub fn run(
             Ok(stream) => stream,
             Err(failure) => return Outcome::Unreachable(failure),
         };
-        let started = json!({"attempt": attempt, "version": 1});
-        if let Err(error) = state.publish_new(&attempt_name(attempt), &record(&started)) {
+        if let Err(error) = state.publish_new(&journal, &record(&started)) {
             return Outcome::Refused(error.to_string());
         }
-        let (mut session, challenge) =
-            match enroll::enroll(&mut stream, &seed, &claims(), schedule.exchange) {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    guest.sleep(schedule.interval);
-                    continue;
+        let enroll::Accepted {
+            mut session,
+            enrollment: challenge,
+            resumed,
+        } = match enroll::enroll(&mut stream, &seed, &claims(), schedule.exchange) {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                guest.sleep(schedule.interval);
+                continue;
+            }
+        };
+        match &earlier {
+            // Accepted: this VM's only enrollment is claimed. When the owner
+            // says this proof resumes one, an earlier acceptance was lost on
+            // its way here, and that enrollment is the one journaled.
+            None => {
+                let accepted =
+                    json!({"attempt": number, "challengeSha256": challenge, "version": 1});
+                if let Err(error) = state.publish_new(ENROLLED, &record(&accepted)) {
+                    return Outcome::Refused(error.to_string());
                 }
-            };
-        // Accepted: this VM's only enrollment is claimed.
-        let enrolled = json!({"attempt": attempt, "challengeSha256": challenge, "version": 1});
-        if let Err(error) = state.publish_new(ENROLLED, &record(&enrolled)) {
-            return Outcome::Refused(error.to_string());
+            }
+            // The owner resumed exactly the journaled enrollment.
+            Some(journaled) if resumed && *journaled == challenge => {}
+            // The owner holds another enrollment, or none and took this proof
+            // for a new one. This VM's enrollment is not made twice.
+            Some(_) => {
+                last_error = Some("the owner did not resume this VM's enrollment".into());
+                guest.sleep(schedule.interval);
+                continue;
+            }
         }
         let accounts = guest.accounts();
         let (reached, retirement) = match converse(
@@ -403,9 +499,16 @@ pub fn run(
             Ok(Reached { summary, .. }) => (summary, Value::Null),
             Err(error) => (json!({"error": error.to_string()}), Value::Null),
         };
-        let result = json!({"challengeSha256": challenge, "reached": reached,
+        let mut result = json!({"challengeSha256": challenge, "reached": reached,
             "retirement": retirement, "version": 1});
-        return match state.publish_new(RESULT, &record(&result)) {
+        let name = match &earlier {
+            None => RESULT.to_owned(),
+            Some(_) => {
+                result["resumption"] = json!(number);
+                result_name(number)
+            }
+        };
+        return match state.publish_new(&name, &record(&result)) {
             Ok(()) => Outcome::Finished(result),
             Err(error) => Outcome::Refused(error.to_string()),
         };
@@ -439,6 +542,7 @@ mod tests {
         exchange: Duration::from_secs(3),
         person: Duration::from_secs(3),
         attempts: 3,
+        resumptions: 2,
     };
 
     fn euid() -> u32 {
@@ -616,82 +720,103 @@ mod tests {
     /// A conforming owner for one session: accepts the enrollment, relays the
     /// person's confirmation of `account` and a key grant, and returns every
     /// helper frame until the helper closes.
-    fn owner(
+    fn owner(end: UnixStream, key: [u8; 32], account: Value, ack: Ack) -> io::Result<Vec<Value>> {
+        owner_answering(end, key, account, ack, enroll::Reply::Accept).map(|(_, frames)| frames)
+    }
+
+    /// As `owner`, answering the verified proof with `reply`. Also returns
+    /// the digest of the challenge this connection's proof answered. A
+    /// resumed session's acknowledgement names the enrollment it resumes, as
+    /// the real owner's does.
+    fn owner_answering(
         mut end: UnixStream,
         key: [u8; 32],
         account: Value,
         ack: Ack,
-    ) -> io::Result<Vec<Value>> {
+        reply: enroll::Reply,
+    ) -> Served {
         let deadline = || Instant::now() + Duration::from_secs(3);
-        let (proof, session) = enroll::accept_fixture(&mut end, key, |_| {})?;
-        let mut frames = vec![Session::helper_body(
-            &session,
-            0,
-            &read_frame(&mut end, deadline())?,
-        )?];
-        let acknowledgement = |final_report: &Value| {
-            json!({"retire": {"challengeSha256": proof["challengeSha256"],
-                "hostKeySha256": crate::sha256(&record(final_report)), "observationSha256": "b".repeat(64)}})
+        let (proof, session) = enroll::accept_fixture_with(&mut end, key, |_| {}, reply.clone())?;
+        let challenge = proof["challengeSha256"].as_str().unwrap().to_owned();
+        let enrollment = match &reply {
+            enroll::Reply::Resume(enrollment) => enrollment.clone(),
+            enroll::Reply::Lost => return Ok((challenge, vec![])),
+            _ => challenge.clone(),
         };
-        if let Ack::Premature = ack {
-            let early = acknowledgement(
-                &json!({"hostKey": {"keyReference": REFERENCE, "publicKey": host_key(4)}}),
-            );
-            write_frame(
-                &mut end,
-                &Session::owner_frame(&session, 1, &early),
-                deadline(),
-            )?;
-            while let Ok(frame) = read_frame(&mut end, deadline()) {
-                frames.push(Session::helper_body(&session, frames.len() as u64, &frame)?);
+        let frames = (|| -> io::Result<Vec<Value>> {
+            let mut frames = vec![Session::helper_body(
+                &session,
+                0,
+                &read_frame(&mut end, deadline())?,
+            )?];
+            if let Ack::HangUp = ack {
+                return Ok(frames);
             }
-            return Ok(frames);
-        }
-        let mut confirmation = account.clone();
-        confirmation["confirmed"] = json!(true);
-        confirmation["confirmationSha256"] = json!("c".repeat(64));
-        let relayed = json!({"accountConfirmation": confirmation});
-        write_frame(
-            &mut end,
-            &Session::owner_frame(&session, 1, &relayed),
-            deadline(),
-        )?;
-        frames.push(Session::helper_body(
-            &session,
-            1,
-            &read_frame(&mut end, deadline())?,
-        )?);
-        let grant = json!({"keyGrant": {"keyReference": REFERENCE, "publicKey": PUBLIC}});
-        write_frame(
-            &mut end,
-            &Session::owner_frame(&session, 2, &grant),
-            deadline(),
-        )?;
-        let mut seq = 2;
-        while let Ok(frame) = read_frame(&mut end, deadline()) {
-            let body = Session::helper_body(&session, seq, &frame)?;
-            seq += 1;
-            frames.push(body.clone());
-            if body.get("hostKey").is_none() {
-                continue;
-            }
-            let mut sent = acknowledgement(&body);
-            let signer = match ack {
-                Ack::Never => break,
-                Ack::Changed(change) => {
-                    change(&mut sent);
-                    session
-                }
-                Ack::Untagged => [0x02; 32],
-                _ => session,
+            let acknowledgement = |final_report: &Value| {
+                json!({"retire": {"challengeSha256": enrollment,
+                "hostKeySha256": crate::sha256(&record(final_report)), "observationSha256": "b".repeat(64)}})
             };
+            if let Ack::Premature = ack {
+                let early = acknowledgement(
+                    &json!({"hostKey": {"keyReference": REFERENCE, "publicKey": host_key(4)}}),
+                );
+                write_frame(
+                    &mut end,
+                    &Session::owner_frame(&session, 1, &early),
+                    deadline(),
+                )?;
+                while let Ok(frame) = read_frame(&mut end, deadline()) {
+                    frames.push(Session::helper_body(&session, frames.len() as u64, &frame)?);
+                }
+                return Ok(frames);
+            }
+            let mut confirmation = account.clone();
+            confirmation["confirmed"] = json!(true);
+            confirmation["confirmationSha256"] = json!("c".repeat(64));
+            let relayed = json!({"accountConfirmation": confirmation});
             write_frame(
                 &mut end,
-                &Session::owner_frame(&signer, 3, &sent),
+                &Session::owner_frame(&session, 1, &relayed),
                 deadline(),
             )?;
-        }
-        Ok(frames)
+            frames.push(Session::helper_body(
+                &session,
+                1,
+                &read_frame(&mut end, deadline())?,
+            )?);
+            let grant = json!({"keyGrant": {"keyReference": REFERENCE, "publicKey": PUBLIC}});
+            write_frame(
+                &mut end,
+                &Session::owner_frame(&session, 2, &grant),
+                deadline(),
+            )?;
+            let mut seq = 2;
+            while let Ok(frame) = read_frame(&mut end, deadline()) {
+                let body = Session::helper_body(&session, seq, &frame)?;
+                seq += 1;
+                frames.push(body.clone());
+                if body.get("hostKey").is_none() {
+                    continue;
+                }
+                let mut sent = acknowledgement(&body);
+                let signer = match ack {
+                    Ack::Never => break,
+                    Ack::Changed(change) => {
+                        change(&mut sent);
+                        session
+                    }
+                    Ack::Untagged => [0x02; 32],
+                    _ => session,
+                };
+                write_frame(
+                    &mut end,
+                    &Session::owner_frame(&signer, 3, &sent),
+                    deadline(),
+                )?;
+            }
+            Ok(frames)
+        })()?;
+        Ok((challenge, frames))
     }
 
     /// How the fixture owner answers the helper's host-key report.
@@ -707,6 +832,9 @@ mod tests {
         Untagged,
         /// Sends an acknowledgement in place of the person's confirmation.
         Premature,
+        /// Closes the session after the helper's account report, as an owner
+        /// whose session ended early does.
+        HangUp,
     }
 
     fn host_key(fill: u8) -> String {
@@ -862,7 +990,9 @@ mod tests {
         }
         assert!(!temp.path().join("installer-state").exists());
 
-        // Every later launch: the owner admits nothing more, so nothing is tried.
+        // A later launch makes no second enrollment. It tries to resume this
+        // one, and with no owner listening it journals nothing.
+        let before = state_names(&layout);
         let mut again = Fake::new(vec![], vec![mine()]);
         let outcome = run(
             &layout,
@@ -871,8 +1001,9 @@ mod tests {
             &mut again,
             &mut Stage("publicKeyInstalled", vec![]),
         );
-        assert!(matches!(outcome, Outcome::EnrolledEarlier), "{outcome:?}");
-        assert_eq!(again.connects, 0);
+        assert!(matches!(outcome, Outcome::Unreachable(_)), "{outcome:?}");
+        assert_eq!(again.connects, SCHEDULE.connects);
+        assert_eq!(state_names(&layout), before);
     }
 
     fn with_host_key(layout: &Layout) {
@@ -1004,11 +1135,19 @@ mod tests {
                 &mut later,
                 &mut Stage("publicKeyInstalled", vec![]),
             );
+            // Nothing was removed, so the enrollment can still be resumed;
+            // with no owner listening nothing more is journaled.
             assert!(
-                matches!(again, Outcome::EnrolledEarlier),
+                matches!(again, Outcome::Unreachable(_)),
                 "{name}: {again:?}"
             );
-            assert_eq!(later.connects, 0, "{name}");
+            assert_eq!(later.connects, SCHEDULE.connects, "{name}");
+            assert!(
+                !state_names(&layout)
+                    .iter()
+                    .any(|n| n.starts_with("enrollment-resumption-")),
+                "{name}"
+            );
         }
     }
 
@@ -1075,6 +1214,303 @@ mod tests {
                 (0, vec![true, true, true])
             );
         }
+    }
+
+    /// What one fixture owner saw: the digest of the challenge its
+    /// connection's proof answered, and the helper's frames.
+    type Served = io::Result<(String, Vec<Value>)>;
+
+    /// One launch against a fixture owner on each of `owners`' connections,
+    /// in order.
+    fn launch(
+        layout: &Layout,
+        owners: Vec<(Ack, enroll::Reply)>,
+        installer: &mut impl Installer,
+    ) -> (Outcome, Vec<Served>) {
+        let mut ends = Vec::new();
+        let mut threads = Vec::new();
+        for (ack, reply) in owners {
+            let (helper_end, owner_end) = UnixStream::pair().unwrap();
+            ends.push(helper_end);
+            threads.push(thread::spawn(move || {
+                owner_answering(owner_end, SEEDED, mine(), ack, reply)
+            }));
+        }
+        // `Fake` hands out its connections last first.
+        ends.reverse();
+        let outcome = run(
+            layout,
+            euid(),
+            &SCHEDULE,
+            &mut Fake::new(ends, vec![mine()]),
+            installer,
+        );
+        (
+            outcome,
+            threads.into_iter().map(|t| t.join().unwrap()).collect(),
+        )
+    }
+
+    fn journal(layout: &Layout, name: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(layout.state().join(name)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_session_that_ended_early_is_resumed_by_a_later_launch_under_the_same_enrollment() {
+        let temp = guest_root();
+        let layout = layout(&temp);
+        with_host_key(&layout);
+        // The owner's session ends after the account report: the guest
+        // restarted, or the person had not answered when the wait ran out.
+        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let (outcome, owners) = launch(
+            &layout,
+            vec![(Ack::HangUp, enroll::Reply::Accept)],
+            &mut installer,
+        );
+        let (enrollment, frames) = owners[0].as_ref().unwrap();
+        assert_eq!(frames, &vec![json!({"accounts": [mine()]})]);
+        let Outcome::Finished(first) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(first["reached"]["error"].is_string(), "{first}");
+        assert_eq!(first["challengeSha256"], enrollment.as_str());
+        assert!(installer.1.is_empty(), "no grant was reached");
+        assert_eq!(
+            state_names(&layout),
+            [ENROLLED, "enrollment-attempt-1.json", KEY, RESULT]
+        );
+        let enrolled_record = std::fs::read(layout.state().join(ENROLLED)).unwrap();
+
+        // The next launch proves the key again. The owner answers that this
+        // resumes the enrollment it holds, and the conversation runs through.
+        let (outcome, owners) = launch(
+            &layout,
+            vec![(Ack::Exact, enroll::Reply::Resume(enrollment.clone()))],
+            &mut installer,
+        );
+        let (resumed_challenge, frames) = owners[0].as_ref().unwrap();
+        assert_ne!(resumed_challenge, enrollment, "a fresh challenge each time");
+        let Outcome::Finished(result) = outcome else {
+            panic!("{outcome:?}")
+        };
+        // The session is the enrollment's: its result and the acknowledgement
+        // it retired on name the original challenge, not this connection's.
+        assert_eq!(result["challengeSha256"], enrollment.as_str());
+        assert_eq!(result["resumption"], 1);
+        assert_eq!(result["reached"]["keyStage"], "publicKeyInstalled");
+        assert_eq!(result["retirement"]["stage"], "retired");
+        assert_eq!(frames[0], json!({"accounts": [mine()]}), "reported again");
+        assert_eq!(frames.last().unwrap()["retirement"]["stage"], "retired");
+        assert_eq!(installer.1.len(), 1, "one grant, in the resumed session");
+        assert_eq!(seeded_present(&layout), [false, false, false]);
+        // No second enrollment: the journal is the original, and the resumed
+        // session has its own journals beside the first session's.
+        assert_eq!(
+            std::fs::read(layout.state().join(ENROLLED)).unwrap(),
+            enrolled_record
+        );
+        assert_eq!(journal(&layout, RESULT), first);
+        assert_eq!(journal(&layout, "session-result-1.json"), result);
+        assert_eq!(
+            journal(&layout, "enrollment-resumption-1.json"),
+            json!({"resumption": 1, "version": 1})
+        );
+        assert!(!layout.state().join("enrollment-attempt-2.json").exists());
+        let secret = [STANDARD.encode(SEEDED), crate::hex(&SEEDED)];
+        for name in state_names(&layout) {
+            let text = std::fs::read_to_string(layout.state().join(&name)).unwrap();
+            assert!(
+                name == KEY || !secret.iter().any(|s| text.contains(s.as_str())),
+                "{name} names the key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_acceptance_is_resumed_and_the_owners_enrollment_is_the_one_journaled() {
+        let temp = guest_root();
+        let layout = layout(&temp);
+        with_host_key(&layout);
+        // The owner verified the first proof and claimed the enrollment, but
+        // its acceptance never arrived. The helper's next attempt is, to the
+        // owner, a resumption of that enrollment.
+        let (lost_end, lost_owner_end) = UnixStream::pair().unwrap();
+        let lost = thread::spawn(move || {
+            owner_answering(
+                lost_owner_end,
+                SEEDED,
+                mine(),
+                Ack::Exact,
+                enroll::Reply::Lost,
+            )
+        });
+        let (resume_end, resume_owner_end) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        let resume = thread::spawn(move || {
+            let enrollment = receiver.recv().unwrap();
+            owner_answering(
+                resume_owner_end,
+                SEEDED,
+                mine(),
+                Ack::Exact,
+                enroll::Reply::Resume(enrollment),
+            )
+        });
+        let claimed = thread::spawn(move || {
+            let (enrollment, frames) = lost.join().unwrap().unwrap();
+            assert!(frames.is_empty());
+            sender.send(enrollment.clone()).unwrap();
+            enrollment
+        });
+        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let outcome = run(
+            &layout,
+            euid(),
+            &SCHEDULE,
+            &mut Fake::new(vec![resume_end, lost_end], vec![mine()]),
+            &mut installer,
+        );
+        let enrollment = claimed.join().unwrap();
+        let (_, frames) = resume.join().unwrap().unwrap();
+        let Outcome::Finished(result) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(result["challengeSha256"], enrollment.as_str());
+        assert_eq!(result["retirement"]["stage"], "retired");
+        assert_eq!(frames.last().unwrap()["retirement"]["stage"], "retired");
+        // Two attempts were journaled, and the enrollment journaled is the one
+        // the owner claimed on the first: it was never made twice.
+        assert_eq!(
+            journal(&layout, ENROLLED),
+            json!({"attempt": 2, "challengeSha256": enrollment, "version": 1})
+        );
+        assert_eq!(journal(&layout, RESULT), result);
+        let names = state_names(&layout);
+        for name in ["enrollment-attempt-1.json", "enrollment-attempt-2.json"] {
+            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with("enrollment-resumption-")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_journaled_enrollment_is_resumed_and_resumptions_are_bounded_across_launches() {
+        let temp = guest_root();
+        let layout = layout(&temp);
+        with_host_key(&layout);
+        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let (_, owners) = launch(
+            &layout,
+            vec![(Ack::HangUp, enroll::Reply::Accept)],
+            &mut installer,
+        );
+        let enrollment = owners[0].as_ref().unwrap().0.clone();
+        let before = std::fs::read(layout.state().join(ENROLLED)).unwrap();
+
+        // An owner that resumes some other enrollment, and one that holds none
+        // and takes the proof for a new enrollment: neither is followed. The
+        // helper reports nothing to them, and each try spends a resumption.
+        let (outcome, owners) = launch(
+            &layout,
+            vec![
+                (Ack::Exact, enroll::Reply::Resume("e".repeat(64))),
+                (Ack::Exact, enroll::Reply::Accept),
+            ],
+            &mut installer,
+        );
+        assert!(
+            matches!(&outcome, Outcome::ResumptionsSpent(Some(reason)) if reason.contains("did not resume")),
+            "{outcome:?}"
+        );
+        for owner in owners {
+            assert!(
+                owner.is_err(),
+                "the helper closed without a report: {owner:?}"
+            );
+        }
+        assert!(installer.1.is_empty());
+        assert_eq!(seeded_present(&layout), [true, true, true]);
+        assert_eq!(
+            std::fs::read(layout.state().join(ENROLLED)).unwrap(),
+            before
+        );
+        assert_eq!(
+            state_names(&layout),
+            [
+                ENROLLED,
+                "enrollment-attempt-1.json",
+                "enrollment-resumption-1.json",
+                "enrollment-resumption-2.json",
+                KEY,
+                RESULT
+            ]
+        );
+
+        // Spent: no later launch connects, even to the owner that would resume it.
+        let (helper_end, owner_end) = UnixStream::pair().unwrap();
+        let mut later = Fake::new(vec![helper_end], vec![mine()]);
+        let outcome = run(&layout, euid(), &SCHEDULE, &mut later, &mut installer);
+        assert!(
+            matches!(outcome, Outcome::ResumptionsSpent(None)),
+            "{outcome:?}"
+        );
+        assert_eq!(later.connects, 0);
+        drop(owner_end);
+        let _ = enrollment;
+
+        // A damaged or foreign enrollment journal is never followed either.
+        let damaged = guest_root();
+        let layout = Layout {
+            root: damaged.path().to_path_buf(),
+        };
+        finish_setup(&layout);
+        for (name, bytes) in [
+            ("not JSON", &b"{"[..]),
+            ("no digest", &br#"{"attempt":1,"version":1}"#[..]),
+            (
+                "short digest",
+                &br#"{"attempt":1,"challengeSha256":"abcd","version":1}"#[..],
+            ),
+            (
+                "another version",
+                format!(
+                    r#"{{"attempt":1,"challengeSha256":"{}","version":2}}"#,
+                    "a".repeat(64)
+                )
+                .as_bytes(),
+            ),
+        ] {
+            std::fs::write(layout.state().join(ENROLLED), bytes).unwrap();
+            private(&layout.state().join(ENROLLED), 0o600);
+            let mut guest = Fake::new(vec![], vec![mine()]);
+            let outcome = run(&layout, euid(), &SCHEDULE, &mut guest, &mut installer);
+            assert!(
+                matches!(outcome, Outcome::Refused(_)),
+                "{name}: {outcome:?}"
+            );
+            assert_eq!(guest.connects, 0, "{name}");
+        }
+        std::fs::write(
+            layout.state().join(ENROLLED),
+            format!(
+                r#"{{"attempt":1,"challengeSha256":"{}","version":1}}"#,
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        private(&layout.state().join(ENROLLED), 0o644);
+        let mut guest = Fake::new(vec![], vec![mine()]);
+        let outcome = run(&layout, euid(), &SCHEDULE, &mut guest, &mut installer);
+        assert!(
+            matches!(outcome, Outcome::Refused(_)),
+            "readable journal: {outcome:?}"
+        );
+        assert_eq!(guest.connects, 0);
     }
 
     #[test]

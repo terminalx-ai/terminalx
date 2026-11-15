@@ -477,16 +477,41 @@ mod tests {
         };
         for name in ["personal", "ab", "a1", "dev_user", long.as_str()] {
             assert!(short_name(name), "{name}");
-            assert_eq!(ConfirmedAccount::from_body(&confirmation(name)).unwrap().name, name);
+            assert_eq!(
+                ConfirmedAccount::from_body(&confirmation(name))
+                    .unwrap()
+                    .name,
+                name
+            );
         }
         let too_long = "a".repeat(33);
         for name in [
-            "", "a", "1abc", "_x", "User", "john.doe", "john-doe", "name space", "name;cmd", "../user",
-            "root", "lume", "daemon", "nobody", "jos\u{e9}", too_long.as_str(),
+            "",
+            "a",
+            "1abc",
+            "_x",
+            "User",
+            "john.doe",
+            "john-doe",
+            "name space",
+            "name;cmd",
+            "../user",
+            "root",
+            "lume",
+            "daemon",
+            "nobody",
+            "jos\u{e9}",
+            too_long.as_str(),
         ] {
             assert!(!short_name(name), "{name}");
-            assert!(ConfirmedAccount::from_body(&confirmation(name)).is_err(), "{name}");
-            assert!(describe(name, 501, 20, &format!("/Users/{name}")).is_none(), "{name}");
+            assert!(
+                ConfirmedAccount::from_body(&confirmation(name)).is_err(),
+                "{name}"
+            );
+            assert!(
+                describe(name, 501, 20, &format!("/Users/{name}")).is_none(),
+                "{name}"
+            );
         }
     }
 

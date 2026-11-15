@@ -80,6 +80,18 @@ enum TXWire {
         var yes: Int32 = 1
         try txRequire(setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size)) == 0)
     }
+    /// Whether the peer of a stream that owes this side nothing has gone: it
+    /// closed, the stream failed, or it sent bytes out of turn. Used while the
+    /// owner waits on the host, when it reads nothing and would otherwise hold
+    /// a dead session open until its deadline.
+    static func ended(_ fd: Int32) -> Bool {
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&descriptor, 1, 0) > 0 else { return false }
+        if descriptor.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 { return true }
+        var byte: UInt8 = 0
+        let count = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        return count >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+    }
     private static func wait(_ fd: Int32, _ event: Int16, _ deadline: UInt64) throws {
         while true {
             let now = DispatchTime.now().uptimeNanoseconds

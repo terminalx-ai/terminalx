@@ -203,10 +203,11 @@ existing TXWire framing and canonical JSON.
 | Session | `{body, seq, tag}` | Key: HKDF-SHA256 with `K` as input, both nonces as salt and `"terminalx-vm-enrollment-v2 session " + challengeSha256` as info. Each direction counts `seq` from 0. Tag: `tag(session, "frame", [direction, seq, sha256(body)])`. |
 | Acceptance | owner frame 0 | Body `{accountAuthenticated: false, challengeSha256, helperAuthenticated: true, ready: false, trustAccepted: false}`; the helper refuses any other body. |
 
-`TXEnrollmentGate` admits one attempt at a time. A failed attempt spends one
-unit of a bounded refusal budget and never claims. The first valid proof
-claims, after which nothing more is admitted. A spent budget fences the gate
-for inspection. Cross-language fixtures (`Tests/enrollment_test.py`, run by
+`TXEnrollmentGate` admits one connection at a time. A failed attempt spends
+one unit of a bounded refusal budget and never claims. The first valid proof
+claims, and no later proof makes a second enrollment; the claimed one can be
+[resumed](#resuming-an-enrollment-2026-11-15). A spent budget fences the gate
+for inspection, before or after the claim. Cross-language fixtures (`Tests/enrollment_test.py`, run by
 `verify.py`) cover the following, with an independent standard-library
 reference playing a hostile peer on each side:
 
@@ -231,13 +232,55 @@ version 3:
   sent. That file holds digests, ids and `helperAuthenticated: true`, with
   account authentication, trust and readiness false.
 - A durable receipt claims even if the reply is lost, so enrollment is never
-  repeated.
+  repeated. The helper's next connection
+  [resumes](#resuming-an-enrollment-2026-11-15) it.
 - The owner channel serves only the `enrollment` action for version 3, and
   never serves it for version 2.
 
 `protocol_test.py` runs the real service after a genuine launch hand-off with
 the real Rust helper. It covers refusals, the budget fence, the claim, a lost
 reply, a missing key and a malformed seed binding.
+
+#### Resuming an enrollment (2026-11-15)
+
+Until this change, any early end of the one session left the VM unreachable
+for good: the helper found `enrolled.json` and never connected again, and the
+owner admitted nothing after its claim. A guest restart, a confirmation given
+after the six-hour wait, or a lost acceptance could only be recovered by
+deleting the VM (review 2 of #672). Now:
+
+- **Same proof, no second enrollment.** After the claim, and only while no
+  session is live, the owner admits a connection that proves the seeded key
+  again over a fresh challenge. The claims must be the ones in
+  `enrollment.json`, which is never rewritten. Each such challenge is
+  journaled as `enrollment-resumption-N.json` before it is sent.
+- **The acceptance says so.** Its body adds `resumes`, the original
+  enrollment's challenge digest. The helper follows it only in that exact
+  form, and only if it names the enrollment in its own `enrolled.json`. A
+  helper whose acceptance was lost has no such journal, and records the
+  enrollment the owner names.
+- **The session is the enrollment's.** Frames use the new challenge's key,
+  from sequence zero. Records and the retirement acknowledgement name the
+  original challenge.
+- **Replayed, never replaced.** The conversation runs again from the account
+  report. A report the owner already journaled must be identical, byte for
+  byte (`writeSame`); a different one ends the session and changes nothing.
+  The host's relays are sent as journaled. The helper's key install returns
+  its own receipt for the same grant.
+- **Bounded.** The owner allows 8 resumptions per launch, and a failed proof
+  spends the same refusal budget as before the claim. The helper journals
+  each resumption (`enrollment-resumption-N.json`) before its proof and stops
+  after 8 across launches. A resumed session's result is
+  `session-result-N.json`.
+- **A helper that has gone ends its session.** While the owner waits for the
+  host it checks the stream each second, so the helper can resume when it
+  returns and not when the wait ends.
+- **Not resumed.** A retirement that started is never resumed. An owner that
+  exits takes its VM with it and is never replaced (`replacementAllowed` is
+  always false), so an owner crash or a host restart still ends the
+  bootstrap. That is the launch contract, not the session, and it is
+  unchanged here. A changed account list between sessions is a different
+  report and is refused.
 
 **Host (2026-10-31).**
 
@@ -272,6 +315,14 @@ The confirmation works like this:
 - It is gated by the onboarding capability and needs `confirm: true`.
 - It must quote the exact observation digest and one account from it, from the
   original parent session, tab and conversation.
+- That account must be the one planned at Create: the same short name and the
+  home it fixes. The helper reports every personal account, but this VM's one
+  key and its host-key pin are for the planned account, and a choice is
+  permanent. Before 2026-11-15 only the pin checked this, so another choice
+  was accepted twice and then refused for good (review 2 of #672). Now it is
+  refused first, before anything is recorded, and again before the key exists.
+  The status names the planned account (`plannedAccount`), and the card
+  offers only it.
 - The host records `account-confirmation.json` exclusively before relaying it.
   A retry re-presents those same bytes, and a different account is refused
   for good.
@@ -608,8 +659,10 @@ against the helper and the seeder's production profile.
   minutes) and journal nothing.
   - Each enrollment attempt is journaled before it starts, at most three per
     seed across launches.
-  - An acceptance is journaled as `enrolled.json`. Later launches then exit
-    without connecting, because the owner admits nothing more.
+  - An acceptance is journaled as `enrolled.json`. A later launch makes no
+    second enrollment; it
+    [resumes](#resuming-an-enrollment-2026-11-15) that one, at most eight
+    times across launches.
 - **Conversation.** `helper::converse` reports the accounts. It then waits for
   the relayed confirmation and answers `accountConfirmed` or
   `accountRefused`. Next it takes the key grant, which the forking account
@@ -847,7 +900,7 @@ What a process in the guest, including guest root, can reach on the host.
 | Inputs sent to the guest | Read the files the host selected | Read other host files: at most 64 files and 10 MiB, canonicalized inside the chosen root, credential paths refused, bytes pinned to the approved hashes | `real_files_require_approved_bytes_and_reject_symlink_escape` | — |
 | Host credentials and tokens | — | Receive the host control token, socket, hook tokens or Cua daemon tokens (`process::remove_control_credentials`). On the personalized path, any inherited variable (`env_clear`). | `process.rs`; the transport, delivery, first-connection and owner fixtures assert no `SSH_AUTH_SOCK`, `TERMINALX_NEXT_TOKEN`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` | Provider sign-in happens inside the guest; nothing is imported |
 | SSH, personalized path | Answer as the pinned host key | Use any forwarding: `-F none`, `IdentityAgent=none`, `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`, `ProxyCommand=none`, `ControlMaster=no`, `PermitLocalCommand=no`, `StrictHostKeyChecking=yes` against one pinned line | `ssh_plan_pins_guest_host_key_account_and_target_without_inherited_authentication` | Admission is closed; never run live |
-| SSH, legacy path (pinned Cua 0.7.0, Lume 0.6.1) | Run as the guest account through the guest's `cua-spacesd` | Reach Lume's SSH through any TerminalX command. **Source protection** (`legacy_route`): every legacy Cua command runs `--embedded`, so no running cua daemon of another build takes it. `sb exec`, `sb cp` and `sb create` run only with TerminalX's prepared, digest- and signature-checked Cua and Lume. `sb exec` must stream (`-i`). `sb create` carries no `--env` and refuses a VM name for which Cua kept an `env-applied` marker. Any other Cua command is refused, and the host SSH agent socket is removed. | `legacy_route.rs` (6 tests, including refusal through `host::cua` before dispatch); `guest_session_tools_never_inherit_the_host_ssh_agent` | **Installed dependency behavior**, from the pinned source (`cua-sdk-v0.7.0`, retained under `passes/20261031-legacy-route/`): with `-i`, `sb exec` never takes its `lume ssh` path; `sb cp` uses `cua-spacesd`; a create runs `lume ssh` only with an environment or that marker. That the pinned release was built from this tag is assumed. The ssh_config is not read at all, because this route never starts `ssh`. Not verified live: B3 must show no `lume ssh` or `/usr/bin/ssh` process during these commands. Cua commands run outside TerminalX are not covered. A host process writing the marker between the check and the create is a host-only race. TerminalX's Lume candidate also fixes the fallback options (`TerminalXSSHPolicy`, patch `019f29dc…`) if it is adopted, which stays held. |
+| SSH, legacy path (pinned Cua 0.7.0, Lume 0.6.1) | Run as the guest account through the guest's `cua-spacesd` | Reach Lume's SSH through any TerminalX command. **Source protection** (`legacy_route`): every legacy Cua command runs `--embedded`, so no running cua daemon of another build takes it. `sb exec`, `sb cp` and `sb create` run only with TerminalX's prepared, digest- and signature-checked Cua and Lume. `sb exec` must stream (`-i`). `sb create` carries no `--env` and refuses a VM name for which Cua kept an `env-applied` marker. Any other Cua command is refused, and the host SSH agent socket is removed. | `legacy_route.rs` (6 tests, including refusal through `host::cua` before dispatch); `guest_session_tools_never_inherit_the_host_ssh_agent` | **Installed dependency behavior**, from the pinned source (`cua-sdk-v0.7.0`, retained under `passes/20261031-legacy-route/`): with `-i`, `sb exec` never takes its `lume ssh` path; `sb cp` uses `cua-spacesd`; a create runs `lume ssh` only with an environment or that marker. That the pinned release was built from this tag is assumed. The ssh_config is not read at all, because this route never starts `ssh`. Not verified live: B3 must show no `lume ssh` or `/usr/bin/ssh` process during these commands. Cua commands run outside TerminalX are not covered. A host process writing the marker between the check and the create is a host-only race. TerminalX's Lume candidate also fixes the fallback options and, since patch `268ec76e…`, verifies the guest's host key against a pin file where upstream turned the check off (`TerminalXSSHPolicy`), if it is adopted, which stays held. Lume's built-in client, which runs first, still accepts any host key. |
 | Computer and MCP endpoints | Serve its own Driver tools to the host's attachment adapter, which carries back data | Reach the host desktop: the guest worker gets only guest native and browser tools (`desktop.rs`); provider MCP names only `local-vm-computer --stdio --task <bound target>`; no host Unix socket is forwarded or shared | `provider_mcp_configs_only_name_the_bound_guest_proxy` | — |
 | Shares | Nothing on a version-3 VM, which has no host share since the share-free checkpoint. Versions 1 and 2, which have no production route, keep `bo/<key>/input` (read-only) and `bo/<key>/receipt` | Have a share at all on version 3: no input or receipt directory is created, bound or passed to Lume, and the owner refuses a version-3 run or VM with any share, or a binding that still names one. Read the enrollment key or `control.capability` (never in a share). Personalized Create passes no share. | Native: `native_seeded_launch_binds_version_3_and_accepts_only_exact_helper_enrollment`, `native_a_version_3_owner_refuses_a_mounted_share_and_a_binding_that_still_names_one`; Swift protocol suite; plan tests | VirtioFS confinement for versions 1 and 2 is Apple's and untested here. What `cua sb create` shares on the legacy path is not verified. |
 | Network | Use NAT egress, and reach host services listening on all interfaces, as a LAN peer would: TerminalX's nearby pairing listener on `0.0.0.0:6768` (`pairing/direct.rs`) and anything else the user runs that way | Reach host loopback services: TerminalX's local listeners bind `127.0.0.1`, as does Lume's API at the pinned commit (`127.0.0.1:7777`) | — | Live vmnet reachability and the user's other listeners are not verified |

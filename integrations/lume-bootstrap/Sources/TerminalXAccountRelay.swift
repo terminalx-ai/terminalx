@@ -3,7 +3,9 @@
 // recorded by the host and delivered over the MAC'd owner channel, is relayed
 // back over the tagged session. The helper's acknowledgement is the only source
 // of accountAuthenticated, and only for that one account; trust and readiness
-// stay false. Every step is journaled exclusively and never re-chosen.
+// stay false. Every step is journaled exclusively and never re-chosen. When a
+// session is resumed the helper reports each step again, and a report that is
+// already journaled must be identical to it (`writeSame`); none is replaced.
 import Foundation
 import Darwin
 
@@ -40,7 +42,7 @@ enum TXAccountRelay {
         let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
             "challengeSha256": challengeSha256, "accounts": accounts,
             "helperAuthenticated": true, "accountAuthenticated": false, "trustAccepted": false, "ready": false])
-        try launch.pins["operation"]!.writeNew("account-observation.json", record)
+        try launch.pins["operation"]!.writeSame("account-observation.json", record)
         return record
     }
 
@@ -102,7 +104,7 @@ enum TXAccountRelay {
         let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
             "confirmationSha256": digest, "account": r["account"]!, "outcome": confirmed ? "confirmed" : "refused",
             "accountAuthenticated": confirmed, "trustAccepted": false, "ready": false])
-        try launch.pins["operation"]!.writeNew("account-confirmation-answer.json", record)
+        try launch.pins["operation"]!.writeSame("account-confirmation-answer.json", record)
         return record
     }
 
@@ -176,7 +178,7 @@ enum TXAccountRelay {
         let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
             "challengeSha256": challengeSha256, "hostKeySha256": txDigest(report), "observationSha256": txDigest(observation),
             "acknowledgementSha256": txDigest(body), "trustAccepted": false, "ready": false])
-        try launch.pins["operation"]!.writeNew("retirement-acknowledgement.json", record)
+        try launch.pins["operation"]!.writeSame("retirement-acknowledgement.json", record)
         return record
     }
     static func retirementBody(challengeSha256: String, hostKeySha256: String, observationSha256: String) -> [String: Any] {
@@ -200,7 +202,7 @@ enum TXAccountRelay {
         let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
             "acknowledgementSha256": try txString(a, "acknowledgementSha256"), "stage": stage, "helperReported": true,
             "verified": false, "trustAccepted": false, "ready": false])
-        try launch.pins["operation"]!.writeNew("retirement-report.json", record)
+        try launch.pins["operation"]!.writeSame("retirement-report.json", record)
         return record
     }
 
@@ -238,7 +240,7 @@ enum TXAccountRelay {
             let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
                 "grantSha256": try txString(r, "grantSha256"), "keyResultSha256": txDigest(result), "keyReference": reference,
                 "hostKey": key, "observed": true, "trustAccepted": false, "ready": false])
-            try launch.pins["operation"]!.writeNew("host-key-observation.json", record)
+            try launch.pins["operation"]!.writeSame("host-key-observation.json", record)
             return record
         }
     }
@@ -255,7 +257,7 @@ enum TXAccountRelay {
         let record = try txJSON(["version": 1, "bindingDigest": launch.bindingDigest, "ownerEpoch": launch.binding.ownerEpoch,
             "grantSha256": try txString(r, "grantSha256"), "keyReference": try txString(r, "keyReference"), "stage": stage,
             "installed": stage == "publicKeyInstalled", "trustAccepted": false, "ready": false])
-        try launch.pins["operation"]!.writeNew("key-install-result.json", record)
+        try launch.pins["operation"]!.writeSame("key-install-result.json", record)
         return record
     }
 }

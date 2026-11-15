@@ -72,6 +72,7 @@ fn main() {
                 exchange: Duration::from_secs(3),
                 person: Duration::from_secs(30),
                 attempts: 1,
+                resumptions: 1,
             };
             // SAFETY: no preconditions.
             let owner = unsafe { libc::geteuid() };
@@ -89,10 +90,17 @@ fn main() {
         }
         // SAFETY: no preconditions.
         let claims = json!({"euid": unsafe { libc::geteuid() }, "fixture": true});
-        let (mut session, challenge) =
-            enroll::enroll(&mut stream, &seed, &claims, Duration::from_secs(3))?;
+        // `challenge` is the enrollment's: this proof's own, or the earlier
+        // one the owner says it resumed.
+        let enroll::Accepted {
+            mut session,
+            enrollment: challenge,
+            resumed,
+        } = enroll::enroll(&mut stream, &seed, &claims, Duration::from_secs(3))?;
         if mode == "enroll-only" {
-            return Ok(json!({"authenticated": true, "challengeSha256": challenge}));
+            return Ok(
+                json!({"authenticated": true, "challengeSha256": challenge, "resumed": resumed}),
+            );
         }
         if mode == "confirm" {
             // The production helper's conversation after acceptance. Accounts
@@ -118,11 +126,14 @@ fn main() {
             .summary;
             reached["authenticated"] = json!(true);
             reached["challengeSha256"] = json!(challenge);
+            reached["resumed"] = json!(resumed);
             return Ok(reached);
         }
         session.send(&mut stream, json!({"hello": "rust helper"}))?;
         let echo = session.receive(&mut stream)?;
-        Ok(json!({"authenticated": true, "challengeSha256": challenge, "echo": echo}))
+        Ok(
+            json!({"authenticated": true, "challengeSha256": challenge, "resumed": resumed, "echo": echo}),
+        )
     })();
     match result {
         Ok(value) => println!("{value}"),

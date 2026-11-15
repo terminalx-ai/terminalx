@@ -393,7 +393,7 @@ class EnrollmentListenerTests(unittest.TestCase):
         rust = self.rust(f, b, s)
         state = self.done(f)
         self.assertTrue(rust['authenticated'])
-        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'sessionRetained': True})
+        self.assertEqual(state, {'claimed': True, 'refusals': 0, 'fenced': False, 'resumptions': 0, 'sessionRetained': True})
         receipt = json.loads((f.op/'enrollment.json').read_bytes())
         self.assertEqual(receipt['challengeSha256'], rust['challengeSha256'])
         self.assertEqual(receipt['challengeSha256'], digest((f.op/'enrollment-attempt-0.json').read_bytes()))
@@ -410,35 +410,108 @@ class EnrollmentListenerTests(unittest.TestCase):
         with self.assertRaises((EOFError, ConnectionResetError)): read(sockets[1])
         sockets[1].close()
         self.assertTrue(self.rust(f, b, sockets[2])['authenticated'])
-        self.assertEqual(self.done(f), {'claimed': True, 'refusals': 2, 'fenced': False, 'sessionRetained': True})
+        self.assertEqual(self.done(f), {'claimed': True, 'refusals': 2, 'fenced': False, 'resumptions': 0, 'sessionRetained': True})
         self.assertTrue((f.op/'enrollment-attempt-0.json').exists())
         self.assertFalse((f.op/'enrollment-attempt-1.json').exists(), 'a refused hello gets no challenge')
         self.assertEqual(json.loads((f.op/'enrollment.json').read_bytes())['attempt'], 2)
-    def test_spent_budget_fences_and_a_claim_admits_nothing_more(self):
+    def test_spent_budget_fences_and_a_claimed_enrollment_is_resumed_not_repeated(self):
         f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
         sockets = self.launch(f, b, 9)
         for s in sockets[:8]: s.close()
         self.assertFalse(self.rust(f, b, sockets[8])['authenticated'])
-        self.assertEqual(self.done(f), {'claimed': False, 'refusals': 8, 'fenced': True, 'sessionRetained': False})
+        self.assertEqual(self.done(f), {'claimed': False, 'refusals': 8, 'fenced': True, 'resumptions': 0, 'sessionRetained': False})
         self.assertFalse((f.op/'enrollment.json').exists())
         g = Fixture(); self.addCleanup(g.finish); b = self.binding(g)
-        sockets = self.launch(g, b, 2)
-        self.assertTrue(self.rust(g, b, sockets[0])['authenticated'])
-        self.assertFalse(self.rust(g, b, sockets[1])['authenticated'])
-        self.assertEqual(self.done(g)['claimed'], True)
-    def test_a_lost_acceptance_reply_still_claims_once(self):
+        sockets = self.launch(g, b, 3)
+        first = self.rust(g, b, sockets[0])
+        self.assertEqual((first['authenticated'], first['resumed']), (True, False))
+        receipt = (g.op/'enrollment.json').read_bytes()
+        # The helper's session is over. Its next connection resumes the one
+        # enrollment; another key resumes nothing and spends the budget.
+        again = self.rust(g, b, sockets[1])
+        self.assertEqual((again['authenticated'], again['resumed'], again['challengeSha256']), (True, True, first['challengeSha256']))
+        self.assertFalse(self.rust(g, b, sockets[2], key=os.urandom(32))['authenticated'])
+        self.assertEqual(self.done(g), {'claimed': True, 'refusals': 1, 'fenced': False, 'resumptions': 1, 'sessionRetained': True})
+        self.assertEqual((g.op/'enrollment.json').read_bytes(), receipt, 'the one receipt is never rewritten')
+        self.assertEqual(sorted(p.name for p in g.op.glob('enrollment-*.json')),
+            ['enrollment-attempt-0.json', 'enrollment-resumption-0.json', 'enrollment-resumption-1.json'])
+        self.assertNotEqual(digest((g.op/'enrollment-resumption-0.json').read_bytes()), first['challengeSha256'], 'a fresh challenge')
+        self.assertTrue(self.secret_free(g))
+    def test_a_lost_acceptance_reply_still_claims_once_and_the_helper_resumes_that_enrollment(self):
         f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
         sockets = self.launch(f, b, 2)
         s = sockets[0]; hello = {'bootstrapId': b['bootstrapId'], 'clientNonce': os.urandom(32).hex(), 'seedId': b['seedId'], 'version': 2}
         send(s, hello)
         n = struct.unpack('!I', s.recv(4, socket.MSG_WAITALL))[0]; challenge = s.recv(n, socket.MSG_WAITALL)
-        claims = {'euid': 0}; sha = digest(challenge)
+        # The claims the Rust fixture helper makes: it is the same helper that returns.
+        claims = {'euid': os.geteuid(), 'fixture': True}; sha = digest(challenge)
         send(s, {'challengeSha256': sha, 'claims': claims, 'proof': etag(self.key, 'enrollment', [sha, digest(wire(claims))])})
         s.close()  # never reads the acceptance
-        self.assertFalse(self.rust(f, b, sockets[1])['authenticated'])
+        # Before resumption this helper was refused for good, and only deleting the VM recovered it.
+        rust = self.rust(f, b, sockets[1])
+        self.assertEqual((rust['authenticated'], rust['resumed'], rust['challengeSha256']), (True, True, sha))
         state = self.done(f)
-        self.assertTrue(state['claimed'])
-        self.assertEqual(json.loads((f.op/'enrollment.json').read_bytes())['attempt'], 0)
+        self.assertEqual((state['claimed'], state['refusals'], state['resumptions']), (True, 0, 1))
+        receipt = json.loads((f.op/'enrollment.json').read_bytes())
+        self.assertEqual((receipt['attempt'], receipt['challengeSha256']), (0, sha))
+    def reference(self, b, s, claims):
+        """A conforming helper's proof on `s`. Returns the challenge digest,
+        the session key and the owner's acceptance body."""
+        hello = {'bootstrapId': b['bootstrapId'], 'clientNonce': os.urandom(32).hex(), 'seedId': b['seedId'], 'version': 2}
+        send(s, hello)
+        challenge = eread(s); sha = digest(challenge)
+        send(s, {'challengeSha256': sha, 'claims': claims, 'proof': etag(self.key, 'enrollment', [sha, digest(wire(claims))])})
+        k = session_key(self.key, hello['clientNonce'], json.loads(challenge)['serverNonce'], sha)
+        accepted = json.loads(eread(s))
+        self.assertEqual(accepted, eframe(k, 'owner', 0, accepted['body']))
+        return sha, k, accepted['body']
+    def test_a_session_that_ended_early_is_resumed_and_only_an_identical_report_is_kept(self):
+        f = Fixture(); self.addCleanup(f.finish); b = self.binding(f)
+        sockets = self.launch(f, b, 4)
+        claims = {'euid': 0, 'label': 'reference'}
+        account = {'gid': 20, 'home': '/Users/personal', 'homeDevice': 1, 'homeInode': 42, 'name': 'personal', 'uid': 501}
+        observation = f.op/'account-observation.json'
+        def journaled():
+            deadline = time.monotonic() + 15
+            while not observation.exists():
+                self.assertLess(time.monotonic(), deadline, 'the report was not journaled'); time.sleep(0.05)
+            return observation.read_bytes()
+        # The helper enrolls and reports its accounts, then the guest goes away
+        # while the owner waits for the person.
+        sha, k, body = self.reference(b, sockets[0], claims)
+        self.assertNotIn('resumes', body)
+        send(sockets[0], eframe(k, 'helper', 0, {'accounts': [account]}))
+        first = journaled()
+        self.assertEqual(json.loads(first)['challengeSha256'], sha)
+        sockets[0].close()
+        # The owner notices, so the helper is admitted again at once and not
+        # when the six-hour wait ends. Its proof resumes the same enrollment.
+        started = time.monotonic()
+        sha2, k2, body2 = self.reference(b, sockets[1], claims)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual((body2.get('resumes'), sha2 != sha), (sha, True))
+        # It reports again. A report that differs from the journaled one ends the session and replaces nothing.
+        send(sockets[1], eframe(k2, 'helper', 0, {'accounts': [{**account, 'homeInode': 43}]}))
+        with self.assertRaises((struct.error, EOFError, ConnectionError)): eread(sockets[1])
+        sockets[1].close()
+        self.assertEqual(observation.read_bytes(), first)
+        # The identical report is kept as it is, and the session goes on waiting for the person.
+        sha3, k3, body3 = self.reference(b, sockets[2], claims)
+        self.assertEqual(body3.get('resumes'), sha)
+        send(sockets[2], eframe(k3, 'helper', 0, {'accounts': [account]}))
+        sockets[2].settimeout(2.5)
+        with self.assertRaises(socket.timeout): sockets[2].recv(1)
+        self.assertEqual(observation.read_bytes(), first)
+        sockets[2].close()
+        # A helper with other claims is not the one that enrolled.
+        with self.assertRaises((struct.error, EOFError, ConnectionError)): self.reference(b, sockets[3], {'euid': 0, 'label': 'another'})
+        sockets[3].close()
+        self.assertEqual(self.done(f), {'claimed': True, 'refusals': 1, 'fenced': False, 'resumptions': 2, 'sessionRetained': True})
+        receipt = json.loads((f.op/'enrollment.json').read_bytes())
+        self.assertEqual((receipt['attempt'], receipt['challengeSha256']), (0, sha))
+        self.assertEqual(sorted(p.name for p in f.op.glob('enrollment-*.json')),
+            ['enrollment-attempt-0.json', 'enrollment-resumption-0.json', 'enrollment-resumption-1.json', 'enrollment-resumption-2.json'])
+        self.assertTrue(self.secret_free(f))
     def test_version_3_needs_its_private_key_and_exact_seed_binding(self):
         f = Fixture(); self.addCleanup(f.finish); b = self.binding(f, key=False)
         (s,) = self.launch(f, b, 1); s.close()

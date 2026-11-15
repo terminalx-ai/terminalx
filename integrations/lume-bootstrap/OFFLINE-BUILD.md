@@ -56,6 +56,12 @@ adopted. Signature/catalog review and live acceptance remain later gates.
   warnings or errors in TerminalX sources or the edited upstream file. The
   policy strings are present in it and absent from build 12 (static `strings`
   check; the executable was not run).
+  - **Not rebuilt since (2026-11-15).** The patch is now `268ec76e…`: the
+    fallback verifies the guest's host key against a pin file, an enrollment
+    can be resumed, and the owner's account-name rule matches the host's. It
+    applies to the pinned source, parses, typechecks and passes the fixture
+    suites (`verify.py`), but no full candidate build was made from it, so
+    build 13 above is the last executable and does not contain these changes.
   - As built it cannot host a VM. Upstream signs Lume with
     `com.apple.security.virtualization` (`resources/lume.entitlements` also adds
     `com.apple.vm.networking`), and only a reviewed signing step may add those

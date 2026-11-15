@@ -50,7 +50,7 @@ import Darwin
             }
             let state = service.gate.state
             print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced,
-                "sessionRetained": service.session != nil]), as: UTF8.self))
+                "resumptions": service.gate.resumptions, "sessionRetained": service.session != nil]), as: UTF8.self))
             return
         }
         // ssh-policy: the options Lume's system ssh and scp fallback use, with
@@ -135,20 +135,29 @@ import Darwin
                 seedReceiptSha256: try txString(config, "seedReceiptSha256"))
             let journal = try txString(config, "journal")
             let gate = TXEnrollmentGate(limit: limit)
+            // The claimed enrollment, as the service's receipt keeps it.
+            var claimed: (challengeSha256: String, claimsSha256: String)?
             for (index, argument) in CommandLine.arguments.dropFirst(4).enumerated() {
                 guard let fd = Int32(argument) else { throw TXBootstrapError.refused }
                 defer { close(fd) }
                 var result: [String: Any] = ["attempt": index]
-                if !gate.begin() {
-                    result["admitted"] = false
-                } else {
+                if let admission = gate.begin() {
                     result["admitted"] = true
                     do {
-                        let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding) {
+                        let session = try TXEnrollment.accept(fd: fd, key: key, binding: binding, journal: {
                             try $0.write(to: URL(fileURLWithPath: "\(journal)/challenge-\(index).json"), options: .withoutOverwriting)
-                        }
+                        }, commit: { challengeSha256, claims in
+                            let claimsSha256 = txDigest(try txJSON(claims))
+                            guard admission == .resumption else {
+                                claimed = (challengeSha256, claimsSha256)
+                                return nil
+                            }
+                            guard let claimed, claimed.claimsSha256 == claimsSha256 else { throw TXBootstrapError.refused }
+                            return claimed.challengeSha256
+                        })
                         gate.finish(authenticated: true)
                         result["authenticated"] = true
+                        result["resumed"] = admission == .resumption
                         result["challengeSha256"] = session.challengeSha256
                         result["claims"] = session.claims
                         do {
@@ -157,16 +166,20 @@ import Darwin
                         } catch { result["sessionError"] = "\(error)" }
                         result["sent"] = session.sent
                         result["received"] = session.received
+                        gate.sessionEnded()
                     } catch {
                         gate.finish(authenticated: false)
                         result["authenticated"] = false
                         result["error"] = "\(error)"
                     }
+                } else {
+                    result["admitted"] = false
                 }
                 print(String(decoding: try txJSON(result), as: UTF8.self))
             }
             let state = gate.state
-            print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced]), as: UTF8.self))
+            print(String(decoding: try txJSON(["claimed": state.claimed, "refusals": state.refusals, "fenced": state.fenced,
+                "resumptions": gate.resumptions]), as: UTF8.self))
             return
         }
         // <control-fd> <requests> guest <guest-fd> <wait-seconds>: the owner

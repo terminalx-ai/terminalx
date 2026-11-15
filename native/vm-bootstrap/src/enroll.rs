@@ -294,15 +294,39 @@ pub fn acceptance(challenge_sha256: &str) -> Value {
         "ready": false, "trustAccepted": false})
 }
 
+/// The owner's acceptance of a proof that resumes the enrollment whose
+/// challenge digest is `enrollment`: the owner had already claimed this VM's
+/// one enrollment, and this proof makes no second one.
+pub fn resumption(challenge_sha256: &str, enrollment: &str) -> Value {
+    json!({"accountAuthenticated": false, "challengeSha256": challenge_sha256, "helperAuthenticated": true,
+        "ready": false, "resumes": enrollment, "trustAccepted": false})
+}
+
+/// What an accepted proof opened.
+#[derive(Debug)]
+pub struct Accepted {
+    pub session: Session,
+    /// The enrollment the session belongs to, by its challenge digest: this
+    /// proof's own challenge, or the earlier one the owner says it resumes.
+    /// The owner's records and its retirement acknowledgement name this one.
+    pub enrollment: String,
+    /// The owner had claimed this VM's enrollment before this proof.
+    pub resumed: bool,
+}
+
 /// Runs one enrollment over a connected stream: hello, challenge check, proof,
-/// and the owner's tagged acceptance. Returns the session and the challenge
-/// digest. Errors leave nothing to retry on this connection.
+/// and the owner's tagged acceptance. Errors leave nothing to retry on this
+/// connection.
+///
+/// The owner decides whether the proof is the VM's enrollment or resumes it:
+/// it alone knows whether it has claimed one. Either way the proof is the
+/// same, over a fresh challenge, and the frames use that challenge's key.
 pub fn enroll(
     stream: &mut impl Stream,
     seed: &Seed,
     claims: &Value,
     timeout: Duration,
-) -> io::Result<(Session, String)> {
+) -> io::Result<Accepted> {
     let claims_object = claims
         .as_object()
         .ok_or_else(|| refused("claims are an object"))?;
@@ -353,10 +377,42 @@ pub fn enroll(
         deadline: timeout,
     };
     let accepted = session.receive(stream)?;
-    if accepted != acceptance(&challenge_sha256) {
-        return Err(refused("owner acceptance changed or promoted trust"));
+    if accepted == acceptance(&challenge_sha256) {
+        return Ok(Accepted {
+            session,
+            enrollment: challenge_sha256,
+            resumed: false,
+        });
     }
-    Ok((session, challenge_sha256))
+    // Exactly the resumption form, naming another, well-formed challenge.
+    match accepted.get("resumes").and_then(Value::as_str) {
+        Some(enrollment)
+            if unhex(enrollment, 32).is_some()
+                && enrollment != challenge_sha256
+                && accepted == resumption(&challenge_sha256, enrollment) =>
+        {
+            Ok(Accepted {
+                session,
+                enrollment: enrollment.to_owned(),
+                resumed: true,
+            })
+        }
+        _ => Err(refused("owner acceptance changed or promoted trust")),
+    }
+}
+
+/// How a fixture owner answers a verified proof.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) enum Reply {
+    /// The acceptance of this VM's enrollment.
+    Accept,
+    /// The acceptance of a resumption of the enrollment with this digest.
+    Resume(String),
+    /// Nothing: the proof was verified and the acceptance lost.
+    Lost,
+    /// This body, tagged like an acceptance.
+    Body(fn(&str) -> Value),
 }
 
 /// A conforming owner's side of one enrollment, written against the spec for
@@ -369,6 +425,17 @@ pub(crate) fn accept_fixture(
     stream: &mut impl Stream,
     key: [u8; 32],
     tamper: fn(&mut Value),
+) -> io::Result<(Value, [u8; 32])> {
+    accept_fixture_with(stream, key, tamper, Reply::Accept)
+}
+
+/// As `accept_fixture`, answering the verified proof with `reply`.
+#[cfg(test)]
+pub(crate) fn accept_fixture_with(
+    stream: &mut impl Stream,
+    key: [u8; 32],
+    tamper: fn(&mut Value),
+    reply: Reply,
 ) -> io::Result<(Value, [u8; 32])> {
     let deadline = || Instant::now() + Duration::from_secs(3);
     let hello: Value = serde_json::from_slice(&read_frame(stream, deadline())?)?;
@@ -392,7 +459,12 @@ pub(crate) fn accept_fixture(
         challenge["serverNonce"].as_str().unwrap_or_default(),
         &challenge_sha256,
     )?;
-    let body = acceptance(&challenge_sha256);
+    let body = match reply {
+        Reply::Accept => acceptance(&challenge_sha256),
+        Reply::Resume(enrollment) => resumption(&challenge_sha256, &enrollment),
+        Reply::Lost => return Ok((proof, session)),
+        Reply::Body(make) => make(&challenge_sha256),
+    };
     let frame_tag = tag(&session, "frame", &[OWNER, "0", &sha256(&canonical(&body))]);
     write_frame(
         stream,
@@ -478,9 +550,13 @@ mod tests {
     fn enrolls_and_exchanges_tagged_frames() {
         let (mut helper, owner_end) = UnixStream::pair().unwrap();
         let owner = thread::spawn(move || owner(owner_end, KEY, |_| {}));
-        let (mut session, challenge) =
-            enroll(&mut helper, &seed(), &claims(), Duration::from_secs(3)).unwrap();
+        let Accepted {
+            mut session,
+            enrollment: challenge,
+            resumed,
+        } = enroll(&mut helper, &seed(), &claims(), Duration::from_secs(3)).unwrap();
         assert_eq!(challenge.len(), 64);
+        assert!(!resumed, "this proof is the enrollment");
         session.send(&mut helper, json!({"accounts": []})).unwrap();
         assert_eq!(
             session.receive(&mut helper).unwrap(),
@@ -493,6 +569,70 @@ mod tests {
             !wire.contains(&crate::hex(&KEY)),
             "the key never crosses the wire"
         );
+    }
+
+    #[test]
+    fn an_acceptance_may_resume_an_earlier_enrollment_and_is_otherwise_exact() {
+        fn resume(reply: Reply) -> io::Result<Accepted> {
+            let (mut helper, mut owner_end) = UnixStream::pair().unwrap();
+            let owner =
+                thread::spawn(move || accept_fixture_with(&mut owner_end, KEY, |_| {}, reply));
+            let accepted = enroll(&mut helper, &seed(), &claims(), Duration::from_secs(3));
+            owner.join().unwrap().unwrap();
+            accepted
+        }
+        // The owner had claimed this VM's enrollment: the same proof resumes
+        // it, and the session belongs to that enrollment, not to this challenge.
+        let original = "a".repeat(64);
+        let mut accepted = resume(Reply::Resume(original.clone())).unwrap();
+        assert!(accepted.resumed);
+        assert_eq!(accepted.enrollment, original);
+        // Its frames still use this connection's own key, from sequence zero.
+        let (mut helper, mut owner_end) = UnixStream::pair().unwrap();
+        accepted.session.set_wait(Duration::from_secs(1));
+        accepted
+            .session
+            .send(&mut helper, json!({"accounts": []}))
+            .unwrap();
+        assert!(read_frame(&mut owner_end, Instant::now() + Duration::from_secs(1)).is_ok());
+
+        // An acceptance body for a given challenge digest.
+        type Body = fn(&str) -> Value;
+        let bodies: [(&str, Body); 8] = [
+            ("promoted trust", |c| {
+                let mut body = resumption(c, &"a".repeat(64));
+                body["trustAccepted"] = json!(true);
+                body
+            }),
+            ("its own challenge", |c| resumption(c, c)),
+            ("uppercase digest", |c| resumption(c, &"A".repeat(64))),
+            ("short digest", |c| resumption(c, "abcd")),
+            ("an extra field", |c| {
+                let mut body = resumption(c, &"a".repeat(64));
+                body["also"] = json!(1);
+                body
+            }),
+            ("no enrollment named", |c| {
+                let mut body = acceptance(c);
+                body["resumes"] = Value::Null;
+                body
+            }),
+            ("another challenge", |c| {
+                let mut body = resumption(c, &"a".repeat(64));
+                body["challengeSha256"] = json!("b".repeat(64));
+                body
+            }),
+            ("not authenticated", |c| {
+                let mut body = resumption(c, &"a".repeat(64));
+                body["helperAuthenticated"] = json!(false);
+                body
+            }),
+        ];
+        for (name, body) in bodies {
+            assert!(resume(Reply::Body(body)).is_err(), "{name}");
+        }
+        // A lost acceptance is an error on this connection, not an enrollment.
+        assert!(resume(Reply::Lost).is_err());
     }
 
     #[test]
