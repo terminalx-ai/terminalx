@@ -100,7 +100,7 @@ function WorkspaceRow({ item, title, first, last, onPress }: { item: CloudWorksp
     <View style={styles.mark}>{status.mark === "needs" || status.mark === "working" ? <StateMark state={status.mark} info={palette.info} warning={palette.warning} /> : <StatusDot color={dot} />}</View>
     <View style={styles.body}>
       <Text numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
-      <Text numberOfLines={1} style={[styles.status, { color: status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : palette.muted }]}>{status.words}{when ? <Text style={{ color: palette.faint }}>{` · ${when}`}</Text> : null}</Text>
+      <Text numberOfLines={1} style={[styles.status, { color: status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : palette.muted }]}>{status.words}{when ? <Text style={{ color: palette.faint, fontWeight: "400" }}>{` · ${when}`}</Text> : null}</Text>
       {where ? <Text numberOfLines={1} style={[styles.where, { color: palette.faint }]}>{where}</Text> : null}
     </View>
     <View style={styles.chevron}><ChevronRight size={16} color={palette.faint} /></View>
@@ -151,8 +151,8 @@ const styles = StyleSheet.create({
   chevron: { height: 22, justifyContent: "center" },
   mark: { width: 16, height: 22, alignItems: "center", justifyContent: "center" },
   body: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: 17, lineHeight: 22, letterSpacing: -0.3 },
-  status: { fontSize: 14, lineHeight: 19 },
+  title: { fontSize: 17, lineHeight: 22, letterSpacing: -0.3, fontWeight: "600" },
+  status: { fontSize: 14, lineHeight: 19, fontWeight: "600" },
   where: { fontFamily: MONO, fontSize: 12, lineHeight: 17 },
   folded: { marginTop: 20, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   placeholderCard: { marginTop: 0 },
