@@ -41,6 +41,32 @@ pub const STATUS: &str = "runtime.machineHost.status";
 pub const ADOPT_KEY: &str = "runtime.machineHost.adoptKey";
 pub const PHONE_ROUTE: &str = "runtime.machineHost.phoneRoute";
 pub const REVOKE: &str = "runtime.machineHost.revoke";
+/// Make a pairing code (PRO-342). Answers [`CreatedCode`], or refuses with
+/// `pairing_paused` (after five wrong attempts in a minute) or `not_enabled`.
+pub const CREATE_CODE: &str = "runtime.machineHost.createCode";
+/// Allow the computer waiting with `requestId` ([`Answer`]): `{ approved: true }`, or `not_found`.
+pub const APPROVE: &str = "runtime.machineHost.approve";
+/// Don't allow it ([`Answer`]): `{ declined: true }`.
+pub const DECLINE: &str = "runtime.machineHost.decline";
+
+/// A pairing code: `txm2.` and base64url, unpadded, of a [`MachineCode`].
+pub const CODE_PREFIX: &str = "txm2.";
+/// How long a code works (`OFFER_TTL_MS`), once.
+pub const CODE_TTL_MS: i64 = 5 * 60_000;
+/// How long a computer waits for Allow (`APPROVAL_TTL_MS`).
+pub const APPROVAL_TTL_MS: i64 = 120_000;
+/// Wrong attempts within [`ATTEMPT_WINDOW_MS`] that pause pairing for [`PAUSE_MS`].
+pub const ATTEMPT_LIMIT: usize = 5;
+pub const ATTEMPT_WINDOW_MS: i64 = 60_000;
+pub const PAUSE_MS: i64 = 60_000;
+/// The most a code may take, prefix included.
+pub const MAX_CODE_BYTES: usize = 8192;
+
+/// Why the machine host refused to pair, as `pairing_refused` says.
+pub const REFUSED_NOT_APPROVED: &str = "not-approved";
+pub const REFUSED_CODE_INACTIVE: &str = "code-inactive";
+pub const REFUSED_ANOTHER_COMPUTER: &str = "another-computer";
+pub const REFUSED_PAIRING_PAUSED: &str = "pairing-paused";
 
 /// The most a header line may take, newline included.
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -93,6 +119,45 @@ pub struct Status {
     pub computers: Vec<ComputerSummary>,
     /// Why the host is not serving although it is enabled.
     pub error: Option<String>,
+    /// A computer asking to operate this machine, waiting for Allow.
+    #[serde(default)]
+    pub pending: Option<PendingComputer>,
+    /// The live pairing code's expiry. Never the code: only [`CREATE_CODE`] answers it.
+    #[serde(default)]
+    pub code: Option<CodeExpiry>,
+    /// Pairing is paused after five wrong attempts in a minute, until then.
+    #[serde(default)]
+    pub paused_until: Option<i64>,
+}
+
+/// A computer waiting for Allow, as the approval dialog shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingComputer {
+    pub request_id: String,
+    pub label: String,
+    pub platform: Option<String>,
+    /// The pairing fingerprint (`pairing_fingerprint`), which the operating
+    /// computer shows too.
+    pub fingerprint: String,
+    /// `direct` or `relay`.
+    pub transport: String,
+    pub requested_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeExpiry {
+    pub expires_at: i64,
+}
+
+/// The answer to [`CREATE_CODE`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedCode {
+    pub code: String,
+    pub expires_at: i64,
 }
 
 impl Status {
@@ -132,6 +197,155 @@ pub struct Revoke {
     pub epoch: String,
     pub lease: String,
     pub id: String,
+}
+
+/// Params of [`APPROVE`] and [`DECLINE`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Answer {
+    pub epoch: String,
+    pub lease: String,
+    pub request_id: String,
+}
+
+/// Params of [`CREATE_CODE`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCode {
+    pub epoch: String,
+    pub lease: String,
+}
+
+/// The machine's operating system, as `machine.describe` names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineOs {
+    pub family: String,
+    pub version: Option<String>,
+}
+
+/// A machine as its code names it, before anything connects.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineIdentity {
+    pub machine_id: String,
+    pub name: String,
+    pub os: MachineOs,
+    /// The TerminalX version on the machine.
+    pub version: String,
+}
+
+/// The relay half of a machine's code, in the shape of a phone offer's
+/// (`remote::client::RelayOffer`). No code carries one until PRO-344.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineRelay {
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    pub relay_host_id: String,
+    pub invite_token: String,
+    pub invite_expires_at: i64,
+}
+
+/// A machine's pairing code (docs/MACHINES.md, "As built (PRO-342)"). The
+/// runtime encodes it, the operating computer decodes it, both with this type.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineCode {
+    pub v: u8,
+    pub kind: String,
+    pub scope: String,
+    pub identity_mode: String,
+    pub device_token: String,
+    /// The host key, standard base64.
+    pub public_key_b64: String,
+    pub machine: MachineIdentity,
+    pub direct_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<MachineRelay>,
+    pub expires_at: i64,
+}
+
+/// Never print the token.
+impl std::fmt::Debug for MachineCode {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("MachineCode")
+            .field("machine", &self.machine)
+            .field("directEndpoints", &self.direct_endpoints)
+            .field("relay", &self.relay.is_some())
+            .field("expiresAt", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MachineCode {
+    pub fn new(device_token: String, public_key_b64: String, machine: MachineIdentity, direct_endpoints: Vec<String>, expires_at: i64) -> Self {
+        Self {
+            v: 2,
+            kind: "machine".into(),
+            scope: "runtime".into(),
+            identity_mode: "authenticate".into(),
+            device_token,
+            public_key_b64,
+            machine,
+            direct_endpoints,
+            relay: None,
+            expires_at,
+        }
+    }
+
+    pub fn encode(&self) -> Result<String> {
+        use base64::Engine as _;
+        let code = format!("{CODE_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?));
+        if code.len() > MAX_CODE_BYTES {
+            bail!("the pairing code is over {MAX_CODE_BYTES} bytes");
+        }
+        Ok(code)
+    }
+
+    /// Decode a code a person pasted, refusing anything that is not a whole,
+    /// consistent machine code: its `machineId` must be its key's host id.
+    pub fn decode(code: &str) -> Result<Self> {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+        use base64::Engine as _;
+        let code = code.trim();
+        if code.len() > MAX_CODE_BYTES {
+            bail!("not a machine pairing code");
+        }
+        let body = code.strip_prefix(CODE_PREFIX).context("not a machine pairing code")?;
+        let bytes = URL_SAFE_NO_PAD.decode(body).context("not a machine pairing code")?;
+        let decoded: Self = serde_json::from_slice(&bytes).context("not a machine pairing code")?;
+        if decoded.v != 2 || decoded.kind != "machine" || decoded.scope != "runtime" || decoded.identity_mode != "authenticate" {
+            bail!("unsupported machine pairing code");
+        }
+        if URL_SAFE_NO_PAD.decode(&decoded.device_token).map(|token| token.len()) != Ok(32) {
+            bail!("the code's device token is invalid");
+        }
+        let key: [u8; 32] = STANDARD
+            .decode(&decoded.public_key_b64)
+            .ok()
+            .and_then(|key| key.try_into().ok())
+            .context("the code's machine key is invalid")?;
+        if crate::relay_e2ee::host_id_of(&key) != decoded.machine.machine_id {
+            bail!("the code's machine id does not match its key");
+        }
+        let name_ok = |name: &str| !name.trim().is_empty() && name.chars().count() <= 80 && !name.chars().any(char::is_control);
+        if !name_ok(&decoded.machine.name) {
+            bail!("the code's machine name is invalid");
+        }
+        if decoded.direct_endpoints.is_empty() && decoded.relay.is_none() {
+            bail!("the code names no way to reach the machine");
+        }
+        if decoded.direct_endpoints.len() > 64
+            || !decoded.direct_endpoints.iter().all(|endpoint| {
+                url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "ws" && url.host_str().is_some() && url.path() == MACHINE_PATH)
+            })
+        {
+            bail!("the code's endpoints are invalid");
+        }
+        Ok(decoded)
+    }
 }
 
 /// A relay connection request, as the relay's `conn-open` names it.
@@ -238,8 +452,13 @@ mod tests {
             phone_route: false,
             computers: vec![],
             error: None,
+            pending: None,
+            code: Some(CodeExpiry { expires_at: 9 }),
+            paused_until: None,
         };
         let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["code"], serde_json::json!({ "expiresAt": 9 }));
+        assert_eq!(value["pausedUntil"], serde_json::Value::Null);
         assert_eq!(value["hostKey"], "needed");
         assert_eq!(value["phoneRoute"], false);
         assert_eq!(value["takesPort"], true);
@@ -248,5 +467,62 @@ mod tests {
         assert!(!cannot.runtime_owns_direct(), "a runtime that cannot listen leaves the port to the window");
         let older: Status = serde_json::from_value(serde_json::json!({ "enabled": true, "hostKey": "ready", "machineId": null, "listening": null, "phoneRoute": false, "computers": [], "error": null })).unwrap();
         assert!(!older.runtime_owns_direct(), "a status without takesPort never takes the window's port");
+        assert_eq!(older.pending, None, "a status from before PRO-342 has nothing pending");
+    }
+
+    fn code() -> MachineCode {
+        use base64::Engine as _;
+        let keypair = crate::relay_e2ee::HostKeypair::from_secret([7; 32]);
+        MachineCode::new(
+            crate::relay_e2ee::random_token(),
+            base64::engine::general_purpose::STANDARD.encode(keypair.public()),
+            MachineIdentity { machine_id: keypair.host_id(), name: "Mac mini".into(), os: MachineOs { family: "macos".into(), version: Some("26.1".into()) }, version: "0.2.33".into() },
+            vec!["ws://192.168.1.20:6768/machine/1".into(), "ws://mac-mini.local:6768/machine/1".into()],
+            1_763_200_000_000,
+        )
+    }
+
+    #[test]
+    fn a_machine_code_round_trips_in_the_documented_shape() {
+        let made = code();
+        let encoded = made.encode().unwrap();
+        assert!(encoded.starts_with("txm2."));
+        use base64::Engine as _;
+        let json: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&encoded[5..]).unwrap()).unwrap();
+        assert_eq!(json["v"], 2);
+        assert_eq!(json["kind"], "machine");
+        assert_eq!(json["scope"], "runtime");
+        assert_eq!(json["identityMode"], "authenticate");
+        assert_eq!(json["machine"]["os"]["family"], "macos");
+        assert!(json.get("relay").is_none(), "no relay without the account");
+        assert_eq!(MachineCode::decode(&format!("  {encoded}\n")).unwrap(), made);
+        assert!(!format!("{made:?}").contains(&made.device_token), "Debug never prints the token");
+    }
+
+    #[test]
+    fn a_code_that_is_not_whole_and_consistent_is_refused() {
+        let encode = |code: &MachineCode| {
+            use base64::Engine as _;
+            format!("txm2.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(code).unwrap()))
+        };
+        assert!(MachineCode::decode("").is_err());
+        assert!(MachineCode::decode(&encode(&code()).replace("txm2.", "txm1.")).is_err(), "another prefix");
+        assert!(MachineCode::decode("txm2.!!!").is_err());
+        let mut other = code();
+        other.machine.machine_id = "AAAAAAAAAAAAAAAA".into();
+        assert!(MachineCode::decode(&encode(&other)).is_err(), "ids disagree");
+        let mut other = code();
+        other.device_token = "short".into();
+        assert!(MachineCode::decode(&encode(&other)).is_err());
+        let mut other = code();
+        other.direct_endpoints = vec!["ws://192.168.1.20:6768/".into()];
+        assert!(MachineCode::decode(&encode(&other)).is_err(), "a phone's endpoint");
+        let mut other = code();
+        other.kind = "phone".into();
+        assert!(MachineCode::decode(&encode(&other)).is_err());
+        let mut other = code();
+        other.direct_endpoints.clear();
+        assert!(MachineCode::decode(&encode(&other)).is_err(), "nowhere to connect");
+        assert!(MachineCode::decode(&format!("txm2.{}", "A".repeat(MAX_CODE_BYTES))).is_err());
     }
 }
