@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 /** Immutable display data supplied by future lead integration, never identity authority. */
@@ -41,20 +41,26 @@ export interface HostCommandCardProps {
  */
 export function HostCommandCard({ request, state, onIntent }: HostCommandCardProps) {
   const id = useId();
-  const [sent, setSent] = useState<HostCommandPresentationIntent | null>(null);
-  const busy = sent?.request === request;
+  // UI deduplication only, including synchronous re-entry. Remounts and callers
+  // can bypass it; the future native boundary must enforce its own one-shot gate.
+  const sent = useRef(new Set<string>());
+  const [, refresh] = useState(0);
+  const actionKey = JSON.stringify([request.requestId, state === "running" ? "cancel" : "decision"]);
+  const busy = sent.current.has(actionKey);
+  const args = Array.isArray(request.arguments) ? Array.from(request.arguments) : null;
   const complete = [request.requestId, request.executable, request.cwd, request.agent, request.turn, request.originAccount, request.originDevice]
     .every((value) => typeof value === "string" && value.trim().length > 0)
-    && Array.isArray(request.arguments) && request.arguments.every((value) => typeof value === "string")
+    && args !== null && args.every((value) => typeof value === "string")
     && Number.isSafeInteger(request.timeoutMs) && request.timeoutMs > 0;
   const labels: Record<HostCommandCardState, string> = {
     pending: "Waiting for a decision", running: "Running", cancelling: "Cancellation requested",
     cancelled: "Cancelled", denied: "Denied", expired: "Expired", completed: "Completed", failed: "Failed",
   };
   function notify(kind: HostCommandPresentationIntent["kind"]) {
-    if (!onIntent || busy || (kind === "cancel" ? state !== "running" : state !== "pending") || (kind === "run-once" && !complete)) return;
+    if (!onIntent || sent.current.has(actionKey) || (kind === "cancel" ? state !== "running" : state !== "pending") || (kind === "run-once" && !complete)) return;
     const intent = { kind, request };
-    setSent(intent);
+    sent.current.add(actionKey);
+    refresh((revision) => revision + 1);
     onIntent(intent);
   }
   const status = state && Object.hasOwn(labels, state) ? labels[state] : "Unavailable";
@@ -69,7 +75,7 @@ export function HostCommandCard({ request, state, onIntent }: HostCommandCardPro
           <Detail label="Executable" value={request.executable} />
           <div>
             <dt className="font-medium text-muted-foreground">Arguments (in order)</dt>
-            <dd>{request.arguments.length === 0 ? <span>No arguments</span> : <ol className="list-inside list-decimal space-y-1">{request.arguments.map((argument, index) => <li key={index}><Value value={argument} /></li>)}</ol>}</dd>
+            <dd>{args === null ? "Unavailable" : args.length === 0 ? <span>No arguments</span> : <ol className="list-inside list-decimal space-y-1">{args.map((argument, index) => <li key={index}><Value value={argument} /></li>)}</ol>}</dd>
           </div>
           <Detail label="Working directory on this Mac" value={request.cwd} />
           <Detail label="Requesting agent" value={request.agent} />
@@ -100,7 +106,7 @@ function displayValue(value: string): string {
 }
 
 function Value({ value }: { value: string }) {
-  return <code dir="ltr" className="block whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-xs text-foreground [overflow-wrap:anywhere] [unicode-bidi:isolate]">{displayValue(value)}</code>;
+  return <code dir="ltr" className="block whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-xs text-foreground [overflow-wrap:anywhere] [unicode-bidi:isolate]">{typeof value === "string" ? displayValue(value) : "Unavailable"}</code>;
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
