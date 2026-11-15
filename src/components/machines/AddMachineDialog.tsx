@@ -133,7 +133,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
 
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[700px]" showClose={false} className="gap-0 p-0" data-testid="add-machine">
+      <DialogContent width="max-w-[720px]" showClose={false} className="gap-0 p-0" data-testid="add-machine">
         <header className="flex h-14 items-center gap-2.5 border-b border-hairline px-5">
           <Monitor className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 leading-4">
@@ -146,7 +146,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
             </Button>
           </DialogClose>
         </header>
-        <div className="grid grid-cols-[minmax(0,1fr)_236px] max-[699px]:grid-cols-1">
+        <div className="grid grid-cols-[minmax(0,1fr)_260px] max-[699px]:grid-cols-1">
           <div className="grid min-w-0 content-start gap-3 p-5">
             <div className="grid gap-1">
               <label htmlFor="machine-code" className="text-[13px] font-medium">Pairing code</label>

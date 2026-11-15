@@ -96,7 +96,7 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
           <Button variant="outline" size="sm" disabled={host.busy} onClick={decline}>
             Don’t allow
           </Button>
-          <Button size="sm" disabled={host.busy} onClick={() => void approveMachine(request.requestId)}>
+          <Button variant="accent" size="sm" disabled={host.busy} onClick={() => void approveMachine(request.requestId)}>
             Allow
           </Button>
         </footer>
