@@ -10,6 +10,7 @@ import { ComputerSelection } from "./ComputerSelection";
 import type { ComputerContext, ComputerTarget } from "@/types/computer";
 import { computerKey } from "@/types/computer";
 import { localVmRequest } from "@/lib/localVm";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 
 type Place = "local" | "cloud";
 type Busy = "start" | "stop" | "reset" | "runtime" | null;
@@ -29,6 +30,8 @@ const BUSY_TEXT: Record<Exclude<Busy, null>, string> = {
  */
 export function ComputerPanel({ active, context }: { active: boolean; context?: ComputerContext }) {
   const [place, setPlace] = useState<Place>("local");
+  // A tab chooses its computer only behind Settings → Experimental → Local VM tasks; off, the Local VM as before.
+  const choosing = useExperimentalSettings()?.localVmTasks === true;
   return (
     <div className="flex h-full flex-col" data-testid="panel-computer">
       <div role="radiogroup" aria-label="Computer" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs">
@@ -49,7 +52,7 @@ export function ComputerPanel({ active, context }: { active: boolean; context?: 
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1">{place === "local" ? context ? <ComputerSelection key={JSON.stringify(context)} context={context} active={active}>{(target) => <LocalVm key={target ? computerKey(target) : "manage"} active={active} target={target ?? undefined} />}</ComputerSelection> : <LocalVm active={active} /> : <CloudVm />}</div>
+      <div className="min-h-0 flex-1">{place === "local" ? context && choosing ? <ComputerSelection key={JSON.stringify(context)} context={context} active={active}>{(target) => <LocalVm key={target ? computerKey(target) : "manage"} active={active} target={target ?? undefined} />}</ComputerSelection> : <LocalVm active={active} /> : <CloudVm />}</div>
     </div>
   );
 }

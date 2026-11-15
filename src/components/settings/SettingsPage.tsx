@@ -1,4 +1,5 @@
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { settingsSectionOffered } from "@/lib/settingsSections";
 import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -71,11 +72,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [selected, setSelected] = useState(0);
   const [selectionRequest, setSelectionRequest] = useState(0);
   // A section behind a switch in Settings → Experimental is listed, and found, only while the switch is on.
-  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
-  const offered = useCallback((key: string) => key !== "orchestrator" || orchestratorRuns, [orchestratorRuns]);
-  // searchSettings reads the Experimental switch itself; orchestratorRuns re-runs it when the switch changes.
+  const switches = useExperimentalSettings();
+  const orchestratorRuns = switches?.orchestratorRuns === true;
+  const localVmTasks = switches?.localVmTasks === true;
+  // settingsSectionOffered reads the switches as last read; these re-run it when one changes.
+  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks]);
+  // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
-  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns]);
+  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns, localVmTasks]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   const highlight = useRef<{ row: HTMLElement; timers: number[] } | null>(null);

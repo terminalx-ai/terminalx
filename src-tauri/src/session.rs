@@ -3466,7 +3466,7 @@ impl SessionManager {
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
-        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -3478,7 +3478,7 @@ impl SessionManager {
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
-        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));

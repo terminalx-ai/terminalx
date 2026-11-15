@@ -119,11 +119,19 @@ pub fn save(tab: &mut TabEntry, conversation: Option<String>, target: Option<Tar
     Ok(selection)
 }
 
+/// The computer a launch of `tab` honours: its choice, while Settings →
+/// Experimental → Local VM tasks is on. Off, none is read, so every agent
+/// starts as before computers could be chosen.
+pub fn chosen(tab: &TabEntry) -> Result<Option<Target>> {
+    if !crate::store::settings::load().experimental.local_vm_tasks { return Ok(None); }
+    Ok(selected(tab)?.target)
+}
+
 /// The desktop tools a new agent of `tab` starts with: the computer the tab
 /// chose, or, with none chosen, the Local VM while it runs, as before
 /// computers could be chosen. A choice that no longer holds fails the launch.
 pub fn launch_args(session_id: &str, tab: &TabEntry) -> Result<crate::container_vm::VmLaunch> {
-    match selected(tab)?.target {
+    match chosen(tab)? {
         #[cfg(unix)]
         Some(target @ Target::MacosGuest { .. }) => crate::local_vm::attachment::launch_args(session_id, tab, &target),
         Some(target) => { let _ = session_id; crate::container_vm::launch_selected(&target, &tab.harness) }
@@ -187,7 +195,26 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn a_choice_is_honoured_only_while_local_vm_tasks_is_on() {
+        let _home = crate::store::temp_home();
+        let target = Target::MacosGuest { environment_id: uuid::Uuid::new_v4().to_string(), generation: uuid::Uuid::new_v4().to_string() };
+        let mut tab: TabEntry = serde_json::from_value(json!({"id":"tab","harness":"codex","created":"now"})).unwrap();
+        tab.unknown.insert(SELECTION.into(), json!({"version":1,"conversation":null,"target":target}));
+        assert_eq!(chosen(&tab).unwrap(), None, "off, a kept choice is not read");
+        let mut settings = crate::store::settings::load();
+        settings.experimental.local_vm_tasks = true;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(chosen(&tab).unwrap(), Some(target));
+        tab.unknown.insert(SELECTION.into(), json!({"version":2}));
+        assert!(chosen(&tab).is_err(), "on, a corrupt choice still fails the launch");
+    }
+
+    #[test]
     fn selection_reopens_exact_identity_and_refuses_corruption_or_conversation_change() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.local_vm_tasks = true;
+        crate::store::settings::save(&settings).unwrap();
         let mut tab: TabEntry = serde_json::from_value(json!({"id":"tab","harness":"codex","created":"now","unrelated":"kept"})).unwrap();
         assert!(selected(&tab).unwrap().target.is_none());
         let target = Target::LinuxContainer { runtime: Runtime::Podman, id: "a".repeat(64) };

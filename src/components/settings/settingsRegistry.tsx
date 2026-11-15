@@ -10,6 +10,9 @@ import { UserFileRowAccessory } from "./SettingSources";
 export const NATIVE_CODEX_DESCRIPTION =
   "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
 
+export const LOCAL_VM_TASKS_DESCRIPTION =
+  "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.";
+
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
 
@@ -68,7 +71,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns";
+  requires?: "orchestratorRuns" | "localVmTasks";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -334,6 +337,12 @@ export const SETTINGS_ROWS = [
     description: ORCHESTRATOR_RUNS_DESCRIPTION,
     searchTerms: ["experimental", "orchestrator", "orchestration", "runs", "lead", "workers", "plan"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.orchestratorRuns" },
+  }),
+  defineSetting({
+    id: "experimental.localVmTasks", section: "experimental", title: "Local VM tasks",
+    description: LOCAL_VM_TASKS_DESCRIPTION,
+    searchTerms: ["experimental", "local vm", "vm", "virtual machine", "computer", "desktop", "tasks", "guest", "linux", "macos"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",

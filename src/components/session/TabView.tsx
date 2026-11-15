@@ -48,6 +48,7 @@ import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
 import { LocalVmTasks } from "@/components/localVm/LocalVmTasks";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 
@@ -139,6 +140,8 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  // Local VM task cards are behind Settings → Experimental → Local VM tasks (PRO-114).
+  const localVmTasks = useExperimentalSettings(local)?.localVmTasks === true;
   const setup = useWorkspaceSetup(local ? session.id : null);
   const isGit = useSessionIsGit(session, local);
   const forge = useProjectForge(local && isGit ? session.projectPath || session.cwd : null);
@@ -704,7 +707,7 @@ export function TabView({
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       footer={
         <>
-        {local ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
+        {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
         {
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
