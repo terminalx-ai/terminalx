@@ -100,7 +100,7 @@ Future collection must preserve the root's unmerged automation changes in
 `cloud_workspaces.rs` and `api.ts`; neither import nor discard those changes
 while syncing this checkpoint. Review and collect only this owned diff.
 
-## Verification and resource hold
+## Focused validation
 
 Embedded mocked HTTP tests all contain `phase2_presence_contract` in their names.
 They cover exact paths/auth/body, nonactive membership, strict input/no HTTP,
@@ -110,49 +110,53 @@ bounded timeout/body capture, and stale account/profile/org/session/membership/
 A-B-A replies. Stale-context cases preserve target membership when testing other
 fields and cover both successful and unauthorized late replies.
 
-Source checkpoint verification: tests NOT RUN. This continuation is SOURCE ONLY:
-no Cargo, Vitest, build, typecheck, donecheck or verifier command was run, including
-blocked checks. Static source/diff inspection and `git diff --check` alone are
-allowed. Future execution requires the existing focused grant, explicit root slot
-confirmation AND a fresh release from root; an old marker is insufficient.
-SaaS PR253 retains the next heavy slot. After committing, the worker records
-`READY_FOR_SUPPORTED_STOP` in the designated combined worker status file and
-keeps the turn open for supported stop. No full suites, dependencies or wrapper
-changes. Prior 133 tests were authored, not accepted or run in this continuation.
+Checkpoint `52ac17d33bca14276951fafca7eb2af85ddcf131` was untested source.
+This worker inspected the baseline diff and cherry-picked only that five-file
+commit onto the newer assigned base, preserving its agent-title/tab behavior.
+The root explicitly granted the wave5 serial focused window after the SaaS
+release below; the old source-only resource instructions are historical.
 
-Stored focused commands for a future explicitly released slot (NOT RUN here):
+Required reproduction from this worktree root (positive counts are mandatory):
 
 ```sh
-test -f "$HOME/phase2-orch/presence-client-prep-focused-granted" && test -s "$HOME/phase2-orch/presence-client-prep/root-slot-confirmation.txt" || { echo 'RESOURCE HOLD: marker and explicit root slot confirmation required'; exit 1; }
+test -f "$HOME/phase2-orch/wave5-focused-granted" || exit 1
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
-cd src-tauri || exit 1
-for filter in phase2_presence_contract phase2_following_contract; do
- log=$(mktemp /tmp/phase2-client-contract.XXXXXX)
- cargo test --lib "$filter" > "$log" 2>&1
- result=$?
- cat "$log"
- test "$result" -eq 0 && rg -q 'test result: ok\. [1-9][0-9]* passed' "$log" || exit 1
-done
+python3 - <<'CHECK'
+import subprocess,tempfile,re
+for name in ['phase2_presence_contract','phase2_following_contract']:
+ with tempfile.TemporaryFile(mode='w+') as f:
+  r=subprocess.run(['cargo','test','--manifest-path','src-tauri/Cargo.toml','--lib',name],stdout=f,stderr=subprocess.STDOUT)
+  f.seek(0);s=f.read();print(s)
+  assert r.returncode==0 and re.search(r'test result: ok\. [1-9][0-9]* passed',s)
+CHECK
 ```
 
-A successful command with zero selected tests is not acceptance. The lead must
-collect focused test results before treating this checkpoint as verified. The
-full ticket and activation remain open even after the focused tests pass.
+The full ticket and activation remain open even after these mocked transport
+tests pass. No full suites, dependency installs, provider certification or
+production activation are part of this validation.
 
 
-## PRO-137 source-only continuation
+## PRO-137 contract and source provenance
 
 Read-first evidence: `PRO-137-accepted-contract.md`,
 `PRO-137-contract-status-for-desktop.txt`, and
 `PRO-137-integration-handoff-pending.txt` in `~/phase2-orch/saas-wave3/`.
 Accepted worker `88a949fc722654f0ff8c6b71554f0e9e70e0e4cd` was collected as
 `38154a7a70f2570a813c800b6e259b0138f4e48b` locally on the SaaS wave branch.
-Shared integration remains uncommitted/unpublished in that handoff; published
-PR253 head `60c5e25e` excludes 137. This is NOT SaaS phase-2 or deployed.
-The root/chief source-only authorization does not activate any endpoint.
+Those handoffs describe historical availability, not the current gate result.
+The latest available SaaS evidence is
+`~/phase2-orch/saas-wave3/heavy-gate-status.json`: released at
+2026-11-15T16:49:21.993652+00:00, source
+`f88e9ecb660ea8236a8cf2180801d7e76b3af61b`, all six gate tasks and
+migration histories through 111 passed. The status reports source validation;
+it does not establish publication, a merge into SaaS phase-2, deployment or native
+acceptance. `status-current.json` (16:10Z), the pending handoff and the earlier
+PR253 head are historical. No later publication/merge/deployment is asserted here.
+The accepted exact contracts above remain the wire authority.
 
-The five-file 133 diff from `ac570f05` was inspected and selectively applied to
+In the original source checkpoint, the five-file 133 diff from `ac570f05`
+was inspected and selectively applied to
 baseline `a823c209`, including its stricter validation, fencing and valid-response
 timeout fixture. Original `d4dc843d`, try 2 `d818e9b1` and try 3 `ac570f05`
 branches/worktrees remain intact. No root wave4 source was imported or reset.
@@ -239,6 +243,30 @@ UUID versions/variants, UTF-16 boundaries, controls/path/extra/type rejection wi
 no HTTP, production hold, response scope/boolean/receipt validation, every accepted
 error including runtime/privacy/idempotency/personal-route/busy restrictions,
 no automatic retry, timeouts/body bounds and stale context success/error replies.
-The prior `phase2_presence_contract` test source is preserved. **Neither focused
-filter nor any build/typecheck/verifier was RUN here; no passing result or native
-acceptance is claimed.**
+The prior `phase2_presence_contract` test source is preserved. Results for this
+validation run are recorded below; native UI and lifecycle acceptance remain
+outstanding.
+
+## Wave5 validation result (2026-11-15)
+
+The exact SDK-pinned reproduction command above exited 0 in the allocated
+wave5 slot on branch `raccoon/presence-following-validate-accepted-con`.
+Both mocked HTTP filters compiled and passed:
+
+| Filter | Passed | Failed | Ignored | Exit |
+| --- | --- | --- | --- | --- |
+| `phase2_presence_contract` | 8 | 0 | 0 | 0 |
+| `phase2_following_contract` | 8 | 0 | 0 | 0 |
+
+No compile/test/review finding required a source correction after importing
+`52ac17d3` as `b2469bca`. The newer base's `adopt_agent_title` tab behavior
+remains intact. `git diff --check` passed. Only the five scoped paths changed.
+
+These are native mocked transport proofs, including strict optional note null
+rejection, complete UUID/ID bounds, captured-context success/error and A-B-A
+fences, exact auth/body/error/receipt semantics, pre-HTTP production holds and
+no automatic reassignment retry. They do not prove deployed route availability,
+private cross-owner or bootstrap-backed handover support, tab/credential migration,
+or native UI/lifecycle acceptance. Production constructors still set
+`phase2_enabled: false`. No full suite, API typecheck, Vitest, install or
+activation was performed in this allocation.
