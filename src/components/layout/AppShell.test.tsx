@@ -137,6 +137,7 @@ vi.mock("@/lib/models", () => ({
 }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
+vi.mock("@/lib/desktopInbox", () => ({ bootDesktopInbox: vi.fn() }));
 vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
@@ -641,4 +642,15 @@ describe("welcome routing", () => {
     expect(screen.getByTestId(view)).toBeTruthy();
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
+});
+
+
+it("boots the account inbox alongside the catalog after data privacy is ready", async () => {
+  const { bootDesktopInbox } = await import("@/lib/desktopInbox");
+  const { bootCloudCatalog } = await import("@/lib/cloudCatalog");
+  vi.mocked(bootDesktopInbox).mockClear();
+  vi.mocked(bootCloudCatalog).mockClear();
+  render(<AppShell />);
+  await waitFor(() => expect(bootDesktopInbox).toHaveBeenCalledOnce());
+  expect(vi.mocked(bootDesktopInbox).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(bootCloudCatalog).mock.invocationCallOrder[0]);
 });
