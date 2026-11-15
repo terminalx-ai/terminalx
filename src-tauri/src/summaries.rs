@@ -8,7 +8,7 @@
 //! has what a card shows; opening the dashboard on fifty sessions then costs
 //! about one block per tab rather than fifty whole transcripts.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -271,6 +271,74 @@ fn card_tab(s: &SessionEntry) -> Option<&TabEntry> {
         .or_else(|| s.tabs.iter().max_by(|a, b| a.modified.cmp(&b.modified)))
 }
 
+/// The name each tab goes by once one has been made for it, by tab id, for
+/// a list that shows a session's tabs (the phone's). A tab the reader named
+/// is left out: its own title stands. So is one nothing has been made for
+/// yet, which goes by its own title, the first words of its first request.
+///
+/// A session of one tab is named for that tab, so the tab takes the
+/// session's title, as `session_ops::adopt_agent_title` gives it on the Mac
+/// once the agent has titled the conversation. A tab beside others takes the
+/// name the Mac makes for a session (`session_names::chosen_name`): from
+/// the conversation it holds now, a ticket named in its first request, else
+/// the title its agent gave it, else the request's first clause.
+pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let [tab] = session.tabs.as_slice() {
+        let title = session.title.trim();
+        if !tab.follow.title_pinned && !title.is_empty() && title != "New session" && title != crate::session_ops::QUICK_CHAT_TITLE {
+            out.insert(tab.id.clone(), title.to_string());
+        }
+        return out;
+    }
+    for tab in session.tabs.iter().filter(|tab| !tab.follow.title_pinned) {
+        let first = store::log_path(&session.id, &tab.id)
+            .ok()
+            .and_then(|path| first_request(&path, tab.follow.conversation.as_deref()))
+            .unwrap_or_default();
+        let agent_title = (tab.harness == "claude")
+            .then(|| tab.provider_session_id.as_deref())
+            .flatten()
+            .and_then(|id| crate::harness::claude::transcript::locate(&session.cwd, id))
+            .filter(|path| path.is_file())
+            .and_then(|path| crate::harness::claude::transcript::ai_title(&path));
+        if let Some(title) = crate::session_names::chosen_name(&first, agent_title) {
+            out.insert(tab.id.clone(), title);
+        }
+    }
+    out
+}
+
+/// The first top-level request of the conversation a tab holds now, read
+/// forwards: `conversation` is its marker in the log, absent for the one the
+/// tab began with. This runs on every list the phone asks for, so only the
+/// head of a log is read: a conversation that begins further in than that
+/// gets no name here, and its tab keeps its own title.
+fn first_request(path: &Path, conversation: Option<&str>) -> Option<String> {
+    use std::io::BufRead;
+    let reader = io::BufReader::new(fs::File::open(path).ok()?.take(MAX_SCAN));
+    let mut under: Option<String> = None;
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if !line.contains(r#""type":"user_message""#) && !line.contains(r#""type":"conversation""#) {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+        if event.get("subagent").is_some_and(|value| !value.is_null()) {
+            continue;
+        }
+        let payload = &event["payload"];
+        if payload["type"] == "conversation" {
+            under = payload["id"].as_str().map(String::from);
+        } else if under.as_deref() == conversation && payload["type"] == "user_message" {
+            if let Some(text) = payload["text"].as_str().filter(|text| !text.trim().is_empty()) {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Summaries for the given sessions, or for every session when `None`.
 pub fn collect(session_ids: Option<Vec<String>>) -> Result<Vec<SessionSummary>> {
     let wanted: Option<HashSet<String>> = session_ids.map(|ids| ids.into_iter().collect());
@@ -514,6 +582,58 @@ mod tests {
             tabs,
             unknown: Default::default(),
         }
+    }
+
+    const WORKER_PROMPT: &str = "You are a worker in a run led by another session. Fix the login timeout in the auth module, then report.";
+
+    #[test]
+    fn a_lone_tab_takes_its_sessions_title_unless_the_reader_named_it() {
+        let mut tab = a_tab("only", TabStatus::Idle);
+        tab.title = Some("You are a worker in a run led".into());
+        let mut session = a_session("s1", vec![tab]);
+        session.title = "Tabs show the generated title".into();
+        assert_eq!(generated_tab_titles(&session).get("only").map(String::as_str), Some("Tabs show the generated title"));
+
+        session.title = "New session".into();
+        assert!(generated_tab_titles(&session).is_empty(), "a placeholder is no title");
+
+        session.title = "Tabs show the generated title".into();
+        session.tabs[0].follow.title_pinned = true;
+        session.tabs[0].title = Some("Mine".into());
+        assert!(generated_tab_titles(&session).is_empty(), "the reader's own title stands");
+    }
+
+    #[test]
+    fn tabs_beside_others_are_named_from_the_conversation_they_hold() {
+        let _home = store::temp_home();
+        let mut worker = a_tab("worker", TabStatus::Idle);
+        worker.harness = "codex".into();
+        worker.title = Some("You are a worker in a run led".into());
+        let mut moved = a_tab("moved", TabStatus::Idle);
+        moved.harness = "codex".into();
+        moved.follow.conversation = Some("c2".into());
+        let mut named = a_tab("named", TabStatus::Idle);
+        named.follow.title_pinned = true;
+        named.title = Some("Reviewer".into());
+        let quiet = a_tab("quiet", TabStatus::Idle);
+        let session = a_session("s1", vec![worker, moved, named, quiet]);
+        write(&store::log_path("s1", "worker").unwrap(), &[
+            event(serde_json::json!({"type": "user_message", "text": WORKER_PROMPT})),
+            event(serde_json::json!({"type": "user_message", "text": "Now implement PRO-9: something else entirely. Do it today."})),
+        ]);
+        write(&store::log_path("s1", "moved").unwrap(), &[
+            event(serde_json::json!({"type": "user_message", "text": "Implement PRO-1: the first thing. Then report back to me."})),
+            event(serde_json::json!({"type": "conversation", "id": "c2"})),
+            event(serde_json::json!({"type": "user_message", "text": "Implement PRO-123: short generated names. Read the code first and then change it."})),
+        ]);
+        write(&store::log_path("s1", "named").unwrap(), &[event(serde_json::json!({"type": "user_message", "text": WORKER_PROMPT}))]);
+
+        let titles = generated_tab_titles(&session);
+        assert_eq!(titles.get("worker").map(String::as_str), crate::session_names::generated_name(WORKER_PROMPT).as_deref());
+        assert!(!titles["worker"].starts_with("You are"), "the role preamble is not the name: {}", titles["worker"]);
+        assert_eq!(titles.get("moved").map(String::as_str), Some("PRO-123 Short generated names"));
+        assert!(!titles.contains_key("named"));
+        assert!(!titles.contains_key("quiet"), "nothing said yet, nothing made");
     }
 
     #[test]

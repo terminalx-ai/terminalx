@@ -40,7 +40,8 @@ export function SessionHeader({ title, subtitle, onBack, view, onView }: {
 
 /**
  * The chats this branch holds, as tabs, as the Mac's tab strip shows them:
- * each by its agent's mark and its own title, the open one underlined, and
+ * each by its agent's mark and the name made for it, else its own title
+ * (`branchChats`), the open one underlined, and
  * `+` for another chat in the same branch.
  */
 export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose }: { session: SessionSummary; selectedTabId: string; onSelect(tabId: string): void; onAdd?(): void; onClose?(tabId: string): void }) {
