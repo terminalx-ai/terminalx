@@ -55,6 +55,7 @@ import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -329,6 +330,7 @@ function CloudLocation({
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
   return (
     <>
+      {item && !cloud.locked && <CloudWorkspaceDetails item={item} />}
       {item || diagnosticsOffered || onShowPorts ? (
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -344,7 +346,7 @@ function CloudLocation({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
-            {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {item && <WorkspaceActionItems item={item} detailsAllowed={!cloud.locked} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
             {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
             {item && !cloud.locked && (
               <>
