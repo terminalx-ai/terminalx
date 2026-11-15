@@ -401,7 +401,7 @@ pub(crate) fn set_default_in(store: &Store<'_>, agent: Agent, id: Option<&str>, 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Added {
     /// A new account, listed under this id.
-    Added(String),
+    New(String),
     /// An account signed in again.
     Updated(String),
     /// The same agent account is already listed under this id.
@@ -432,7 +432,7 @@ pub(crate) fn add_signed_in(store: &Store<'_>, agent: Agent, id: &str, identity:
             None => {
                 ensure!(!again, "That account was removed meanwhile.");
                 entry.accounts.push(Stored::subscription(id, identity));
-                Ok(Added::Added(id.into()))
+                Ok(Added::New(id.into()))
             }
         }
     })
@@ -485,7 +485,7 @@ pub(crate) fn complete(store: &Store<'_>, agent: Agent, id: &str, again: bool, l
         return Ok(Finished::Failed { message: format!("{} did not finish signing in. Try again.", agent.label()) });
     }
     match add_signed_in(store, agent, id, &identity, Some(local), again)? {
-        Added::Added(id) => Ok(Finished::Added { account: account_in(store, agent, &id)?.context("That account is no longer listed.")? }),
+        Added::New(id) => Ok(Finished::Added { account: account_in(store, agent, &id)?.context("That account is no longer listed.")? }),
         Added::Updated(id) => Ok(Finished::SignedInAgain { account: account_in(store, agent, &id)?.context("That account is no longer listed.")? }),
         Added::Duplicate(existing) => {
             let label = account_in(store, agent, &existing)?.map(|account| account.label).unwrap_or_default();

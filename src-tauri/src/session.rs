@@ -5467,6 +5467,7 @@ impl SessionManager {
     /// after it, so a new tab has nothing to follow until its `SessionStart`
     /// hook says which file it opened. A tab that already holds an id follows
     /// that rollout from wherever it stands.
+    #[allow(clippy::too_many_arguments)]
     fn codex_launch(
         &self,
         rt: &mut TabRuntime,

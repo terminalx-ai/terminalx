@@ -466,7 +466,7 @@ fn a_sign_in_the_app_never_saw_end_leaves_a_directory_swept_later() {
     for id in [&old, &open, &listed] {
         std::fs::File::open(account_dir(dir.path(), Agent::Codex, id)).unwrap().set_modified(hour_ago).unwrap();
     }
-    sweep_unlisted(&store, Agent::Codex, &[open.clone()]);
+    sweep_unlisted(&store, Agent::Codex, std::slice::from_ref(&open));
     assert!(!account_dir(dir.path(), Agent::Codex, &old).exists());
     for id in [&fresh, &open, &listed] {
         assert!(account_dir(dir.path(), Agent::Codex, id).exists(), "{id}");

@@ -351,6 +351,7 @@ fn unreadable() -> anyhow::Error {
 }
 
 impl<'a> Store<'a> {
+    #[cfg(test)]
     pub(crate) fn new(root: PathBuf, secrets: &'a dyn SecretStore) -> Self {
         Self { root, secrets }
     }
@@ -1034,6 +1035,7 @@ fn grant_for(agent: Agent, entry: &Entry, key: Option<Zeroizing<String>>) -> cra
     }
 }
 
+#[cfg(test)]
 fn launch_from(store: &Store<'_>, keys: &Keys, agent: Agent, wait: Duration) -> Result<crate::cloud_grants::LaunchGrant> {
     launch_on(store, keys, agent, Choice::default(), wait, |_, _| bail!("no account home in this launch"))
 }
@@ -1114,11 +1116,8 @@ fn launch_on(store: &Store<'_>, keys: &Keys, agent: Agent, choice: Choice<'_>, w
 /// a cloud workspace's grant there, this Mac's agent login settings here.
 /// A tab set to use a key that this runtime does not have is refused rather
 /// than started on another login.
-pub fn launch_grant(harness: &str, cwd: &Path) -> Result<crate::cloud_grants::LaunchGrant> {
-    launch_grant_on(harness, cwd, Choice::default())
-}
-
-/// [`launch_grant`] on the account `choice` asks for (#980): the grant says
+///
+/// On the account `choice` asks for (#980): the grant says
 /// which account it resolved to (`account`), sets `CLAUDE_CONFIG_DIR` or
 /// `CODEX_HOME` for an added subscription account (and names it again in
 /// `after_profile`, for a profile that exports its own), and unsets what
@@ -1497,7 +1496,7 @@ mod tests {
         let dir = crate::agent_accounts::account_dir(&store.root, agent, &id);
         crate::agent_accounts::create_private(&dir).unwrap();
         let identity = crate::agent_accounts::Identity { email: Some(email.into()), plan: Some("Max".into()), ..Default::default() };
-        assert_eq!(crate::agent_accounts::add_signed_in(store, agent, &id, &identity, None, false).unwrap(), crate::agent_accounts::Added::Added(id.clone()));
+        assert_eq!(crate::agent_accounts::add_signed_in(store, agent, &id, &identity, None, false).unwrap(), crate::agent_accounts::Added::New(id.clone()));
         id
     }
 

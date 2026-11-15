@@ -2533,11 +2533,12 @@ pub fn status_json() -> Option<Value> {
 
 /// Wrap `command` so `unset` names are removed from its environment after
 /// the login shell has run its profile. The names are plain identifiers.
+#[cfg(test)]
 pub fn unset_prefix(command: &str, unset: &[String]) -> String {
     env_prefix(command, unset, &[])
 }
 
-/// [`unset_prefix`], and `set` given their values again after the profile
+/// `unset_prefix`, and `set` given their values again after the profile
 /// (an agent account's directory, #980). Names are plain identifiers; each
 /// value is one shell word.
 pub fn env_prefix(command: &str, unset: &[String], set: &[(String, String)]) -> String {

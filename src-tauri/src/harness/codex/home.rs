@@ -127,11 +127,12 @@ fn digest(bytes: &[u8]) -> String {
 ///
 /// Trust is per checkout and additive: a home that already trusts three
 /// worktrees keeps all three when a fourth tab opens.
+#[cfg(test)]
 pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>) -> Result<String> {
     mirrored_config_for(user_toml, previous, cwd, trust, false)
 }
 
-/// [`mirrored_config`], and for an agent account's home (`file_store`) the
+/// `mirrored_config`, and for an agent account's home (`file_store`) the
 /// login kept in its `auth.json`, whatever the reader's own config says.
 fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool) -> Result<String> {
     let user: toml::Table = toml::from_str(user_toml).unwrap_or_default();

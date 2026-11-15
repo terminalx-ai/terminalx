@@ -144,7 +144,7 @@ fn added_account(agent: Agent, email: &str) -> String {
         Agent::Codex => crate::agent_accounts::prepare_codex_dir(&dir).unwrap(),
     }
     let identity = crate::agent_accounts::Identity { email: Some(email.into()), plan: Some("Max".into()), ..Default::default() };
-    assert_eq!(crate::agent_accounts::add_signed_in(&store, agent, &id, &identity, None, false).unwrap(), crate::agent_accounts::Added::Added(id.clone()));
+    assert_eq!(crate::agent_accounts::add_signed_in(&store, agent, &id, &identity, None, false).unwrap(), crate::agent_accounts::Added::New(id.clone()));
     id
 }
 
@@ -288,7 +288,7 @@ fn terminal_tabs_of_a_session_carry_its_accounts_variables() {
     let out = rig.dir.path().join("terminal.env");
     let command = format!("/bin/sh -c 'printf \"%s\\n%s\\n\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" > {}.tmp && mv {0}.tmp {0}'", out.display());
     let sink = rig.manager.sink();
-    crate::local_runtime::calls::execute(&rig.manager, &sink, "runtime.pty.spawn", json!({
+    crate::local_runtime::calls::execute(&rig.manager, sink, "runtime.pty.spawn", json!({
         "id": format!("{}:shell-1", rig.session), "cwd": rig.checkout(), "cols": 80, "rows": 24, "command": command,
     })).unwrap();
     wait("the terminal's command to run", || out.is_file());
@@ -403,7 +403,7 @@ fn an_older_runtime_starts_the_tab_on_this_macs_login_and_the_desktop_says_so() 
     let manager = rig.clone();
     owner(&new.join("unused.sock"), move |request| {
         let sink = manager.sink();
-        match crate::local_runtime::calls::execute(&manager, &sink, &request.command, request.params.clone()) {
+        match crate::local_runtime::calls::execute(&manager, sink, &request.command, request.params.clone()) {
             Ok(result) => crate::control::ControlResponse::success(request.id.clone(), result),
             Err(error) => crate::control::ControlResponse::failure(request.id.clone(), crate::control::ControlError::internal(error)),
         }
