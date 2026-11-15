@@ -4823,3 +4823,46 @@ fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
         assert!(run.pipeline().resolution.is_none());
     }
 }
+
+// ---- a paired phone's news (#990) ------------------------------------------------
+
+#[test]
+fn a_phone_is_told_once_that_checks_failed_and_once_that_it_merged() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "success"), check("test", "failure")];
+    let run = Run::start_in(host, true);
+    // Working, under review: nothing a phone is told.
+    let reviewing = run.to_review();
+    assert_eq!(engine::phone_notice(&reviewing, Some("Work"), run.host.now()), None);
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    let failed = engine::phone_notice(&stopped, Some("Work"), run.host.now()).expect("checks failed is news");
+    assert_eq!(failed.kind, engine::PhoneNoticeKind::ChecksFailed);
+    assert_eq!(failed.pull_request, github_issue().title, "named as the pipeline titled the pull request");
+    assert_eq!(failed.detail, "Failed: test.");
+    assert_eq!(failed.author, author_tab(), "it belongs to the author's conversation");
+    // Announced again with nothing new: the same news, under the same key.
+    assert_eq!(engine::phone_notice(&run.pipeline(), Some("Work"), run.host.now()).map(|notice| notice.key), Some(failed.key.clone()));
+    // Long after, it is old news.
+    let later = run.host.now() + TimeDelta::minutes(engine::PHONE_NOTICE_MINUTES + 1);
+    assert_eq!(engine::phone_notice(&stopped, Some("Work"), later), None);
+
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success"), check("test", "success")];
+    let merged = run.poll();
+    let notice = engine::phone_notice(&merged, Some("Work"), run.host.now()).expect("a merge is news");
+    assert_eq!(notice.kind, engine::PhoneNoticeKind::Merged);
+    assert_ne!(notice.key, failed.key);
+    assert!(notice.detail.contains("merged pull request"), "{}", notice.detail);
+}
+
+#[test]
+fn a_pull_request_without_an_issue_is_named_by_its_session() {
+    let host = FakeHost::new(&github_issue());
+    host.world().sessions.get_mut("author").unwrap().issue = None;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    let merged = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(merged.state, State::Merged);
+    let notice = engine::phone_notice(&merged, Some("Work"), run.host.now()).unwrap();
+    assert_eq!((notice.kind, notice.pull_request.as_str()), (engine::PhoneNoticeKind::Merged, "Work"));
+    assert_eq!(engine::phone_notice(&merged, None, run.host.now()).unwrap().pull_request, merged.branch, "the branch, as the pipeline would title it");
+}

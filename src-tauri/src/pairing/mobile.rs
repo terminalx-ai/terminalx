@@ -68,11 +68,138 @@ struct MobileNotification {
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tab_id: Option<String>,
+    /// What the notice is about (#990), for a phone that chooses which it is sent.
+    kind: NoticeKind,
+    /// The session's title as the Mac shows it, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_title: Option<String>,
+    /// For a `question` the phone can answer from the notice alone: one
+    /// question, one answer from its options. `body` is then the question
+    /// exactly, the key `questions.respond` takes it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question: Option<QuestionNotice>,
+    /// For an `approval`: what `permission.respond` takes besides the option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval: Option<ApprovalNotice>,
 }
+
+/// The kinds of notice a phone can be sent (#990). A phone's filter names
+/// them by these words; one it names that is not here matches nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoticeKind {
+    Question,
+    Approval,
+    Finished,
+    Failed,
+    UsageLimit,
+    PrChecksFailed,
+    PrMerged,
+}
+
+impl NoticeKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Question => "question",
+            Self::Approval => "approval",
+            Self::Finished => "finished",
+            Self::Failed => "failed",
+            Self::UsageLimit => "usage_limit",
+            Self::PrChecksFailed => "pr_checks_failed",
+            Self::PrMerged => "pr_merged",
+        }
+    }
+
+    /// Whether the notice waits on the person: what `needsMe` sends.
+    fn needs_me(self) -> bool {
+        matches!(self, Self::Question | Self::Approval)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionNotice {
+    request_id: String,
+    options: Vec<QuestionNoticeOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionNoticeOption {
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalNotice {
+    request_id: String,
+}
+
+/// The notices a phone asked for (#990), held only by the subscription that
+/// asked: the Mac keeps nothing of a phone's choices. No filter sends every
+/// notice, as before there were filters.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NotificationFilter {
+    /// The kinds sent for a session that passes `sessions`; absent, every kind.
+    #[serde(default)]
+    kinds: Option<Vec<String>>,
+    /// Absent, every session.
+    #[serde(default)]
+    sessions: Option<SessionScope>,
+    /// One session's own choice, over `kinds` and `sessions` both.
+    #[serde(default)]
+    overrides: HashMap<String, SessionOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "scope", rename_all = "camelCase", deny_unknown_fields)]
+enum SessionScope {
+    All,
+    Only { ids: Vec<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SessionOverride {
+    /// Only what waits on the person: questions and approvals.
+    NeedsMe,
+    /// Every kind, whatever `kinds` and `sessions` say.
+    Everything,
+    /// Nothing.
+    Mute,
+}
+
+impl NotificationFilter {
+    fn admits(&self, notification: &MobileNotification) -> bool {
+        let session = notification.session_id.as_deref();
+        match session.and_then(|id| self.overrides.get(id)) {
+            Some(SessionOverride::Mute) => return false,
+            Some(SessionOverride::Everything) => return true,
+            Some(SessionOverride::NeedsMe) => return notification.kind.needs_me(),
+            None => {}
+        }
+        let in_scope = match &self.sessions {
+            None | Some(SessionScope::All) => true,
+            Some(SessionScope::Only { ids }) => session.is_some_and(|id| ids.iter().any(|only| only == id)),
+        };
+        in_scope && self.kinds.as_ref().is_none_or(|kinds| kinds.iter().any(|kind| kind == notification.kind.name()))
+    }
+}
+
+fn admitted(filter: Option<&NotificationFilter>, notification: &MobileNotification) -> bool {
+    filter.is_none_or(|filter| filter.admits(notification))
+}
+
+/// The filter a connection's latest `notifications.subscribe` named, and that
+/// subscription's id: `notifications.event`, sent to every connection, is
+/// held to it too. Unsubscribing that subscription clears it.
+type ConnectionFilter = Arc<Mutex<Option<(String, NotificationFilter)>>>;
 
 struct MobileClient {
     sender: mpsc::Sender<Value>,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
+    filter: ConnectionFilter,
 }
 
 pub(super) struct MobileRuntime {
@@ -81,6 +208,14 @@ pub(super) struct MobileRuntime {
     notifications: Mutex<VecDeque<MobileNotification>>,
     notification_epoch: String,
     notification_seq: std::sync::atomic::AtomicU64,
+    /// Questions and permission requests already noticed, by request id: an
+    /// ask published again (a reconciliation) is not news again.
+    asked: Mutex<VecDeque<String>>,
+    /// Tabs whose usage limit was noticed since their last turn began, so a
+    /// limit reported again, or the turn it ends, is not noticed again.
+    limited: Mutex<HashSet<String>>,
+    /// Pipeline news already sent, by `engine::PhoneNotice::key`.
+    pipeline_notices: Mutex<VecDeque<String>>,
     notes: Mutex<()>,
     /// Shared by every connection: the retry of a send whose reply was lost
     /// comes over the connection that replaced the one that dropped (#675).
@@ -98,6 +233,9 @@ impl MobileRuntime {
             notifications: Mutex::new(VecDeque::new()),
             notification_epoch: Uuid::new_v4().to_string(),
             notification_seq: std::sync::atomic::AtomicU64::new(0),
+            asked: Mutex::new(VecDeque::new()),
+            limited: Mutex::new(HashSet::new()),
+            pipeline_notices: Mutex::new(VecDeque::new()),
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
             codex_models: OnceLock::new(),
@@ -116,11 +254,22 @@ impl MobileRuntime {
                 if let Some(runtime) = runtime.upgrade() { runtime.broadcast_sessions_changed(); }
             }));
         }
+        // An issue's pipeline, written: its pull request's checks failing, or its merge (#990).
+        let runtime = Arc::downgrade(self);
+        sink.listen(crate::issue_pipeline::host::CHANGED, Box::new(move |payload| {
+            let Some(runtime) = runtime.upgrade() else { return };
+            let Ok(pipeline) = serde_json::from_str::<crate::issue_pipeline::Pipeline>(payload) else { return };
+            let author = index::get(&pipeline.author.session_id).ok().map(|session| session.title);
+            let Some(notice) = crate::issue_pipeline::engine::phone_notice(&pipeline, author.as_deref(), Utc::now()) else { return };
+            if let Some(notification) = runtime.pipeline_notification(notice, author) {
+                runtime.publish(runtime.sink.get().map(|sink| &**sink), notification);
+            }
+        }));
         Ok(())
     }
 
-    fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>) {
-        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed });
+    fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>, filter: ConnectionFilter) {
+        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed, filter });
     }
 
     fn unregister_client(&self, id: &str) {
@@ -137,6 +286,21 @@ impl MobileRuntime {
                     false
                 }
             });
+    }
+
+    /// `notifications.event` to each connection whose subscription's filter
+    /// admits it; to every connection that named none, as before filters.
+    fn broadcast_notification(&self, notification: &MobileNotification) {
+        let value = json!({ "method": "notifications.event", "params": notification });
+        self.clients.lock().unwrap().retain(|_, client| {
+            if !admitted(client.filter.lock().unwrap().as_ref().map(|(_, filter)| filter), notification) {
+                return true;
+            }
+            if client.sender.try_send(value.clone()).is_ok() { true } else {
+                client.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                false
+            }
+        });
     }
 
     pub(super) fn broadcast_sessions_changed(&self) {
@@ -160,23 +324,135 @@ impl MobileRuntime {
         let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
         self.broadcast(json!({ "method": "session.event", "params": { "event": event } }));
         self.broadcast_sessions_changed();
-        let Payload::TurnCompleted { final_text, .. } = &event.payload else { return };
-        let body = final_text
-            .as_deref()
-            .map(collapse_notification_text)
-            .filter(|text| !text.is_empty())
-            .unwrap_or_else(|| "An agent turn finished on your Mac.".into());
-        let notification = MobileNotification {
-            seq: self
-                .notification_seq
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1,
+        let Some(notification) = self.agent_notification(&event, || index::get(&event.session_id).ok().map(|session| session.title)) else { return };
+        self.publish(manager.sink.get().map(|sink| &**sink), notification);
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.notification_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    fn notification(&self, kind: NoticeKind, title: String, body: String, session_id: &str, tab_id: &str, session_title: Option<String>) -> MobileNotification {
+        MobileNotification {
+            seq: self.next_seq(),
             epoch: self.notification_epoch.clone(),
-            title: "Agent finished".into(),
+            title,
             body,
-            session_id: Some(event.session_id.clone()),
-            tab_id: Some(event.tab_id.clone()),
+            session_id: Some(session_id.to_string()),
+            tab_id: Some(tab_id.to_string()),
+            kind,
+            session_title,
+            question: None,
+            approval: None,
+        }
+    }
+
+    /// The notice an agent event makes, if it makes one (#990). `title` reads
+    /// the session's title, only for an event that makes a notice.
+    fn agent_notification(&self, event: &AgentEvent, title: impl FnOnce() -> Option<String>) -> Option<MobileNotification> {
+        let tab_key = format!("{}/{}", event.session_id, event.tab_id);
+        let (kind, body, question, approval) = match &event.payload {
+            Payload::TurnStarted { .. } => {
+                self.limited.lock().unwrap().remove(&tab_key);
+                return None;
+            }
+            Payload::QuestionsAsked { request_id, questions, .. } => {
+                if !self.first_ask(request_id) { return None; }
+                let body = match questions.as_slice() {
+                    [] => "An agent has a question for you.".to_string(),
+                    [one] => collapse_notification_text(&one.question),
+                    [first, rest @ ..] => collapse_notification_text(&format!("{} (and {} more)", first.question, rest.len())),
+                };
+                // Answerable from the notice: one question, one of its options,
+                // and the body is its text exactly, which is the answer's key.
+                let question = match questions.as_slice() {
+                    [one] if !one.multi_select && !one.options.is_empty() && body == one.question => Some(QuestionNotice {
+                        request_id: request_id.clone(),
+                        options: one.options.iter().map(|option| QuestionNoticeOption { label: option.label.clone() }).collect(),
+                    }),
+                    _ => None,
+                };
+                (NoticeKind::Question, body, question, None)
+            }
+            Payload::PermissionRequested { request_id, tool_name, title, description, options, .. } => {
+                if !self.first_ask(request_id) { return None; }
+                let asked = title.as_deref().or(description.as_deref()).map(collapse_notification_text).filter(|text| !text.is_empty());
+                let body = asked.unwrap_or_else(|| collapse_notification_text(&format!("{tool_name} wants permission to run.")));
+                let approval = (!options.is_empty()).then(|| ApprovalNotice { request_id: request_id.clone() });
+                (NoticeKind::Approval, body, None, approval)
+            }
+            Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => {
+                if !self.limited.lock().unwrap().insert(tab_key) { return None; }
+                (NoticeKind::UsageLimit, crate::recovery::RecoveryKind::UsageLimit.message().to_string(), None, None)
+            }
+            Payload::GoalUpdated { goal } if goal.status != crate::events::GoalStatus::UsageLimited => {
+                self.limited.lock().unwrap().remove(&tab_key);
+                return None;
+            }
+            Payload::GoalUpdated { .. } => {
+                if !self.limited.lock().unwrap().insert(tab_key) { return None; }
+                (NoticeKind::UsageLimit, crate::recovery::RecoveryKind::UsageLimit.message().to_string(), None, None)
+            }
+            Payload::TurnCompleted { final_text, .. } => {
+                let failure = crate::recovery::failure(&event.payload);
+                let limited = self.limited.lock().unwrap().contains(&tab_key);
+                let text = final_text.as_deref().map(collapse_notification_text).filter(|text| !text.is_empty());
+                match failure {
+                    // The limit was the notice: the turn it ended says nothing more.
+                    Some(_) if limited => return None,
+                    Some(failure) => (NoticeKind::Failed, text.unwrap_or_else(|| failure.message().to_string()), None, None),
+                    // Ended well, or stopped by a person: finished, as every
+                    // turn's end was before notices had kinds.
+                    None => (NoticeKind::Finished, text.unwrap_or_else(|| "An agent turn finished on your Mac.".into()), None, None),
+                }
+            }
+            _ => return None,
         };
+        let session_title = title().filter(|title| !title.trim().is_empty());
+        let name = session_title.clone().unwrap_or_else(|| "An agent".into());
+        let title = match kind {
+            NoticeKind::Question => format!("{name} needs your answer"),
+            NoticeKind::Approval => format!("{name} needs approval"),
+            NoticeKind::Finished => format!("{name} finished"),
+            NoticeKind::Failed => format!("{name} stopped on an error"),
+            NoticeKind::UsageLimit => format!("{name} reached a usage limit"),
+            NoticeKind::PrChecksFailed | NoticeKind::PrMerged => unreachable!("agent events make no pull request notice"),
+        };
+        let mut notification = self.notification(kind, title, body, &event.session_id, &event.tab_id, session_title);
+        notification.question = question;
+        notification.approval = approval;
+        Some(notification)
+    }
+
+    /// The notice for a pipeline's news, once per news (`PhoneNotice::key`).
+    fn pipeline_notification(&self, notice: crate::issue_pipeline::engine::PhoneNotice, author_title: Option<String>) -> Option<MobileNotification> {
+        use crate::issue_pipeline::engine::PhoneNoticeKind;
+        {
+            let mut sent = self.pipeline_notices.lock().unwrap();
+            if sent.contains(&notice.key) { return None; }
+            sent.push_back(notice.key);
+            while sent.len() > NOTIFICATION_LIMIT { sent.pop_front(); }
+        }
+        let (kind, title) = match notice.kind {
+            PhoneNoticeKind::ChecksFailed => (NoticeKind::PrChecksFailed, format!("Checks failed on {}", notice.pull_request)),
+            PhoneNoticeKind::Merged => (NoticeKind::PrMerged, format!("{} merged", notice.pull_request)),
+        };
+        let session_title = author_title.filter(|title| !title.trim().is_empty());
+        Some(self.notification(kind, title, collapse_notification_text(&notice.detail), &notice.author.session_id, &notice.author.tab_id, session_title))
+    }
+
+    /// Whether this is the first notice of an ask's request id.
+    fn first_ask(&self, request_id: &str) -> bool {
+        let mut asked = self.asked.lock().unwrap();
+        if asked.iter().any(|seen| seen == request_id) { return false; }
+        asked.push_back(request_id.to_string());
+        while asked.len() > NOTIFICATION_LIMIT { asked.pop_front(); }
+        true
+    }
+
+    /// Kept for `notifications.missedSince`, streamed to subscriptions and
+    /// sent to each connection that asked for it.
+    fn publish(&self, sink: Option<&dyn EventSink>, notification: MobileNotification) {
         {
             let mut events = self.notifications.lock().unwrap();
             events.push_back(notification.clone());
@@ -184,18 +460,19 @@ impl MobileRuntime {
                 events.pop_front();
             }
         }
-        if let Some(sink) = manager.sink.get() {
+        if let Some(sink) = sink {
             sink.emit("mobile_notification", &notification);
         }
-        self.broadcast(json!({ "method": "notifications.event", "params": notification }));
+        self.broadcast_notification(&notification);
     }
 
-    fn missed_notifications(&self, epoch: Option<&str>, last_seen_seq: u64) -> Vec<MobileNotification> {
+    fn missed_notifications(&self, epoch: Option<&str>, last_seen_seq: u64, filter: Option<&NotificationFilter>) -> Vec<MobileNotification> {
         self.notifications
             .lock()
             .unwrap()
             .iter()
             .filter(|event| epoch != Some(self.notification_epoch.as_str()) || event.seq > last_seen_seq)
+            .filter(|event| admitted(filter, event))
             .cloned()
             .collect()
     }
@@ -210,6 +487,8 @@ pub(super) struct MobileConnection {
     outbound: mpsc::Sender<Value>,
     wire: Wire,
     subscriptions: Mutex<HashMap<String, ListenerId>>,
+    /// What this connection's latest `notifications.subscribe` asked for.
+    notification_filter: ConnectionFilter,
     terminal_subscriptions: Mutex<HashMap<String,String>>,
     polling: std::sync::atomic::AtomicBool,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
@@ -234,9 +513,10 @@ impl MobileConnection {
         };
         owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id}))?;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        runtime.register_client(&id, outbound.clone(), overflowed.clone());
+        let notification_filter = ConnectionFilter::default();
+        runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone());
         Ok(Self {
-            id, owner, actor, overflowed,
+            id, owner, actor, overflowed, notification_filter,
             runtime,
             outbound,
             wire: Wire::new(transport),
@@ -335,6 +615,9 @@ impl MobileConnection {
             return Ok(result["removed"].as_bool().unwrap_or(false));
         }
         let listener = self.subscriptions.lock().unwrap().remove(subscription_id);
+        let mut filter = self.notification_filter.lock().unwrap();
+        if filter.as_ref().is_some_and(|(id, _)| id == subscription_id) { *filter = None; }
+        drop(filter);
         if let (Some(sink), Some(listener)) = (self.runtime.sink.get(), listener) {
             sink.unlisten(listener);
             Ok(true)
@@ -469,7 +752,7 @@ pub(super) fn dispatch(
         "notifications.subscribe" => sink
             .as_ref()
             .context("app is unavailable")
-            .and_then(|sink| no_params(&params).and_then(|_| subscribe_notifications(&**sink, connection, request_id(request)))),
+            .and_then(|sink| parse_params(params).and_then(|params| subscribe_notifications(&**sink, connection, request_id(request), params))),
         _ => return None,
     };
     Some(result)
@@ -484,7 +767,9 @@ pub(super) fn dispatch(
 /// (`local_runtime::mobile::features`).
 fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `transcript`, `conditionalLists` and `promptImages` (`session.image`) are this app's own.
-    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
+    // `notificationFilters`: notices carry a `kind`, and `notifications.subscribe`
+    // and `notifications.missedSince` take a `filter` (#990).
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1 });
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
@@ -1729,6 +2014,8 @@ struct MissedNotificationsParams {
     last_seen_seq: u64,
     #[serde(default)]
     epoch: Option<String>,
+    #[serde(default)]
+    filter: Option<NotificationFilter>,
 }
 
 fn missed_notifications(manager: &PairingManager, params: MissedNotificationsParams) -> Value {
@@ -1736,22 +2023,34 @@ fn missed_notifications(manager: &PairingManager, params: MissedNotificationsPar
         "epoch": manager.mobile.notification_epoch,
         "events": manager
             .mobile
-            .missed_notifications(params.epoch.as_deref(), params.last_seen_seq),
+            .missed_notifications(params.epoch.as_deref(), params.last_seen_seq, params.filter.as_ref()),
     })
+}
+
+/// Empty, as every phone before filters sends it: every notice.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubscribeNotificationsParams {
+    #[serde(default)]
+    filter: Option<NotificationFilter>,
 }
 
 fn subscribe_notifications(
     sink: &dyn EventSink,
     connection: &Arc<MobileConnection>,
     request_id: &str,
+    params: SubscribeNotificationsParams,
 ) -> Result<Value> {
     let subscription_id = Uuid::new_v4().to_string();
     let stream = Arc::downgrade(connection);
     let response_id = request_id.to_string();
+    let filter = params.filter;
+    *connection.notification_filter.lock().unwrap() = filter.clone().map(|filter| (subscription_id.clone(), filter));
     let listener = sink.listen(
         "mobile_notification",
         Box::new(move |payload| {
             let Ok(event) = serde_json::from_str::<MobileNotification>(payload) else { return };
+            if !admitted(filter.as_ref(), &event) { return; }
             if let Some(stream) = stream.upgrade() {
                 stream.stream(&response_id, json!({ "event": event }));
             }
@@ -1806,7 +2105,7 @@ mod tests {
         let runtime = Arc::new(MobileRuntime::new());
         runtime.configure(sink.clone()).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
-        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)), ConnectionFilter::default());
         let before = summaries_with_row_statuses(Value::Null).unwrap();
         assert!(before["sessions"][0]["manualStatus"].is_null());
         let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
@@ -2528,20 +2827,20 @@ mod tests {
     /// serve, not what this app could serve through a runtime of its own build.
     #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
-        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
         every["closeTab"] = json!(1);
         every["layeredConfiguration"] = json!(1);
         every["questions"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
         assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration and answering questions came later");
-        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
         assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
         // A runtime that names features is taken at its word, at the level this app knows.
         let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
-        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "terminal": 1 }));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "terminal": 1 }));
     }
 
     /// #730: an operation the runtime does not know reads as what to do about it.
@@ -2855,5 +3154,205 @@ mod tests {
         )])
         .is_err());
         assert_eq!(safe_attachment_name(Some("../../design brief.pdf")), "design_brief.pdf");
+    }
+
+    // ---- notification kinds and filters (#990) ----------------------------------
+
+    fn titled() -> Option<String> { Some("Fix login".into()) }
+
+    fn notice(runtime: &MobileRuntime, payload: Payload) -> Option<MobileNotification> {
+        runtime.agent_notification(&event(1, payload), titled)
+    }
+
+    fn ended(status: TurnStatus, final_text: Option<&str>, auth_failed: bool) -> Payload {
+        Payload::TurnCompleted { status, final_text: final_text.map(str::to_string), usage: None, duration_ms: None, head: None, auth_failed, detail: None }
+    }
+
+    fn asked(request_id: &str, questions: Vec<crate::events::Question>) -> Payload {
+        Payload::QuestionsAsked { request_id: request_id.into(), tool_use_id: "tool".into(), questions }
+    }
+
+    fn question(text: &str, options: &[&str], multi_select: bool) -> crate::events::Question {
+        crate::events::Question {
+            question: text.into(), header: None, multi_select, free_text: false,
+            options: options.iter().map(|label| crate::events::QuestionOption { label: label.to_string(), description: None }).collect(),
+        }
+    }
+
+    fn permission(request_id: &str, title: Option<&str>) -> Payload {
+        Payload::PermissionRequested {
+            request_id: request_id.into(), tool_use_id: "tool".into(), tool_name: "Bash".into(), input: json!({"command": "ls"}),
+            cwd: None, title: title.map(str::to_string), description: None, reason: None,
+            options: vec![crate::events::PermissionOption { id: "allow".into(), label: "Allow".into(), kind: crate::events::PermissionOptionKind::AllowOnce }],
+        }
+    }
+
+    fn limited(status: &str) -> Payload {
+        Payload::RateLimited { status: Some(status.into()), resets_at: None, window: None, message: None }
+    }
+
+    fn goal(status: crate::events::GoalStatus) -> Payload {
+        Payload::GoalUpdated { goal: crate::events::Goal { objective: "Ship".into(), status, token_budget: None, tokens_used: 1 } }
+    }
+
+    #[test]
+    fn each_agent_event_makes_a_notice_of_its_kind_named_by_its_session() {
+        let runtime = MobileRuntime::new();
+        let finished = notice(&runtime, ended(TurnStatus::Ok, Some("All\n done."), false)).unwrap();
+        assert_eq!((finished.kind, finished.title.as_str(), finished.body.as_str()), (NoticeKind::Finished, "Fix login finished", "All done."));
+        assert_eq!(finished.session_title.as_deref(), Some("Fix login"));
+        assert_eq!((finished.session_id.as_deref(), finished.tab_id.as_deref()), (Some("session"), Some("tab")));
+
+        let failed = notice(&runtime, ended(TurnStatus::Error, Some("boom"), false)).unwrap();
+        assert_eq!((failed.kind, failed.title.as_str(), failed.body.as_str()), (NoticeKind::Failed, "Fix login stopped on an error", "boom"));
+        let signed_out = notice(&runtime, ended(TurnStatus::Ok, None, true)).unwrap();
+        assert_eq!((signed_out.kind, signed_out.body.as_str()), (NoticeKind::Failed, crate::recovery::RecoveryKind::SignedOut.message()));
+        let aborted_signed_out = notice(&runtime, ended(TurnStatus::Aborted, None, true)).unwrap();
+        assert_eq!(aborted_signed_out.kind, NoticeKind::Failed, "aborted by an error");
+        let stopped = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
+        assert_eq!((stopped.kind, stopped.body.as_str()), (NoticeKind::Finished, "An agent turn finished on your Mac."), "stopped by the person: a turn's end, as an old phone was always told");
+
+        let answerable = notice(&runtime, asked("q1", vec![question("Which database?", &["Postgres", "SQLite"], false)])).unwrap();
+        assert_eq!((answerable.kind, answerable.title.as_str(), answerable.body.as_str()), (NoticeKind::Question, "Fix login needs your answer", "Which database?"));
+        assert_eq!(serde_json::to_value(&answerable).unwrap()["question"], json!({"requestId": "q1", "options": [{"label": "Postgres"}, {"label": "SQLite"}]}));
+        assert!(notice(&runtime, asked("q1", vec![question("Which database?", &["Postgres"], false)])).is_none(), "the same ask published again is not news");
+        for (id, questions) in [
+            ("q2", vec![question("Which?", &["A", "B"], true)]),
+            ("q3", vec![question("Which?", &[], false)]),
+            ("q4", vec![question("One?", &["A"], false), question("Two?", &["B"], false)]),
+            ("q5", vec![question("Which  database?", &["A"], false)]),
+        ] {
+            let unanswerable = notice(&runtime, asked(id, questions)).unwrap();
+            assert_eq!(unanswerable.kind, NoticeKind::Question);
+            assert!(unanswerable.question.is_none(), "{id}: not answerable from the notice alone");
+        }
+
+        let approval = notice(&runtime, permission("p1", Some("Run ls"))).unwrap();
+        assert_eq!((approval.kind, approval.title.as_str(), approval.body.as_str()), (NoticeKind::Approval, "Fix login needs approval", "Run ls"));
+        assert_eq!(serde_json::to_value(&approval).unwrap()["approval"], json!({"requestId": "p1"}));
+        assert_eq!(notice(&runtime, permission("p2", None)).unwrap().body, "Bash wants permission to run.");
+
+        assert!(notice(&runtime, limited("allowed_warning")).is_none(), "a warning is not a limit");
+        let limit = notice(&runtime, limited("rejected")).unwrap();
+        assert_eq!((limit.kind, limit.title.as_str()), (NoticeKind::UsageLimit, "Fix login reached a usage limit"));
+        assert!(notice(&runtime, limited("rejected")).is_none(), "the same limit is noticed once");
+        assert!(notice(&runtime, ended(TurnStatus::Error, Some("limit"), false)).is_none(), "nor the turn it ended");
+        assert!(notice(&runtime, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: None, initiating_prompt: None }).is_none());
+        assert_eq!(notice(&runtime, goal(crate::events::GoalStatus::UsageLimited)).unwrap().kind, NoticeKind::UsageLimit, "a new turn may reach it again");
+        assert!(notice(&runtime, goal(crate::events::GoalStatus::UsageLimited)).is_none());
+        assert!(notice(&runtime, goal(crate::events::GoalStatus::Active)).is_none());
+        assert!(notice(&runtime, Payload::ModelRequestStarted).is_none());
+
+        let untitled = MobileRuntime::new().agent_notification(&event(1, ended(TurnStatus::Ok, None, false)), || None).unwrap();
+        assert_eq!(untitled.title, "An agent finished");
+        assert!(serde_json::to_value(&untitled).unwrap().get("sessionTitle").is_none());
+        let wire = serde_json::to_value(&finished).unwrap();
+        assert_eq!(wire["kind"], "finished");
+        assert!(wire.get("question").is_none() && wire.get("approval").is_none());
+    }
+
+    #[test]
+    fn a_pull_request_notice_is_sent_once_for_its_session() {
+        use crate::issue_pipeline::engine::{PhoneNotice, PhoneNoticeKind};
+        let runtime = MobileRuntime::new();
+        let author = crate::issue_pipeline::SessionRef { session_id: "session".into(), tab_id: "tab".into() };
+        let failed = PhoneNotice { key: "p:needsYou:1".into(), kind: PhoneNoticeKind::ChecksFailed, pull_request: "Open a pull request".into(), detail: "Failed: test.".into(), author: author.clone() };
+        let notification = runtime.pipeline_notification(failed.clone(), titled()).unwrap();
+        assert_eq!((notification.kind, notification.title.as_str(), notification.body.as_str()), (NoticeKind::PrChecksFailed, "Checks failed on Open a pull request", "Failed: test."));
+        assert_eq!((notification.session_id.as_deref(), notification.tab_id.as_deref(), notification.session_title.as_deref()), (Some("session"), Some("tab"), Some("Fix login")));
+        assert_eq!(serde_json::to_value(&notification).unwrap()["kind"], "pr_checks_failed");
+        assert!(runtime.pipeline_notification(failed, titled()).is_none(), "the same news announced again");
+        let merged = PhoneNotice { key: "p:merged:2".into(), kind: PhoneNoticeKind::Merged, pull_request: "Open a pull request".into(), detail: "TerminalX merged pull request #7.".into(), author };
+        let notification = runtime.pipeline_notification(merged, titled()).unwrap();
+        assert_eq!((notification.kind, notification.title.as_str()), (NoticeKind::PrMerged, "Open a pull request merged"));
+        assert_eq!(serde_json::to_value(&notification).unwrap()["kind"], "pr_merged");
+    }
+
+    fn of(kind: NoticeKind, session: &str) -> MobileNotification {
+        MobileNotification { seq: 1, epoch: "e".into(), title: "t".into(), body: "b".into(), session_id: Some(session.into()), tab_id: Some("tab".into()), kind, session_title: None, question: None, approval: None }
+    }
+
+    fn filter(value: Value) -> NotificationFilter {
+        serde_json::from_value(value).unwrap()
+    }
+
+    const KINDS: [NoticeKind; 7] = [NoticeKind::Question, NoticeKind::Approval, NoticeKind::Finished, NoticeKind::Failed, NoticeKind::UsageLimit, NoticeKind::PrChecksFailed, NoticeKind::PrMerged];
+
+    #[test]
+    fn a_filter_sends_by_kind_scope_and_each_session_override() {
+        assert!(KINDS.iter().all(|kind| admitted(None, &of(*kind, "a"))), "no filter: everything");
+        assert!(KINDS.iter().all(|kind| admitted(Some(&filter(json!({}))), &of(*kind, "a"))), "an empty filter: everything");
+
+        let kinds = filter(json!({ "kinds": ["question", "pr_merged", "someday_kind"] }));
+        let sent: Vec<_> = KINDS.into_iter().filter(|kind| kinds.admits(&of(*kind, "a"))).collect();
+        assert_eq!(sent, [NoticeKind::Question, NoticeKind::PrMerged], "an unknown kind is ignored");
+        assert!(!KINDS.iter().any(|kind| filter(json!({ "kinds": [] })).admits(&of(*kind, "a"))));
+
+        let only = filter(json!({ "sessions": { "scope": "only", "ids": ["a"] } }));
+        assert!(only.admits(&of(NoticeKind::Finished, "a")));
+        assert!(!only.admits(&of(NoticeKind::Finished, "b")));
+        assert!(filter(json!({ "sessions": { "scope": "all" } })).admits(&of(NoticeKind::Finished, "b")));
+
+        let overrides = filter(json!({
+            "kinds": ["finished"],
+            "sessions": { "scope": "only", "ids": ["a", "muted"] },
+            "overrides": { "muted": "mute", "loud": "everything", "asks": "needsMe" },
+        }));
+        assert!(!KINDS.iter().any(|kind| overrides.admits(&of(*kind, "muted"))), "mute sends nothing, in scope or not");
+        assert!(KINDS.iter().all(|kind| overrides.admits(&of(*kind, "loud"))), "everything, whatever kinds and scope say");
+        let asks: Vec<_> = KINDS.into_iter().filter(|kind| overrides.admits(&of(*kind, "asks"))).collect();
+        assert_eq!(asks, [NoticeKind::Question, NoticeKind::Approval], "needsMe: questions and approvals, out of scope too");
+        let plain: Vec<_> = KINDS.into_iter().filter(|kind| overrides.admits(&of(*kind, "a"))).collect();
+        assert_eq!(plain, [NoticeKind::Finished]);
+        assert!(!overrides.admits(&of(NoticeKind::Finished, "b")), "out of scope, no override");
+    }
+
+    #[test]
+    fn subscribing_with_empty_params_still_takes_everything_and_unknown_fields_are_refused() {
+        let empty: SubscribeNotificationsParams = parse_params(json!({})).unwrap();
+        assert!(empty.filter.is_none());
+        let filtered: SubscribeNotificationsParams = parse_params(json!({ "filter": { "kinds": ["question"] } })).unwrap();
+        assert_eq!(filtered.filter, Some(filter(json!({ "kinds": ["question"] }))));
+        assert!(parse_params::<SubscribeNotificationsParams>(json!({ "since": 3 })).is_err());
+        assert!(parse_params::<SubscribeNotificationsParams>(json!({ "filter": { "machines": [] } })).is_err());
+        assert!(parse_params::<SubscribeNotificationsParams>(json!({ "filter": { "sessions": { "scope": "only", "ids": [], "extra": 1 } } })).is_err());
+        assert!(parse_params::<SubscribeNotificationsParams>(json!({ "filter": { "sessions": { "scope": "some" } } })).is_err());
+        assert!(parse_params::<SubscribeNotificationsParams>(json!({ "filter": { "overrides": { "a": "loud" } } })).is_err());
+        let missed: MissedNotificationsParams = parse_params(json!({ "lastSeenSeq": 0 })).unwrap();
+        assert!(missed.filter.is_none(), "missedSince as before");
+        assert!(parse_params::<MissedNotificationsParams>(json!({ "lastSeenSeq": 0, "filters": {} })).is_err());
+    }
+
+    #[test]
+    fn missed_notices_and_each_connection_are_held_to_its_filter() {
+        let runtime = MobileRuntime::new();
+        let (old_tx, mut old_rx) = mpsc::channel(16);
+        let (new_tx, mut new_rx) = mpsc::channel(16);
+        runtime.register_client("old", old_tx, Default::default(), ConnectionFilter::default());
+        let chosen = ConnectionFilter::default();
+        *chosen.lock().unwrap() = Some(("subscription".into(), filter(json!({ "kinds": ["question"] }))));
+        runtime.register_client("new", new_tx, Default::default(), chosen);
+        let ask = runtime.agent_notification(&event(1, asked("q", vec![question("Which?", &["A"], false)])), titled).unwrap();
+        let end = runtime.agent_notification(&event(2, ended(TurnStatus::Ok, None, false)), titled).unwrap();
+        runtime.publish(None, ask);
+        runtime.publish(None, end);
+        let kinds = |rx: &mut mpsc::Receiver<Value>| std::iter::from_fn(|| rx.try_recv().ok()).map(|message| {
+            assert_eq!(message["method"], "notifications.event");
+            message["params"]["kind"].as_str().unwrap().to_string()
+        }).collect::<Vec<_>>();
+        assert_eq!(kinds(&mut old_rx), ["question", "finished"], "a phone that chose nothing gets everything");
+        assert_eq!(kinds(&mut new_rx), ["question"]);
+
+        let all = runtime.missed_notifications(None, 0, None);
+        assert_eq!(all.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::Question, NoticeKind::Finished]);
+        let chosen = filter(json!({ "kinds": ["finished"] }));
+        let missed = runtime.missed_notifications(Some(&runtime.notification_epoch), 0, Some(&chosen));
+        assert_eq!(missed.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::Finished]);
+        assert!(runtime.missed_notifications(Some(&runtime.notification_epoch), missed[0].seq, Some(&chosen)).is_empty());
+    }
+
+    #[test]
+    fn a_phone_is_told_this_mac_filters_notices() {
+        assert_eq!(capabilities(&current_runtime())["notificationFilters"], 1);
     }
 }
