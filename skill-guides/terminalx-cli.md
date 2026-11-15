@@ -983,7 +983,9 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   not held to its files. One you took over yourself in a run they approved is: `finish`
   refuses a change outside the files it owns (both sides of a rename count) with
   `person_only`, naming them, and nothing is checked. Widening it is theirs, so tell them
-  which files it needs and why. Once a piece is with you, its earlier worker's reports no
+  which files it needs and why: their own Check and finish in the Run view runs the checks
+  on what you committed and, when they pass, accepts those files as their widening (they
+  join the piece's `owns`, and its note says so). Once a piece is with you, its earlier worker's reports no
   longer move it.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
@@ -1027,8 +1029,9 @@ time, and `toLead.waits` says what it waits for. Then it is `lead`, and you are 
 brief as with `runs take-over`, saying the run handed it to you. Finish it the same way, with
 `terminalx runs finish <piece> --json`. In a run a person approved you are held to the files
 the piece owns, as with a take-over of your own: `finish` refuses a change outside them, since
-widening a piece is the person's. You are not asked to tell the person: it is not
-theirs to decide.
+widening a piece is the person's. Taking the piece is not theirs to decide, so you need not
+tell them you have it; if it needs files outside its own, tell them which and why, and their
+Check and finish accepts them.
 
 Every step a run takes by itself is in the run's `events` (`runs show`), each with `at`,
 `step`, `piece`, `message` and, where the message does not say it, what was `stuck`; the

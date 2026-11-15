@@ -565,9 +565,10 @@ pub struct Try {
     /// work is counted from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_commit: Option<String>,
-    /// A try the lead took over itself on a plan a person approved: it is held
-    /// to the files the piece owns, as its workers were. Widening them is the
-    /// person's, so `finish` refuses a change outside them.
+    /// A try the lead took over itself, or the run handed it, on a plan a person
+    /// approved: it is held to the files the piece owns, as its workers were.
+    /// Widening them is the person's, so `finish` refuses a change outside them
+    /// unless the person finishes it, which accepts them onto the piece's `owns`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held_to_owns: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

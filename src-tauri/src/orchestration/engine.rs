@@ -2469,12 +2469,15 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
     // owns would widen it, and that is the person's (`person_only`).
     let held = piece.tries.last().is_some_and(|attempt| attempt.held_to_owns);
     let outside: Vec<String> = if held { work.changes.iter().map(|change| change.path.clone()).filter(|path| !super::plan::owns(&piece.owns, path)).collect() } else { Vec::new() };
-    if !outside.is_empty() {
+    // The person's own Check and finish, from the Run view, is their widening: they saw the
+    // change and accept it, and the piece owns those files from then on. Anyone else is refused.
+    let widened: Vec<String> = if by == By::Person { outside.clone() } else { Vec::new() };
+    if !outside.is_empty() && by != By::Person {
         let owned = if piece.owns.is_empty() { "no files".to_string() } else { piece.owns.join(", ") };
         let mut error = EngineError::new(
             "person_only",
-            format!("A person approved the plan of run {}: piece {piece_id} owns {owned}, and the lead's commits since it took the piece over change {} outside them: {}. Only the person widens a piece, in the session's Run view.", run.id, if outside.len() == 1 { "a file" } else { "files" }, outside.iter().take(8).cloned().collect::<Vec<_>>().join(", ")),
-            Some("Take those changes out of the piece's commits and finish it again. If the piece cannot be done within its files, tell the person which files it needs and why, then end your turn."),
+            format!("A person approved the plan of run {}: piece {piece_id} owns {owned}, and the lead's commits since it took the piece over change {} outside them: {}. Only the person widens a piece: Check and finish in the session's Run view accepts them as theirs.", run.id, if outside.len() == 1 { "a file" } else { "files" }, outside.iter().take(8).cloned().collect::<Vec<_>>().join(", ")),
+            Some("Take those changes out of the piece's commits and finish it again. If the piece needs those files, tell the person which and why, and that Check and finish in the Run view accepts them as their widening; then end your turn."),
         );
         error.details = json!({"piece": piece_id, "files": outside, "owns": piece.owns});
         return Err(error);
@@ -2516,6 +2519,15 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
                 None => {
                     piece.state = PieceState::Done;
                     piece.note = Some(format!("Finished by the lead in its own checkout, at {}; its checks passed there.", &work.head[..work.head.len().min(7)]));
+                    // Accepted by the person with its checks passing: recorded where any widening is.
+                    if !widened.is_empty() {
+                        for file in &widened {
+                            if !piece.owns.contains(file) {
+                                piece.owns.push(file.clone());
+                            }
+                        }
+                        piece.note = Some(format!("Finished by the lead in its own checkout, at {}; its checks passed there. The person widened it to {}.", &work.head[..work.head.len().min(7)], widened.join(", ")));
+                    }
                 }
                 Some(failed) => piece.note = Some(format!("The lead's work did not pass its checks: `{}` {}.", failed.run, failed.exit_code.map_or("did not finish".to_string(), |code| format!("exited {code}")))),
             }
@@ -2532,7 +2544,8 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
         return Err(error);
     }
     if by == By::Person {
-        host.tell_lead(&after, &format!("The person checked piece {piece_id} of run {id}: what you committed passed its checks, so it is done. Start what waited for it with `terminalx runs start {id} --json`."));
+        let widening = if widened.is_empty() { String::new() } else { format!(" They accepted its change outside the piece's files as theirs: it owns {} now.", widened.join(", ")) };
+        host.tell_lead(&after, &format!("The person checked piece {piece_id} of run {id}: what you committed passed its checks, so it is done.{widening} Start what waited for it with `terminalx runs start {id} --json`."));
     }
     // The lead is free again: a piece the run gives it next goes to it now.
     hand_off(host, id)?;

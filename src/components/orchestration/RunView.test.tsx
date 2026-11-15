@@ -1316,6 +1316,22 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     fireEvent.click(within(detail()).getByRole("button", { name: "Open lead chat" }));
     expect(onShowChat).toHaveBeenCalled();
     expect(within(detail()).getByRole("button", { name: "Skip piece" })).toBeTruthy();
+    expect(within(detail()).queryByTestId("piece-held-to-owns")).toBeNull();
+  });
+
+  it("says a piece the lead is held to on an approved plan takes the person's Check and finish as their widening", async () => {
+    const run = blockedRun();
+    const store = run.pieces[1];
+    const held = { ...store, state: "lead" as const, note: "Taken over by the lead: it finishes the piece in its own checkout.", tries: [...(store.tries ?? []), { step: "lead" as const, model: "opus", fromCommit: "4d1c0e7", heldToOwns: true }] };
+    const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
+    answers.orchestration_finish = () => Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] });
+    await open(heldRun);
+    pick("store", "Typed store module");
+    expect(within(detail()).getByTestId("piece-held-to-owns").textContent).toBe("The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.");
+    const finish = within(detail()).getByRole("button", { name: "Check and finish" });
+    expect(finish.getAttribute("title")).toContain("files it changed outside the piece become the piece's");
+    fireEvent.click(finish);
+    await waitFor(() => expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]));
   });
 
   it("lets a piece title wrap rather than cut it short", async () => {

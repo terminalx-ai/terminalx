@@ -3291,6 +3291,29 @@ fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_f
 }
 
 #[test]
+fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_as_their_widening() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_blocked_cli("lead");
+    engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap();
+    // The piece needs a file another piece does not own: the lead may not finish it so.
+    let outside = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: outside, uncommitted: Vec::new() });
+    host.world().lead_mode = Some("default".into());
+    let error = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err();
+    assert_eq!(error.code, "person_only");
+    assert!(error.message.contains("Check and finish in the session's Run view accepts them as theirs"), "{}", error.message);
+    assert!(error.recovery.as_deref().unwrap().contains("Check and finish in the Run view accepts them as their widening"), "{:?}", error.recovery);
+    // The person saw it and finishes it from the Run view: that is their widening, recorded on the piece.
+    let finished = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap();
+    let piece = finished.run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.owns.clone()), (PieceState::Done, vec!["src/cli.rs".to_string(), "src/store/projects.rs".to_string()]));
+    assert_eq!(piece.note.as_deref(), Some("Finished by the lead in its own checkout, at 4c1d0e2; its checks passed there. The person widened it to src/store/projects.rs."));
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.starts_with("The person checked piece cli") && told.contains("They accepted its change outside the piece's files as theirs: it owns src/store/projects.rs now."), "{told}");
+    assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+}
+
+#[test]
 fn a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");

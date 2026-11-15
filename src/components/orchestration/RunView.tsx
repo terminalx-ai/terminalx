@@ -1365,7 +1365,12 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
               <BlockedActions run={run} piece={piece} busy={busy} act={act} />
             </div>
           ) : piece.state === "lead" && !["stopped", "done"].includes(run.state) ? <>
-            <Button size="sm" variant="accent" disabled={busy} title="Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass." onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
+            {piece.tries?.at(-1)?.heldToOwns && (
+              <p className="w-full text-xs text-muted-foreground" data-testid="piece-held-to-owns">
+                The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.
+              </p>
+            )}
+            <Button size="sm" variant="accent" disabled={busy} title={piece.tries?.at(-1)?.heldToOwns ? "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass; files it changed outside the piece become the piece's." : "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass."} onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
               {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Check and finish
             </Button>
             <Button size="sm" variant="outline" onClick={onShowChat}><Sparkles />Open lead chat</Button>

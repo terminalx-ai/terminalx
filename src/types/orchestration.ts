@@ -202,6 +202,10 @@ export interface PieceTry {
   outputTokens?: number;
   /** A try the lead took over: the commit its branch was at then. */
   fromCommit?: string;
+  /** A take-over on a plan a person approved, by the lead itself or handed to it by the run:
+   * the lead is held to the piece's files. Only the person's own Check and finish accepts a
+   * change outside them, as their widening. Absent when not held. */
+  heldToOwns?: boolean;
   baseCommit?: string;
   started?: string;
   ended?: string;

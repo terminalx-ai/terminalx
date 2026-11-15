@@ -112,7 +112,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
     // nobody widened it, so its files stay as approved. Only a person's take-over lifts them.
     let held = !matches!(by, TakenBy::Person) && run.approval.is_some();
     let files = if held {
-        "You are held to the files it owns, as its workers were: a person approved them, and only they widen a piece. `terminalx runs finish` refuses a change outside them."
+        "You are held to the files it owns, as its workers were: a person approved them, and only they widen a piece. `terminalx runs finish` refuses a change outside them. If it needs files outside them, tell the person which and why: their Check and finish in the Run view accepts them as their widening."
     } else {
         "You are not held to the files it owns: its workers were."
     };
@@ -184,7 +184,7 @@ pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
     }).collect();
     if !outside.is_empty() {
         let said = if held {
-            format!("Its last report or check names files it does not own, where the fix may lie:\n{}\n\nThey are not yours to change here. If the piece needs them, tell the person which and why: widening it is theirs.", bullets(&outside))
+            format!("Its last report or check names files it does not own, where the fix may lie:\n{}\n\nThey are not yours to change here. If the piece needs them, tell the person which and why: widening it is theirs, and their Check and finish in the Run view accepts them.", bullets(&outside))
         } else {
             format!("Its last report or check names files it did not own, where the fix may lie:\n{}", bullets(&outside))
         };
