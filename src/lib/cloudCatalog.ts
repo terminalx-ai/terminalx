@@ -101,6 +101,8 @@ export interface CreateMemoryEntry {
 }
 
 export interface CloudCatalogState {
+  /** Authenticated native catalog viewer; not persisted or inferred from roles. */
+  viewerUserId?: string;
   /** Whose catalog this is (the account email); null while signed out. */
   owner: string | null;
   /** The account context revision the saved file is fenced by. */
@@ -775,6 +777,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
     }
     await repositories;
     if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+    if (feed.viewerUserId) set({ ...state, viewerUserId: feed.viewerUserId }, false);
     feedFailures = 0;
     // As of the answer: an organization the user left meanwhile gets nothing.
     const live = liveCloudOrgIds(getAccount().status);
@@ -1112,11 +1115,17 @@ function scheduleSave() {
   }, SAVE_DELAY_MS);
 }
 
+/** Presence is current only. Never restore online state or authenticated viewer identity from disk. */
+export function withoutLivePresence(item: CloudWorkspaceListItem): CloudWorkspaceListItem {
+  const { presence: _presence, ...rest } = item;
+  return rest;
+}
+
 /** What goes on disk: rows and repositories, never errors or notices. */
 export function serializeCatalog(catalog: CloudCatalogState): unknown {
   const orgs: Record<string, unknown> = {};
   for (const [orgId, org] of Object.entries(catalog.orgs)) {
-    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions, pipelines: org.pipelines };
+    orgs[orgId] = { workspaces: org.workspaces.map(withoutLivePresence), repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions, pipelines: org.pipelines };
   }
   return { version: CATALOG_VERSION, orgs, createMemory: catalog.createMemory };
 }
@@ -1169,7 +1178,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
   const orgs: Record<string, OrgCatalog> = {};
   for (const [orgId, raw] of Object.entries(value.orgs)) {
     if (!isObject(raw) || !Array.isArray(raw.workspaces)) continue;
-    const workspaces = raw.workspaces.filter(validItem).filter((item) => item.workspace.orgId === orgId);
+    const workspaces = raw.workspaces.filter(validItem).filter((item) => item.workspace.orgId === orgId).map(withoutLivePresence);
     orgs[orgId] = {
       ...emptyOrg(orgId),
       workspaces,

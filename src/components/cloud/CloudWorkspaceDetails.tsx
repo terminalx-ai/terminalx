@@ -8,6 +8,8 @@ import { useAccount } from "@/lib/account";
 import { copyText } from "@/lib/clipboard";
 import { bytesText, useWorkspaceDetailsResources } from "@/lib/cloudResources";
 import { type CloudWorkspaceDetailsResponse, detailsScope, loadWorkspaceDetails, useWorkspaceDetailsAvailable, workspaceInfo } from "@/lib/cloudWorkspaceDetails";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
+import { OwnerProfile } from "@/components/dashboard/TeamOverview";
 import { cloudWorkspaceKey } from "@/types/target";
 
 export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWorkspaceListItem; initialCopy?: "machine" | "info" }) {
@@ -15,6 +17,9 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWo
   const scope = detailsScope();
   const [owner] = useState(detailsScope);
   const w = item.workspace;
+  const catalog = useCloudCatalog();
+  const org = catalog.orgs[w.orgId];
+  const currentOwner = owner === scope && org?.source === "live" && !org.error ? org.workspaces.find((row) => row.workspace.id === w.id)?.workspace : undefined;
   const [loaded, setLoaded] = useState<{ scope: string; result: CloudWorkspaceDetailsResponse } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logError, setLogError] = useState(false);
@@ -44,7 +49,7 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWo
     ? `${bytesText(resource.totalBytes - resource.availableBytes)} used of ${bytesText(resource.totalBytes)}` : "Unavailable";
   const fields = d ? [
     ["Repository", d.repositories.map((repo) => [repo.fullName ?? repo.identity ?? "Repository", repo.ref].filter(Boolean).join(" · ")).join(", ") || "None"],
-    ["Creator ID", d.createdBy], ["Provider", d.provider], ["Machine ID", d.machineId ?? "Unavailable"],
+    ["Owner ID at details read", d.createdBy], ["Provider", d.provider], ["Machine ID", d.machineId ?? "Unavailable"],
     ["Environment version", d.environmentVersion ? String(d.environmentVersion.versionNumber) : "Unavailable"],
     ["Toolchain version", d.environmentVersion ? String(d.environmentVersion.toolchainVersion) : "Unavailable"],
     ["Runtime SHA256", d.runtime?.sha256 ?? "Unavailable"],
@@ -68,6 +73,7 @@ export function CloudWorkspaceDetailsCard({ item, initialCopy }: { item: CloudWo
   return (
     <section aria-label="Workspace details" className="w-96 max-w-[85vw] p-3">
       <h3 className="mb-3 truncate text-sm font-medium">{w.name}</h3>
+      <div className="mb-3 flex items-center justify-between gap-3 text-xs"><span className="text-muted-foreground">Owner</span>{currentOwner?.createdBy ? <OwnerProfile orgId={w.orgId} userId={currentOwner.createdBy} name={currentOwner.creator?.displayName ?? `User ${currentOwner.createdBy.slice(0, 8)}`} /> : <span>Unavailable</span>}</div>
       {error ? <p role="alert" className="text-xs">{error}</p> : !d ? <p role="status">Loading details…</p> : <>
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
           {fields.map(([label, value]) => <div key={label} className="contents"><dt className="text-muted-foreground">{label}</dt><dd className="break-words text-right">{value}</dd></div>)}

@@ -1,3 +1,6 @@
+import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog } from "./WorkspaceFollowing";
+import { useAccount } from "@/lib/account";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useState } from "react";
 import { Archive, ArchiveRestore, CalendarClock, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -29,7 +32,7 @@ import { selectCloudWorkspace } from "@/lib/sessions";
  * existing confirmation dialog; Resume is the one explicit wake.
  */
 
-export type LifecycleRequest = { item: CloudWorkspaceListItem; action: LifecycleAction | "restart" | "details" | "copy-machine" | "copy-info" };
+export type LifecycleRequest = { item: CloudWorkspaceListItem; action: LifecycleAction | "restart" | "details" | "copy-machine" | "copy-info" | "reassign" };
 
 export function WorkspaceActionItems({
   item,
@@ -45,6 +48,10 @@ export function WorkspaceActionItems({
   detailsAllowed?: boolean;
 }) {
   const detailsAvailable = useWorkspaceDetailsAvailable();
+  const preferencesAvailable = useWorkspacePreferencesAvailable();
+  const { status } = useAccount();
+  const catalog = useCloudCatalog();
+  const reassign = preferencesAvailable && mayReassign(item, catalog.viewerUserId, status.organizations?.find((org) => org.id === item.workspace.orgId)?.role);
   const state = deriveCloudActivity(item);
   const actions = actionsFor(item);
   const busy = state.tone === "changing";
@@ -84,6 +91,7 @@ export function WorkspaceActionItems({
         {canRestartWorkspace(item) && <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "restart" })}><RotateCcw /> Restart workspace…</DropdownMenuItem>}
         <DropdownMenuSeparator />
       </>}
+      {present && reassign && <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "reassign" })}><Users /> Reassign to…</DropdownMenuItem>}
       {shareable && shareBlocked && (
         <DropdownMenuItem disabled title={VISIBILITY_ADMIN_REASON} data-testid="cloud-share-locked">
           <Users />
@@ -156,6 +164,7 @@ export function WorkspaceActionItems({
 
 /** The confirmation dialog for a requested action; a deleted workspace's connection is closed after. */
 export function WorkspaceLifecycleDialog({ request, onClose }: { request: LifecycleRequest; onClose: () => void }) {
+  if (request.action === "reassign") return <WorkspaceReassignDialog key={`${request.item.workspace.orgId}:${request.item.workspace.id}`} item={request.item} onClose={onClose} />;
   if (request.action === "restart") return <WorkspaceRestartDialog item={request.item} onClose={onClose} />;
   if (request.action === "details" || request.action === "copy-machine" || request.action === "copy-info") return <Dialog open onOpenChange={(open) => !open && onClose()}>
     <DialogContent><DialogHeader><DialogTitle>Workspace details</DialogTitle><DialogDescription>Original setup and current connected resources.</DialogDescription></DialogHeader>

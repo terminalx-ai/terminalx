@@ -1853,3 +1853,14 @@ describe("retained inbox catalog resync", () => {
     await setDataPrivacy(false);
   });
 });
+
+
+it("drops live presence at the persistence boundary without changing independent Following", async () => {
+  const { withoutLivePresence } = await import("./cloudCatalog");
+  const current = { workspace: { id: "visible", orgId: "org", createdBy: "new-owner", creator: { userId: "new-owner", displayName: "Current", photoUrl: null } }, latestOperation: null, following: true, presence: { activeMembers: [{ userId: "person", displayName: "Person", photoUrl: null }] } } as CloudWorkspaceListItem;
+  const stored = withoutLivePresence(current);
+  expect(stored).not.toHaveProperty("presence");
+  expect(stored.following).toBe(true);
+  expect(stored.workspace.creator?.userId).toBe("new-owner");
+  expect(current.presence?.activeMembers).toHaveLength(1);
+});

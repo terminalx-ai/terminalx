@@ -703,6 +703,9 @@ pub struct CloudWorkspace {
     pub repositories: Option<Vec<WorkspaceRepository>>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<PresencePerson>,
+
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -1104,10 +1107,14 @@ pub struct CloudWorkspaceSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceListItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<bool>,
     pub workspace: CloudWorkspace,
     pub latest_operation: Option<CloudWorkspaceOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_markers: Option<Vec<crate::desktop_inbox::ReadMarker>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<CatalogPresence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1127,6 +1134,8 @@ pub struct CloudWorkspaceList {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudCatalogOrganization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<CatalogPresence>,
     pub org_id: String,
     #[serde(default)]
     pub workspaces: Vec<CloudWorkspaceListItem>,
@@ -1155,6 +1164,7 @@ struct CloudCatalogBody {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudCatalogFeed {
+    pub viewer_user_id: String,
     pub changed: bool,
     pub cursor: Option<String>,
     /// The answer is the whole catalog and replaces what the desktop holds.
@@ -1888,6 +1898,11 @@ pub struct WorkspaceReassignResponse {
     pub reassigned: bool,
 }
 
+/// Current visible presence only; no timestamps or durable history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogPresence { pub active_members: Vec<PresencePerson> }
+
 // PRO-133 transport only. No device lifecycle or cached presence state lives here.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2175,12 +2190,13 @@ enum RequestBody {
 impl Client {
     /// `GET /v1/desktop/cloud-catalog` (saas contract §23). `None` is the
     /// server's 304: nothing changed since `cursor`.
-    fn catalog_feed(&self, context: &AccountContext, cursor: Option<&str>) -> Result<Option<CloudCatalogBody>, CloudWorkspaceClientError> {
+    fn catalog_feed(&self, context: &AccountContext, cursor: Option<&str>, presence: bool) -> Result<Option<CloudCatalogBody>, CloudWorkspaceClientError> {
         let risk = RequestRisk::Read;
         let mut url = self.base.clone();
         url.path_segments_mut()
             .map_err(|_| CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false))?
             .extend(["v1", "desktop", "cloud-catalog"]);
+        if presence { url.query_pairs_mut().append_pair("presence", "1"); }
         let agent = crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build();
         let mut request = agent
             .request("GET", url.as_str())
@@ -2300,7 +2316,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&[])?;
-            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string());
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1");
             let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
             if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
                 || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
@@ -2313,7 +2329,7 @@ impl CloudWorkspaceService {
         if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
         self.inbox_account(RequestRisk::Read, |client, context| {
             let mut url = client.inbox_url(&["stream"])?;
-            url.query_pairs_mut().append_pair("after", after);
+            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1");
             let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
             if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
             let response = match request.call() {
@@ -3090,10 +3106,11 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_catalog_feed_unavailable", false));
         }
         let cursor = cursor.filter(|cursor| valid_cursor(cursor));
-        let answer = self.client.catalog_feed(&context, cursor);
+        let answer = self.client.catalog_feed(&context, cursor, self.phase2_enabled);
+        if self.phase2_enabled && !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
         let scope = self.account.scope_if_same_account(&context).filter(|scope| scope.multi_org).ok_or_else(|| context_changed_error(risk))?;
         let Some(body) = answer? else {
-            return Ok(CloudCatalogFeed { changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
+            return Ok(CloudCatalogFeed { viewer_user_id: context.user_id.clone(), changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
         };
         if !valid_cursor(&body.cursor) {
             return Err(invalid_response());
@@ -3105,12 +3122,13 @@ impl CloudWorkspaceService {
                 continue;
             }
             let org_id = organization.org_id;
-            let failed = |code: String| CloudCatalogOrganization { org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
+            let failed = |code: String| CloudCatalogOrganization { presence: None, org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
             organizations.push(match organization.error {
                 // Only a code this desktop knows crosses to the webview.
+                _ if organization.presence.as_ref().is_some_and(|presence| !valid_presence_people(&presence.active_members)) => failed("cloud_workspace_invalid_response".into()),
                 Some(code) => failed(if known_error_code(&code) { code } else { "cloud_workspace_unknown_error".into() }),
                 None => match ensure_list(CloudWorkspaceList { workspaces: organization.workspaces, tombstones: organization.tombstones, quota: organization.quota }, &org_id, risk) {
-                    Ok(list) => CloudCatalogOrganization { org_id: org_id.clone(), workspaces: list.workspaces, tombstones: list.tombstones, quota: list.quota, error: None },
+                    Ok(list) => CloudCatalogOrganization { presence: organization.presence, org_id: org_id.clone(), workspaces: list.workspaces, tombstones: list.tombstones, quota: list.quota, error: None },
                     Err(error) => failed(error.code),
                 },
             });
@@ -3118,7 +3136,7 @@ impl CloudWorkspaceService {
         let listed: std::collections::BTreeSet<&str> = organizations.iter().flat_map(|organization| organization.tombstones.iter().map(|tombstone| tombstone.id.as_str())).collect();
         // Only ids this desktop was also shown a tombstone for, or (in a delta) ids that are well formed.
         let deleted_workspace_ids = body.deleted_workspace_ids.into_iter().filter(|id| valid_resource_id(id) && (!body.reset || listed.contains(id.as_str()))).collect();
-        Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
+        Ok(CloudCatalogFeed { viewer_user_id: context.user_id.clone(), changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
     /// Check the repositories and refs before quoting (contract §16), and
@@ -4137,7 +4155,9 @@ fn ensure_list(
     risk: RequestRisk,
 ) -> Result<CloudWorkspaceList, CloudWorkspaceClientError> {
     if value.workspaces.iter().any(|item| {
-        item.workspace.org_id != org_id
+        item.workspace.creator.as_ref().is_some_and(|person| !valid_presence_id(&person.user_id) || item.workspace.created_by.as_deref() != Some(person.user_id.as_str()))
+            || item.presence.as_ref().is_some_and(|presence| !valid_presence_people(&presence.active_members))
+            || item.workspace.org_id != org_id
             || !valid_resource_id(&item.workspace.id)
             || item
                 .latest_operation
@@ -5110,7 +5130,7 @@ mod tests {
         let filtered = service.inbox(id, 0).unwrap();
         assert!(filtered.has_more && filtered.events.is_empty());
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1 HTTP/1.1"));
         assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
         for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
@@ -5143,7 +5163,7 @@ mod tests {
         assert!(service.inbox_stream(&page.cursor, None).is_err());
         assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
         let requests = requests.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0 HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1 HTTP/1.1"));
         assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
         assert!(requests[2].contains("after=9007199254740994"));
         for request in requests { phase2_headers(&request); }
@@ -5308,6 +5328,39 @@ mod tests {
 
     fn feed_body(organizations: Value) -> String {
         json!({ "v": 1, "cursor": "cursor-2", "reset": true, "organizations": organizations, "deletedWorkspaceIds": ["gone-1", "never-listed"] }).to_string()
+    }
+
+    #[test]
+    fn phase2_presence_catalog_exact_projection_optin_and_independent_following() {
+        for enabled in [false, true] {
+            let mut item = feed_item("org-1", "workspace-1");
+            item["following"] = json!(true);
+            if enabled {
+                item["workspace"]["createdBy"] = json!("user-1");
+                item["workspace"]["creator"] = json!({"userId":"user-1","displayName":"Current owner","photoUrl":null});
+                item["presence"] = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]});
+            }
+            let mut organization = json!({"orgId":"org-1","workspaces":[item]});
+            if enabled { organization["presence"] = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]}); }
+            let (base, _, request) = serve_once(response("200 OK", &feed_body(json!([organization])), ""), Duration::ZERO);
+            let (account, mut service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1"], true);
+            account.set_catalog_feed_for_test(true);
+            service.phase2_enabled = enabled;
+            let feed = service.catalog_feed(Some("cursor-1")).unwrap();
+            assert_eq!(feed.viewer_user_id, "user-1");
+            let item = &feed.organizations[0].workspaces[0];
+            assert_eq!(item.following, Some(true));
+            assert_eq!(item.presence.is_some(), enabled);
+            assert_eq!(feed.organizations[0].presence.is_some(), enabled);
+            let projection = serde_json::to_value(item).unwrap();
+            assert!(projection["workspace"].get("creatorPerson").is_none());
+            if enabled { assert_eq!(projection["workspace"]["creator"]["displayName"], "Current owner"); }
+            let request = request.join().unwrap().text;
+            assert_eq!(request.contains("presence=1"), enabled);
+            assert!(request.to_ascii_lowercase().contains("if-none-match: \"cursor-1\""));
+            phase2_headers(&request);
+        }
     }
 
     #[test]
@@ -6577,6 +6630,7 @@ mod tests {
                     deleted_at: None,
                     repositories: None,
                     created_by: None,
+                    creator: None,
                     last_activity_at: None,
                     revision: None,
                     runtime_activity: None,
@@ -6588,7 +6642,9 @@ mod tests {
                     runtime: None,
                 },
                 latest_operation: None,
+                following: None,
                 read_markers: None,
+                presence: None,
             }],
             tombstones: Vec::new(),
             quota: None,
