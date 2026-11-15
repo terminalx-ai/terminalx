@@ -285,25 +285,7 @@ pub fn codex_in(home: &Path) -> Result<LocalLogin, LocalLoginError> {
     Ok(LocalLogin { secret, expires_at_ms, account })
 }
 
-/// Whose sign-in a configuration directory holds, as the agent wrote it:
-/// display strings only, each checked, and the organization's id to tell
-/// two sign-ins of one address apart. Never a token, and nothing is kept
-/// of the file it was read from.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Identity {
-    pub email: Option<String>,
-    pub plan: Option<String>,
-    /// The organization's (Claude Code) or workspace's (ChatGPT) name, display only.
-    pub organization: Option<String>,
-    /// Its id, for telling accounts apart; never shown.
-    pub organization_id: Option<String>,
-}
-
-impl Identity {
-    pub fn signed_in(&self) -> bool {
-        self.email.is_some()
-    }
-}
+pub use crate::agent_accounts::Identity;
 
 /// A short display string: one line, no control characters.
 fn display_text(raw: &str, max: usize) -> Option<String> {

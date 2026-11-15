@@ -35,6 +35,7 @@ use crate::agent_keys::{Agent, Entry, Mode, Saved, Store};
 pub mod claude_dir;
 #[cfg(feature = "desktop")]
 pub mod commands;
+#[cfg(feature = "desktop")]
 pub mod login;
 #[cfg(test)]
 mod tests;
@@ -106,7 +107,25 @@ impl Stored {
     }
 }
 
-pub use crate::agent_local_login::Identity;
+/// Whose sign-in a configuration directory holds, as the agent wrote it
+/// (read by `agent_local_login::identity_in`): display strings only, each
+/// checked, and the organization's id to tell two sign-ins of one address
+/// apart. Never a token.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub email: Option<String>,
+    pub plan: Option<String>,
+    /// The organization's (Claude Code) or workspace's (ChatGPT) name, display only.
+    pub organization: Option<String>,
+    /// Its id, for telling accounts apart; never shown.
+    pub organization_id: Option<String>,
+}
+
+impl Identity {
+    pub fn signed_in(&self) -> bool {
+        self.email.is_some()
+    }
+}
 
 /// The same agent account: one address, ignoring case, and the same
 /// organization where both sign-ins report one.
@@ -449,6 +468,7 @@ pub enum Finished {
     Failed { message: String },
 }
 
+#[cfg(feature = "desktop")]
 /// What a sign-in into account `id`'s directory became once the agent's own
 /// login ended well: whose sign-in it is, read from the directory, and
 /// listed (or updated) unless the same account already is. A duplicate is
@@ -480,6 +500,7 @@ pub(crate) fn complete(store: &Store<'_>, agent: Agent, id: &str, again: bool, l
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Undo a new account's directory that never became an account: the
 /// agent's own logout, its Keychain entry, then the directory. Only for an
 /// id the index does not list.
@@ -656,10 +677,12 @@ pub fn directory(harness: &str, id: &str) -> Result<Option<PathBuf>> {
     })
 }
 
+#[cfg(feature = "desktop")]
 fn cli() -> login::Cli {
     login::Cli { programs: login::Programs::installed() }
 }
 
+#[cfg(feature = "desktop")]
 fn person_for(agent: Agent) -> Result<Option<claude_dir::Person>> {
     Ok(match agent {
         Agent::Claude => Some(claude_dir::Person::current()?),
@@ -667,6 +690,7 @@ fn person_for(agent: Agent) -> Result<Option<claude_dir::Person>> {
     })
 }
 
+#[cfg(feature = "desktop")]
 /// Begin adding an account of `harness` with the agent's own sign-in.
 pub fn add_start(harness: &str) -> Result<login::Started> {
     let store = crate::agent_keys::store()?;
@@ -675,6 +699,7 @@ pub fn add_start(harness: &str) -> Result<login::Started> {
     login::start_in(&store, agent, None, &cli.programs, person_for(agent)?.as_ref(), &cli)
 }
 
+#[cfg(feature = "desktop")]
 /// Sign listed account `id` of `harness` in again, in its own directory only.
 pub fn sign_in_again(harness: &str, id: &str) -> Result<login::Started> {
     let store = crate::agent_keys::store()?;
@@ -683,21 +708,25 @@ pub fn sign_in_again(harness: &str, id: &str) -> Result<login::Started> {
     login::start_in(&store, agent, Some(id), &cli.programs, person_for(agent)?.as_ref(), &cli)
 }
 
+#[cfg(feature = "desktop")]
 /// Where sign-in `attempt_id` is, and what it became once it ended.
 pub fn add_finish(attempt_id: &str) -> Result<Finished> {
     let store = crate::agent_keys::store()?;
     login::finish_in(&store, attempt_id, |agent| crate::agent_local_login::local_identity(agent.id()), &cli())
 }
 
+#[cfg(feature = "desktop")]
 pub fn add_cancel(attempt_id: &str) -> Result<()> {
     login::cancel_in(&crate::agent_keys::store()?, attempt_id, &cli())
 }
 
+#[cfg(feature = "desktop")]
 /// Remove account `id` of `harness` (see [`remove_in`]).
 pub fn remove(harness: &str, id: &str) -> Result<AgentAccounts> {
     remove_in(&crate::agent_keys::store()?, crate::agent_keys::agent_of(harness)?, id, &cli())
 }
 
+#[cfg(feature = "desktop")]
 /// Account `id`'s login state, from the agent's own status in its directory.
 /// This Mac's login and key accounts are what `check_agent_readiness` says.
 pub fn readiness(harness: &str, id: &str) -> Result<crate::harness::readiness::Readiness> {
@@ -707,6 +736,7 @@ pub fn readiness(harness: &str, id: &str) -> Result<crate::harness::readiness::R
     }
 }
 
+#[cfg(feature = "desktop")]
 /// Take back directories a crash left behind: unlisted, an hour old, and
 /// not in an open sign-in.
 pub fn sweep() {
@@ -721,6 +751,7 @@ pub fn sweep() {
 /// This Mac's login as before, or an added account's own sign-in. The
 /// organization login flow (`cloud_workspaces`) calls it once it asks which
 /// account to lend.
+#[cfg(feature = "desktop")]
 #[allow(dead_code)]
 pub fn lend(harness: &str, id: &str) -> std::result::Result<crate::agent_local_login::LocalLogin, crate::agent_local_login::LocalLoginError> {
     use crate::agent_local_login::{self as local, LocalLoginError};
