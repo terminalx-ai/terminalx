@@ -170,9 +170,10 @@ rotation is out of scope.
 
 ## Decisions on the issue's open questions
 
-1. Resuming across accounts with a shared `projects` directory is confirmed
-   by a probe against the installed Claude Code as part of the core work; the
-   result is recorded here.
+1. Resuming across accounts with a shared `projects` directory: **confirmed**
+   against the installed Claude Code 2.1.325 (see "Probe results" below). A
+   conversation written under one `CLAUDE_CONFIG_DIR` resumed under a second
+   directory whose `projects` is a symlink to the same place.
 2. Codex is always given `cli_auth_credentials_store = "file"` for added
    accounts, so the keyring question does not arise; if an organization
    policy forces the keyring, the add flow reports the agent's error.
@@ -180,6 +181,78 @@ rotation is out of scope.
 4. "This Mac's login" is always selectable, including when
    `CLAUDE_CONFIG_DIR` is set in the person's shell profile; it then means
    that directory.
+
+## Probe results (Claude Code 2.1.325, 2026-11-15)
+
+- **Keychain entry per directory.** With `CLAUDE_CONFIG_DIR` set, Claude Code
+  keeps the login in the generic-password item
+  `Claude Code-credentials-<h>`, account `$USER`, where `<h>` is the first 8
+  hex characters of SHA-256 of the directory path as given (NFC-normalised).
+  With no `CLAUDE_CONFIG_DIR` it is the unsuffixed `Claude Code-credentials`,
+  the person's own, which TerminalX never names, reads for an account, or
+  deletes. `agent_accounts::claude_dir::keychain_service` computes the name
+  (only for an ASCII path; for any other path the agent's own logout is what
+  removes the item). `CLAUDE_SECURESTORAGE_CONFIG_DIR` overrides which
+  directory the item is keyed to, so a launch on an account unsets it.
+- **Resume across directories.** A conversation written under one
+  `CLAUDE_CONFIG_DIR` resumed under a second directory that shares
+  `projects` with it by symlink, so the transcript is found in the shared
+  `projects/` whichever directory wrote it. Not confirmed: a resume across
+  two *different* signed-in subscriptions, which needs a second account.
+
+## How the core implements it (`src-tauri/src/agent_accounts/`)
+
+- **Index.** `agent-logins.json` stays `agent_keys`' file. Per agent it gains
+  `accounts` (added accounts: `id`, `kind`, `label`, `email`, `plan`,
+  `organization`, `organizationId`, `addedAt`, and for an `apiKey` account the
+  Keychain revision of its key), `defaultAccount`, `projectDefaults`
+  (project id → account id) and `keyLabel` (the saved key's label). Every
+  field this build does not know is kept on save, at the top level (an agent
+  it does not know, a version field) and inside each agent's entry and each
+  account. A file without these fields reads as `local` alone, plus the saved
+  key as account `api-key` when one is saved; while `defaultAccount` is
+  unset, `mode` decides the default exactly as before (the saved key when
+  `api_key`, else `local`), so with one account nothing changes.
+- **Ids.** `local`, `api-key`, and 16 lowercase hex characters for added
+  accounts. Only such ids name a directory.
+- **Directories.** `$TERMINALX_HOME/agent-accounts/claude/<id>/` (0700) is
+  `CLAUDE_CONFIG_DIR`, with `settings.json`, `CLAUDE.md`, `skills`,
+  `commands`, `agents`, `plugins` and `projects` linked to the person's
+  directory and `mcpServers` mirrored into its own `.claude.json` at every
+  launch. `$TERMINALX_HOME/agent-accounts/codex/<id>/` (0700) is `CODEX_HOME`
+  while Codex signs in (its `config.toml` sets the file store) and holds
+  `auth.json`; the tabs' managed home is `…/codex/<id>/home`, with
+  `auth.json` linked to `../auth.json`, `sessions` linked to
+  `$TERMINALX_HOME/codex/sessions`, and the reader's settings mirrored as in
+  the default home (plus `cli_auth_credentials_store = "file"`).
+- **Sign-in.** Claude Code: `claude auth login --claudeai` runs as a child of
+  the desktop (under the watchdog of `codex_device_login`, so it dies with
+  the app) with `CLAUDE_CONFIG_DIR` set and the variables that would outrank
+  it removed; it opens the browser itself. Codex: the device-code login of
+  `codex_device_login` with `CODEX_HOME` the account's directory. The app
+  polls `agent_accounts_add_finish`; when the CLI has ended, the email, plan
+  and organization are read from the directory (`.claude.json`'s
+  `oauthAccount`, or `auth.json`'s ID-token claims). The same address (and
+  organization id, where both report one) as a listed account or as This
+  Mac's login is a duplicate: the new directory is logged out and deleted and
+  the existing account named.
+- **Launch grant.** `agent_keys::launch_grant_on(harness, cwd, Choice
+  { account, project })` resolves the account (asked for, project default,
+  agent default, `local`), and for an added subscription sets
+  `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, unsets `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_SECURESTORAGE_CONFIG_DIR` and the
+  cloud-provider switches, and lists the directory variable in
+  `after_profile` so it is set again after the login shell's profile
+  (`cloud_grants::env_prefix`). `launch_grant(harness, cwd)` is unchanged.
+  An added account's directory deleted outside the app refuses the launch
+  ("Sign in again") rather than starting on another login.
+- **Removal.** `agent_accounts_remove` first returns the running tabs on the
+  account (from the runtime's launch registry, which now records the account
+  each tab started on) unless `confirmed`; then the agent's own logout runs
+  in the account's directory, and only if it succeeded is the account
+  dropped from the index, its Keychain entry deleted and its directory
+  removed (links inside it are removed as links, never followed).
 
 ## Out of scope
 
