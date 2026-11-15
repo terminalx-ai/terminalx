@@ -7,9 +7,10 @@ function fixture() {
   const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: vi.fn((key: string, value: string) => { values.set(key, value); }), removeItem: vi.fn((key: string) => { values.delete(key); }) };
   const transport = { desktopInboxStream: vi.fn().mockResolvedValue(page("0")), desktopInbox: vi.fn().mockResolvedValue(page("0")), desktopInboxReceipts: vi.fn().mockResolvedValue({ acknowledged: true }) };
   const apply = vi.fn();
-  const reader = new CloudInboxSubscriber(transport as unknown as InboxTransport, storage, apply);
+  const resync = vi.fn();
+  const reader = new CloudInboxSubscriber(transport as unknown as InboxTransport, storage, apply, resync);
   readers.push(reader);
-  return { reader, transport, apply, values, storage };
+  return { reader, transport, apply, resync, values, storage };
 }
 const readers: CloudInboxSubscriber[] = [];
 beforeEach(() => vi.useFakeTimers());
@@ -123,4 +124,34 @@ describe("account inbox replay", () => {
     const f = fixture(); f.transport.desktopInboxStream.mockResolvedValue(page("1", [event("2")]));
     f.reader.start("a"); await settle(); expect(f.apply).not.toHaveBeenCalled(); expect(f.values.size).toBe(0);
   });
+});
+
+it("resyncs on startup and recovery from EOF without blocking polling on a hung catalog", async () => {
+  const f = fixture();
+  f.resync.mockImplementation(() => new Promise(() => {}));
+  f.transport.desktopInboxStream.mockRejectedValueOnce(new Error("normal EOF / reader cap"));
+  f.transport.desktopInbox.mockResolvedValue(page("100"));
+  f.reader.start("a");
+  expect(f.resync).toHaveBeenCalledTimes(1);
+  await settle();
+  expect(f.transport.desktopInbox).toHaveBeenCalledWith("0", 25000);
+  expect(f.resync).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.transport.desktopInboxStream).toHaveBeenCalledWith("100", "100");
+  expect(f.resync).toHaveBeenCalledTimes(2);
+});
+it("resyncs after poll recovery, fencing an old account's late recovery", async () => {
+  const f = fixture();
+  f.transport.desktopInboxStream.mockRejectedValue(new Error("closed"));
+  f.transport.desktopInbox.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page("20"));
+  f.reader.start("a"); await settle();
+  expect(f.resync).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(f.resync).toHaveBeenCalledTimes(2);
+  let resolve!: (p: ReturnType<typeof page>) => void;
+  f.transport.desktopInboxStream.mockReturnValueOnce(new Promise((done) => { resolve = done; })).mockImplementation(() => new Promise(() => {}));
+  f.reader.start("b"); f.reader.start("a");
+  const calls = f.resync.mock.calls.length;
+  resolve(page("21")); await settle();
+  expect(f.resync).toHaveBeenCalledTimes(calls);
 });

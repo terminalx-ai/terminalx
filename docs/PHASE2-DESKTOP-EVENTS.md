@@ -99,3 +99,20 @@ use local mocked HTTP responses; frontend checks use mocked native commands.
 ## Lead integration validation
 
 The accepted native contracts are collected on the desktop wave branch. Production activation remains held until SaaS shared integration and live readiness are confirmed. Contract checks use local HTTP mocks and frontend fixtures; they do not certify live delivery, native two-account timing, or deployed restart/reattachment. Existing catalog polling remains enabled.
+
+## Coalesced hints and retained replay
+
+The integrated SaaS contract at `56c2253d` coalesces read-marker hints and retains
+delivered inbox rows for 30 days. A hint's marker payload is folded monotonically
+for immediate feedback, then the authorized catalog is invalidated and listed
+again to retrieve the latest `readMarkers`; one event per PUT is not assumed.
+
+Startup and recovery from a closed stream or failed polling request explicitly
+resynchronize every live authorized organization's full catalog. Old in-flight
+lists/feed responses are fenced before a fresh list is requested. The retained
+inbox cursor is preserved for deduplication, but is never treated as proof that
+all access or read-marker changes remain replayable. Account/context generations,
+current membership, and privacy mode fence queued resyncs. Catalog refreshes do
+not block inbox delivery, receipts, or long-poll fallback. Normal checkpoint pages
+continue the same logical replay; transport failure/recovery triggers resync.
+Production activation remains held.
