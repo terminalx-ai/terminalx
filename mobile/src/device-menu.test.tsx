@@ -12,14 +12,17 @@ vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
+// The ring spinner: the connection line's is the one these tests look for.
+vi.mock("@mobile/ui/Spinner", () => ({ Spinner: ({ testID }: { testID?: string }) => testID === "connection-spinner" ? <i data-spinner /> : <i data-row-spinner /> }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
 vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, vi.fn()], CameraView: () => null }));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
+vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 34, left: 0, right: 0 }) }));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     AppState: { currentState: "active" },
-    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
+    View: Box, Text: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div data-modal>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     // A long press is a right-click here: a different gesture from the press.
@@ -108,7 +111,9 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     await click("Device options for Paresh’s Mac mini");
     expect(menuOpen()).toBe(true);
     for (const action of ["Rename", "Reconnect", "Forget this machine"]) expect(button(action), action).toBeDefined();
-    await click("Cancel");
+    // 22.05: a sheet closed by a tap outside it, with no Cancel of its own.
+    expect(button("Cancel")).toBeUndefined();
+    await click("Close");
     expect(menuOpen()).toBe(false);
     await longPress("Paresh’s Mac mini");
     expect(menuOpen()).toBe(true);
@@ -131,7 +136,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
       const menu = container.querySelector("[data-modal]")!.textContent!;
       expect(menu, words).toContain(words);
       for (const old of ["attempt", "Can’t", "Reconnecting", "retrying"]) expect(menu).not.toContain(old);
-      await click("Cancel");
+      await click("Close");
       // The machine list's row is labelled for VoiceOver with the same words.
       if (_where === "the device list") expect(container.querySelector("[data-testid='machine-row-host-aaaa1111'], button[aria-label^='Paresh’s Mac mini, active']")?.getAttribute("aria-label")).toBe(`Paresh’s Mac mini, active, ${words}`);
     }
@@ -241,7 +246,7 @@ describe("one list of machines (#987)", () => {
     expect(container.textContent).not.toContain("Offline");
     await click("Device options for Mac mini");
     expect(itemDisabled("Connect")).toBe(false);
-    await click("Cancel");
+    await click("Close");
     const row = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label")?.startsWith("Mac mini,"))!;
     await act(async () => row.click());
     expect(mocks.app.connectHost).toHaveBeenCalledWith(paired);

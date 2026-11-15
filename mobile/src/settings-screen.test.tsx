@@ -5,12 +5,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SettingsScreen from "../app/(tabs)/settings";
 import PrivacyScreen from "../app/privacy";
 import ConnectionLogScreen from "../app/connection-log";
+import AccountScreen from "../app/account";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
-const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), setName: vi.fn(), alert: vi.fn() }));
+const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn() }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@mobile/notifications/local", () => ({ localNotificationsEnabled: async () => false, enableLocalNotifications: vi.fn(async () => true), disableLocalNotifications: vi.fn() }));
@@ -40,6 +41,7 @@ const show = (screen: ReactNode) => act(async () => { root.render(screen); });
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.push.mockReset();
+  mocks.back.mockReset();
   mocks.setName.mockReset();
   mocks.alert.mockReset();
   const studio = host("studio", { customName: "Studio MacBook" });
@@ -109,4 +111,29 @@ it.each([["Settings", () => <SettingsScreen />], ["the privacy page", () => <Pri
   const words = `${container.textContent} ${[...container.querySelectorAll("[aria-label]")].map((node) => node.getAttribute("aria-label")).join(" ")}`;
   expect(words.length).toBeGreaterThan(40);
   for (const banned of [/\bRPC\b/i, /ciphertext/i, /socket/i, /redacted/i]) expect(words).not.toMatch(banned);
+});
+
+it("shows the account as one row that opens the account screen, with Sign out one step away (22.05)", async () => {
+  await show(<SettingsScreen />);
+  const row = container.querySelector("button[aria-label='Account, Alex']") as HTMLButtonElement;
+  expect(row.textContent).toBe("AAlexalex@example.com");
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Sign out")).toBe(false);
+  await act(async () => row.click());
+  expect(mocks.push).toHaveBeenCalledWith("/account");
+
+  await show(<AccountScreen />);
+  expect(container.textContent).toContain("Signed in asAlexalex@example.com");
+  const signOut = [...container.querySelectorAll("button")].find((b) => b.textContent === "Sign out")!;
+  await act(async () => signOut.click());
+  expect(mocks.app.signOut).toHaveBeenCalledTimes(1);
+  expect(mocks.back).toHaveBeenCalledTimes(1);
+});
+
+it("offers Sign in in place of the account row when signed out", async () => {
+  mocks.app.session = null;
+  await show(<SettingsScreen />);
+  expect(container.querySelector("button[aria-label^='Account']")).toBeNull();
+  expect(container.textContent).toContain("Not signed in");
+  [...container.querySelectorAll("button")].find((b) => b.textContent === "Sign in")!.click();
+  expect(mocks.app.signIn).toHaveBeenCalledTimes(1);
 });

@@ -87,24 +87,23 @@ export default function MachinesScreen() {
 /** One machine: tap to use it (or pair it); "…" or a long press for its menu. */
 function MachineRow({ machine, connection, divided, onPress, onMenu }: { machine: Machine; connection?: ConnectionState; divided: boolean; onPress(): void; onMenu(): void }) {
   const { palette } = useTheme();
-  const offline = machine.tone === "offline";
   const active = machine.kind === "paired" && machine.active;
   const pairable = machine.kind === "available" && machine.pairBlocked === null;
   // The row and its buttons are siblings, so each is its own accessibility element (a button inside a pressable row is hidden from VoiceOver).
   return <View style={[styles.hostRow, divided && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}>
     <Pressable testID={`machine-row-${machine.id}`} accessibilityRole="button" accessibilityLabel={`${machine.name}${active ? ", active" : ""}, ${machine.state}`} accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") onMenu(); }} onPress={onPress} onLongPress={onMenu} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}>
-      <MachineGlyph icon={machine.icon} color={offline ? palette.faint : palette.ink} />
+      <MachineGlyph icon={machine.icon} color={palette.ink} />
       <View style={styles.rowCopy}>
         <View style={styles.nameLine}>
-          <Text numberOfLines={1} style={[styles.rowTitle, styles.shrink, { color: offline ? palette.muted : palette.ink }]}>{machine.name}</Text>
+          <Text numberOfLines={1} style={[styles.rowTitle, styles.shrink, { color: palette.ink }]}>{machine.name}</Text>
           {active ? <View style={[styles.badge, { backgroundColor: `${palette.success}26` }]}><Text style={[styles.badgeText, { color: palette.success }]}>Active</Text></View> : null}
         </View>
-        {/* The machine this phone is using says its connection in the words every screen uses (#983); disconnected on the Mac keeps its own line and action. */}
-        {active && connection && connection !== "none" && connection !== "held" ? <ConnectionLine state={connection} />
-          : <Text numberOfLines={1} style={[styles.detail, { color: toneColor(machine.tone, palette) }]}>{machine.state}</Text>}
+        {/* The machine this phone is using says its connection in the words every screen uses (#983); disconnected on the Mac keeps its own line and action. Connected reads in green (22.05). */}
+        {active && connection && connection !== "none" && connection !== "held" && connection !== "connected" ? <ConnectionLine state={connection} />
+          : <Text numberOfLines={1} style={[styles.rowDetail, { color: toneColor(machine.tone, palette) }]}>{machine.state}</Text>}
       </View>
     </Pressable>
-    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: `${palette.accent}24`, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
+    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: palette.raised, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
     <DeviceOptionsButton name={machine.name} onPress={onMenu} />
   </View>;
 }
@@ -219,7 +218,8 @@ const styles = StyleSheet.create({
   heroTitle: { fontSize: 32, lineHeight: 37, fontWeight: "700", letterSpacing: -0.8 },
   heroDetail: { fontSize: 16, lineHeight: 23 },
   detail: { fontSize: 14, lineHeight: 19 },
-  row: { minHeight: 68, paddingHorizontal: 15, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
+  rowDetail: { fontSize: 13, lineHeight: 17 },
+  row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
   rowCopy: { flex: 1, gap: 3 },
   // The row that connects and the options button are siblings, so each is its own accessibility element (a button inside a pressable row is hidden from VoiceOver).
   hostRow: { flexDirection: "row", alignItems: "center", paddingRight: 8 },
@@ -227,10 +227,10 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 16, fontWeight: "600" },
   shrink: { flexShrink: 1 },
   nameLine: { flexDirection: "row", alignItems: "center", gap: 8 },
-  badge: { borderRadius: 7, paddingHorizontal: 7, paddingVertical: 2 },
-  badgeText: { fontSize: 12, fontWeight: "700" },
-  pairButton: { borderRadius: 9, paddingHorizontal: 12, paddingVertical: 7, marginRight: 2 },
-  pairLabel: { fontSize: 15, fontWeight: "700" },
+  badge: { borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeText: { fontSize: 12, fontWeight: "600" },
+  pairButton: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center", marginRight: 2 },
+  pairLabel: { fontSize: 14, fontWeight: "600" },
   note: { fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
   link: { alignSelf: "flex-start", paddingHorizontal: 4, paddingVertical: 4 },
   linkText: { fontSize: 14, fontWeight: "600" },
