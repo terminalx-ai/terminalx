@@ -2599,12 +2599,29 @@ mod tests {
         let claimed = json!({"idempotencyKey": key, "confirm": true, "parentSession": uuid::Uuid::new_v4().to_string(),
             "parentTab": uuid::Uuid::new_v4().to_string(), "parentConversation": "original", "observationSha256": "a".repeat(64),
             "account": {"name": "personal", "uid": 501}, "fingerprint": "SHA256:x"});
-        for approval in [Value::Null, json!(true), json!({"approved": true}), json!({"document": "e30=", "proof": "00"})] {
-            for method in ["environment.confirmGuestAccount", "environment.grantGuestKey", "environment.confirmGuestHostKey"] {
+        for method in ["environment.confirmGuestAccount", "environment.grantGuestKey", "environment.confirmGuestHostKey"] {
+            let refusal = |params: Value| {
+                let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
+                (error.code, error.message)
+            };
+            // The request reaches its action, which refuses at the claimed
+            // bootstrap: that operation was never made. The earlier gates
+            // refuse differently, so this is not one of them.
+            let unknown = refusal(claimed.clone());
+            let mut unconfirmed = claimed.clone();
+            unconfirmed["confirm"] = json!(false);
+            assert_eq!(refusal(unconfirmed).1, "Explicit confirmation is required", "{method}");
+            let mut unnamed = claimed.clone();
+            unnamed.as_object_mut().unwrap().remove("idempotencyKey");
+            assert_eq!(refusal(unnamed).1, "Original bootstrap operation required", "{method}");
+            assert!(!["Explicit confirmation is required", "Original bootstrap operation required"].contains(&unknown.1.as_str()),
+                "{method}: {unknown:?}");
+            // No approval is part of these requests, so an approval-shaped
+            // value changes nothing: the refusal is the one given without it.
+            for approval in [Value::Null, json!(true), json!({"approved": true}), json!({"document": "e30=", "proof": "00"})] {
                 let mut params = claimed.clone();
                 params["approval"] = approval.clone();
-                let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
-                assert!(!format!("{error:?}").contains("person approved"), "{method}: {error:?}");
+                assert_eq!(refusal(params), unknown, "{method}: {approval} changed the refusal");
             }
         }
         for (method, field) in [("environment.grantGuestKey", "publicKey"), ("environment.confirmGuestHostKey", "hostKey")] {
