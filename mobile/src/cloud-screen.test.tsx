@@ -280,6 +280,40 @@ describe("a cloud workspace screen", () => {
     expect(session.decide).toHaveBeenCalledWith("t1", { requestId: "r1", optionId: "allow" });
   });
 
+  it("shows an agent's question in a cloud tab, answered through the decision command by whoever may approve (#979)", async () => {
+    const questions = [
+      { question: "Which checks should run?", multiSelect: true, freeText: false, options: [{ label: "Lint, format", description: "Both" }, { label: "Tests" }] },
+      { question: "Which branch?", multiSelect: false, freeText: true, options: [{ label: "main" }, { label: "next" }] },
+    ];
+    const ask = [event(1, { type: "user_message", text: "deploy", queued: false }), event(2, { type: "questions_asked", requestId: "q1", toolUseId: "", questions })];
+    // Someone who may not approve reads the question and its options, and is told why there is nothing to press.
+    world({ events: ask, canApprove: false });
+    await show(<CloudWorkspaceScreen />);
+    for (const shown of ["2 questions", "Which checks should run?", "Lint, format", "Both", "Tests", "Which branch?", "next"]) expect(text()).toContain(shown);
+    expect(text()).toContain("Only someone allowed to approve can answer this question.");
+    expect(text()).not.toContain("waiting for a permission");
+    expect(() => button("Answer")).toThrow();
+
+    const { session } = world({ events: ask, canApprove: true });
+    await show(<CloudWorkspaceScreen />);
+    await click("Tests"); await click("Lint, format. Both"); await click("next");
+    await click("Answer");
+    // What the desktop sends for a cloud tab: `session.decide` with the answers.
+    expect(session.decide).toHaveBeenCalledWith("t1", { requestId: "q1", answers: { "Which checks should run?": "Tests, Lint, format", "Which branch?": "next" } });
+    await click("Skip");
+    expect(session.decide).toHaveBeenLastCalledWith("t1", { requestId: "q1", answers: {} });
+    // A double tap sends one answer.
+    session.decide.mockClear();
+    await act(async () => { button("Answer").click(); button("Answer").click(); });
+    expect(session.decide).toHaveBeenCalledTimes(1);
+
+    // The runtime would not take this phone's answer: someone had answered first.
+    const refused = { clientCommandId: "c1", tabId: "t1", kind: "permission-decision", text: null, requestId: "q1", state: "rejected", wake: null, category: "request-not-pending", receipt: null, createdAt: 1, updatedAt: 1, error: null };
+    world({ events: ask, canApprove: true, outbox: [refused] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("That request was already answered.");
+  });
+
   it("says what became of a message: waiting, starting the workspace, not delivered, refused", async () => {
     const entry = (id: string, fields: Record<string, unknown>) => ({ clientCommandId: id, tabId: "t1", kind: "send", text: `message ${id}`, requestId: null, wake: null, category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, ...fields });
     const { session } = world({ outbox: [entry("a", { state: "applied" }), entry("b", { state: "unsent" }), entry("c", { state: "queued", wake: "queued" }), entry("d", { state: "rejected", category: "cloud_workspace_collaboration_forbidden" }), entry("e", { state: "queued", tabId: "t2" })] });

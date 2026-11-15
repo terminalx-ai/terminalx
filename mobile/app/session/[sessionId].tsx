@@ -26,7 +26,7 @@ import { agentConversations } from "@mobile/data/session-navigation";
 import { rowName } from "@mobile/data/session-list";
 import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome";
 import { LinkedText } from "@mobile/ui/LinkedText";
-import { CompactingLine, PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
+import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
@@ -70,6 +70,8 @@ export default function SessionScreen() {
   // Another chat in this branch, through the Mac's "continue in a new tab", where it takes that.
   const canAdd = features?.sessionControls === 1 && app.connectionStage === "connected";
   const canClose = features?.closeTab === 1 && app.connectionStage === "connected";
+  // Whether this Mac takes an answer to an agent's question from a phone (#979): null until it has said.
+  const answersQuestions = features ? features.questions === 1 : null;
   const [adding, setAdding] = useState(false);
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
@@ -99,7 +101,7 @@ export default function SessionScreen() {
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
-    {!terminal ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
+    {!terminal ? <ChatPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} available={available} connected={available && app.connectionStage === "connected"} epoch={app.connectionEpoch ?? 0} answersQuestions={answersQuestions} /> : <TerminalPane key={key} hostId={app.activeHost.id} sessionId={sessionId} tabId={tabId} connected={available && app.connectionStage === "connected"} />}
   </View>;
 }
 
@@ -111,7 +113,10 @@ function RoundButton({ label, icon, disabled, tint, onPress }: { label: string; 
 }
 
 
-function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { hostId: string; sessionId: string; tabId: string; available: boolean; connected: boolean; epoch: number }) {
+/** What a question's card says on a phone paired with a Mac that takes no answer from it (#979). */
+const ANSWER_ON_MAC = "Answer this question from your Mac.";
+
+function ChatPane({ hostId, sessionId, tabId, available, connected, epoch, answersQuestions }: { hostId: string; sessionId: string; tabId: string; available: boolean; connected: boolean; epoch: number; answersQuestions: boolean | null }) {
   const app = useApp();
   const router = useRouter();
   const { palette } = useTheme();
@@ -138,6 +143,8 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [answeringPermission, setAnsweringPermission] = useConversationState<string | null>(`${stateKey}:answeringPermission`, null);
   const [permissionErrors, setPermissionErrors] = useConversationState<Record<string, string>>(`${stateKey}:permissionErrors`, {});
+  // In flight as a ref too: a second tap lands before the first one's render.
+  const answeringAsk = useRef(false);
   const draftEdited = useRef(false);
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   useEffect(() => {
@@ -441,19 +448,26 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
 
   const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
 
-  const respondPermission = async (ask: PendingAsk, optionId: string) => {
-    if (!connected || answeringPermission) return;
+  // One answer at a time, to a permission request or a question: the card it
+  // was for goes when the Mac's decision event arrives, and a refusal (the
+  // Mac or another device answered first) is said on that card.
+  const answerAsk = async (ask: PendingAsk, send: () => Promise<{ answered: true } | { answered: false; message: string }>, failed: string) => {
+    if (!connected || answeringAsk.current) return;
+    answeringAsk.current = true;
     setAnsweringPermission(ask.requestId);
     setPermissionErrors((current) => { const next = { ...current }; delete next[ask.requestId]; return next; });
     try {
-      const result = await app.api.respondPermission(sessionId, tabId, ask.requestId, optionId);
+      const result = await send();
       if (!result.answered) setPermissionErrors((current) => ({ ...current, [ask.requestId]: result.message }));
     } catch (error) {
-      setPermissionErrors((current) => ({ ...current, [ask.requestId]: error instanceof Error ? error.message : "The host could not answer this request." }));
+      setPermissionErrors((current) => ({ ...current, [ask.requestId]: error instanceof Error ? error.message : failed }));
     } finally {
+      answeringAsk.current = false;
       setAnsweringPermission(null);
     }
   };
+  const respondPermission = (ask: PendingAsk, optionId: string) => answerAsk(ask, () => app.api.respondPermission(sessionId, tabId, ask.requestId, optionId), "The host could not answer this request.");
+  const answerQuestions = (ask: PendingAsk, answers: Record<string, string>) => answerAsk(ask, () => app.api.answerQuestions(sessionId, tabId, ask.requestId, answers), "The answer could not be sent.");
 
   const notice = transcriptNotice(app.connectionStage, app.connectionAttempt, epoch > 0, available, loadError, events.length > 0, loading);
   const retryTranscript = () => {
@@ -487,7 +501,10 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, epoch }: { h
   const expanded = focused || !!draft || attachments.length > 0 || !sendToAgent || dictation.listening;
   // The bar is drawn in this screen, so the view starts where the screen does: no offset.
   // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
-  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}><TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
+  return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}><TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{items.length ? noticeCard : null}{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
+  // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
+  ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? ANSWER_ON_MAC : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
+  : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
     // While the agent works, an empty composer's button stops the turn, as a chat app's does.
     const interrupting = !!controls?.busy && !draft.trim() && !attachments.length;
     const mic = <RoundButton label="Dictate" icon={<Mic size={19} color={palette.ink} />} onPress={() => void beginDictation()} />;
