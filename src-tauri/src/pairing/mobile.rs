@@ -390,14 +390,22 @@ impl MobileRuntime {
                 };
                 (NoticeKind::Question, body, question, None)
             }
-            Payload::PermissionRequested { request_id, tool_name, title, description, options, .. } => {
+            Payload::PermissionRequested { request_id, tool_name, input, title, description, options, .. } => {
                 if !self.first_ask(request_id) { return None; }
-                let asked = title.as_deref().or(description.as_deref()).map(collapse_notification_text).filter(|text| !text.is_empty());
+                // A command says what is asked in its own words; anything else, the request's title.
+                let command = input.get("command").and_then(Value::as_str).map(str::trim).filter(|command| !command.is_empty());
+                let shown = command.map(|command| format!("Run: {command}"));
+                let asked = shown.as_deref().or(title.as_deref()).or(description.as_deref()).map(collapse_notification_text).filter(|text| !text.is_empty());
                 let body = asked.unwrap_or_else(|| collapse_notification_text(&format!("{tool_name} wants permission to run.")));
-                // Answerable from the notice's Allow and Deny: the phone sends
-                // `allow` or `deny`, so only a request offering both by those ids.
+                // Answerable from the notice's Allow and Deny only when the
+                // notice shows all of what is allowed: the command, whole and
+                // unchanged (not cut short, not folded onto one line). Anything
+                // else is answered in the session, where the card shows it all.
+                // The phone sends `allow` or `deny`: a request offering both by those ids.
                 let offers = |id: &str, kind: crate::events::PermissionOptionKind| options.iter().any(|option| option.id == id && option.kind == kind);
-                let answerable = offers(APPROVAL_ALLOW, crate::events::PermissionOptionKind::AllowOnce) && offers(APPROVAL_DENY, crate::events::PermissionOptionKind::Deny);
+                let answerable = shown.as_deref() == Some(body.as_str())
+                    && offers(APPROVAL_ALLOW, crate::events::PermissionOptionKind::AllowOnce)
+                    && offers(APPROVAL_DENY, crate::events::PermissionOptionKind::Deny);
                 let approval = answerable.then(|| ApprovalNotice { request_id: request_id.clone() });
                 (NoticeKind::Approval, body, None, approval)
             }
@@ -3276,16 +3284,28 @@ mod tests {
         }
 
         let approval = notice(&runtime, permission("p1", Some("Run ls"))).unwrap();
-        assert_eq!((approval.kind, approval.title.as_str(), approval.body.as_str()), (NoticeKind::Approval, "Fix login needs approval", "Run ls"));
+        assert_eq!((approval.kind, approval.title.as_str(), approval.body.as_str()), (NoticeKind::Approval, "Fix login needs approval", "Run: ls"), "the command itself, not the request's title");
         assert_eq!(serde_json::to_value(&approval).unwrap()["approval"], json!({"requestId": "p1"}));
-        assert_eq!(notice(&runtime, permission("p2", None)).unwrap().body, "Bash wants permission to run.");
+        // Allow and Deny only where the notice shows all that is allowed.
+        let asking = |id: &str, input: Value, title: Option<&str>, options: Vec<crate::events::PermissionOption>| {
+            let Payload::PermissionRequested { tool_use_id, tool_name, cwd, description, reason, .. } = permission(id, None) else { unreachable!() };
+            Payload::PermissionRequested { request_id: id.into(), tool_use_id, tool_name, input, cwd, title: title.map(str::to_string), description, reason, options }
+        };
+        let Payload::PermissionRequested { options: allow_deny, .. } = permission("p0", None) else { unreachable!() };
+        let long = "x".repeat(200);
+        let cut_short = notice(&runtime, asking("p2", json!({"command": long}), None, allow_deny.clone())).unwrap();
+        assert!(cut_short.body.ends_with('…') && cut_short.approval.is_none(), "a command cut short is answered in the session");
+        let folded = notice(&runtime, asking("p3", json!({"command": "cd /tmp\nrm -rf build"}), None, allow_deny.clone())).unwrap();
+        assert_eq!((folded.body.as_str(), folded.approval.is_none()), ("Run: cd /tmp rm -rf build", true), "a command folded onto one line is not what runs");
+        let no_command = notice(&runtime, asking("p4", json!({"file_path": "/src/main.rs"}), Some("Edit main.rs"), allow_deny.clone())).unwrap();
+        assert_eq!((no_command.body.as_str(), no_command.approval.is_none()), ("Edit main.rs", true), "an edit's notice does not show the change");
+        assert_eq!(notice(&runtime, asking("p5", json!({}), None, allow_deny.clone())).unwrap().body, "Bash wants permission to run.");
         // Other ids (OpenCode's `once`/`reject`): still a notice, with no Allow and Deny to answer it.
-        let Payload::PermissionRequested { request_id, tool_use_id, tool_name, input, cwd, title, description, reason, .. } = permission("p3", Some("Edit a file")) else { unreachable!() };
         let other_ids = vec![
             crate::events::PermissionOption { id: "once".into(), label: "Allow once".into(), kind: crate::events::PermissionOptionKind::AllowOnce },
             crate::events::PermissionOption { id: "reject".into(), label: "Deny".into(), kind: crate::events::PermissionOptionKind::Deny },
         ];
-        let unanswerable = notice(&runtime, Payload::PermissionRequested { request_id, tool_use_id, tool_name, input, cwd, title, description, reason, options: other_ids }).unwrap();
+        let unanswerable = notice(&runtime, asking("p6", json!({"command": "ls"}), None, other_ids)).unwrap();
         assert_eq!((unanswerable.kind, unanswerable.approval), (NoticeKind::Approval, None));
 
         assert!(notice(&runtime, limited("allowed_warning")).is_none(), "a warning is not a limit");
