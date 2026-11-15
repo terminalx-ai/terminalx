@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
@@ -20,7 +20,7 @@ vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => tr
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({
   ready: true, session: null, hosts: [], error: null, clearError: () => {}, pairCode: mocks.pairCode,
 }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({}) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({}), useFocusEffect: (effect: () => void) => useEffect(effect, [effect]) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-camera", async () => {
   const { useEffect } = await import("react");

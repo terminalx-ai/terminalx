@@ -116,6 +116,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
             <Text style={[styles.detail, { color: palette.muted }]}>
               {"This phone will no longer connect to it. Sessions on that machine are not changed. To use it again, pair it again."}
               {machine.kind === "paired" && machine.active && app.connectionStage === "connected" ? " It is also asked to remove this phone from its paired devices." : ""}
+              {machine.kind === "paired" && machine.account ? " It stays on your account, hidden on this phone; you can show it again from the list of machines." : ""}
             </Text>
             <View style={styles.pair}>
               <Button label="Cancel" kind="secondary" style={styles.flex} disabled={busy} onPress={onClose} />

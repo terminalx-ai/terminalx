@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
 import { useCameraPermissions } from "expo-camera";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { Keyboard, Plus, QrCode, X } from "lucide-react-native";
 import type { PairingProgress } from "@mobile/pairing/pair";
 import { useApp } from "@mobile/state/AppProvider";
@@ -35,7 +35,8 @@ export default function MachinesScreen() {
   const menu = useDeviceMenu({ onPairAgain: openPairing, onConnect: (machine) => void connect(machine) });
   const { paired, available, hidden } = menu.machines;
 
-  useEffect(() => { if (session) void refreshMachines(); }, [refreshMachines, session]);
+  // Read the account again each time the list comes into view: whether a machine is online must not be stale.
+  useFocusEffect(useCallback(() => { if (session) void refreshMachines(); }, [refreshMachines, session]));
 
   const add = <GlassIconButton label="Add a machine" icon={<Plus size={22} color={palette.ink} />} onPress={openPairing} testID="add-machine" />;
   const sheet = <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />;

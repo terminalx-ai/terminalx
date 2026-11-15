@@ -9,6 +9,7 @@ import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
 import { HostApi, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
+import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing, type PairingProgress } from "../pairing/pair";
@@ -420,6 +421,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [connection]);
 
   const forgetHost = useCallback(async (hostId: string) => {
+    // A machine still on the account would be offered again at once under "Available to pair":
+    // forgetting it also hides it on this phone (#987). Pairing it again shows it again.
+    const forgotten = (await readHosts()).find((host) => host.id === hostId);
+    const onAccount = forgotten ? accountHosts.find((host) => host.hostPublicKeyB64 === forgotten.publicKeyB64 && accountHostIdentityMatches(host)) : undefined;
     if (activeHostRef.current?.id === hostId) {
       // Where possible, the computer drops this phone from its paired devices too. It can only be asked
       // over a live connection to it; whatever it answers, the phone forgets it.
@@ -428,8 +433,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
     forgetConversationState(JSON.stringify([hostId]).slice(0, -1) + ",");
     await removeHost(hostId);
+    if (onAccount) setAccountMachinePrefs(await setAccountMachineHidden(onAccount.hostId, true));
     await loadHosts();
-  }, [api, disconnectHost, loadHosts]);
+  }, [accountHosts, api, disconnectHost, loadHosts]);
 
   const renameHost = useCallback(async (hostId: string, name: string) => {
     adoptHost(await setHostNames(hostId, { customName: cleanHostName(name) }));

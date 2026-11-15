@@ -61,6 +61,8 @@ export interface MachineInput {
 }
 
 export const OFFLINE_REASON = "Open TerminalX on that machine first";
+/** The account has not heard from it lately: not known to be offline, but not pairable through the account now. */
+export const UNREACHABLE_REASON = "Not reachable right now. Open TerminalX on that machine";
 export const INCOMPATIBLE_REASON = "Update TerminalX on that machine to pair it";
 
 /**
@@ -87,7 +89,8 @@ export function kindName(platform: string | undefined, environment?: AccountHost
 }
 
 export function machineList(input: MachineInput): { paired: PairedMachine[]; available: AvailableMachine[]; hidden: AvailableMachine[] } {
-  const byKey = new Map(input.accountHosts.map((host) => [host.hostPublicKeyB64, host]));
+  // A record is trusted for a paired machine (its name, its state) only when its key gives its id.
+  const byKey = new Map(input.accountHosts.filter(accountHostIdentityMatches).map((host) => [host.hostPublicKeyB64, host]));
   const pairedKeys = new Set(input.hosts.map((host) => host.publicKeyB64));
   const unpaired = input.accountHosts.filter((host) => !pairedKeys.has(host.hostPublicKeyB64));
 
@@ -113,7 +116,9 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     const name = names.get(host.id)!;
     const active = input.activeHostId === host.id;
     const live = account?.reachability === "live";
-    const offline = account !== null && !live;
+    // Offline only on the machine's own word that TerminalX quit ("exited"). "unverifiable" means the
+    // account has no recent proof, not that it is off: it may still answer directly or over the relay.
+    const offline = account?.reachability === "exited";
     const lastSeen = Math.max(account?.lastSeenAt ? Date.parse(account.lastSeenAt) || 0 : 0, host.lastConnectedAt);
     const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account) };
     if (active) {
@@ -123,6 +128,7 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     if (offline) return { ...common, kind: "paired", host, account, active, connectBlocked: OFFLINE_REASON, state: offlineLine(lastSeen, input.now), tone: "offline" };
     if (host.disconnectedOnMacAt) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: connectionLabel("disconnected-on-mac", 0), tone: "attention" };
     if (live) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: "Online · tap to switch", tone: "online" };
+    if (account) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: lastSeen > 0 ? `Last seen ${ago(lastSeen, input.now)}` : "Not seen recently", tone: "unknown" };
     return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: host.lastConnectedAt > 0 ? `Last connected ${ago(host.lastConnectedAt, input.now)}` : "Not connected yet", tone: "unknown" };
   });
   // The machine in use first, then those that can be switched to, then the rest by when they were last used.
@@ -136,7 +142,9 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     const lastSeen = host.lastSeenAt ? Date.parse(host.lastSeenAt) || 0 : 0;
     const common = { id: host.hostId, name, ownName: ownNames.get(host.hostId) ?? null, customName: cleanHostName(input.prefs[host.hostId]?.customName), custom: cleanHostName(input.prefs[host.hostId]?.customName) !== null, icon: iconFor(name, host), hidden: input.prefs[host.hostId]?.hidden === true, kind: "available" as const, host };
     if (!compatible) return { ...common, pairBlocked: INCOMPATIBLE_REASON, state: INCOMPATIBLE_REASON, tone: "offline" };
-    if (!live) return { ...common, pairBlocked: OFFLINE_REASON, state: offlineLine(lastSeen, input.now), tone: "offline" };
+    if (host.reachability === "exited") return { ...common, pairBlocked: OFFLINE_REASON, state: offlineLine(lastSeen, input.now), tone: "offline" };
+    // Pairing through the account needs a live machine; an unverifiable one is not called offline.
+    if (!live) return { ...common, pairBlocked: UNREACHABLE_REASON, state: lastSeen > 0 ? `Not seen recently · last seen ${ago(lastSeen, input.now)}` : "Not seen recently", tone: "unknown" };
     return { ...common, pairBlocked: null, state: "Signed in to your account", tone: "online" };
   });
   return { paired, available: listed.filter((machine) => !machine.hidden), hidden: listed.filter((machine) => machine.hidden) };

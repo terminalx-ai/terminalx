@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
 import type { AccountHost } from "../pairing/account-client";
 import type { StoredHost } from "../store/hosts";
-import { ago, isGenericName, kindName, machineList, OFFLINE_REASON, type MachineInput } from "./machines";
+import { ago, isGenericName, kindName, machineList, OFFLINE_REASON, UNREACHABLE_REASON, type MachineInput } from "./machines";
 
 // #987: the one list of machines, with a name, one state line, and what can be done now.
 const storage = vi.hoisted(() => new Map<string, string>());
@@ -24,7 +24,7 @@ const input = (fields: Partial<MachineInput>): MachineInput => ({ hosts: [], acc
 describe("machine states", () => {
   it("marks the machine in use, then online, offline and unknown ones", () => {
     const online = account(1);
-    const offline = account(2, { reachability: "unverifiable", lastSeenAt: new Date(NOW - 2 * DAY).toISOString() });
+    const offline = account(2, { reachability: "exited", lastSeenAt: new Date(NOW - 2 * DAY).toISOString() });
     const list = machineList(input({
       hosts: [
         stored("qr-only", { hostName: "Laptop at home", lastConnectedAt: NOW - 3 * 3_600_000 }),
@@ -52,13 +52,16 @@ describe("machine states", () => {
     const live = account(3, { displayName: "Build server", platform: "linux" });
     const asleep = account(4, { reachability: "exited", lastSeenAt: new Date(NOW - 21 * DAY).toISOString() });
     const old = account(5, { capabilities: [] });
+    const quiet = account(12, { reachability: "unverifiable", lastSeenAt: new Date(NOW - 3 * 3_600_000).toISOString() });
     const forged = { ...account(6), hostId: "not-its-key-id" };
-    const list = machineList(input({ accountHosts: [live, asleep, old, forged] }));
+    const list = machineList(input({ accountHosts: [live, asleep, old, forged, quiet] }));
     expect(list.available.map((machine) => [machine.name, machine.state, machine.pairBlocked])).toEqual([
       ["Build server", "Signed in to your account", null],
       ["Machine 4", "Offline · last seen 3 weeks ago", OFFLINE_REASON],
       ["Machine 5", "Update TerminalX on that machine to pair it", "Update TerminalX on that machine to pair it"],
       ["Machine 6", "Update TerminalX on that machine to pair it", "Update TerminalX on that machine to pair it"],
+      // Not called offline: the account has no recent proof either way.
+      ["Machine 12", "Not seen recently · last seen 3 hours ago", UNREACHABLE_REASON],
     ]);
     expect(list.available[0]!.icon).toBe("server");
   });
@@ -85,6 +88,20 @@ describe("machine states", () => {
     expect(list.paired.map((machine) => machine.name).sort()).toEqual(["Mac · " + pairedThisMac.hostId.replace(/[^A-Za-z0-9]/g, "").slice(-4), "Paresh’s MacBook Air"].sort());
     expect(list.available.map((machine) => machine.name)).toEqual([expect.stringMatching(/^Mac · /), "Windows (WSL)"]);
     expect(list.available[0]!.ownName).toBeNull();
+  });
+
+  // Review of #994: only "exited" blocks Connect; a record that does not match its key is not trusted.
+  it("keeps Connect on for a paired machine the account is unsure of, and trusts only records that match their key", () => {
+    const quiet = account(13, { displayName: "Studio", reachability: "unverifiable", lastSeenAt: new Date(NOW - 2 * DAY).toISOString() });
+    const forged = { ...account(14, { displayName: "Renamed by someone else", reachability: "exited" }), hostId: "wrong-id" };
+    const list = machineList(input({ hosts: [
+      stored(quiet.hostId, { label: "This Mac", publicKeyB64: quiet.hostPublicKeyB64, lastConnectedAt: NOW - 5 * DAY }),
+      stored("mine", { hostName: "Work laptop", publicKeyB64: forged.hostPublicKeyB64 }),
+    ], accountHosts: [quiet, forged] }));
+    expect(list.paired.map((machine) => [machine.name, machine.state, machine.connectBlocked, machine.account?.hostId ?? null])).toEqual([
+      ["Work laptop", "Last connected 1 day ago", null, null],
+      ["Studio", "Last seen 2 days ago", null, quiet.hostId],
+    ]);
   });
 
   it("says what is happening with the machine in use", () => {

@@ -42,7 +42,7 @@ export function setAccountMachineHidden(hostId: string, hidden: boolean): Promis
   return change(hostId, (entry) => ({ ...entry, hidden: hidden ? true : undefined }));
 }
 
-/** Drop what is remembered about `hostId`, returning what it was (for a machine just paired). */
+/** Drop what is remembered about `hostId`, returning what it was (for a machine just paired: its name moves to the pairing, and it is no longer hidden). */
 export async function takeAccountMachinePrefs(hostId: string): Promise<{ prefs: AccountMachinePrefs; taken: AccountMachinePrefs[string] | undefined }> {
   const current = await readAccountMachinePrefs();
   const taken = current[hostId];

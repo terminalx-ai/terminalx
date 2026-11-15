@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ pair: vi.fn(), camera: null as any, app: {} as
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: vi.fn() }) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: vi.fn() }), useFocusEffect: (effect: () => void) => useEffect(effect, [effect]) }));
 vi.mock("expo-camera", () => ({
   useCameraPermissions: () => [{ granted: true }, vi.fn()],
   CameraView: (props: any) => { mocks.camera = props; return <div data-camera />; },

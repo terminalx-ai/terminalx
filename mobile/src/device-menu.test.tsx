@@ -186,7 +186,7 @@ describe("one list of machines (#987)", () => {
 
   it("lists every machine once: paired first with one state line, the active one marked, then those available to pair", async () => {
     const online = account(1, { displayName: "Mac mini" });
-    const offline = account(2, { displayName: "Office iMac", reachability: "unverifiable" });
+    const offline = account(2, { displayName: "Office iMac", reachability: "exited" });
     const unpaired = account(3, { displayName: "Build server", platform: "linux" });
     signedIn([
       host({ id: "host-active", hostName: "Studio MacBook", publicKeyB64: "studio" }),
@@ -208,6 +208,30 @@ describe("one list of machines (#987)", () => {
     expect(text).not.toContain("Your machines");
     // Every row has a menu; none is greyed out without one.
     for (const name of ["Studio MacBook", "Mac mini", "Office iMac", "Build server"]) expect(button(`Device options for ${name}`), name).toBeDefined();
+  });
+
+  // Review of #994: "unverifiable" is no proof of being off; such a machine still connects.
+  it("connects a paired machine the account has not heard from lately, and does not call it offline", async () => {
+    const quiet = account(10, { displayName: "Mac mini", reachability: "unverifiable" });
+    const paired = host({ id: quiet.hostId, hostName: "Mac mini", publicKeyB64: quiet.hostPublicKeyB64 });
+    signedIn([host(), paired], [quiet]);
+    await show(<MachinesScreen />);
+    expect(container.textContent).toContain("Mac miniLast seen 2 days ago");
+    expect(container.textContent).not.toContain("Offline");
+    await click("Device options for Mac mini");
+    expect(itemDisabled("Connect")).toBe(false);
+    await click("Cancel");
+    const row = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label")?.startsWith("Mac mini,"))!;
+    await act(async () => row.click());
+    expect(mocks.app.connectHost).toHaveBeenCalledWith(paired);
+  });
+
+  it("ignores an account record whose key does not give its id", async () => {
+    const forged = { ...account(11, { displayName: "Evil name", reachability: "exited" }), hostId: "not-its-id" };
+    signedIn([host({ publicKeyB64: forged.hostPublicKeyB64 })], [forged]);
+    await show(<MachinesScreen />);
+    expect(container.textContent).not.toContain("Evil name");
+    expect(container.textContent).not.toContain("Offline");
   });
 
   it("has one control to add a machine", async () => {
@@ -248,8 +272,9 @@ describe("one list of machines (#987)", () => {
     expect(mocks.app.renameHost).toHaveBeenCalledWith(record.hostId, "Old desk");
     await click("Device options for Office iMac");
     await click("Forget this machine");
-    // Not connected to it: nothing is asked of it.
+    // Not connected to it: nothing is asked of it. On the account: it is hidden here, and the confirmation says so.
     expect(container.textContent).not.toContain("It is also asked");
+    expect(container.textContent).toContain("It stays on your account, hidden on this phone");
     await click("Forget");
     expect(mocks.app.forgetHost).toHaveBeenCalledWith(record.hostId);
   });
