@@ -324,6 +324,67 @@ pub fn waits_on_pull_request(pipeline: &Pipeline) -> bool {
 }
 
 /// When a conversation's turn ended, for the record: "after the merge".
+/// How long after a pipeline stopped on failed checks, or merged, a phone is
+/// still told so (#990). A pipeline announced again later, by a step that
+/// changed something else or by an app that just started, is old news.
+pub const PHONE_NOTICE_MINUTES: i64 = 15;
+
+/// What a paired phone is told about an issue's pull request (#990).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhoneNoticeKind {
+    ChecksFailed,
+    Merged,
+}
+
+/// A pipeline's news for a paired phone: its pull request's checks failed,
+/// or it merged. `key` is the same for every announcement of the same news,
+/// so whoever sends it sends it once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneNotice {
+    pub key: String,
+    pub kind: PhoneNoticeKind,
+    /// The pull request as it was titled when the pipeline opened it.
+    pub pull_request: String,
+    /// What happened, in the pipeline's own words.
+    pub detail: String,
+    /// The conversation the pull request belongs to: the author's.
+    pub author: SessionRef,
+}
+
+/// The news in a pipeline just announced, if it has any a phone is told:
+/// it stopped because its checks failed, or it merged, within
+/// [`PHONE_NOTICE_MINUTES`] of `now`. `author_title` is the author session's
+/// title, the pull request's title when the issue gave none, as
+/// `open_pull_request` titles it.
+pub fn phone_notice(pipeline: &Pipeline, author_title: Option<&str>, now: DateTime<Utc>) -> Option<PhoneNotice> {
+    pipeline.pr.as_ref()?;
+    let (kind, event_kind, detail) = match (&pipeline.state, &pipeline.reason) {
+        (State::Merged, _) => (PhoneNoticeKind::Merged, "merged", None),
+        (State::NeedsYou, Some(StopReason::ChecksFailed { names })) => {
+            let detail = (!names.is_empty()).then(|| format!("Failed: {}.", list(names)));
+            (PhoneNoticeKind::ChecksFailed, "needsYou", detail)
+        }
+        _ => return None,
+    };
+    let event = pipeline.events.iter().rev().find(|event| event.kind == event_kind)?;
+    let at = DateTime::parse_from_rfc3339(&event.at).ok()?.with_timezone(&Utc);
+    if now - at > chrono::TimeDelta::minutes(PHONE_NOTICE_MINUTES) {
+        return None;
+    }
+    let title = pipeline.issue.as_ref().map(|issue| issue.title.as_str())
+        .or(author_title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(&pipeline.branch)
+        .to_string();
+    Some(PhoneNotice {
+        key: format!("{}:{event_kind}:{}", pipeline.id, event.at),
+        kind,
+        pull_request: title,
+        detail: detail.unwrap_or_else(|| event.message.clone()),
+        author: pipeline.author.clone(),
+    })
+}
+
 fn after(ending: Ending) -> &'static str {
     match ending {
         Ending::Merged => "after the merge",
