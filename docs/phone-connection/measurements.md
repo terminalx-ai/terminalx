@@ -7,9 +7,8 @@ measured is marked "not measured" with the reason.
 
 Status: cold start, warm return and the drops while connected are measured.
 Battery cost is not measured: the person chose to skip the battery runs. The
-idle survival runs (10 minutes each at none, 20 s, 30 s and 45 s) are measured.
-Not measured: battery cost, mobile data, warm return over the relay, and the
-streaming transcript and terminal screens.
+idle survival runs are measured for every interval; the router's idle timeout
+could not be reached (see that section).
 
 ## Method
 
@@ -235,78 +234,135 @@ What a later measurement should keep in mind:
 
 ## Does the connection survive each interval idle?
 
-Status: **measured** for none, 20 s, 30 s and 45 s, 10 minutes each, on the
-relay path. A first attempt at 17:13 stopped when the phone went "unavailable"
-in `devicectl list devices` ("CoreDeviceService was unable to locate a device",
-error 1011); the four runs below were taken later on the same build, 19:21 to
-19:52 for 20 s, 30 s and 45 s. The script exits on the first failed step, so a
-run in the table finished every step.
+Status: **measured for none, 20 s, 30 s and 45 s, 10 minutes each, relay
+path, Wi-Fi.** The home router's own NAT idle timeout is **not measured**: no
+connection lived long enough to reach it (see below).
 
-Method: relay path (`-TXNoDirect 1`), home Wi-Fi, Release build, screen on,
-app on the Settings tab (no timer of its own), opened by launching with
-`--payload-url terminalx://settings`. Each launch is fresh
-(`--terminate-existing`). After the idle window the app goes to the background
-for 3 s (Settings is launched) and comes back, so the app's resume probe
-(`pairing.getEndpoints`, 1.5 s limit, `mobile/src/transport/connection.ts:28`)
-tests the old connection end to end. Script: `measurement-patch/idle-test.sh`.
-Summary: `measurement-patch/analyze.py idle`.
+Method:
 
-10-minute runs, raw `data/idle/idle-relay-0s.jsonl`, `idle-relay-20s.jsonl`,
-`idle-relay-30s.jsonl` and `idle-relay-45s.jsonl`, summary
-`data/idle.summary.txt`:
+- Release build with the measurement patch, iPhone 17 Pro Max, iOS 26.6.2,
+  home Wi-Fi, relay path only (`-TXNoDirect 1`), so the traffic crosses the
+  home router's NAT to the relay cell. The direct LAN path crosses no NAT and
+  was not part of this test.
+- Screen on, Auto-Lock set to Never by the person, app on the Settings tab.
+  That tab has no timer of its own, so the only traffic is the keep-alive.
+  The tab is opened by launching with `--payload-url terminalx://settings`.
+- Each run is a fresh launch (`--terminate-existing`) with
+  `-TXKeepAliveMs 0`, `20000`, `30000` or `45000`, then 10 minutes idle. Then
+  the app goes to the background for 3 s (the Settings app is launched) and
+  comes back, so the app's resume probe (`pairing.getEndpoints`, 1.5 s limit,
+  `mobile/src/transport/connection.ts:28`) tests the connection end to end.
+- Script: `measurement-patch/idle-test.sh`. Table: `measurement-patch/analyze.py idle data/idle`.
+  Raw: `data/idle/idle-relay-{0s,20s,30s,45s}.jsonl`. Summary:
+  `data/idle.summary.txt`.
+- The run with no keep-alive was taken at 17:02 to 17:13. The other three were
+  taken back to back from 19:21 to 19:52. In between, the phone locked twice
+  and another session installed a different build (see "Runs that were cut
+  short").
 
-| keep-alive | span min | connects | drops (1001 / 4408) | connected before drop, median s | p90 s | max s | keep-alives sent / answered | reconnect median ms | p90 ms | probe at the end |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| none | 10.4 | 14 | 13 (13 / 0) | 13 | 27 | 29 | 0 / 0 | 3455 | 4812 | answered in 1426 ms |
-| 20 s | 10.5 | 19 | 18 (16 / 2) | 7 | 86 | 189 | 18 / 18 | 4392 | 16470 | answered in 535 ms |
-| 30 s | 10.4 | 34 | 34 (33 / 1) | 6 | 22 | 134 | 5 / 5 | 4409 | 7948 | already down at return |
-| 45 s | 10.4 | 26 | 25 (23 / 2) | 10 | 49 | 129 | 4 / 4 | 4989 | 5876 | already down at return |
+Every connect sends one `pairing.getEndpoints` at once, with the keep-alive
+on or off. "Timer keep-alives" leaves those out and counts only sends from
+the interval timer. "Failed" counts every `pairing.getEndpoints` that failed,
+at connect or from the timer.
 
-- At every interval the relay connection dropped every few seconds to a few
-  minutes: 13 to 34 drops in about 10 minutes, almost all with 1001 "Stream end
-  encountered". No interval kept a connection up for the whole run.
-- Every keep-alive that was sent got an answer (27 of 27). The drops are not
-  idle timeouts: the median connection ended after 6 to 13 s, long before the
-  first 20 s keep-alive and the 60 s and longer timeouts in `connection-path.md`.
-- The longest connections came with a keep-alive (189 s at 20 s, 134 s at
-  30 s, 129 s at 45 s, against 29 s with none). With one 10-minute run per
-  interval, that is not enough to rank the intervals.
-- Reconnecting took 3.5 to 5.0 s (median) over the relay, with a p90 up to
-  16.5 s at 20 s.
-- So on this path the 1001 drops, not the keep-alive interval, decide how long
-  a connection lives. Fixing the drops comes before choosing an interval.
+| keep-alive | span min | connects | drops (1001 / 4408) | connected before drop, median s | p90 s | max s | timer keep-alives sent / answered | requests failed | reconnect median ms | p90 ms | probe at the end |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 10.4 | 14 | 13 (13 / 0) | 13 | 27 | 29 | 0 / 0 | 0 | 3455 | 4812 | answered in 1426 ms |
+| 20 s | 10.5 | 19 | 18 (16 / 2) | 7 | 86 | 189 | 18 / 18 | 1 | 4392 | 16470 | answered in 535 ms |
+| 30 s | 10.4 | 34 | 34 (33 / 1) | 6 | 22 | 134 | 5 / 5 | 1 | 4409 | 7948 | already down at return |
+| 45 s | 10.4 | 26 | 25 (23 / 2) | 10 | 49 | 129 | 4 / 4 | 0 | 4989 | 5876 | already down at return |
 
-- With no keep-alive, the relay connection did not stay up for longer than
-  29 s once in 10.4 minutes. It dropped 13 times, every time with 1001
-  "Stream end encountered", and came back in 3.5 s (median). So on this path
-  today the drops, not an idle timeout, decide how long a connection lives.
-- The end probe answered in 1426 ms, under the 1.5 s limit by 74 ms.
+Round trip of every answered `pairing.getEndpoints` (at connect and from the
+timer), from the same raw files, nearest-rank p90:
 
-Dry run, 20 s idle per interval (about 0.8 min per launch), raw
-`data/idle-dry/*.jsonl`, summary `data/idle-dry.summary.txt`:
+| keep-alive | n | median ms | p90 ms |
+| --- | --- | --- | --- |
+| none | 14 | 616 | 728 |
+| 20 s | 35 | 566 | 994 |
+| 30 s | 38 | 628 | 1003 |
+| 45 s | 30 | 668 | 962 |
+
+What this shows:
+
+- **No connection survived 10 minutes at any interval, with the keep-alive on
+  or off.** The relay connection dropped 13 to 34 times in 10 minutes. The
+  median connection lasted 6 to 13 s before it dropped. The longest lasted
+  189 s.
+- **The drops are not idle timeouts.** 85 of the 90 drops are close 1001
+  "Stream end encountered", which is iOS ending the stream
+  (`mobile/src/transport/relay-client.ts:24-31`). The other 5 are 4408, the
+  relay's "peer dropped": the Mac's leg ended. Every idle timeout listed in
+  `connection-path.md` is 60 s or longer, and the median drop came well before
+  that. So this test could not show how long the home router keeps an idle
+  mapping. Not measured, for that reason.
+- **The keep-alive did not fail on a live connection.** Every timer
+  keep-alive that was sent was answered. The 2 failed requests failed because
+  the connection dropped under them, with the same 1001 close.
+- The interval did not change the drop rate in a way these runs can show:
+  30 s had the most drops (34) and 20 s the fewest with the keep-alive on (18).
+  With the drops this frequent, 10-minute runs cannot separate the interval
+  from the churn.
+- The phone reconnected in a median of 3.5 to 5.0 s. For comparison, race
+  start to connected on a relay cold start took 3952 ms (sum of medians, see
+  "Cold start").
+- The end probe answered in 1426 ms once, 74 ms under its 1.5 s limit. Relay
+  round trips here had a p90 of 728 to 1003 ms, so the 1.5 s limit is tight
+  for the relay.
+- The drops come and go. A 4.2-minute run at 19:05 (below) had no drop at
+  all and answered all 12 timer keep-alives, while the runs at 17:02 and from
+  19:21 dropped every few seconds.
+
+### Dry run
+
+A check of the script before the real runs: 20 s idle per interval, about
+0.8 min per launch, 16:58 to 17:02. Raw `data/idle-dry/*.jsonl`, summary
+`data/idle-dry.summary.txt`.
 
 | keep-alive | connects | drops (1001 / 4408) | connected before drop, median s | max s | probe at the end |
 | --- | --- | --- | --- | --- | --- |
 | none | 4 | 3 (3 / 0) | 8 | 8 | already down at return |
 | 20 s | 4 | 3 (2 / 1) | 11 | 15 | answered in 321 ms |
 | 30 s | 4 | 3 (2 / 1) | 8 | 18 | answered in 1507 ms |
-| 45 s | 3 | 2 (2 / 0) | 3 | 4 | no answer in 1.5 s |
+| 45 s | 3 | 2 (2 / 0) | 3 | 4 | no answer in 1.5 s (waited 1521 ms) |
 
-- In this dry run the relay connection never lasted longer than 18 s, at any
-  interval, so no keep-alive timer fired before a drop. The drops come long
-  before any router or relay idle timeout (60 s and up, `connection-path.md`).
-- 4408 is the relay's "peer dropped" close: the Mac's leg ended. 1001 "Stream
-  end encountered" is iOS ending the stream (`mobile/src/transport/relay-client.ts:24-31`).
-- The 45 s run's resume probe got no answer in 1.5 s on a live connection, and
-  the 30 s run's probe took 1507 ms. Relay round trips here were 345 to
-  692 ms per keep-alive answer. The 1.5 s limit is tight for the relay.
+The 45 s launch's probe got no answer within 1.5 s although the connection had
+not dropped, and the app reconnected because of it.
+
+### Runs that were cut short
+
+These are real measurements but did not finish their 10 minutes, so they are
+not in the table above. Raw: `data/idle-cut-short/`. Summary:
+`data/idle-cut-short.summary.txt`.
+
+| run | keep-alive | span min | connects | drops | max connected s | timer keep-alives sent / answered | what cut it short |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| started 17:13 | 20 s | 21.7 | 10 | 9 (8 x 1001, 1 x 1006) | 1143 | 6 / 6 | By 17:23 `devicectl` showed the phone "unavailable" and the rest of the test failed. The app's marks stop at 17:14:54 and start again at 17:33:58. |
+| started 19:05 | 20 s | 4.2 | 1 | 0 | still open | 12 / 12 | The phone locked after about 4 minutes ("Unable to launch ... the device was not, or could not be, unlocked"). |
+
+- In the 17:13 run, 8 drops came in the first 2 minutes in the foreground.
+  Then one connection stayed open for 1143 s (19 min), and closed with 1006
+  "Socket is not connected" at 17:33:58, when the app came back to the
+  foreground. The close mark says the app was in the background
+  (`backgrounded: true`). A socket the phone counts as open after 19 minutes in the
+  background is not proof that it still carried data. It is a single case.
+- Some time after 17:13, another session installed a build of main on the
+  phone (its Release build on this Mac is dated 18:38 and has no measurement
+  patch). Launches from 18:33 on wrote no marks. With the person's OK, the measurement build was installed again at
+  19:04 (`xcrun devicectl device install app`, exit 0) and left installed.
+- The first version of `idle-test.sh` logged `$?` after `$(date)`, so it showed
+  exit 0 for failed `devicectl` calls. The committed script records the real
+  exit code and stops at the first failure.
 
 ## Follow-up issues found so far
 
 1. The connection closes with 1001 "Stream end encountered" seconds after
    connecting, on both paths: 3 of 13 direct launches and 3 of 12 relay
-   launches. The direct socket also closed in the background on 4 of 12
-   returns. Find which side closes it and why.
+   launches in the cold runs. In the idle runs on the relay it dropped 13 to
+   34 times in 10 minutes (median connection 6 to 13 s), at every keep-alive
+   interval, and some periods had no drops at all. The direct socket also
+   closed in the background on 4 of 12 returns. Find which side closes it and
+   why. Until this is fixed, the keep-alive interval cannot be tuned by
+   measurement.
 2. `sessions.summaries` is the largest cold-start step (748 ms direct, 2252 ms
    relay, 87 sessions). Cache the list per Mac and send the cached version,
    and do not wait for `sync.capabilities` first.
@@ -314,4 +370,13 @@ Dry run, 20 s idle per interval (about 0.8 min per launch), raw
    saved cell, and run the resume confirmation (724 ms) in parallel with
    marking the connection usable.
 4. Find what the 370 ms between the account check and `getInitialURL` is.
-5. The resume probe's p90 (1016 ms) sits close to its 1.5 s limit.
+5. The resume probe's 1.5 s limit is tight. Direct: p90 1016 ms on warm
+   return. Relay: one probe failed at 1521 ms on a live connection in the dry
+   run, and one answered in 1426 ms. `pairing.getEndpoints` round trips over
+   the relay had a p90 of 728 to 1003 ms.
+6. Measure the battery cost once the drops are fixed. Instruments cannot
+   record the phone over Wi-Fi, so it needs a cable link or the phone's
+   Performance Trace, and runs on the Settings tab, where the keep-alive is the
+   only traffic.
+7. Measure the home router's NAT idle timeout once the drops are fixed: idle
+   runs on the relay path with no keep-alive and 2, 4 and 8 minutes of quiet.
