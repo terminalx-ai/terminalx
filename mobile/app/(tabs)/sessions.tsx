@@ -4,7 +4,10 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { ChevronDown, Laptop, Search, X } from "lucide-react-native";
 import { chatRows, filterCounts, LIST_FILTERS, listSections, type ChatRow, type ListFilter } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
-import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
+import { Button, EmptyState } from "@mobile/ui/primitives";
+import { ConnectionLine } from "@mobile/ui/ConnectionLine";
+import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { useDeviceMenu } from "@mobile/ui/DeviceMenu";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { SessionListRow } from "@mobile/ui/SessionListRow";
@@ -32,10 +35,12 @@ export default function SessionsScreen() {
   // A change on the Mac (a question, an approval) is pushed at once as `sessions.changed`; this only catches PR and workspace facts.
   useFocusEffect(useCallback(() => {
     const timer = setInterval(() => {
-      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions();
     }, 10_000);
     return () => clearInterval(timer);
   }, [app.connectionStage, app.refreshSessions]));
+  const state = useConnectionState(app);
+  const pull = usePullRefresh(app.refreshSessions);
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => chatRows(app.sessions, query), [app.sessions, query]);
@@ -45,18 +50,15 @@ export default function SessionsScreen() {
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
 
   const host = app.activeHost;
-  const connected = app.connectionStage === "connected";
-  const heldByMac = app.connectionStage === "disconnected-on-mac";
-  const diagnostic = connected || heldByMac ? undefined : [...app.logs].reverse().find((entry) => ["Trying connection paths", "Relay path failed", "Connection attempt failed"].includes(entry.message));
-  const stage = connectionCopy(app.connectionStage, app.connectionAttempt);
+  const connected = connectionUsable(state);
   const open = (row: ChatRow, tabId = row.tabId) => router.push({ pathname: "/session/[sessionId]", params: { sessionId: row.session.id, tabId, hostId: host.id, title: row.title } });
   const closeSearch = () => { setQuery(""); setSearching(false); };
-  const empty = app.loadingSessions && !app.sessions.length ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." busy />
+  const empty = state === "updating" && !app.sessions.length ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." />
     : query.trim() && !rows.length ? <EmptyState title="No matches" detail="No session's title, branch, project or tabs have those words." />
     : filter === "needs" && rows.length ? <EmptyState title="Nothing waits for you" detail="Sessions waiting for your answer or approval will appear here." />
     : filter === "working" && rows.length ? <EmptyState title="Nothing is working" detail="Sessions whose agent is working will appear here." />
     : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
-    : <EmptyState title="Sessions are offline" detail="Cached transcripts remain available after you reopen a session from recent history." />;
+    : <EmptyState title="No saved sessions" detail="This Mac's sessions appear here once the phone connects." />;
   const waiting = filter === "needs" && counts.needs ? <Text style={[styles.footnote, { color: palette.muted }]}>{counts.needs === 1 ? "1 session is waiting for you." : `${counts.needs} sessions are waiting for you.`}</Text> : undefined;
 
   // The Mac, search and the filters stay at the top as the list scrolls under them, fading away there.
@@ -67,13 +69,19 @@ export default function SessionsScreen() {
     <View style={styles.header}>
       {/* The Mac these sessions are on. */}
       <View style={styles.topBar}>
+        {/* The Mac's name, and beneath it the connection in the words every screen uses (#983). */}
         <Pressable accessibilityRole="button" accessibilityHint="Opens device options" onPress={() => menu.open(host)} onLongPress={() => menu.open(host)} style={styles.hostName}>
           <Laptop size={21} color={palette.ink} strokeWidth={1.8} />
-          <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
-          <StatusDot color={connected ? palette.success : palette.warning} />
+          <View style={styles.hostTitles}>
+            <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
+            <ConnectionLine state={state} />
+          </View>
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`Device options for ${menu.nameOf(host)}`} hitSlop={10} onPress={() => menu.open(host)} style={styles.hostChevron}><ChevronDown size={16} color={palette.muted} /></Pressable>
         <View style={styles.flex} />
+        {/* Only once the phone has really failed to reach the Mac: it keeps trying by itself meanwhile. */}
+        {state === "waiting" ? <Button label="Try again" kind="secondary" onPress={app.retryConnection} style={styles.retry} /> : null}
+        {state === "held" ? <Button label="Reconnect" kind="secondary" onPress={() => app.connection.restart("reconnect was chosen", true)} style={styles.retry} /> : null}
         <GlassIconButton label={searching ? "Close search" : "Search sessions"} size={40} icon={searching ? <X size={20} color={palette.ink} strokeWidth={1.6} /> : <Search size={20} color={palette.ink} strokeWidth={1.6} />} onPress={() => searching ? closeSearch() : setSearching(true)} />
       </View>
       {searching ? <View style={[styles.search, { backgroundColor: palette.raised, borderColor: palette.border }]}>
@@ -89,10 +97,6 @@ export default function SessionsScreen() {
           </Pressable>;
         })}
       </View>
-      {!connected ? <View style={styles.offline}>
-        <Text style={[styles.offlineText, { color: palette.muted }]}><Text style={{ color: palette.warning }}>{stage.title}. </Text>{diagnostic?.detail ? `${diagnostic.message}: ${diagnostic.detail}` : stage.hint ?? "Showing what this phone saved."}</Text>
-        <Button label={heldByMac ? "Reconnect" : "Retry"} kind="secondary" onPress={() => app.connection.restart(heldByMac ? "reconnect was chosen" : "retry was tapped", true)} style={styles.retry} />
-      </View> : null}
     </View>
   </View>;
 
@@ -107,7 +111,7 @@ export default function SessionsScreen() {
     // The last row scrolls clear of the floating tab bar.
     contentContainerStyle={{ paddingTop: headerHeight + 4, paddingBottom: bar + 24 }}
     scrollIndicatorInsets={{ top: headerHeight, bottom: bar }}
-    refreshControl={<RefreshControl refreshing={app.loadingSessions} onRefresh={() => void app.refreshSessions()} tintColor={palette.accent} progressViewOffset={headerHeight} />}
+    refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={headerHeight} />}
     renderSectionHeader={({ section }) => section.title ? <Text accessibilityRole="header" numberOfLines={1} style={[styles.section, { color: palette.muted }]}>{section.title}</Text> : null}
     renderSectionFooter={() => <View style={styles.sectionGap} />}
     renderItem={({ item, index, section }) => <SessionListRow row={item} first={index === 0} last={index === section.data.length - 1} onOpen={(tabId) => open(item, tabId)} />}
@@ -116,13 +120,6 @@ export default function SessionsScreen() {
   />{header}</View>;
 }
 
-function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {
-  if (stage === "connected") return { title: "Live · end-to-end encrypted" };
-  if (stage === "disconnected-on-mac") return { title: "Disconnected on your Mac", hint: "This phone stays paired. Reconnect when you want it back." };
-  if (stage === "unreachable") return { title: "Unreachable", hint: "Check that the Mac is awake and reachable over Wi-Fi, VPN, or relay." };
-  if (stage === "cant-connect") return { title: `Can’t connect · attempt ${attempt}` };
-  return { title: "Reconnecting…" };
-}
 
 const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
@@ -133,6 +130,7 @@ const styles = StyleSheet.create({
   header: { gap: 10, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 8 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10 },
   hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
+  hostTitles: { flexShrink: 1, gap: 1 },
   hostText: { flexShrink: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
   hostChevron: { height: 44, justifyContent: "center", marginLeft: -6 },
   search: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12 },
@@ -141,8 +139,6 @@ const styles = StyleSheet.create({
   filter: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center" },
   filterText: { fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] },
   filterCount: { opacity: 0.6 },
-  offline: { flexDirection: "row", alignItems: "center", gap: 12 },
-  offlineText: { flex: 1, fontSize: 13, lineHeight: 18 },
   retry: { minHeight: 34, paddingHorizontal: 14 },
   // A section's name over its card, as 22.04: small capitals, quiet.
   section: { fontSize: 12, fontWeight: "600", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 8, marginBottom: 8, marginHorizontal: 20 },

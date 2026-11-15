@@ -7,7 +7,7 @@ import * as ImagePicker from "expo-image-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
-import { forgetConversationState } from "@mobile/state/conversation-state";
+import { forgetConversationState, sendHeldMessages } from "@mobile/state/conversation-state";
 import { RelayOuterError } from "./transport/relay-client";
 
 const mocks = vi.hoisted(() => ({
@@ -114,6 +114,7 @@ beforeEach(() => {
       { id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" },
     ] }],
     connection: { onEvent: () => () => {}, reportError: vi.fn(), retryNow: vi.fn() },
+    retryConnection: vi.fn(),
     api: {
       features: async () => ({}),
       onFeaturesChanged: (listener: () => void) => { mocks.featureListeners.add(listener); return () => { mocks.featureListeners.delete(listener); }; },
@@ -363,10 +364,12 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(input().value).toBe("How is it going?");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", lost);
     mocks.app = { ...mocks.app, connectionStage: "reconnecting" }; await render();
-    expect(button("Send again").disabled).toBe(true);
-    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
-    expect(button("Send again").disabled).toBe(false);
+    // Not connected, Send again holds the message, and it goes by itself once the phone is connected (#983).
     await click("Send again");
+    expect(container.textContent).toContain("Sends when connected.");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
+    await act(async () => { await Promise.resolve(); });
     // Send again goes under the same id as the first try (#675).
     const [sendId] = mocks.app.api.sendSession.mock.calls[0].slice(3);
     expect(sendId).toEqual(expect.any(String));
@@ -539,7 +542,8 @@ describe("mobile conversation navigation", () => {
       await render();
       expect(input().placeholder).toBe(placeholder);
       expect(input().value).toBe("Keep my draft");
-      expect(button("Send").disabled).toBe(stage !== "connected");
+      // A message can be sent whatever the connection: while it is down, it is held (#983).
+      expect(button("Send").disabled).toBe(false);
       expect(container.textContent).toContain("claude transcript");
     }
   });
@@ -698,14 +702,13 @@ describe("mobile conversation navigation", () => {
   it("clears failed initial loading and retries without showing empty-history copy", async () => {
     mocks.app.api.tail.mockRejectedValueOnce(new Error("Transcript event 12 is too large to load on mobile. Open this conversation on your Mac."));
     await render();
-    expect(container.textContent).toContain("Could not load transcript");
     expect(container.textContent).toContain("Open this conversation on your Mac.");
     expect(container.textContent).not.toContain("No transcript yet");
     expect(container.textContent).not.toContain("Loading transcript");
-    expect(button("Retry loading transcript").disabled).toBe(false);
-    await click("Retry loading transcript");
+    expect(button("Try again").disabled).toBe(false);
+    await click("Try again");
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("Open this conversation on your Mac.");
     expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
   });
 
@@ -717,65 +720,68 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).toContain("claude transcript");
     expect(container.textContent).toContain("Connection closed");
     expect(input().value).toBe("Keep my draft");
-    await click("Retry loading transcript");
-    expect(container.textContent).not.toContain("Could not load transcript");
+    await click("Try again");
+    expect(container.textContent).not.toContain("Connection closed");
     expect(input().value).toBe("Keep my draft");
   });
 
-  it("says the phone is reconnecting when the connection drops during the initial load, and Retry reconnects at once (#670)", async () => {
+  it("says nothing but the subtitle while the connection drops during the initial load, and offers Try again only after 15 s (#983)", async () => {
     let reject!: (reason: Error) => void;
     mocks.app.api.tail.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
     mocks.app.connectionEpoch = 1;
     await render();
     expect(container.textContent).toContain("Loading transcript");
-    mocks.app.connectionStage = "reconnecting";
+    mocks.app = { ...mocks.app, connectionStage: "reconnecting" };
     await render();
     await act(async () => reject(new RelayOuterError(1001, "Stream end encountered", false)));
-    expect(container.textContent).toContain("Reconnecting to your Mac…");
-    expect(container.textContent).toContain("The transcript loads once the phone is connected.");
+    // Connecting is the subtitle's to say: no card, no error, no button.
+    expect(container.textContent).toContain("Connecting…");
     expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("connection to your Mac dropped");
     expect(container.textContent).not.toContain("relay_outer");
-    expect(container.textContent).not.toContain("No transcript yet");
     expect(container.textContent).not.toContain("Loading transcript");
-    expect(button("Retry loading transcript").disabled).toBe(false);
-    await click("Retry loading transcript");
-    expect(mocks.app.connection.retryNow).toHaveBeenCalledTimes(1);
+    expect(() => button("Try again")).toThrow();
+    // However many attempts: until 15 s have passed without a connection, still no button.
+    mocks.app = { ...mocks.app, connectionStage: "unreachable", connectionAttempt: 12 };
+    await render();
+    expect(() => button("Try again")).toThrow();
+    expect(container.textContent).not.toContain("Waiting for Mac…");
+    // 15 s on (the app's one clock), the phone says it waits for the Mac, and Try again tries now and counts afresh.
+    mocks.app = { ...mocks.app, connectionWaiting: true };
+    await render();
+    expect(container.textContent).toContain("Waiting for Mac…");
+    expect(container.textContent).toContain("Can’t reach Mac. Messages show once it connects.");
+    expect(input().placeholder).toBe("Message sends when connected");
+    await click("Try again");
+    expect(mocks.app.retryConnection).toHaveBeenCalledTimes(1);
     expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
-    // Four failed attempts still read as reconnecting; the fifth says the Mac isn't reachable.
-    mocks.app = { ...mocks.app, connectionStage: "cant-connect", connectionAttempt: 4 };
-    await render();
-    expect(container.textContent).toContain("Reconnecting to your Mac…");
-    expect(container.textContent).not.toContain("Your Mac isn't reachable");
-    mocks.app = { ...mocks.app, connectionAttempt: 5 };
-    await render();
-    expect(container.textContent).toContain("Your Mac isn't reachable");
-    expect(container.textContent).not.toContain("Reconnecting to your Mac…");
-    expect(button("Retry loading transcript").disabled).toBe(false);
-    mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 2 };
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionWaiting: false, connectionEpoch: 2 };
     await render();
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).not.toContain("Your Mac isn't reachable");
-    expect(() => button("Retry loading transcript")).toThrow();
+    expect(container.textContent).not.toContain("Waiting for Mac…");
+    expect(() => button("Try again")).toThrow();
   });
 
-  it("keeps the saved transcript on screen while reconnecting, and says so (#670)", async () => {
+  it("keeps the saved transcript on screen while reconnecting, and says so in the subtitle alone (#983)", async () => {
     await render();
     expect(container.textContent).toContain("claude transcript");
     mocks.app.connectionStage = "connecting"; mocks.app.connectionEpoch = 1;
     await render();
     expect(container.textContent).toContain("claude transcript");
-    expect(container.textContent).toContain("Reconnecting to your Mac…");
-    expect(container.textContent).toContain("Showing the transcript saved on this phone.");
-    // At the latest edge, where the reader is, not above history they would have to scroll to.
-    expect(container.querySelector('[data-testid="list-footer"]')?.textContent).not.toContain("Reconnecting");
+    expect(container.textContent).toContain("Connecting…");
+    expect(container.textContent).not.toContain("Reconnecting");
+    expect(() => button("Try again")).toThrow();
+    mocks.app = { ...mocks.app, connectionWaiting: true };
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("Can’t reach Mac. Showing saved messages.");
   });
 
   it("says in plain words when a sync fails with the connection, and logs the code (#670)", async () => {
     const lost = new RelayOuterError(4408, "", false);
     mocks.app.api.tail.mockRejectedValueOnce(lost);
     await render();
-    expect(container.textContent).toContain("Could not load transcript");
-    expect(container.textContent).toContain("The connection to your Mac dropped.");
+    expect(container.textContent).toContain("Couldn’t load new messages from Mac.");
     expect(container.textContent).not.toContain("relay_outer");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Transcript sync failed", lost);
   });
@@ -799,7 +805,7 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).toContain("too large to load over Relay");
     // Retry asks once more.
     mocks.app.api.syncTranscript.mockResolvedValueOnce({ events: [event("claude", "loaded at last", 10)], reset: true, cursor: { offset: 10, digest: "a".repeat(64) }, hasMore: false, hasEarlier: false });
-    await click("Retry loading transcript");
+    await click("Try again");
     expect(mocks.app.api.syncTranscript).toHaveBeenCalledTimes(3);
     expect(container.textContent).toContain("loaded at last");
     expect(container.textContent).not.toContain("too large to load over Relay");
@@ -855,12 +861,11 @@ describe("mobile conversation navigation", () => {
     });
     mocks.app.api.syncTranscript = vi.fn().mockRejectedValueOnce(new Error("Event too large. Open this conversation on your Mac."));
     await render();
-    expect(container.textContent).toContain("Could not load transcript");
     expect(container.textContent).toContain("Event too large");
     mocks.app.api.syncTranscript.mockResolvedValueOnce(page(10, true));
-    await click("Retry loading transcript");
+    await click("Try again");
     expect(container.textContent).toContain("synced 10");
-    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(container.textContent).not.toContain("Event too large");
 
     mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "earlier", 5)], hasMore: true });
     await click("Load earlier");
@@ -1271,5 +1276,157 @@ describe("an agent's question on the phone (#979)", () => {
     await select("claude");
     await click("Answer");
     expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", { "Which checks should run?": "Tests", "Which branch?": "next" });
+  });
+});
+
+describe("one quiet connection state in a session (#983)", () => {
+  const errorWords = ["Could not", "Couldn’t", "Can’t reach", "dropped", "isn't reachable", "Reconnecting", "Retry", "Try again", "Host is disconnected", "relay_outer"];
+  const quiet = () => {
+    for (const words of errorWords) expect(container.textContent, words).not.toContain(words);
+  };
+
+  it("opens on a cold start with a reachable Mac without any error or button, saved messages first", async () => {
+    mocks.storage.set(`terminalx:transcript:${mocks.params.hostId}:worktree:claude`, JSON.stringify([event("claude", "saved on this phone")]));
+    mocks.app = { ...mocks.app, connectionStage: "idle", connectionEpoch: 0 };
+    await render();
+    quiet();
+    expect(container.textContent).toContain("Connecting…");
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    quiet();
+    expect(container.textContent).toContain("saved on this phone");
+    expect(container.textContent).toContain("Connecting…");
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1, updating: true };
+    await render();
+    quiet();
+    expect(container.textContent).toContain("Updating…");
+    mocks.app = { ...mocks.app, updating: false };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    quiet();
+    expect(container.textContent).toContain("claude transcript");
+    // Connected is the absence of a message: the subtitle is the project again.
+    expect(container.textContent).not.toContain("Connecting…");
+    expect(container.textContent).not.toContain("Connected");
+    expect(container.textContent).toContain("TerminalX");
+  });
+
+  it("says Catching up only while the transcript is read, through the app's one state", async () => {
+    const ends: ReturnType<typeof vi.fn>[] = [];
+    mocks.app.beginUpdate = vi.fn(() => { const end = vi.fn(); ends.push(end); return end; });
+    let resolve!: (value: unknown) => void;
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    await render();
+    expect(mocks.app.beginUpdate).toHaveBeenCalledTimes(1);
+    expect(ends[0]).not.toHaveBeenCalled();
+    await act(async () => resolve({ events: [event("claude", "caught up")], hasMore: false }));
+    expect(ends[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds a message typed while connecting and sends it once on connect, never twice", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    expect(input().placeholder).toBe("Message Claude Code");
+    await type("Send this when you can");
+    expect(button("Send").disabled).toBe(false);
+    await click("Send");
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Sends when connected.");
+    expect(input().value).toBe("Send this when you can");
+    // A second tap while held does nothing more.
+    expect(button("Send").disabled).toBe(true);
+    // 15 s on, the box says a message waits for the connection.
+    mocks.app = { ...mocks.app, connectionWaiting: true };
+    await render();
+    expect(input().placeholder).toBe("Message sends when connected");
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionWaiting: false, connectionEpoch: 1 };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    // Connections that come and go after it was sent do not send it again.
+    for (const stage of ["reconnecting", "connected", "connecting", "connected"]) {
+      mocks.app = { ...mocks.app, connectionStage: stage, connectionEpoch: mocks.app.connectionEpoch + 1 };
+      await render();
+      await act(async () => { await Promise.resolve(); });
+    }
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Send this when you can", [], expect.any(String));
+    expect(input().value).toBe("");
+    expect(container.textContent).toContain("Sent to the agent.");
+  });
+
+  it("sends a held message on connect after the chat was left, once, and not again on the next open", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await type("Send this after I leave"); await click("Send");
+    expect(container.textContent).toContain("Sends when connected.");
+    // Left before the phone connects.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    // The app connects (the provider sends what is held for this Mac).
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 };
+    await act(async () => { sendHeldMessages(mocks.params.hostId); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Send this after I leave", [], expect.any(String));
+    // Opened again: it was sent, and is not sent a second time.
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(input().value).toBe("");
+    expect(container.textContent).toContain("Sent to the agent.");
+  });
+
+  it("forgets a held message with the Mac or the person signing out: never sent later", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await type("Not for later"); await click("Send");
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    forgetConversationState("");
+    await act(async () => { sendHeldMessages(mocks.params.hostId); await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+  });
+
+  it("takes a held message back when it is edited", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await type("First thought"); await click("Send");
+    await type("Second thought");
+    expect(container.textContent).not.toContain("Sends when connected.");
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+    expect(input().value).toBe("Second thought");
+  });
+
+  it("never shows a transport message, whatever failed", async () => {
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("Host is disconnected"));
+    mocks.app.api.sendSession.mockRejectedValueOnce(new Error("Relay connection closed"));
+    await render();
+    expect(container.textContent).not.toContain("Host is disconnected");
+    expect(container.textContent).toContain("Couldn’t load new messages from Mac.");
+    await type("Hello"); await click("Send");
+    expect(container.textContent).not.toContain("Relay connection closed");
+    expect(container.textContent).toContain("Not sent: the connection to your Mac dropped.");
+  });
+
+  it("keeps the tab strip's + and × in place while the connection changes, dimmed and unusable", async () => {
+    mocks.app.api.features = async () => ({ sessionControls: 1, closeTab: 1 });
+    mocks.app.api.models = vi.fn(async () => []);
+    mocks.app.api.tabControls = vi.fn(async () => null);
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    const strip = () => ["New chat in this branch", "Close Claude Code"].map((label) => button(label).disabled);
+    expect(strip()).toEqual([false, false]);
+    for (const stage of ["reconnecting", "connecting", "cant-connect"]) {
+      mocks.app = { ...mocks.app, connectionStage: stage };
+      await render();
+      expect(strip()).toEqual([true, true]);
+    }
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 };
+    await render();
+    expect(strip()).toEqual([false, false]);
   });
 });

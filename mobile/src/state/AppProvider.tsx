@@ -1,12 +1,12 @@
-import { forgetConversationState } from "./conversation-state";
-import { clearTranscriptCaches } from "../data/transcript-cache";
+import { forgetConversationState, sendHeldMessages } from "./conversation-state";
+import { cacheEpoch, clearTranscriptCaches, readSaved, writeSaved } from "../data/transcript-cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import { beginSignIn, finishSignIn, readSession, refreshStoredSession, signOut as revokeCloudSession } from "../auth/native";
 import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
-import { HostApi, type SessionSummary } from "../data/host-api";
+import { HostApi, isSessionSummary, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
 import { accountHostIdentityMatches } from "../pairing/account-identity";
@@ -18,7 +18,9 @@ import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHos
 import { readAccountMachinePrefs, setAccountMachineHidden, setAccountMachineName, takeAccountMachinePrefs, type AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
+import { isTransportError } from "../transport/connection-errors";
 import { phoneNetwork } from "../transport/network";
+import { useWaited } from "./connection-view";
 import { currentDeviceDescription } from "./device-name";
 
 interface AppContextValue {
@@ -37,9 +39,21 @@ interface AppContextValue {
   connectionAttempt: number;
   /** Goes up each time the connection is usable again (a reconnect, a return from the background): what is on screen reads what it missed. */
   connectionEpoch: number;
+  /** When the phone began trying to connect this time; null while connected or not trying. */
+  connectionSince: number | null;
+  /** 15 s have passed since `connectionSince` without a connection: kept here once, so every screen says "Waiting for Mac…" together (#983). */
+  connectionWaiting: boolean;
+  /** False while the phone itself has no network. */
+  online: boolean;
+  /** Connected, and reading what changed meanwhile: the session list after a connect, a transcript catching up. */
+  updating: boolean;
+  /** Mark a catch-up read under way; the returned function ends it. */
+  beginUpdate(): () => void;
+  /** Try to connect now rather than after the reconnect delay, and count the wait afresh. */
+  retryConnection(): void;
   sessions: SessionSummary[];
+  /** A pairing or discovery is under way. Never drawn as a spinner: only a pull to refresh shows one (#983). */
   loadingMachines: boolean;
-  loadingSessions: boolean;
   error: string | null;
   logs: ConnectionLogEntry[];
   connection: HostConnection;
@@ -65,7 +79,8 @@ interface AppContextValue {
   renameAccountMachine(hostId: string, name: string): Promise<void>;
   /** Hide an account machine that is not paired here from this phone's list, or show it again. */
   hideAccountMachine(hostId: string, hidden: boolean): Promise<void>;
-  refreshSessions(silent?: boolean): Promise<void>;
+  /** Read the session list again; resolves once the list read under way, and any asked for meanwhile, has ended. */
+  refreshSessions(): Promise<void>;
   clearError(): void;
 }
 
@@ -89,9 +104,18 @@ export function AppProvider({ children }: PropsWithChildren) {
   const connectionStageRef = useRef<ConnectionStage>("idle");
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const [connectionSince, setConnectionSince] = useState<number | null>(null);
+  const connectionWaiting = useWaited(connectionSince);
+  // Messages held while not connected go as soon as the phone connects, from whatever screen is open (#983).
+  const activeHostId = activeHost?.id;
+  useEffect(() => {
+    if (connectionStage === "connected" && activeHostId) sendHeldMessages(activeHostId);
+  }, [activeHostId, connectionStage]);
+  const [online, setOnline] = useState(true);
+  const updates = useRef(0);
+  const [updating, setUpdating] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loadingMachines, setLoadingMachines] = useState(false);
-  const [loadingSessions, setLoadingSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConnectionLogEntry[]>([]);
   const [pairingProgress, setPairingProgress] = useState<PairingProgress | null>(null);
@@ -104,6 +128,23 @@ export function AppProvider({ children }: PropsWithChildren) {
       activeHostRef.current = active;
       setActiveHost(active);
     }
+  }, []);
+
+  const beginUpdate = useCallback(() => {
+    updates.current++;
+    setUpdating(true);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      if (--updates.current === 0) setUpdating(false);
+    };
+  }, []);
+
+  /** The list shown, and kept for the next open of the app (#983). */
+  const showSessions = useCallback((host: string, values: SessionSummary[], epoch: number) => {
+    setSessions(values);
+    void writeSaved(host, "summaries", values, epoch);
   }, []);
 
   /** A stored host changed (a name): the list, and the active host when it is that one, follow. */
@@ -170,32 +211,37 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [loadHosts, refreshCloudSession, session]);
 
-  const summariesRunning = useRef(false);
+  const summariesRun = useRef<Promise<void> | null>(null);
   const summariesDirty = useRef(false);
-  const refreshSessions = useCallback(async (silent = false) => {
-    if (!activeHostRef.current) return;
+  const refreshSessions = useCallback((): Promise<void> => {
+    if (!activeHostRef.current) return Promise.resolve();
     summariesDirty.current = true;
-    if (summariesRunning.current) return;
-    summariesRunning.current = true;
-    if (!silent) setLoadingSessions(true);
-    try {
-      while (summariesDirty.current && activeHostRef.current) {
-        summariesDirty.current = false;
-        const host: string = activeHostRef.current.id;
-        const generation = selectionGeneration.current;
-        try {
-          const values = await api.summaries();
-          if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) setSessions(values);
-        } catch (cause) {
-          // A reconnect may have queued another read while this one was failing.
-          if (!summariesDirty.current && selectionGeneration.current === generation && activeHostRef.current?.id === host) setError(readableError(cause));
+    // A read under way reads again when it ends; the caller waits for both.
+    if (summariesRun.current) return summariesRun.current;
+    const run = (async () => {
+      try {
+        while (summariesDirty.current && activeHostRef.current) {
+          summariesDirty.current = false;
+          const host: string = activeHostRef.current.id;
+          const generation = selectionGeneration.current;
+          const epoch = cacheEpoch(host);
+          try {
+            const values = await api.summaries();
+            if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) showSessions(host, values, epoch);
+          } catch (cause) {
+            // The connection's own failure is shown as the connection state, not as an error (#983).
+            if (isTransportError(cause)) connection.reportError("Session list refresh failed", cause);
+            // A reconnect may have queued another read while this one was failing.
+            else if (!summariesDirty.current && selectionGeneration.current === generation && activeHostRef.current?.id === host) setError(readableError(cause));
+          }
         }
+      } finally {
+        summariesRun.current = null;
       }
-    } finally {
-      summariesRunning.current = false;
-      if (!silent) setLoadingSessions(false);
-    }
-  }, [api]);
+    })();
+    summariesRun.current = run;
+    return run;
+  }, [api, connection, showSessions]);
 
   const connectHost = useCallback(async (host: StoredHost, signal?: AbortSignal) => {
     if (signal?.aborted) return false;
@@ -213,14 +259,17 @@ export function AppProvider({ children }: PropsWithChildren) {
         setError("The device credential is unavailable. Pair this computer again.");
         return false;
       }
+      // What this Mac's list held last time shows at once, until the Mac answers (#983).
+      const saved = await readSaved(host.id, "summaries", isSummaryList);
+      if (signal?.aborted || generation !== selectionGeneration.current) return false;
       api.resetConnection(true);
       activeHostRef.current = host;
       setActiveHost(host);
-      setSessions([]);
+      setSessions(saved ?? []);
       connection.start(host, credential);
       return true;
     } catch (cause) {
-      if (!signal?.aborted && generation === selectionGeneration.current) setError(readableError(cause));
+      if (!signal?.aborted && generation === selectionGeneration.current && !isTransportError(cause)) setError(readableError(cause));
       return false;
     }
   }, [api, connection, refreshSessions]);
@@ -248,7 +297,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       setHosts(storedHosts);
       void recoverPendingPairing({ device })
         .then(() => { if (!startup.signal.aborted) return loadHosts(); })
-        .catch((cause: unknown) => { if (!startup.signal.aborted) setError(readableError(cause)); });
+        // Finished in the background: a connection failure here is retried at the next open, not reported.
+        .catch((cause: unknown) => { if (!startup.signal.aborted && !isTransportError(cause)) setError(readableError(cause)); });
       if (rawLogs) {
         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
       }
@@ -282,6 +332,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       connectionStageRef.current = next;
       setConnectionStage(next);
       setConnectionAttempt(attempt);
+      // Counting starts when the phone starts trying; connected, stopped or held on the Mac, it is not trying.
+      if (next === "connected" || next === "idle" || next === "disconnected-on-mac") setConnectionSince(null);
+      else setConnectionSince((since) => since ?? Date.now());
       if (next === "connected") {
         api.resetConnection();
         void refreshHostName();
@@ -304,12 +357,15 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     const resumed = connection.onConnected(() => {
       setConnectionEpoch((epoch) => epoch + 1);
+      // Connected again: a failure that was only the connection's is over.
+      setError((current) => current === UNREACHABLE ? null : current);
       // The transport has saved lastConnectedAt and any learned endpoints.
       void loadHosts().catch((cause: unknown) => setError(readableError(cause)));
-      void refreshSessions();
+      // Catching up on what changed is "Updating…"; the list's later refreshes are quiet.
+      void refreshSessions().finally(beginUpdate());
     });
     return () => { clearTimeout(summariesTimer); stage(); log(); event(); resumed(); connection.stop(); };
-  }, [api, connection, loadHosts, refreshHostName, refreshSessions]);
+  }, [api, beginUpdate, connection, loadHosts, refreshHostName, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -319,6 +375,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (state !== "active") return;
       if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
       if (!activeHostRef.current) return;
+      // Back on screen: the 15 s before "Waiting for Mac…" count from now, not from when the phone was put away.
+      if (connectionStageRef.current !== "connected" && connectionStageRef.current !== "disconnected-on-mac") setConnectionSince(Date.now());
       // Not a return from the background it knew of (the first activation): as before, connect if not connected.
       if (!connection.foreground() && connectionStage !== "connected") connection.restart("the app became active");
     });
@@ -328,8 +386,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   // Changing networks races the paths again, rather than waiting for a dead one to time out (#666).
   useEffect(() => NetInfo.addEventListener((state) => {
     const network = phoneNetwork(state);
-    if (network) connection.networkChanged(network);
+    if (!network) return;
+    setOnline(network.online);
+    connection.networkChanged(network);
   }), [connection]);
+
+  const retryConnection = useCallback(() => {
+    if (connectionStageRef.current !== "connected" && connectionStageRef.current !== "disconnected-on-mac") setConnectionSince(Date.now());
+    connection.retryNow();
+  }, [connection]);
 
   const signIn = useCallback(async () => {
     setError(null);
@@ -465,7 +530,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
   }, [accountHosts, hosts]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, connectionSince, connectionWaiting, online, updating, beginUpdate, retryConnection, sessions, loadingMachines, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
@@ -476,4 +541,8 @@ export function useApp(): AppContextValue {
   return value;
 }
 
-const readableError = (value: unknown) => value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Something went wrong";
+/** An error as a screen may say it: the connection's own failures in plain words, never their raw text or an address (#983). */
+const UNREACHABLE = "Couldn’t reach your Mac. Check that it is awake and TerminalX is open, then try again.";
+const readableError = (value: unknown) => isTransportError(value) ? UNREACHABLE : value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Something went wrong";
+
+const isSummaryList = (value: unknown): value is SessionSummary[] => Array.isArray(value) && value.every(isSessionSummary);
