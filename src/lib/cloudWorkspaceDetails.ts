@@ -55,17 +55,22 @@ function requireContracts() {
 /** Scope includes active profile: these APIs require the active organization. */
 function accountScope(): string {
   const { status } = getAccount();
-  return JSON.stringify([status.state, status.context, status.identity?.email, status.identity?.organizationId]);
+  return JSON.stringify([status?.state, status?.context, status?.identity?.email, status?.identity?.organizationId]);
 }
 
 // Remember transitions, including A -> B -> A between asynchronous observations.
 let accountEpoch = 0;
-let observedScope = accountScope();
-subscribeAccount(() => {
-  const next = accountScope();
-  if (next !== observedScope) { observedScope = next; ++accountEpoch; }
-});
+let observedScope: string | undefined;
+let observingAccount = false;
 export function detailsScope(): string {
+  if (!observingAccount) {
+    observingAccount = true;
+    observedScope = accountScope();
+    subscribeAccount(() => {
+      const next = accountScope();
+      if (next !== observedScope) { observedScope = next; ++accountEpoch; }
+    });
+  }
   return JSON.stringify([accountEpoch, accountScope()]);
 }
 
