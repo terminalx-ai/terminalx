@@ -25,7 +25,8 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
+  /** `modified`: when the tab was last active (RFC 3339); absent from older Macs. */
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean; modified?: string }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
