@@ -436,6 +436,10 @@ Notification payloads contain the minimum local summary and no prompt,
 terminal, secret, token, or host path. Turning notifications off does not alter
 pairing, relay demand, or host authorization.
 
+The keep-alive interval, measured cold-start and reconnect times, and the
+design for end-to-end encrypted Apple push are in
+[PHONE-CONNECTION.md](./PHONE-CONNECTION.md) (#989).
+
 ## Verification and delivery
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “Conventions”,
