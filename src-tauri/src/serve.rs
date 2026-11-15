@@ -295,7 +295,10 @@ fn run(options: Options) -> Result<()> {
         }
         let dir = crate::serve_cli::default_data_dir()?;
         crate::serve_cli::check_socket_room(&dir)?;
-        std::fs::create_dir_all(&dir).with_context(|| format!("create data dir {}", dir.display()))?;
+        // It holds the control token, the sockets and the host key's folder:
+        // only this user may enter it.
+        crate::machine_host::private_dir(&crate::serve_cli::install_root()?)?;
+        crate::machine_host::private_dir(&dir)?;
         let dir = std::fs::canonicalize(&dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
         std::env::set_var("TERMINALX_HOME", &dir);
     }
