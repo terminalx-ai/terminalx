@@ -25,6 +25,11 @@ use crate::store::projects::{Project, ProjectKind};
 
 pub const MACHINE: &str = "machine/1";
 
+/// `machine/2` (PRO-345): `directEndpoints` in `machine.describe` and
+/// `machine.changed`, and `machine.relayAccess` for a paired computer
+/// (docs/MACHINES.md, "As built (PRO-345)").
+pub const MACHINE_2: &str = "machine/2";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
