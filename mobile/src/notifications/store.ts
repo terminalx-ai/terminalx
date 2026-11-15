@@ -29,7 +29,10 @@ export function notificationSettingsSnapshot(): NotificationSettings | null {
 
 /** Change the settings; they are saved in order, and every listener hears the new value. */
 export async function updateNotificationSettings(change: (settings: NotificationSettings) => NotificationSettings): Promise<NotificationSettings> {
-  const next = change(await loadNotificationSettings());
+  const loaded = await loadNotificationSettings();
+  // Applied to the latest value, not the one this call read before waiting:
+  // two changes made at once (a switch and a started session) both stay.
+  const next = change(current ?? loaded);
   current = next;
   const json = JSON.stringify(next);
   writing = writing.catch(() => undefined).then(() => AsyncStorage.setItem(SETTINGS_KEY, json));

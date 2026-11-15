@@ -128,9 +128,10 @@ function attach(connection: HostConnection, hostId: string): void {
  */
 function reconcile(hostId: string, catchUp = false): Promise<boolean> {
   const previous = reconcileQueues.get(hostId) ?? Promise.resolve(false);
-  const next = previous.catch(() => false).then(() => reconcileNow(hostId, catchUp));
+  // Never rejects: callers fire it and forget (a settings change, a capability change).
+  const next = previous.catch(() => false).then(() => reconcileNow(hostId, catchUp)).catch(() => false);
   reconcileQueues.set(hostId, next);
-  void next.catch(() => false).finally(() => { if (reconcileQueues.get(hostId) === next) reconcileQueues.delete(hostId); });
+  void next.finally(() => { if (reconcileQueues.get(hostId) === next) reconcileQueues.delete(hostId); });
   return next;
 }
 
@@ -169,7 +170,13 @@ function stop(hostId: string): void {
 async function catchUpMissed(hostId: string, connection: HostConnection, filter: SubscribeFilter | null, current: () => boolean): Promise<void> {
   await serialized(hostId, async () => {
     const watermark = await readWatermark(hostId);
-    const missed = await connection.request<unknown>("notifications.missedSince", { ...(watermark ?? { lastSeenSeq: 0, epoch: null }), ...(filter ? { filter } : {}) });
+    let missed: Awaited<ReturnType<typeof connection.request<unknown>>>;
+    try {
+      missed = await connection.request<unknown>("notifications.missedSince", { ...(watermark ?? { lastSeenSeq: 0, epoch: null }), ...(filter ? { filter } : {}) });
+    } catch {
+      // Disconnected: the stream is still registered below, and the next connection catches up from this watermark.
+      return;
+    }
     // Answered by another Mac when the connection moved meanwhile: not this Mac's events.
     if (!missed.ok || !current()) return;
     for (const event of notificationList(missed.value)) {

@@ -121,6 +121,18 @@ describe("migration from the per-Mac switch", () => {
     expect(first.allow).toBe(true);
   });
 
+  it("keeps both of two changes made at once", async () => {
+    const { store } = await modules();
+    await Promise.all([
+      store.setSessionOverride("mac", "s-2", "mute"),
+      store.recordStartedSession("mac", "s-new"),
+      store.updateNotificationSettings((settings) => ({ ...settings, allow: true })),
+    ]);
+    const settings = await store.loadNotificationSettings();
+    expect([settings.allow, settings.perSession, settings.started]).toEqual([true, { mac: { "s-2": "mute" } }, { mac: ["s-new"] }]);
+    expect(JSON.parse(fake.storage.get(store.SETTINGS_KEY)!)).toEqual(settings);
+  });
+
   it("asks iOS when the master switch is turned on", async () => {
     fake.permission = { granted: false, status: "undetermined" };
     const { store, local } = await modules();
@@ -169,6 +181,20 @@ describe("subscribing", () => {
     await store.setMachineNotifications("mac", true);
     await flush(); await flush();
     expect(live(state)).toHaveLength(1);
+  });
+
+  it("still registers the stream when the Mac is disconnected, and changes made offline do not throw", async () => {
+    fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+    const state = mac({ notificationFilters: 1 });
+    (state.connection.request as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Host is disconnected"));
+    const { store, local } = await modules();
+    await expect(local.restoreLocalNotifications(state.connection, "mac")).resolves.toBe(true);
+    expect(live(state).map((entry) => entry.params)).toEqual([{}]);
+    await store.setSessionOverride("mac", "s-2", "mute");
+    await local.refreshLocalNotifications();
+    await flush(); await flush();
+    expect(live(state)).toHaveLength(1);
+    expect(fake.storage.has("terminalx:notifications:mac")).toBe(false);
   });
 
   it("does not subscribe while iOS has notifications off", async () => {
