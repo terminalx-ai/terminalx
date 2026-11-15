@@ -1195,6 +1195,11 @@ mod open_terminal_tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("codex"), STAND_IN).unwrap();
         std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS checks a new executable the first time it runs, and while the
+        // launch tests run their large copies in parallel that check can take
+        // longer than the 5 s `--help` probe allows. Run it once here, untimed.
+        let warmed = std::process::Command::new(bin.join("codex")).arg("--help").output().unwrap();
+        assert!(warmed.status.success(), "the stand-in answers --help");
         assert!(crate::binpath::set_priority_dir(&bin));
         let entry: store::index::SessionEntry = serde_json::from_value(json!({
             "id":"open","projectPath":root,"cwd":root,"title":"fixture",
