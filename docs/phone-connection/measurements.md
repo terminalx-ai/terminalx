@@ -7,7 +7,9 @@ measured is marked "not measured" with the reason.
 
 Status: cold start, warm return and the drops while connected are measured.
 Battery cost is not measured: the person chose to skip the battery runs. The
-idle survival runs are in progress.
+idle survival runs (10 minutes each at none, 20 s, 30 s and 45 s) are measured.
+Not measured: battery cost, mobile data, warm return over the relay, and the
+streaming transcript and terminal screens.
 
 ## Method
 
@@ -233,13 +235,12 @@ What a later measurement should keep in mind:
 
 ## Does the connection survive each interval idle?
 
-Status: **partly measured.** The 10-minute run with no keep-alive is done. The
-20 s, 30 s and 45 s runs are not measured: at 17:13, right after the first
-run's file was pulled, the phone went "unavailable" in `devicectl list devices`
-and later commands failed with "CoreDeviceService was unable to locate a
-device" (error 1011). The script's logged exit codes were wrong at first (it
-read `$?` after `$(date)`), so the failure only showed when the 20 s file never
-arrived; the committed script captures the right code.
+Status: **measured** for none, 20 s, 30 s and 45 s, 10 minutes each, on the
+relay path. A first attempt at 17:13 stopped when the phone went "unavailable"
+in `devicectl list devices` ("CoreDeviceService was unable to locate a device",
+error 1011); the four runs below were taken later on the same build, 19:21 to
+19:52 for 20 s, 30 s and 45 s. The script exits on the first failed step, so a
+run in the table finished every step.
 
 Method: relay path (`-TXNoDirect 1`), home Wi-Fi, Release build, screen on,
 app on the Settings tab (no timer of its own), opened by launching with
@@ -250,12 +251,30 @@ for 3 s (Settings is launched) and comes back, so the app's resume probe
 tests the old connection end to end. Script: `measurement-patch/idle-test.sh`.
 Summary: `measurement-patch/analyze.py idle`.
 
-10-minute run, raw `data/idle/idle-relay-0s.jsonl`, summary
+10-minute runs, raw `data/idle/idle-relay-0s.jsonl`, `idle-relay-20s.jsonl`,
+`idle-relay-30s.jsonl` and `idle-relay-45s.jsonl`, summary
 `data/idle.summary.txt`:
 
-| keep-alive | span min | connects | drops (1001 / 4408) | connected before drop, median s | p90 s | max s | reconnect median ms | p90 ms | probe at the end |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| none | 10.4 | 14 | 13 (13 / 0) | 13 | 27 | 29 | 3455 | 4812 | answered in 1426 ms |
+| keep-alive | span min | connects | drops (1001 / 4408) | connected before drop, median s | p90 s | max s | keep-alives sent / answered | reconnect median ms | p90 ms | probe at the end |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 10.4 | 14 | 13 (13 / 0) | 13 | 27 | 29 | 0 / 0 | 3455 | 4812 | answered in 1426 ms |
+| 20 s | 10.5 | 19 | 18 (16 / 2) | 7 | 86 | 189 | 18 / 18 | 4392 | 16470 | answered in 535 ms |
+| 30 s | 10.4 | 34 | 34 (33 / 1) | 6 | 22 | 134 | 5 / 5 | 4409 | 7948 | already down at return |
+| 45 s | 10.4 | 26 | 25 (23 / 2) | 10 | 49 | 129 | 4 / 4 | 4989 | 5876 | already down at return |
+
+- At every interval the relay connection dropped every few seconds to a few
+  minutes: 13 to 34 drops in about 10 minutes, almost all with 1001 "Stream end
+  encountered". No interval kept a connection up for the whole run.
+- Every keep-alive that was sent got an answer (27 of 27). The drops are not
+  idle timeouts: the median connection ended after 6 to 13 s, long before the
+  first 20 s keep-alive and the 60 s and longer timeouts in `connection-path.md`.
+- The longest connections came with a keep-alive (189 s at 20 s, 134 s at
+  30 s, 129 s at 45 s, against 29 s with none). With one 10-minute run per
+  interval, that is not enough to rank the intervals.
+- Reconnecting took 3.5 to 5.0 s (median) over the relay, with a p90 up to
+  16.5 s at 20 s.
+- So on this path the 1001 drops, not the keep-alive interval, decide how long
+  a connection lives. Fixing the drops comes before choosing an interval.
 
 - With no keep-alive, the relay connection did not stay up for longer than
   29 s once in 10.4 minutes. It dropped 13 times, every time with 1001
