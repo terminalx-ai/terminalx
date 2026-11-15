@@ -402,7 +402,7 @@
       "additionalProperties": false,
       "properties": {
         "animations": {
-          "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
+          "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
           "type": "boolean"
         },
         "autocorrect": {
