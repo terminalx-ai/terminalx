@@ -13,16 +13,17 @@ export function scrollEdges(offset: number, viewport: number, content: number): 
 
 /** A column is as wide as its widest cell, up to this; longer cells end in an ellipsis until the table is opened. */
 const MAX_COLUMN_WIDTH = 220;
-const WRAPPING_COLUMN_WIDTH = 150;
+/** Full screen a column is as wide as its widest cell, up to this; longer cells wrap. */
+const WRAPPING_COLUMN_WIDTH = 200;
 const FADE_WIDTH = 36;
 
 /**
  * Column widths after a cell reports its own: a column grows to its widest
- * cell, up to MAX_COLUMN_WIDTH, and never shrinks, so every row lines up.
+ * cell, up to `cap`, and never shrinks, so every row lines up.
  * The same array comes back when nothing grew, so no render follows.
  */
-export function growColumns(widths: readonly number[], column: number, width: number): readonly number[] {
-  const next = Math.min(MAX_COLUMN_WIDTH, Math.ceil(width));
+export function growColumns(widths: readonly number[], column: number, width: number, cap = MAX_COLUMN_WIDTH): readonly number[] {
+  const next = Math.min(cap, Math.ceil(width));
   if ((widths[column] ?? 0) >= next) return widths;
   const grown = [...widths];
   grown[column] = next;
@@ -90,6 +91,11 @@ export function ExpandedTable({ visible, table, renderCell, palette, onClose }: 
   // Said only when the columns are wider than the screen (22.03).
   const [fit, setFit] = useState({ viewport: 0, content: 0 });
   const wider = fit.viewport > 0 && fit.content > fit.viewport + 1;
+  // Columns sized to their cells, as in the card; a cell past the cap wraps.
+  const [widths, setWidths] = useState<readonly number[]>([]);
+  const measured = useCallback((column: number, width: number) => {
+    setWidths((previous) => growColumns(previous, column, width, WRAPPING_COLUMN_WIDTH));
+  }, []);
   return <Modal visible={visible} animationType="slide" presentationStyle="fullScreen" onRequestClose={onClose}>
     <View style={[styles.full, { backgroundColor: palette.page }]}>
       <View style={styles.fullBar}>
@@ -103,9 +109,7 @@ export function ExpandedTable({ visible, table, renderCell, palette, onClose }: 
         <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.fullGrid}
           onLayout={(event) => { const viewport = event.nativeEvent.layout.width; setFit((previous) => previous.viewport === viewport ? previous : { ...previous, viewport }); }}
           onContentSizeChange={(content) => setFit((previous) => previous.content === content ? previous : { ...previous, content })}>
-          <View style={[styles.fullCard, { borderColor: palette.border }]}>
-            <TableGrid table={table} renderCell={renderCell} palette={palette} wrap />
-          </View>
+          <TableGrid table={table} renderCell={renderCell} palette={palette} widths={widths} onMeasure={measured} wrap />
         </ScrollView>
         {wider ? <Text style={[styles.hint, { color: palette.muted }]}>Swipe sideways for more columns. Turn the phone for a wider view.</Text> : null}
       </ScrollView>
@@ -114,8 +118,8 @@ export function ExpandedTable({ visible, table, renderCell, palette, onClose }: 
 }
 
 /**
- * Rows of cells. In the card (`onMeasure`) a cell stays on one line and its
- * column takes the widest cell's width; full screen (`wrap`) cells wrap.
+ * Rows of cells, each column as wide as its widest cell up to a cap. In the
+ * card a cell stays on one line; full screen (`wrap`) a longer cell wraps.
  */
 function TableGrid({ table, renderCell, palette, widths = [], onMeasure, wrap = false }: {
   table: Tokens.Table; renderCell: CellRenderer; palette: Palette; widths?: readonly number[]; onMeasure?: (column: number, width: number) => void; wrap?: boolean;
@@ -125,7 +129,7 @@ function TableGrid({ table, renderCell, palette, widths = [], onMeasure, wrap = 
     {rows.map((row, rowIndex) => <View key={rowIndex} style={[styles.row, rowIndex < rows.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderColor: palette.border }]}>
       {row.map((cell, cellIndex) => <View key={cellIndex}
         onLayout={onMeasure ? (event) => onMeasure(cellIndex, event.nativeEvent.layout.width) : undefined}
-        style={[styles.cell, wrap ? styles.wrapCell : { minWidth: widths[cellIndex], maxWidth: MAX_COLUMN_WIDTH }]}>
+        style={[styles.cell, { minWidth: widths[cellIndex], maxWidth: wrap ? WRAPPING_COLUMN_WIDTH : MAX_COLUMN_WIDTH }]}>
         <Text selectable numberOfLines={wrap ? undefined : 1} style={[styles.text, rowIndex === 0 && styles.header, { color: rowIndex === 0 ? palette.muted : palette.ink, textAlign: table.align[cellIndex] ?? "left" }]}>{renderCell(cell)}</Text>
       </View>)}
     </View>)}
@@ -143,7 +147,6 @@ const styles = StyleSheet.create({
   card: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, borderCurve: "continuous", overflow: "hidden", maxWidth: "100%" },
   row: { flexDirection: "row" },
   cell: { paddingHorizontal: 10, paddingVertical: 9 },
-  wrapCell: { width: WRAPPING_COLUMN_WIDTH },
   text: { fontSize: 13, lineHeight: 18 },
   header: { fontWeight: "600" },
   fade: { position: "absolute", top: 0, bottom: 0, width: FADE_WIDTH },
@@ -156,6 +159,5 @@ const styles = StyleSheet.create({
   close: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center" },
   fullContent: { paddingHorizontal: 16, paddingBottom: 32 },
   fullGrid: { flexGrow: 1 },
-  fullCard: { borderWidth: StyleSheet.hairlineWidth },
   hint: { fontSize: 13, lineHeight: 18, marginTop: 12 },
 });

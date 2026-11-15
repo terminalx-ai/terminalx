@@ -60,6 +60,7 @@ it("grows each column to its widest cell, up to a cap, and never shrinks it", ()
   expect(growColumns(widths, 0, 40)).toBe(widths); // a narrower cell changes nothing, not even the array
   expect(growColumns(widths, 0, 95)).toEqual([95, undefined, 118]);
   expect(growColumns(widths, 2, 900)).toEqual([62, undefined, 220]);
+  expect(growColumns(widths, 2, 900, 200)).toEqual([62, undefined, 200]); // full screen caps lower, and wraps past it
 });
 
 it("keeps each cell in the card on one line, no wider than the cap, so no cut characters show", async () => {
@@ -102,9 +103,9 @@ it("opens the table full screen with every cell, and closes it again", async () 
   for (const text of [...HEADERS, ...ROWS.flat()]) expect(cells).toContain(text);
   expect(full.textContent).toBe([...HEADERS, ...ROWS.flat()].join(""));
   expect(full.textContent).not.toContain("|");
-  // Cells may wrap: a long cell is a fixed-width column of wrapped text, not one cut line.
+  // Cells may wrap: a long cell is a capped column of wrapped text, not one cut line.
   const notes = [...full.querySelectorAll("div")].filter((node) => node.textContent === ROWS[0][5]).at(-1)!;
-  expect(getComputedStyle(notes.parentElement!).width).toBe("150px");
+  expect(getComputedStyle(notes.parentElement!).maxWidth).toBe("200px");
   expect(getComputedStyle(notes).whiteSpace).not.toBe("nowrap");
 
   const close = document.querySelector('[aria-label="Close table"]') as HTMLElement;
