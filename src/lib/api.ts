@@ -500,17 +500,28 @@ export const api = {
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
   /** Scheduled tasks (PRO-37, saas contract §24): the organization's, or one workspace's. Owners and admins only; a server with the feature off answers 404. */
   cloudSchedules: (workspaceId?: string | null, orgId?: string | null) =>
-    invoke<{ schedules: CloudSchedule[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+    invoke<{ schedules: CloudAutomationDto[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }).then(({ schedules }) => ({ schedules: schedules.map(projectLegacyCloudSchedule).filter((schedule): schedule is CloudSchedule => schedule !== null) })),
   /** One scheduled task and its newest runs. */
-  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudScheduleDetail>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudAutomationDetailDto>("cloud_schedule", { scheduleId, orgId: orgId ?? null }).then((detail): CloudScheduleDetail => ({ ...detail, schedule: requireLegacyCloudSchedule(detail.schedule) })),
   /** What a schedule would cost and when it would first run, before it is saved. Writes nothing. */
   cloudScheduleEstimate: (input: CloudScheduleEstimateInput, orgId?: string | null) =>
     invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
   /** Make a scheduled task. Only after the person confirmed that it starts billed compute by itself. */
-  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudSchedule>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudAutomationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }).then(requireLegacyCloudSchedule),
   /** Pause a scheduled task, or resume a paused one (which then runs for the person resuming it). */
   cloudScheduleSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
-    invoke<CloudSchedule>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
+    invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }).then(requireLegacyCloudSchedule),
+  /** Exact automation DTOs over existing native commands; no timer projection. */
+  cloudAutomations: (workspaceId?: string | null, orgId?: string | null) =>
+    invoke<{ schedules: CloudAutomationDto[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+  cloudAutomation: (scheduleId: string, orgId?: string | null) =>
+    invoke<CloudAutomationDetailDto>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  cloudAutomationEstimate: (input: CloudAutomationEstimateInput, orgId?: string | null) =>
+    invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
+  cloudAutomationCreate: (input: CloudAutomationCreateInput, orgId?: string | null) =>
+    invoke<CloudAutomationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  cloudAutomationSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
+    invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
   cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
   /** Pause every active scheduled task of the organization. */
   cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
@@ -1337,6 +1348,8 @@ export interface CloudScheduleEstimate {
   hourlyMicros: number;
   /** The longest a run can keep the workspace on: starting it, the time limit, and ending the run. Absent from a server that priced the time limit alone. */
   perRunMaxMinutes?: number;
+  /** Fresh workspace admission allowance, included in perRunMaxMinutes. */
+  createPerRunMinutes?: number;
   perRunMaxMicros: number;
   monthlyRuns: number;
   monthlyMaxMicros: number;
@@ -1351,7 +1364,13 @@ export interface CloudScheduleRun {
   id: string;
   scheduledFor: number;
   trigger: string;
-  /** queued | provisioning | working | completed | failed | skipped | canceled | expired */
+  /** Own workspace link target; unavailable before fresh allocation. Never substitute the template ID. */
+  workspaceId?: string | null;
+  workBranch?: string | null;
+  archiveAt?: number | null;
+  /** Archival was observed, not merely requested. */
+  archivedAt?: number | null;
+  /** queued | creating-workspace | provisioning | working | completed | failed | skipped | canceled | expired */
   state: string;
   category?: string;
   sessionId?: string;
@@ -1413,6 +1432,63 @@ export interface CloudScheduleCreateInput extends CloudScheduleEstimateInput {
   mode: string;
   prompt: string;
   missedRunPolicy: "skip" | "run-once";
+}
+
+export interface CloudScheduleGithubFilter {
+  field: "label" | "author" | "baseBranch";
+  operator: "is" | "is-not";
+  value: string;
+}
+
+export interface CloudScheduleGithubTrigger {
+  /** Selected organization repository row ID. */
+  repositoryId: string;
+  event: "opened" | "pushed" | "merged";
+  /** At most five, ANDed by the service. */
+  filters: CloudScheduleGithubFilter[];
+  /** Defaults false and is persisted. UI label: Allow pull requests from forks. */
+  allowForkPullRequests?: boolean;
+}
+
+/** Raw native response. GitHub timers are absent/null, never fabricated. */
+export interface CloudAutomationDto extends Omit<CloudSchedule, "schedule" | "nextRunAt" | "lastRun"> {
+  schedule?: CloudScheduleTiming | null;
+  githubTrigger?: CloudScheduleGithubTrigger | null;
+  workspaceMode?: "existing" | "fresh" | null;
+  archiveAfterDays?: number | null;
+  archiveOnPrMerge?: boolean | null;
+  nextRunAt?: number | null;
+  lastRun?: CloudScheduleRun | null;
+}
+
+export interface CloudAutomationDetailDto {
+  schedule: CloudAutomationDto;
+  runs: CloudScheduleRun[];
+}
+
+export type CloudAutomationTriggerInput =
+  | { schedule: CloudScheduleTiming; githubTrigger?: never }
+  | { schedule?: never; githubTrigger: CloudScheduleGithubTrigger };
+
+export type CloudAutomationWorkspaceInput =
+  | { workspaceMode?: "existing"; archiveAfterDays?: never; archiveOnPrMerge?: false }
+  | { workspaceMode: "fresh"; archiveAfterDays?: number; archiveOnPrMerge?: boolean };
+
+export type CloudAutomationEstimateInput = Omit<CloudScheduleEstimateInput, "schedule"> &
+  CloudAutomationTriggerInput & { workspaceMode?: "existing" | "fresh" };
+export type CloudAutomationCreateInput = Omit<CloudScheduleCreateInput, "schedule"> &
+  CloudAutomationTriggerInput & CloudAutomationWorkspaceInput;
+
+/** Existing timer UI only. No fabricated timer or fresh workspace identity. */
+function projectLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule | null {
+  if (value.schedule == null || value.githubTrigger != null || (value.workspaceMode != null && value.workspaceMode !== "existing")) return null;
+  return { ...value, schedule: value.schedule, nextRunAt: value.nextRunAt ?? undefined, lastRun: value.lastRun ?? undefined };
+}
+
+function requireLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule {
+  const schedule = projectLegacyCloudSchedule(value);
+  if (schedule === null) throw new Error("This automation requires the automation API.");
+  return schedule;
 }
 
 export interface CloudWorkspaceShares {
