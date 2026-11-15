@@ -62,7 +62,7 @@ fn changed_receipts_and_competing_ownership_refuse_then_original_stop_releases()
     f.prepare(key);
     f.deliver(key);
     enabled(&f);
-    let desktop = Guard::attach(&f.root(), &f.binding.target, &f.journal).unwrap();
+    let desktop = Guard::attach(&f.root(), &f.binding.target, &f.journal, None).unwrap();
     assert!(
         change_using(&f.root(), &f.journal, key, "start", |_, _| panic!(
             "desktop owned"

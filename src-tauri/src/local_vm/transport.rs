@@ -242,18 +242,18 @@ else: sys.exit(72)
         let target = Target::LinuxGuest { runtime: Runtime::Podman, id: "c".repeat(64), environment_id: new_id(), generation: new_id() };
         let env = journal.enroll_container("Guest", &target, &"e".repeat(64)).unwrap();
         let desktop = env.transport.container().unwrap();
-        let attached = super::super::admission::Guard::attach(dir.path(), &desktop, &journal).unwrap();
+        let attached = super::super::admission::Guard::attach(dir.path(), &desktop, &journal, None).unwrap();
         assert!(journal.submit_selected("task", input(&env.id), Some(&target)).is_err());
         attached.completed().unwrap();
         let task = journal.submit_selected("task", input(&env.id), Some(&target)).unwrap();
         for status in [TaskStatus::Queued, TaskStatus::Starting, TaskStatus::Waiting, TaskStatus::OutcomeUnknown, TaskStatus::Canceling] {
             journal.transaction(|s| { s.tasks.get_mut(&task.target.task_id).unwrap().status = status; Ok(()) }).unwrap();
             let reopened = Journal::open_existing(dir.path()).unwrap();
-            assert!(super::super::admission::Guard::attach(dir.path(), &desktop, &reopened).is_err());
+            assert!(super::super::admission::Guard::attach(dir.path(), &desktop, &reopened, None).is_err());
             assert_eq!(reopened.submit_selected("task", task.input.clone(), Some(&target)).unwrap().target, task.target);
         }
         journal.transaction(|s| { s.tasks.get_mut(&task.target.task_id).unwrap().status = TaskStatus::Completed; Ok(()) }).unwrap();
-        super::super::admission::Guard::attach(dir.path(), &desktop, &journal).unwrap().completed().unwrap();
+        super::super::admission::Guard::attach(dir.path(), &desktop, &journal, None).unwrap().completed().unwrap();
         assert_eq!(journal.read().unwrap().tasks.len(), 1);
     }
 

@@ -10,6 +10,35 @@ use anyhow::{bail, Context, Result};
 use crate::computer_targets::{Capability, Target};
 use super::journal::{atomic_private_write, private_directory, Journal};
 
+/// When an operation's own timeout ends, in milliseconds since the epoch.
+/// A marker past it is no longer work in progress: its call was given up
+/// on, and only the container's Stop or Reset can settle what it left.
+fn expires_at(within: std::time::Duration) -> u64 {
+    let at = std::time::SystemTime::now() + within;
+    at.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+}
+
+/// The container operations still inside their own timeout at `now`, as a
+/// person names them: the work a runtime handover would cut short. A tab's
+/// attached desktop and a guest's lease have no timeout and are carried
+/// over, and a marker that cannot be read names no live operation.
+pub(super) fn live(root: &Path, now: std::time::SystemTime) -> Result<Vec<String>> {
+    let directory = root.join("computer-admission");
+    if !directory.try_exists()? { return Ok(Vec::new()); }
+    let now = now.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+    let mut live = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if !path.extension().is_some_and(|ext| ext == "json") { continue; }
+        let Some(marker) = read_marker(&path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()) else { continue };
+        if marker["expiresAt"].as_u64().is_some_and(|at| at > now) {
+            live.push(if marker["kind"] == "lifecycle" { "A Local VM start, stop or reset".into() } else { "A Local VM desktop call or screenshot".into() });
+        }
+    }
+    live.sort();
+    Ok(live)
+}
+
 #[derive(Debug)]
 pub struct Guard { _file: File, pub(super) marker: PathBuf }
 
@@ -86,13 +115,17 @@ impl Guard {
         Ok(Self { _file: file, marker })
     }
 
-    pub fn attach(root: &Path, target: &Target, journal: &Journal) -> Result<Self> {
+    /// `within` is the operation's own timeout; none for a tab's attached
+    /// desktop, which lasts as long as its agent.
+    pub fn attach(root: &Path, target: &Target, journal: &Journal, within: Option<std::time::Duration>) -> Result<Self> {
         if !matches!(target,Target::LinuxContainer {..}) { bail!("Container proxy requires an exact Linux desktop target"); }
         let guard = Self::acquire(root, target)?;
         reserved(target, journal)?;
-        atomic_private_write(&guard.marker, &serde_json::to_vec(&serde_json::json!({
+        let mut marker = serde_json::json!({
             "target":target,"operationId":uuid::Uuid::new_v4().to_string(),"startedAt":super::journal::now(),"status":"awaitingExitReceipt"
-        }))?)?;
+        });
+        if let Some(within) = within { marker["expiresAt"] = serde_json::json!(expires_at(within)); }
+        atomic_private_write(&guard.marker, &serde_json::to_vec(&marker)?)?;
         Ok(guard)
     }
 
@@ -118,7 +151,8 @@ pub struct Lifecycle {
 }
 
 impl Lifecycle {
-    pub fn begin(root: &Path, target: &Target, journal: &Journal) -> Result<Self> {
+    /// `within` bounds the whole start, stop or reset.
+    pub fn begin(root: &Path, target: &Target, journal: &Journal, within: std::time::Duration) -> Result<Self> {
         if !matches!(target, Target::LinuxContainer { .. }) { bail!("The Local VM's lifecycle requires its exact Linux desktop container"); }
         let guard = Guard::lock(root, target)?;
         reserved(target, journal)?;
@@ -132,7 +166,7 @@ impl Lifecycle {
         let prior_value = prior.as_deref().map(serde_json::from_slice::<serde_json::Value>).transpose()?;
         atomic_private_write(&guard.marker, &serde_json::to_vec(&serde_json::json!({
             "target":target,"operationId":uuid::Uuid::new_v4().to_string(),"startedAt":super::journal::now(),
-            "status":"awaitingExitReceipt","kind":"lifecycle","prior":prior_value,
+            "status":"awaitingExitReceipt","kind":"lifecycle","prior":prior_value,"expiresAt":expires_at(within),
         }))?)?;
         Ok(Self { guard, target: target.clone(), prior })
     }
@@ -232,7 +266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(&dir.path().join("journal")).unwrap();
         let target = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
-        let owner = Guard::attach(dir.path(), &target, &journal).unwrap();
+        let owner = Guard::attach(dir.path(), &target, &journal, None).unwrap();
         assert!(inspect_using(dir.path(), &target, |_| unreachable!()).is_err());
         drop(owner);
         let fenced = inspect_using(dir.path(), &target, |_| bail!("still running")).unwrap();
@@ -257,7 +291,7 @@ mod tests {
         let archived: serde_json::Value = serde_json::from_slice(&std::fs::read(archives[0].as_ref().unwrap().path()).unwrap()).unwrap();
         assert_eq!(archived,receipt);
         // A new operation cannot be reconciled using the previous digest.
-        drop(Guard::attach(dir.path(), &target, &journal).unwrap());
+        drop(Guard::attach(dir.path(), &target, &journal, None).unwrap());
         assert!(reconcile_using(dir.path(), &target, digest, true, |_| unreachable!()).is_err());
     }
     /// Review 2: a desktop call that never confirmed its exit must not keep
@@ -268,16 +302,16 @@ mod tests {
         let journal = Journal::open(&dir.path().join("journal")).unwrap();
         let target = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
         // A call whose exit was never confirmed fences the container.
-        drop(Guard::attach(dir.path(), &target, &journal).unwrap());
+        drop(Guard::attach(dir.path(), &target, &journal, None).unwrap());
         assert!(Guard::acquire(dir.path(), &target).is_err());
         let fenced = read_marker(&dir.path().join(format!("computer-admission/docker-{}.json", "a".repeat(64)))).unwrap();
         // A start against a running container proves nothing: the fence stays as it was.
-        let start = Lifecycle::begin(dir.path(), &target, &journal).unwrap();
+        let start = Lifecycle::begin(dir.path(), &target, &journal, std::time::Duration::from_secs(60)).unwrap();
         assert!(start.fenced());
         start.ended_keeping_prior().unwrap();
         assert_eq!(read_marker(&dir.path().join(format!("computer-admission/docker-{}.json", "a".repeat(64)))).unwrap(), fenced);
         // A stop that leaves the container exited ends it, and keeps its history.
-        let stop = Lifecycle::begin(dir.path(), &target, &journal).unwrap();
+        let stop = Lifecycle::begin(dir.path(), &target, &journal, std::time::Duration::from_secs(60)).unwrap();
         stop.ended(serde_json::json!({"status":"exited"})).unwrap();
         drop(Guard::acquire(dir.path(), &target).unwrap());
         let archives: Vec<_> = std::fs::read_dir(dir.path().join("computer-admission/history")).unwrap().collect();
@@ -287,18 +321,18 @@ mod tests {
         assert_eq!(archived["retained"]["status"], "awaitingExitReceipt");
         assert_eq!(archived["markerDigest"], super::super::journal::digest(&fenced));
         // Unfenced, a lifecycle step archives nothing.
-        Lifecycle::begin(dir.path(), &target, &journal).unwrap().ended(serde_json::json!({})).unwrap();
+        Lifecycle::begin(dir.path(), &target, &journal, std::time::Duration::from_secs(60)).unwrap().ended(serde_json::json!({})).unwrap();
         assert_eq!(std::fs::read_dir(dir.path().join("computer-admission/history")).unwrap().count(), 1);
         // A live attachment still refuses it.
-        let live = Guard::attach(dir.path(), &target, &journal).unwrap();
-        assert!(Lifecycle::begin(dir.path(), &target, &journal).is_err());
+        let live = Guard::attach(dir.path(), &target, &journal, None).unwrap();
+        assert!(Lifecycle::begin(dir.path(), &target, &journal, std::time::Duration::from_secs(60)).is_err());
         live.completed().unwrap();
         // So does a guest task's reservation of the container.
         let guest = Target::LinuxGuest { runtime: Runtime::Docker, id: "a".repeat(64),
             environment_id: super::super::journal::new_id(), generation: super::super::journal::new_id() };
         let env = journal.enroll_container("Linux", &guest, &"e".repeat(64)).unwrap();
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
-        assert!(Lifecycle::begin(dir.path(), &target, &journal).is_err());
+        assert!(Lifecycle::begin(dir.path(), &target, &journal, std::time::Duration::from_secs(60)).is_err());
     }
 
     #[test]
@@ -306,11 +340,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(&dir.path().join("journal")).unwrap();
         let target = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
-        let attachment = Guard::attach(dir.path(), &target, &journal).unwrap();
+        let attachment = Guard::attach(dir.path(), &target, &journal, None).unwrap();
         assert!(Guard::acquire(dir.path(), &target).is_err());
         attachment.completed().unwrap();
         drop(Guard::acquire(dir.path(), &target).unwrap());
-        drop(Guard::attach(dir.path(), &target, &journal).unwrap());
+        drop(Guard::attach(dir.path(), &target, &journal, None).unwrap());
         assert!(Guard::acquire(dir.path(), &target).unwrap_err().to_string().contains("no confirmed exit"));
         let another = Target::LinuxContainer { runtime: Runtime::Podman, id: "a".repeat(64) };
         drop(Guard::acquire(dir.path(), &another).unwrap());

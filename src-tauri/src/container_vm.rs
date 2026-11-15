@@ -27,6 +27,12 @@ const LABEL: &str = "ai.terminalx.computer";
 const VIEWER_PORT: u16 = 6901;
 const QUICK: Duration = Duration::from_secs(20);
 const PULL: Duration = Duration::from_secs(20 * 60);
+/// The longest a start, stop or reset of a running container takes: its
+/// QUICK steps, the 60 s wait for the screen and the 15 s one for the driver.
+#[cfg(unix)]
+const LIFECYCLE: Duration = Duration::from_secs(5 * 60);
+/// A one-shot `vm call`.
+const CALL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -459,8 +465,8 @@ pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     #[cfg(unix)]
-    let admission = attach(target)?;
-    let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120));
+    let admission = attach(target, Some(CALL))?;
+    let result = run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], CALL);
     // A call that exited, even unsuccessfully, has ended in the container;
     // only one given up on leaves the container fenced (review 2).
     #[cfg(unix)]
@@ -490,8 +496,9 @@ pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
         None => crate::store::ensure_dir(crate::store::root()?.join("computer").join("screens"))?.join(format!("screen-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"))),
     };
+    // Its capture and its copy, each with its own QUICK.
     #[cfg(unix)]
-    let admission = attach(target)?;
+    let admission = attach(target, Some(QUICK * 2))?;
     let inside = "/tmp/terminalx-screen.png";
     let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK)
         .context("capture the screen")
@@ -616,12 +623,12 @@ fn lifecycle_admission(path: &Path, deleting: bool) -> Result<Option<crate::loca
     if deleting && journal.read()?.environments.values().any(|e| e.transport.container().as_ref() == Some(&target)) {
         bail!("This container has retained guest task history. Reset requires explicit guest disposition; it cannot remove that history through the desktop shortcut");
     }
-    Ok(Some(crate::local_vm::admission::Lifecycle::begin(&crate::local_vm::host::root()?, &target, &journal)?))
+    Ok(Some(crate::local_vm::admission::Lifecycle::begin(&crate::local_vm::host::root()?, &target, &journal, LIFECYCLE)?))
 }
 
 #[cfg(unix)]
-fn attach(target: &Target) -> Result<crate::local_vm::admission::Guard> {
-    crate::local_vm::admission::Guard::attach(&crate::local_vm::host::root()?, target, &crate::local_vm::host::journal()?)
+fn attach(target: &Target, within: Option<Duration>) -> Result<crate::local_vm::admission::Guard> {
+    crate::local_vm::admission::Guard::attach(&crate::local_vm::host::root()?, target, &crate::local_vm::host::journal()?, within)
 }
 
 /// The attached MCP proxy holds admission for its entire lifetime. A crash or
@@ -646,7 +653,8 @@ pub fn run_stdio_cli() -> Option<i32> {
         let target: Target = serde_json::from_str(&args[1])?;
         let path = selected_runtime(&target)?;
         let Target::LinuxContainer { id, .. } = &target else { bail!("An exact Linux desktop container is required; no OS fallback") };
-        let admission = attach(&target)?;
+        // As long as the tab's agent: a handover carries it over.
+        let admission = attach(&target, None)?;
         let mut command = Command::new(path);
         command.args(["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"]);
         proxy(command, &signals, std::io::stdin(), admission)
@@ -768,12 +776,12 @@ mod tests {
         // A driver that, like `cua-driver mcp`, reads until its input ends.
         let driver = || { let mut command = Command::new("/bin/sh"); command.args(["-c", "cat >/dev/null"]); command };
         // The agent closes its end.
-        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal, None).unwrap();
         proxy(driver(), &signals, std::io::Cursor::new(b"{}\n".to_vec()), admission).unwrap();
         assert!(!marker.exists());
         // The tab is stopped while the agent's end stays open.
         let (agent, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
-        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal, None).unwrap();
         // SAFETY: the watcher thread is alive and blocks SIGTERM.
         assert_eq!(unsafe { libc::pthread_kill(signals.watcher().as_pthread_t(), libc::SIGTERM) }, 0);
         proxy(driver(), &signals, agent, admission).unwrap();
@@ -782,7 +790,7 @@ mod tests {
         let mut stubborn = Command::new("/bin/sh");
         stubborn.args(["-c", "trap '' TERM; while :; do sleep 1; done"]);
         let (agent, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
-        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal).unwrap();
+        let admission = crate::local_vm::admission::Guard::attach(dir.path(), &target, &journal, None).unwrap();
         unsafe { libc::pthread_kill(signals.watcher().as_pthread_t(), libc::SIGTERM) };
         assert!(proxy(stubborn, &signals, agent, admission).is_err());
         assert!(marker.exists(), "the container stays reserved");

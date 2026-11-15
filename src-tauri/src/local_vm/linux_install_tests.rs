@@ -155,7 +155,7 @@ fn serving_enrollment_requires_original_account_artifact_and_exclusive_ownership
         );
     }
     assert!(f.journal.read().unwrap().environments.is_empty());
-    let attached = Guard::attach(&f.root(), &f.binding.target, &f.journal).unwrap();
+    let attached = Guard::attach(&f.root(), &f.binding.target, &f.journal, None).unwrap();
     assert!(enroll_serving_using(&f.root(), &f.journal, key, |_| panic!(
         "routed while desktop owned"
     ))
@@ -219,7 +219,7 @@ fn real_guest_installer_retains_lost_reply_and_reconciles_original_receipt_witho
     std::fs::write(fixture.dir.path().join("lose"), "").unwrap();
     let lost = fixture.deliver("once");
     assert_eq!(lost["status"], "outcomeUnknown");
-    assert!(Guard::attach(&fixture.root(), &fixture.binding.target, &fixture.journal).is_err());
+    assert!(Guard::attach(&fixture.root(), &fixture.binding.target, &fixture.journal, None).is_err());
     assert!(super::super::admission::inspect(&fixture.root(), &fixture.binding.target).is_err());
     assert_eq!(fixture.deliver("once"), lost);
     assert!(linux_profile::trusted_record(&fixture.root(), "once").is_err()); // Fixtures never enter production delivery.
@@ -273,7 +273,7 @@ fn interrupted_guest_intent_and_competing_ownership_stay_fenced() {
     let fixture = Fixture::new();
     fixture.prepare("partial");
     let desktop =
-        Guard::attach(&fixture.root(), &fixture.binding.target, &fixture.journal).unwrap();
+        Guard::attach(&fixture.root(), &fixture.binding.target, &fixture.journal, None).unwrap();
     assert!(linux_profile::execute_prepared(
         &fixture.root(),
         &fixture.journal,

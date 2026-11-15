@@ -192,32 +192,73 @@ fn provision_driven(env: &journal::Environment) -> bool {
         .is_some_and(|status| matches!(status, "running" | "canceling"))
 }
 
-/// What a replacement could not carry on: the setup or provisioning that
-/// `Supervisor::start` would record as outcomeUnknown.
-fn driving(state: &journal::State) -> bool {
-    state.environments.values().any(|env| env.setup.as_ref().is_some_and(setup_driven) || provision_driven(env))
+/// What a replacement could not carry on, as a person names it: the setup
+/// or provisioning that `Supervisor::start` would record as outcomeUnknown.
+fn driven(state: &journal::State) -> Vec<String> {
+    let mut work = Vec::new();
+    for env in state.environments.values() {
+        if env.setup.as_ref().is_some_and(setup_driven) { work.push(format!("Local VM setup of \u{201c}{}\u{201d}", env.name)); }
+        if provision_driven(env) { work.push(format!("Local VM provisioning of \u{201c}{}\u{201d}", env.name)); }
+    }
+    work
 }
 
-/// Held through a runtime handover (#765) until the exec, or until the
-/// handover is off, so no VM operation or tick runs across it. The
-/// replacement starts its own supervisor from the journal and carries on
-/// tasks, manual control, an unready setup and every admission marker, so
-/// those never hold a handover off (review 3); only a setup or provisioning
-/// this process is driving does. An unreadable journal drives nothing.
-/// A tick still running after `settle` makes the handover unsettled, to be
-/// tried again, as anything else that has not settled does.
-pub fn prepare_handover(settle: Duration) -> Result<Exclusive> {
-    let tick = tick_within(settle)?;
-    let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
-    let root = host::root()?;
-    if root.join("journal.json").try_exists()? {
+/// How long a runtime handover waits on Local VM work before it names that
+/// work and asks the reader instead of retrying (review 3): longer than a
+/// one-shot call's own timeout, so one of those simply ends first.
+pub const HANDOVER_PATIENCE: Duration = Duration::from_secs(3 * 60);
+
+/// Since when a handover has been waiting on Local VM work, if it is.
+static HANDOVER_WAITING: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The Local VM work a runtime handover would cut short at `now`: a setup or
+/// provisioning this process drives, and container operations still inside
+/// their own timeout. The replacement starts its own supervisor from the
+/// journal and carries on tasks, manual control, an unready setup, a tab's
+/// attached desktop, a guest's lease and any marker past its timeout, so
+/// none of those is work here (review 3). An unreadable journal drives
+/// nothing.
+pub fn live_work(now: std::time::SystemTime) -> Vec<String> {
+    let Ok(root) = host::root() else { return Vec::new() };
+    let mut work = Vec::new();
+    if root.join("journal.json").try_exists().unwrap_or(false) {
         match Journal::open_existing(&root).and_then(|journal| journal.read()) {
-            Ok(state) if driving(&state) => bail!("Local VM setup or provisioning is under way"),
-            Ok(_) => {}
+            Ok(state) => work.extend(driven(&state)),
             Err(error) => log::warn!("local vm handover: journal unreadable, nothing to carry: {error:#}"),
         }
     }
-    Ok(Exclusive { _admission: guard, _tick: tick })
+    match super::admission::live(&root, now) {
+        Ok(live) => work.extend(live),
+        Err(error) => log::warn!("local vm handover: admission markers unreadable: {error:#}"),
+    }
+    work
+}
+
+/// The Local VM work a handover has waited on for longer than
+/// [`HANDOVER_PATIENCE`] by `clock`, and is still under way at `now`: the
+/// reader is shown it and asked, instead of the update retrying for ever.
+pub fn handover_asks(now: std::time::SystemTime, clock: std::time::Instant) -> Vec<String> {
+    let waited = HANDOVER_WAITING.lock().unwrap().is_some_and(|since| clock.saturating_duration_since(since) >= HANDOVER_PATIENCE);
+    if waited { live_work(now) } else { Vec::new() }
+}
+
+/// Held through a runtime handover (#765) until the exec, or until the
+/// handover is off, so no VM operation or tick runs across it. Live work
+/// ([`live_work`]) holds it off unless the reader, shown it, agreed to have
+/// it cut (`agreed`); the first refusal starts [`HANDOVER_PATIENCE`].
+/// A tick still running after `settle` makes the handover unsettled, to be
+/// tried again, as anything else that has not settled does.
+pub fn prepare_handover(settle: Duration, agreed: &[String]) -> Result<Exclusive> {
+    let tick = tick_within(settle)?;
+    let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
+    let cut: Vec<String> = live_work(std::time::SystemTime::now()).into_iter().filter(|work| !agreed.contains(work)).collect();
+    let mut waiting = HANDOVER_WAITING.lock().unwrap();
+    if cut.is_empty() {
+        *waiting = None;
+        return Ok(Exclusive { _admission: guard, _tick: tick });
+    }
+    waiting.get_or_insert_with(std::time::Instant::now);
+    bail!("{} under way", cut.join("; "))
 }
 
 pub struct Supervisor {
@@ -979,41 +1020,112 @@ mod tests {
         drop(operation);
     }
 
+    /// A container marker as `admission` writes one, expiring `in_ms` from now.
+    fn marker(name: &str, kind: Option<&str>, in_ms: Option<i64>) {
+        let markers = host::root().unwrap().join("computer-admission");
+        journal::private_directory(&markers).unwrap();
+        let target = crate::computer_targets::Target::LinuxContainer { runtime: crate::computer_targets::Runtime::Docker, id: "a".repeat(64) };
+        let mut value = json!({"target":target,"status":"awaitingExitReceipt"});
+        if let Some(kind) = kind { value["kind"] = json!(kind); }
+        if let Some(in_ms) = in_ms {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            value["expiresAt"] = json!(now + in_ms);
+        }
+        journal::atomic_private_write(&markers.join(format!("{name}.json")), &serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
     #[test]
     fn a_handover_waits_only_for_what_a_restart_would_cut_off() {
         let _home = crate::store::temp_home();
         let life = Lifetime::new(Duration::ZERO);
         let operation = admit(&life).unwrap();
-        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("in flight"));
+        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1), &[]).unwrap_err()).contains("in flight"));
         drop(operation);
         let journal = host::journal().unwrap();
         let env = journal.enroll("held guest", "local:test").unwrap();
-        // The replacement carries these on from the journal (review 3): manual
-        // control, an unfinished task's guest, a marker left by a vm call.
+        // Carried on from the journal by the replacement (review 3).
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
-        let markers = host::root().unwrap().join("computer-admission");
-        journal::private_directory(&markers).unwrap();
-        let container = crate::computer_targets::Target::LinuxContainer { runtime: crate::computer_targets::Runtime::Docker, id: "a".repeat(64) };
-        journal::atomic_private_write(&markers.join("docker-a.json"), &serde_json::to_vec(&json!({"target":container,"status":"awaitingExitReceipt"})).unwrap()).unwrap();
-        drop(prepare_handover(Duration::from_secs(1)).unwrap());
+        drop(prepare_handover(Duration::from_secs(1), &[]).unwrap());
         // What this process drives, and a restart would record as outcomeUnknown.
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().provision = Some(host::progress("running", "Downloading")); Ok(()) }).unwrap();
-        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("under way"));
+        let provisioning = "Local VM provisioning of \u{201c}held guest\u{201d}".to_string();
+        let refused = format!("{:#}", prepare_handover(Duration::from_secs(1), &[]).unwrap_err());
+        assert!(refused.contains(&format!("{provisioning} under way")), "{refused}");
+        // Agreed to by the reader, it is cut.
+        drop(prepare_handover(Duration::from_secs(1), std::slice::from_ref(&provisioning)).unwrap());
         journal.transaction(|state| {
             let env = state.environments.get_mut(&env.id).unwrap();
             env.provision = Some(host::progress("completed", "Ready"));
             env.setup = Some(json!({"status":"working"}));
             Ok(())
         }).unwrap();
-        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("under way"));
+        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1), &[]).unwrap_err()).contains("Local VM setup of"));
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().setup = None; Ok(()) }).unwrap();
-        let handover = prepare_handover(Duration::from_secs(1)).unwrap();
+        let handover = prepare_handover(Duration::from_secs(1), &[]).unwrap();
         assert!(ADMISSION.try_read().is_err(), "no VM operation starts during a handover");
         drop(handover);
         drop(admit(&life).unwrap());
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn a_call_marker_is_live_work_only_until_its_own_timeout() {
+        let _home = crate::store::temp_home();
+        host::journal().unwrap();
+        marker("docker-call", None, Some(60_000));
+        assert_eq!(live_work(std::time::SystemTime::now()), ["A Local VM desktop call or screenshot"]);
+        assert!(prepare_handover(Duration::from_secs(1), &[]).is_err());
+        // The same call, timed out: given up on, it is the container's Stop and Reset's to settle.
+        assert!(live_work(std::time::SystemTime::now() + Duration::from_secs(61)).is_empty());
+        marker("docker-call", None, Some(-1));
+        drop(prepare_handover(Duration::from_secs(1), &[]).unwrap());
+        marker("docker-call", Some("lifecycle"), Some(60_000));
+        assert_eq!(live_work(std::time::SystemTime::now()), ["A Local VM start, stop or reset"]);
+    }
+
+    #[test]
+    fn a_tabs_attached_desktop_or_a_guest_lease_never_holds_a_handover() {
+        let _home = crate::store::temp_home();
+        host::journal().unwrap();
+        // A tab with a selected Linux desktop: its proxy's marker has no timeout.
+        marker("docker-proxy", None, None);
+        let markers = host::root().unwrap().join("computer-admission");
+        let guest = crate::computer_targets::Target::MacosGuest { environment_id: journal::new_id(), generation: journal::new_id() };
+        journal::atomic_private_write(&markers.join("macos-lease.json"), &serde_json::to_vec(&json!({"target":guest,"status":"awaitingExitReceipt"})).unwrap()).unwrap();
+        std::fs::write(markers.join("unreadable.json"), b"not a receipt").unwrap();
+        assert!(live_work(std::time::SystemTime::now()).is_empty());
+        drop(prepare_handover(Duration::from_secs(1), &[]).unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_journal_is_not_work() {
+        let _home = crate::store::temp_home();
+        let root = host::root().unwrap();
+        journal::private_directory(&root).unwrap();
+        std::fs::write(root.join("journal.json"), b"broken history").unwrap();
+        assert!(live_work(std::time::SystemTime::now()).is_empty());
+        drop(prepare_handover(Duration::from_secs(1), &[]).unwrap());
+        assert_eq!(std::fs::read(root.join("journal.json")).unwrap(), b"broken history", "left as it was");
+    }
+
+    #[test]
+    fn after_a_bounded_wait_the_handover_names_what_it_would_cut_and_asks() {
+        let _home = crate::store::temp_home();
+        let journal = host::journal().unwrap();
+        let env = journal.enroll("slow guest", "local:test").unwrap();
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().provision = Some(host::progress("running", "Downloading")); Ok(()) }).unwrap();
+        let now = std::time::SystemTime::now();
+        assert!(handover_asks(now, std::time::Instant::now()).is_empty(), "nothing to ask before a handover has waited");
+        assert!(prepare_handover(Duration::from_secs(1), &[]).is_err());
+        let refused = std::time::Instant::now();
+        assert!(handover_asks(now, refused + HANDOVER_PATIENCE - Duration::from_secs(1)).is_empty(), "still within the wait: retried");
+        assert_eq!(handover_asks(now, refused + HANDOVER_PATIENCE), ["Local VM provisioning of \u{201c}slow guest\u{201d}"]);
+        // Settled, the wait is over and nothing is asked.
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().provision = Some(host::progress("completed", "Ready")); Ok(()) }).unwrap();
+        drop(prepare_handover(Duration::from_secs(1), &[]).unwrap());
+        assert!(handover_asks(now, refused + HANDOVER_PATIENCE * 2).is_empty());
+    }
+
     #[test]
     fn guest_agent_reload_waits_for_a_slow_existing_service_to_leave_launchd() {
         let directory = tempfile::tempdir().unwrap();

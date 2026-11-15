@@ -752,6 +752,7 @@ fn named(sessions: &[SessionEntry], work: &Work) -> String {
         WorkKind::Processes if work.harness.is_some() => format!("Commands {agent}{place} left running"),
         WorkKind::Processes => "Commands its agents left running, or processes that outlived what started them".into(),
         WorkKind::Pipeline => "An issue pipeline step".into(),
+        WorkKind::LocalVm => work.title.clone().unwrap_or_else(|| "Local VM work".into()),
     }
 }
 
@@ -1372,6 +1373,10 @@ mod tests {
         assert_eq!(work(WorkKind::Processes, Some("s1"), Some("t2"), Some("codex"), None), format!("Commands {codex} in \u{201c}Fix login\u{201d} left running"));
         assert_eq!(work(WorkKind::Processes, None, None, None, None), "Commands its agents left running, or processes that outlived what started them");
         assert_eq!(work(WorkKind::Pipeline, None, None, None, None), "An issue pipeline step");
+        assert_eq!(work(WorkKind::LocalVm, None, None, None, Some("Local VM setup of \u{201c}Mac\u{201d}")), "Local VM setup of \u{201c}Mac\u{201d}");
+        // A LocalVm item travels between runtime and app as the reader's stop consent.
+        let item = Work { kind: WorkKind::LocalVm, session_id: None, tab_id: None, harness: None, title: Some("Local VM setup".into()), pane: None };
+        assert_eq!(serde_json::to_value(&item).unwrap(), serde_json::json!({"kind":"localVm","title":"Local VM setup"}));
     }
 
     /// #730 review: a runtime too old to say what it runs (0.2.22 and before)
