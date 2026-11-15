@@ -17,8 +17,11 @@ const keyStages: Record<LocalVmGuestKeyStage, string> = {
 };
 
 /** This conversation's guest-account choices. Key proof alone never chooses an
- *  account: one is picked from the exact list the guest reported, and only the
- *  helper's acknowledgement authenticates it. Never trust or readiness. */
+ *  account: the one this VM was prepared for is confirmed from the exact list
+ *  the guest reported, and only the helper's acknowledgement authenticates it.
+ *  No other reported account is offered: this VM's one key and host-key pin
+ *  are for the planned account, the choice is permanent, and the host refuses
+ *  any other. Never trust or readiness. */
 export function GuestAccountConfirmations({ session, tab, conversation, readOnly }: {
   session: SessionEntry; tab: TabEntry; conversation: string | null; readOnly: boolean;
 }) {
@@ -67,8 +70,13 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
     } finally { await reload(); lock.current = false; setBusy(false); }
   }
 
+  // The reported accounts that are the one planned at Create (normally one).
+  const planned = item.plannedAccount ?? null;
+  const offered = item.accounts.filter((account) => planned !== null && account.name === planned && account.home === `/Users/${planned}`);
+  const others = item.accounts.filter((account) => !offered.includes(account));
+
   async function confirm() {
-    const account = item.accounts.find((candidate) => accountId(candidate) === selected);
+    const account = offered.find((candidate) => accountId(candidate) === selected);
     if (lock.current || readOnly || !consent || !account || !item.observationSha256) return;
     lock.current = true; setBusy(true); setError(null);
     try {
@@ -106,16 +114,25 @@ function Confirmation({ item, session, tab, conversation, readOnly, reload }: {
       <p role="status">Waiting for the guest helper to report its accounts. The helper may still be starting, or the VM owner is unreachable.{item.detail ? ` ${item.detail}` : ""}</p>
       {checkButton}
     </>;
+  } else if (!offered.length) {
+    body = <>
+      <p role="status">{planned
+        ? `This VM was prepared for the account ${planned}, and the guest helper did not report it. Finish creating that account in the VM, then check again. TerminalX cannot use another account in this VM.`
+        : "TerminalX could not read which account this VM was prepared for, so no account can be confirmed. Check again, or inspect the VM."}</p>
+      {others.length ? <p className="text-muted-foreground">Reported: {others.map((account) => `${account.name} (UID ${account.uid})`).join(", ")}.</p> : null}
+      {checkButton}
+    </>;
   } else {
     body = <>
-      <p>The guest helper proved it runs in this VM and reported these accounts. That proof does not choose an account: pick the one TerminalX may use.</p>
+      <p>The guest helper proved it runs in this VM and reported its accounts. That proof does not choose one. This VM was prepared for {planned}: confirm that TerminalX may use it.</p>
       <fieldset className="space-y-1" disabled={busy || readOnly}>
         <legend className="sr-only">Guest accounts</legend>
-        {item.accounts.map((account) => <label key={accountId(account)} className="flex items-center gap-2">
+        {offered.map((account) => <label key={accountId(account)} className="flex items-center gap-2">
           <input type="radio" name={`guest-account-${item.idempotencyKey}`} checked={selected === accountId(account)} onChange={() => { setSelected(accountId(account)); setConsent(false); }} />
           <span>{account.name} · UID {account.uid} · {account.home}</span>
         </label>)}
       </fieldset>
+      {others.length ? <p className="text-muted-foreground">Also reported, and not usable for this VM: {others.map((account) => `${account.name} (UID ${account.uid})`).join(", ")}.</p> : null}
       <label className="flex items-start gap-2 leading-relaxed"><input type="checkbox" checked={consent} disabled={busy || readOnly || !selected} onChange={(event) => setConsent(event.target.checked)} /><span>I confirm TerminalX may use this account in this VM. This choice is permanent for this VM and does not make SSH trusted or ready.</span></label>
       <div className="flex gap-2">
         <Button type="button" size="sm" disabled={busy || readOnly || !selected || !consent} onClick={() => void confirm()}>{busy ? "Confirming…" : "Confirm account"}</Button>

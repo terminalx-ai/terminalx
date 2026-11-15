@@ -368,3 +368,26 @@ fn bounded_native_frames_allow_successive_reads_and_refuse_oversized_lengths() {
     assert!(read(&mut reader).unwrap_err().to_string().contains("bound"));
     actor.join().unwrap();
 }
+
+#[test]
+fn only_the_account_planned_at_create_is_the_planned_account() {
+    let plan = crate::local_vm::macos_personalization::AccountPlan {
+        short_name: "personal".into(),
+        password_reference: journal::new_id(),
+        ssh_key_reference: journal::new_id(),
+    };
+    let account = |name: &str, home: &str| json!({"gid": 20, "home": home, "homeDevice": 1, "homeInode": 601, "name": name, "uid": 501});
+    assert!(is_planned(&plan, &account("personal", "/Users/personal")));
+    for (name, home) in [
+        ("other", "/Users/other"),
+        ("personal", "/Users/other"),
+        ("other", "/Users/personal"),
+        ("Personal", "/Users/personal"),
+        ("personal", "/Users/personal/"),
+        ("personal2", "/Users/personal2"),
+    ] {
+        assert!(!is_planned(&plan, &account(name, home)), "{name} {home}");
+    }
+    assert!(!is_planned(&plan, &json!({"name": "personal"})), "no home");
+    assert!(!is_planned(&plan, &Value::Null));
+}

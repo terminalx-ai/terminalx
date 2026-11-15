@@ -27,14 +27,20 @@ pub struct ConfirmedAccount {
     pub confirmation_sha256: String,
 }
 
+/// A personal account's short name, by the same rule as the host's
+/// `validate_name` (`src-tauri/src/local_vm/macos_account.rs`). The two crates
+/// share no code, so the rule is written twice and both test the same names
+/// (`short_names_follow_the_hosts_rule` here): an account this helper
+/// reported that the host could never bind is one the person could choose
+/// and never use.
 fn short_name(name: &str) -> bool {
     let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 32
+    (2..=32).contains(&bytes.len())
         && bytes[0].is_ascii_lowercase()
-        && bytes.iter().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-' || *b == b'.'
-        })
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+        && !matches!(name, "root" | "lume" | "daemon" | "nobody")
 }
 
 impl ConfirmedAccount {
@@ -459,6 +465,29 @@ mod tests {
             describe("someone", 502, 20, "/Users/other").is_none(),
             "home must be /Users/<name>"
         );
+    }
+
+    /// The names the host's `validate_name` tests, with the same verdicts.
+    #[test]
+    fn short_names_follow_the_hosts_rule() {
+        let long = "a".repeat(32);
+        let confirmation = |name: &str| {
+            json!({"accountConfirmation": {"confirmed": true, "confirmationSha256": "c".repeat(64),
+                "gid": 20, "home": format!("/Users/{name}"), "homeDevice": 1, "homeInode": 42, "name": name, "uid": 501}})
+        };
+        for name in ["personal", "ab", "a1", "dev_user", long.as_str()] {
+            assert!(short_name(name), "{name}");
+            assert_eq!(ConfirmedAccount::from_body(&confirmation(name)).unwrap().name, name);
+        }
+        let too_long = "a".repeat(33);
+        for name in [
+            "", "a", "1abc", "_x", "User", "john.doe", "john-doe", "name space", "name;cmd", "../user",
+            "root", "lume", "daemon", "nobody", "jos\u{e9}", too_long.as_str(),
+        ] {
+            assert!(!short_name(name), "{name}");
+            assert!(ConfirmedAccount::from_body(&confirmation(name)).is_err(), "{name}");
+            assert!(describe(name, 501, 20, &format!("/Users/{name}")).is_none(), "{name}");
+        }
     }
 
     #[test]

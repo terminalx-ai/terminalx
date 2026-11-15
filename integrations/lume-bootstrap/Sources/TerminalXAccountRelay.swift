@@ -20,9 +20,13 @@ enum TXAccountRelay {
               let name = account["name"] as? String, let uid = account["uid"] as? Int, let gid = account["gid"] as? Int,
               let home = account["home"] as? String, let device = account["homeDevice"] as? Int,
               let inode = account["homeInode"] as? Int else { throw TXBootstrapError.refused }
+        // The name rule is the host's `validate_name` and the helper's
+        // `short_name`: an account the owner journals must be one the host
+        // can bind.
         let bytes = Array(name.utf8)
-        try txRequire(!bytes.isEmpty && bytes.count <= 32 && (97...122).contains(bytes[0])
-            && bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || [45, 46, 95].contains($0) }
+        try txRequire((2...32).contains(bytes.count) && (97...122).contains(bytes[0])
+            && bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }
+            && !["root", "lume", "daemon", "nobody"].contains(name)
             && (501..<65534).contains(uid) && gid > 0 && home == "/Users/\(name)" && device >= 0 && inode > 0)
         return account
     }

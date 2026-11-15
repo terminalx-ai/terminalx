@@ -10,7 +10,7 @@ import { GuestAccountConfirmations } from "./GuestAccountConfirmation";
 const personal: LocalVmGuestAccount = { name: "personal", uid: 501, gid: 20, home: "/Users/personal", homeDevice: 1, homeInode: 601 };
 const other: LocalVmGuestAccount = { name: "other", uid: 502, gid: 20, home: "/Users/other", homeDevice: 1, homeInode: 602 };
 const status = (overrides: Partial<LocalVmGuestAccountStatus> = {}): LocalVmGuestAccountStatus => ({
-  idempotencyKey: "boot-1", observationSha256: "a".repeat(64), accounts: [personal, other], chosen: null, answer: null, key: null,
+  idempotencyKey: "boot-1", observationSha256: "a".repeat(64), accounts: [personal, other], plannedAccount: "personal", chosen: null, answer: null, key: null,
   accountAuthenticated: false, trustAccepted: false, ready: false, ...overrides,
 });
 let listing: LocalVmGuestAccountStatus[] = [];
@@ -46,7 +46,7 @@ describe("guest account confirmation", () => {
 
   it("drops a selection when the reported list changes and explains a stale-list refusal", async () => {
     mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => {
-      if (args.method === "environment.confirmGuestAccount") { listing = [status({ observationSha256: "b".repeat(64), accounts: [other] })]; throw "Confirm exactly one observed account from the original parent conversation"; }
+      if (args.method === "environment.confirmGuestAccount") { listing = [status({ observationSha256: "b".repeat(64), accounts: [personal] })]; throw "Confirm exactly one observed account from the original parent conversation"; }
       return { bootstraps: listing };
     });
     mount();
@@ -54,9 +54,36 @@ describe("guest account confirmation", () => {
     fireEvent.click(screen.getByLabelText(/I confirm TerminalX may use this account/));
     fireEvent.click(screen.getByRole("button", { name: "Confirm account" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/review the current list.*Retrying the same choice is safe/);
-    await waitFor(() => expect(screen.queryByLabelText(/personal · UID 501/)).toBeNull());
-    expect((screen.getByLabelText(/other · UID 502/) as HTMLInputElement).checked).toBe(false);
+    await waitFor(() => expect(screen.queryByText(/not usable for this VM: other/)).toBeNull());
+    expect((screen.getByLabelText(/personal · UID 501/) as HTMLInputElement).checked).toBe(false);
     expect((screen.getByRole("button", { name: "Confirm account" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers only the account the VM was prepared for, and none when that account is missing or unknown", async () => {
+    const { unmount } = mount();
+    // `other` was reported too, but it is named, not offered: the host refuses it, and a choice is permanent.
+    await screen.findByLabelText(/personal · UID 501/);
+    expect(screen.getAllByRole("radio")).toHaveLength(1);
+    expect(screen.queryByLabelText(/other · UID 502/)).toBeNull();
+    expect(screen.getByText(/This VM was prepared for personal/)).toBeTruthy();
+    expect(screen.getByText(/Also reported, and not usable for this VM: other \(UID 502\)\./)).toBeTruthy();
+    unmount();
+    // The planned account under another home is not the planned account.
+    for (const [accounts, plannedAccount, text] of [
+      [[other], "personal", /prepared for the account personal, and the guest helper did not report it.*cannot use another account/],
+      [[{ ...personal, home: "/Users/elsewhere" }], "personal", /did not report it/],
+      [[personal, other], null, /could not read which account this VM was prepared for, so no account can be confirmed/],
+      [[personal, other], undefined, /could not read which account/],
+    ] as const) {
+      listing = [status({ accounts: [...accounts], plannedAccount })];
+      const view = mount();
+      expect(await screen.findByText(text)).toBeTruthy();
+      expect(screen.queryByRole("radio")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Confirm account" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Check again" })).toBeTruthy();
+      view.unmount();
+    }
+    expect(calls("environment.confirmGuestAccount")).toHaveLength(0);
   });
 
   it("shows a waiting state while the helper has not reported, and offers no account choice", async () => {

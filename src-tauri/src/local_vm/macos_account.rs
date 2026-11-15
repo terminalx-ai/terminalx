@@ -19,6 +19,9 @@ pub struct Account {
     pub home_inode: u64,
 }
 
+/// The guest helper applies the same rule to the accounts it reports
+/// (`short_name` in `native/vm-bootstrap/src/account.rs`). The crates share no
+/// code, so the rule is written twice and both test the same names.
 pub(super) fn validate_name(name: &str) -> Result<()> {
     if name.len() < 2
         || name.len() > 32
@@ -207,6 +210,23 @@ mod tests {
                 &base
             )
             .is_err());
+    }
+
+    /// The names the guest helper's `short_names_follow_the_hosts_rule` tests,
+    /// with the same verdicts.
+    #[test]
+    fn account_names_follow_the_rule_the_guest_helper_reports_by() {
+        let long = "a".repeat(32);
+        for name in ["personal", "ab", "a1", "dev_user", long.as_str()] {
+            validate_name(name).unwrap();
+        }
+        let too_long = "a".repeat(33);
+        for name in [
+            "", "a", "1abc", "_x", "User", "john.doe", "john-doe", "name space", "name;cmd", "../user",
+            "root", "lume", "daemon", "nobody", "jos\u{e9}", too_long.as_str(),
+        ] {
+            assert!(validate_name(name).is_err(), "{name}");
+        }
     }
 
     #[test]

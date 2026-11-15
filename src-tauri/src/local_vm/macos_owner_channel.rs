@@ -169,10 +169,23 @@ fn account_status(data: &Path, reference: &Reference) -> Result<Value> {
         true => serde_json::from_slice::<Value>(&reference.root.read("account-confirmation.json", 32 * 1024, true)?)?["account"].clone(),
         false => Value::Null,
     };
-    Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "helperAuthenticated": true,
+    // The one reported account that can be confirmed (see `is_planned`), by
+    // name; null when this VM's preparation record cannot be read.
+    let planned = reference.plan(data).ok().map(|(plan, _)| plan.short_name);
+    Ok(json!({"observationSha256": journal::digest(&bytes), "accounts": observation["accounts"], "plannedAccount": planned,
+        "helperAuthenticated": true,
         "accountAuthenticated": authenticated, "chosen": chosen, "answer": answer, "key": key, "hostKey": host_key,
         "retirement": retirement, "trustAccepted": false,
         "ready": false}))
+}
+/// Whether a helper-reported account is the one this VM was prepared for at
+/// Create: its short name and the home that name fixes. The helper reports
+/// every personal account in the guest, but this VM's one SSH key and its
+/// host-key pin are for the planned account alone, and a choice is never
+/// changed. So no other account is confirmed, granted the key or pinned
+/// (review 2: an unplanned choice could never be pinned, and stranded the VM).
+fn is_planned(plan: &super::macos_personalization::AccountPlan, account: &Value) -> bool {
+    account["name"] == plan.short_name.as_str() && account["home"] == plan.home().as_str()
 }
 // The three steps below are trusted host requests: the person or an agent in
 // the original parent conversation may send them (docs/LOCAL-VM-HELPER-DELIVERY.md,
@@ -186,7 +199,7 @@ pub(super) fn confirm_guest_account(params: &Value) -> Result<Value> {
         "observationSha256": params["observationSha256"], "account": params["account"],
         "parentSession": params["parentSession"], "parentTab": params["parentTab"],
         "parentConversation": params["parentConversation"]}))?;
-    let relay = reference.confirm_account(&confirmation)?;
+    let relay = reference.confirm_account(&super::host::root()?, &confirmation)?;
     Ok(json!({"relay": relay, "accountAuthenticated": false, "trustAccepted": false, "ready": false}))
 }
 /// Installs this VM's SSH key, on a request from the original parent, in the
@@ -886,7 +899,12 @@ impl Reference {
     /// and conversation. Recorded once, exclusively, before it is relayed: a
     /// retry re-presents the same choice, and a different account is refused
     /// for good. Relaying authenticates nothing by itself.
-    fn confirm_account(&self, confirmation: &AccountConfirmation) -> Result<Value> {
+    ///
+    /// Only the account planned at Create can be confirmed, and that is
+    /// checked here, before anything is recorded: the choice is permanent, so
+    /// a refusal at a later step could not be undone. `root` is the Local VM
+    /// data root that holds this VM's preparation record.
+    fn confirm_account(&self, root: &Path, confirmation: &AccountConfirmation) -> Result<Value> {
         let (bytes, observation) = self.account_observation()?;
         if !confirmation.confirm
             || confirmation.observation_sha256 != journal::digest(&bytes)
@@ -896,6 +914,10 @@ impl Reference {
             || confirmation.parent_conversation != self.binding.parent_conversation
         {
             bail!("Confirm exactly one observed account from the original parent conversation")
+        }
+        let (plan, _) = self.plan(root)?;
+        if !is_planned(&plan, &confirmation.account) {
+            bail!("Only {}, the account planned for this VM, can be confirmed; nothing was recorded", plan.short_name)
         }
         let record = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&self.raw),
             "ownerEpoch": self.binding.owner_epoch, "observationSha256": confirmation.observation_sha256,
@@ -971,17 +993,18 @@ impl Reference {
     /// in production and a synthetic one in fixtures.
     fn grant_guest_key_using(&self, keys_root: &Path, utility: &Path, budget: Duration) -> Result<Value> {
         let mut binding = self.key_binding()?;
-        let (planned, intent_digest) = self.planned_key(keys_root)?;
+        // The SSH key reference this bootstrap's provisioning intent minted
+        // before the VM existed. The post-trust transport uses the same
+        // reference; no other is ever minted for this VM.
+        let (plan, intent_digest) = self.plan(keys_root)?;
+        // `confirm_account` already refuses any other account. Checked again
+        // before the VM's one key exists: it is created and granted once.
+        if !is_planned(&plan, &binding["account"]) {
+            bail!("The confirmed account is not the account planned for this VM; no key is created or granted")
+        }
         binding["accountIntentDigest"] = json!(intent_digest);
-        let (key_reference, public_key) = original_key(&self.root, keys_root, &planned, &binding, utility, budget)?;
+        let (key_reference, public_key) = original_key(&self.root, keys_root, &plan.ssh_key_reference, &binding, utility, budget)?;
         self.relay_grant(&key_reference, &public_key)
-    }
-    /// The SSH key reference this bootstrap's provisioning intent minted before
-    /// the VM existed, and that intent's digest. The post-trust transport uses
-    /// the same reference; no other is ever minted for this VM.
-    fn planned_key(&self, root: &Path) -> Result<(String, String)> {
-        let (plan, digest) = self.plan(root)?;
-        Ok((plan.ssh_key_reference, digest))
     }
     /// The account plan this bootstrap's provisioning intent recorded before the
     /// VM existed, checked against this owner's VM, and the intent's digest.
@@ -1197,7 +1220,7 @@ impl Reference {
         let (answer_bytes, answer) = self.account_answer_bytes()?;
         let a = &answer["account"];
         let (plan, _) = self.plan(root)?;
-        if answer["outcome"] != "confirmed" || a["name"] != plan.short_name.as_str() || a["home"] != plan.home().as_str() {
+        if answer["outcome"] != "confirmed" || !is_planned(&plan, a) {
             bail!("The confirmed account is not the account planned for this VM; its host key is not pinned")
         }
         let account = super::macos_account::Account {

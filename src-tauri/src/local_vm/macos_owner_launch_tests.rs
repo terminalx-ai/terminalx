@@ -489,8 +489,8 @@ fn native_exit_or_lost_startup_announcement_is_recorded_without_replacement() {
 }
 
 /// Each trusted host request, as its route makes it.
-fn confirm(reference: &Reference, confirmation: &super::super::AccountConfirmation) -> Result<Value> {
-    reference.confirm_account(confirmation)
+fn confirm(f: &Fixture, reference: &Reference, confirmation: &super::super::AccountConfirmation) -> Result<Value> {
+    reference.confirm_account(&f.root, confirmation)
 }
 fn grant_key(reference: &Reference, root: &Path, utility: &Path) -> Result<Value> {
     reference.grant_guest_key_using(root, utility, Duration::from_secs(5))
@@ -647,17 +647,24 @@ fn native_only_a_confirmation_from_the_original_parent_is_relayed_once() {
         parent_conversation: reference.binding.parent_conversation.clone(),
     };
     let original = reference.binding.parent_session.clone();
-    assert!(confirm(&reference, &confirmation(observed["accounts"][0].clone(), &journal::new_id())).is_err(), "another parent");
-    assert!(confirm(&reference, &confirmation(account("ghost", 503), &original)).is_err(), "unobserved account");
+    assert!(confirm(&f, &reference, &confirmation(observed["accounts"][0].clone(), &journal::new_id())).is_err(), "another parent");
+    assert!(confirm(&f, &reference, &confirmation(account("ghost", 503), &original)).is_err(), "unobserved account");
+    // An observed account that is not the one planned at Create is refused
+    // too, before anything is recorded, so the planned one can still be chosen.
+    let unplanned = confirm(&f, &reference, &confirmation(observed["accounts"][1].clone(), &original)).unwrap_err();
+    assert!(format!("{unplanned:#}").contains("the account planned for this VM"), "{unplanned:#}");
+    let parents = json!({"parentSession": original, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation});
+    assert_eq!(super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0]["plannedAccount"], "personal");
     let mut unconfirmed = confirmation(observed["accounts"][0].clone(), &original);
     unconfirmed.confirm = false;
-    assert!(confirm(&reference, &unconfirmed).is_err());
+    assert!(confirm(&f, &reference, &unconfirmed).is_err());
     assert!(!f.op().join("account-confirmation.json").exists(), "refusals record nothing");
-    let relay = confirm(&reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap();
+    let relay = confirm(&f, &reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap();
     assert_eq!((relay["relayed"].as_bool(), relay["accountAuthenticated"].as_bool()), (Some(true), Some(false)));
     let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
-    assert_eq!(confirm(&reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap(), relay, "a retry relays the same record");
-    assert!(confirm(&reference, &confirmation(observed["accounts"][1].clone(), &original)).is_err(), "never re-chosen");
+    assert_eq!(confirm(&f, &reference, &confirmation(observed["accounts"][0].clone(), &original)).unwrap(), relay, "a retry relays the same record");
+    assert!(confirm(&f, &reference, &confirmation(observed["accounts"][1].clone(), &original)).is_err(), "never re-chosen");
     assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded);
     let answer = json!({"version": 1, "bindingDigest": digest, "ownerEpoch": reference.binding.owner_epoch,
         "confirmationSha256": journal::digest(&recorded), "account": observed["accounts"][0], "outcome": "confirmed",
@@ -705,14 +712,10 @@ fn replace(path: &Path, bytes: &[u8]) {
     let _ = std::fs::remove_file(path);
     private(path, bytes);
 }
-/// The owner's enrollment and the helper's account observation, then a
-/// confirmation of `personal` from the original parent. Returns the
-/// chosen account and the recorded confirmation.
-fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
-    choose(f, reference, 0)
-}
-/// As `confirmed_choice`, choosing the `pick`th reported account (`personal`, `other`).
-fn choose(f: &Fixture, reference: &Reference, pick: usize) -> (Value, Vec<u8>) {
+/// The owner's enrollment and the helper's account observation: `personal`,
+/// the account planned at Create, and `other`. Returns the observation and
+/// both accounts.
+fn observed_accounts(f: &Fixture, reference: &Reference) -> (Vec<u8>, [Value; 2]) {
     let digest = journal::digest(&reference.raw);
     let (receipt, receipt_digest) = crate::local_vm::macos_seed::seeded(&f.root, &f.key).unwrap();
     private(&f.op().join("enrollment.json"), &canonical(&json!({"version":2,"bindingDigest":digest,"ownerEpoch":reference.binding.owner_epoch,
@@ -724,13 +727,22 @@ fn choose(f: &Fixture, reference: &Reference, pick: usize) -> (Value, Vec<u8>) {
         "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501), account("other", 502)], "helperAuthenticated": true,
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     private(&f.op().join("account-observation.json"), &observation);
-    let chosen = [account("personal", 501), account("other", 502)][pick].clone();
-    confirm(reference, &super::super::AccountConfirmation {
-        confirm: true, observation_sha256: journal::digest(&observation), account: chosen.clone(),
+    (observation, [account("personal", 501), account("other", 502)])
+}
+/// A request from the original parent to confirm `account` of `observation`.
+fn choice(reference: &Reference, observation: &[u8], account: &Value) -> super::super::AccountConfirmation {
+    super::super::AccountConfirmation {
+        confirm: true, observation_sha256: journal::digest(observation), account: account.clone(),
         parent_session: reference.binding.parent_session.clone(), parent_tab: reference.binding.parent_tab.clone(),
         parent_conversation: reference.binding.parent_conversation.clone(),
-    }).unwrap();
-    (chosen, std::fs::read(f.op().join("account-confirmation.json")).unwrap())
+    }
+}
+/// `observed_accounts`, then a confirmation of `personal` from the original
+/// parent. Returns the chosen account and the recorded confirmation.
+fn confirmed_choice(f: &Fixture, reference: &Reference) -> (Value, Vec<u8>) {
+    let (observation, [personal, _]) = observed_accounts(f, reference);
+    confirm(f, reference, &choice(reference, &observation, &personal)).unwrap();
+    (personal, std::fs::read(f.op().join("account-confirmation.json")).unwrap())
 }
 fn answer(reference: &Reference, recorded: &[u8], account: &Value, outcome: &str) -> Vec<u8> {
     canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw), "ownerEpoch": reference.binding.owner_epoch,
@@ -853,12 +865,12 @@ fn native_an_interrupted_key_creation_is_pending_and_never_repeated_or_granted()
 }
 
 /// Through the produced grant and the helper's own `publicKeyInstalled`.
-fn installed(f: &Fixture, pick: usize) -> (Reference, Vec<u8>) {
+fn installed(f: &Fixture) -> (Reference, Vec<u8>) {
     seed(f);
     assert_eq!(f.run().unwrap()["stage"], "originalOwnerConnected");
     let reference = Reference::reopen(&f.op()).unwrap();
     let (utility, _) = producer(f, 7);
-    let (account, recorded) = choose(f, &reference, pick);
+    let (account, recorded) = confirmed_choice(f, &reference);
     private(&f.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &account, "confirmed"));
     let relay = grant_key(&reference, &f.root, &utility).unwrap();
     let grant = std::fs::read(f.op().join("key-grant.json")).unwrap();
@@ -895,7 +907,7 @@ fn host_key_confirmation(reference: &Reference, observation: &[u8], fingerprint:
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
 fn native_a_pin_request_pins_only_the_owner_observed_host_key_once_and_a_changed_key_is_never_pinned() {
     let f = Fixture::new();
-    let (reference, result) = installed(&f, 0);
+    let (reference, result) = installed(&f);
     let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
         "parentConversation": reference.binding.parent_conversation});
     let status = || super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0]["hostKey"].clone();
@@ -952,7 +964,12 @@ fn native_a_pin_request_pins_only_the_owner_observed_host_key_once_and_a_changed
     let target: crate::local_vm::macos_personalization::Target = serde_json::from_value(record["intent"]["target"].clone()).unwrap();
     let retained = crate::local_vm::macos_personalization::retained(&f.root, &f.key, &target).unwrap();
     assert_eq!((retained.trust.host_key.as_str(), retained.account.account.short_name.as_str()), (host_key.as_str(), "personal"));
-    let plan = crate::local_vm::macos_personalization::ssh_plan(&f.root, &f.key, &target, "192.168.64.7".parse().unwrap(), &"c".repeat(64), "status", json!({})).unwrap();
+    // The route alone: no runtime was installed from this root yet, so it holds
+    // no host key, and a guest request, which must carry it, cannot be built.
+    let plan = crate::local_vm::macos_personalization::ssh_route(&f.root, &f.key, &target, "192.168.64.7".parse().unwrap()).unwrap();
+    let unkeyed = crate::local_vm::macos_personalization::ssh_plan(&f.root, &f.key, &target, "192.168.64.7".parse().unwrap(),
+        &"c".repeat(64), "status", json!({})).err().unwrap();
+    assert!(format!("{unkeyed:#}").contains("installed without a host key"), "{unkeyed:#}");
     assert!(plan.known_hosts.ends_with(&format!(" {host_key}\n")) && plan.known_hosts.lines().count() == 1);
     assert!(plan.args.iter().any(|a| a == "StrictHostKeyChecking=yes") && !plan.args.iter().any(|a| a.contains("accept-new") || a.contains("StrictHostKeyChecking=no")));
     assert!(plan.args.iter().any(|a| a.ends_with(&format!("{}/private_key", record["intent"]["account"]["sshKeyReference"].as_str().unwrap()))),
@@ -990,7 +1007,7 @@ fn native_a_pin_request_pins_only_the_owner_observed_host_key_once_and_a_changed
 /// Through the pin of the owner-observed host key, with the real
 /// version-3 key, grant and confirmation records. Returns the pinned host key.
 fn pinned(f: &Fixture) -> String {
-    let (reference, result) = installed(f, 0);
+    let (reference, result) = installed(f);
     let (observation, host_key) = host_key_observation(f, &reference, &result, 9);
     let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
     pin(&reference, &f.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap();
@@ -1155,7 +1172,7 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 #[ignore = "Requires explicitly compiled synthetic native owner fixture"]
 fn native_retirement_shows_only_the_helpers_unverified_report_for_this_session_and_observation() {
     let f = Fixture::new();
-    let (reference, result) = installed(&f, 0);
+    let (reference, result) = installed(&f);
     let parents = json!({"parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
         "parentConversation": reference.binding.parent_conversation});
     let bootstrap = || super::super::confirmations_in(&f.root.join("bo"), &parents).unwrap()["bootstraps"][0].clone();
@@ -1264,14 +1281,34 @@ fn native_no_host_key_is_pinned_before_the_helpers_install_or_for_an_unplanned_a
     assert!(!f.op().join("host-key-confirmation.json").exists());
     drop(reference);
 
-    // `other` was confirmed, not the account planned at Create.
+    // `other` is not the account planned at Create. It is refused at the
+    // first step, so nothing is recorded: the VM is not stranded on a choice
+    // that could never be pinned.
     let g = Fixture::new();
-    let (reference, result) = installed(&g, 1);
-    let (observation, host_key) = host_key_observation(&g, &reference, &result, 9);
-    let fingerprint = crate::local_vm::macos_personalization::public_key(&host_key).unwrap();
-    let error = pin(&reference, &g.root, &host_key_confirmation(&reference, &observation, &fingerprint)).unwrap_err();
+    seed(&g);
+    assert_eq!(g.run().unwrap()["stage"], "originalOwnerConnected");
+    let reference = Reference::reopen(&g.op()).unwrap();
+    let (utility, _) = producer(&g, 7);
+    let (observation, [personal, other]) = observed_accounts(&g, &reference);
+    let error = confirm(&g, &reference, &choice(&reference, &observation, &other)).unwrap_err();
+    assert!(format!("{error:#}").contains("the account planned for this VM"), "{error:#}");
+    assert!(!g.op().join("account-confirmation.json").exists());
+    // A record of that choice from before this check, even one the helper
+    // acknowledged, gets no key: the VM's one key is for the planned account.
+    let recorded = canonical(&json!({"version": 1, "bindingDigest": journal::digest(&reference.raw),
+        "ownerEpoch": reference.binding.owner_epoch, "observationSha256": journal::digest(&observation),
+        "account": other, "parentSession": reference.binding.parent_session, "parentTab": reference.binding.parent_tab,
+        "parentConversation": reference.binding.parent_conversation, "confirmationId": journal::new_id()})).unwrap();
+    private(&g.op().join("account-confirmation.json"), &recorded);
+    private(&g.op().join("account-confirmation-answer.json"), &answer(&reference, &recorded, &other, "confirmed"));
+    let error = grant_key(&reference, &g.root, &utility).unwrap_err();
     assert!(format!("{error:#}").contains("not the account planned"), "{error:#}");
-    assert!(!g.op().join("host-key-confirmation.json").exists());
+    assert_eq!(generations(&g), 0, "no key is created for an unplanned account");
+    assert!(!g.op().join("key-intent.json").exists() && !g.op().join("key-grant.json").exists());
+    assert!(!g.root.join("macos-personalization-keys").exists());
+    // That earlier record stays the VM's one choice; it is never replaced.
+    assert!(confirm(&g, &reference, &choice(&reference, &observation, &personal)).is_err());
+    assert_eq!(std::fs::read(g.op().join("account-confirmation.json")).unwrap(), recorded);
 }
 
 #[test]
@@ -1305,7 +1342,7 @@ fn native_a_host_request_binds_only_current_evidence_and_a_lost_reply_never_repe
         "challengeSha256": "c".repeat(64), "accounts": [account("personal", 501)], "helperAuthenticated": true,
         "accountAuthenticated": false, "trustAccepted": false, "ready": false})).unwrap();
     replace(&f.op().join("account-observation.json"), &changed);
-    assert!(confirm(&reference, &stale).is_err(), "request for evidence that changed");
+    assert!(confirm(&f, &reference, &stale).is_err(), "request for evidence that changed");
     assert!(nothing_recorded());
     // An approval-shaped field is not part of the request and grants nothing.
     let raw = json!({"confirm": true, "observationSha256": journal::digest(&changed), "account": account("personal", 501),
@@ -1315,13 +1352,13 @@ fn native_a_host_request_binds_only_current_evidence_and_a_lost_reply_never_repe
 
     // A lost reply: the identical request returns the one recorded effect.
     let mut current = super::super::AccountConfirmation { observation_sha256: journal::digest(&changed), ..stale };
-    let relay = confirm(&reference, &current).unwrap();
+    let relay = confirm(&f, &reference, &current).unwrap();
     let recorded = std::fs::read(f.op().join("account-confirmation.json")).unwrap();
-    assert_eq!(confirm(&reference, &current).unwrap(), relay, "lost reply");
+    assert_eq!(confirm(&f, &reference, &current).unwrap(), relay, "lost reply");
     assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded, "one record");
     // Anything else for this VM afterwards is refused, never re-chosen.
     current.account = account("other", 502);
-    assert!(confirm(&reference, &current).is_err());
+    assert!(confirm(&f, &reference, &current).is_err());
     assert_eq!(std::fs::read(f.op().join("account-confirmation.json")).unwrap(), recorded);
     assert!(!std::fs::read_dir(f.op()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("approval-")),
         "no approval record is written or claimed");

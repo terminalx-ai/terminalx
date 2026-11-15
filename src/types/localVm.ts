@@ -345,6 +345,10 @@ export interface LocalVmGuestAccountStatus {
   idempotencyKey: string;
   observationSha256: string | null;
   accounts: LocalVmGuestAccount[];
+  /** The short name of the account this VM was prepared for at Create: the
+   *  only reported account the host will confirm. Null when the host cannot
+   *  read that preparation, and then none can be confirmed. */
+  plannedAccount?: string | null;
   detail?: string;
   chosen?: LocalVmGuestAccount | null;
   answer?: { outcome: "confirmed" | "refused"; accountAuthenticated: boolean; account: LocalVmGuestAccount } | null;
