@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { Send, Square, Users } from "lucide-react-native";
+import { Play, Send, Square, SquareDashed, Users } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
@@ -134,7 +134,7 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} />
       : <View style={styles.flex}>
         <View style={styles.flex}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
-          : stopped || starting ? <EmptyState title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
+          : stopped || starting ? <EmptyState icon={(color) => <SquareDashed size={28} color={color} />} title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
         {startBarShown(listedState, starting) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
@@ -178,7 +178,7 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
       {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
     </View>
-    {mayStart ? <Button label={changing ? "Starting…" : "Start"} disabled={changing} onPress={start} style={styles.startButton} /> : null}
+    {mayStart ? <Button label={changing ? "Starting…" : "Start"} icon={changing ? undefined : (color) => <Play size={16} color={color} />} disabled={changing} onPress={start} style={styles.startButton} /> : null}
   </View>;
 }
 

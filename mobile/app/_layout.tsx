@@ -1,6 +1,6 @@
 import "react-native-gesture-handler";
-import { useEffect } from "react";
-import { Stack, useRouter, type Href } from "expo-router";
+import { useEffect, useRef } from "react";
+import { Stack, useRootNavigationState, useRouter, type Href } from "expo-router";
 import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { Platform, Settings, useColorScheme } from "react-native";
@@ -27,9 +27,14 @@ function Navigation() {
   // A screen to open at launch, as a link would but without iOS asking first:
   // `xcrun simctl launch booted <bundle id> -openRoute /cloud`, for screenshots
   // and checks on a simulator. iOS keeps a launch argument for that launch only.
+  // It waits for the navigator, or a pushed workspace is lost and only its tab is shown.
+  const navigationReady = Boolean(useRootNavigationState()?.key);
+  const opened = useRef(false);
   useEffect(() => {
+    if (!navigationReady || opened.current) return;
+    opened.current = true;
     const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;
     if (typeof route === "string" && route.startsWith("/")) router.push(route as Href);
-  }, [router]);
+  }, [navigationReady, router]);
   return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /></Stack></>;
 }
