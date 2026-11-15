@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn(), delivery: vi.fn(), create: vi.fn(), quick: vi.fn(), archive: vi.fn(), upsert: vi.fn(), select: vi.fn(), pipelineLaunch: vi.fn(), workspaces: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list, createSession: mocks.create, createQuickChat: mocks.quick, listWorkspaces: mocks.workspaces }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String, onPromptDelivery: mocks.delivery }));
-vi.mock("@/lib/sessions", () => ({ addTab: mocks.add, archiveSession: mocks.archive, upsertSession: mocks.upsert, selectSession: mocks.select }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn(), pipeline: vi.fn(), delivery: vi.fn(), create: vi.fn(), quick: vi.fn(), archive: vi.fn(), upsert: vi.fn(), select: vi.fn(), pipelineLaunch: vi.fn(), workspaces: vi.fn(), apiAddTab: vi.fn(), patch: vi.fn(), selectAgent: vi.fn(), store: { sessions: [] as { id: string; tabs: TabEntry[] }[] } }));
+vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list, createSession: mocks.create, createQuickChat: mocks.quick, listWorkspaces: mocks.workspaces, addTab: mocks.apiAddTab }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String, onPromptDelivery: mocks.delivery }));
+vi.mock("@/lib/sessions", () => ({ addTab: mocks.add, archiveSession: mocks.archive, upsertSession: mocks.upsert, selectSession: mocks.select, patchSession: mocks.patch, getSessionStore: () => mocks.store }));
+vi.mock("@/lib/terminal", () => ({ setSelectedAgent: mocks.selectAgent }));
 vi.mock("@/lib/pipelineLaunch", () => ({ preparePipelineContinuation: mocks.pipeline, preparePipelineLaunch: mocks.pipelineLaunch }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: mocks.apply }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-default" }, lastEffort: { codex: "high" }, lastMode: "default" }) }));
@@ -392,5 +393,47 @@ describe("containing project resolution", () => {
     expect(continuationDefaultProject({ kind: "quick" } as SessionEntry, "/external/work/sub", workspaces)).toBe("/repo");
     expect(continuationDefaultProject({ kind: "quick" } as SessionEntry, "/scratch", workspaces)).toBeNull();
     expect(continuationDefaultProject({ projectPath: "/attached" } as SessionEntry, "/external/work/sub", workspaces)).toBe("/attached");
+  });
+});
+
+// #980: a handoff starts on the account chosen in its form, and names none without one.
+describe("the account a handoff starts on", () => {
+  const WORK = "0123456789abcdef";
+  const session = { id: "made", tabs: [tab] } as unknown as SessionEntry;
+  beforeEach(() => {
+    mocks.create.mockResolvedValue(session);
+    mocks.quick.mockResolvedValue(session);
+    mocks.apiAddTab.mockResolvedValue(tab);
+    mocks.store.sessions = [{ id: context.sessionId, tabs: [{ id: "source" } as TabEntry] }];
+  });
+
+  it("names none when no account was chosen, as before accounts", async () => {
+    await launchContinuation(context, codex, "Continue", vi.fn());
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith(context.sessionId, "codex", "codex-model", "medium", "acceptEdits");
+    expect(mocks.apiAddTab).not.toHaveBeenCalled();
+    await moveChatToProject({ id: "chat", title: "Chat" }, { projectPath: "/repo", worktree: true }, codex, "Continue", vi.fn());
+    expect(mocks.create.mock.calls[0][0]).not.toHaveProperty("account");
+    expect(mocks.create.mock.calls[0][0].tab).toEqual(codex);
+  });
+
+  it("adds a tab to the same session on the chosen account, and shows it as any new tab", async () => {
+    const created = vi.fn();
+    const result = await launchContinuation(context, { ...codex, account: WORK }, "Continue", created);
+    expect(result.stage).toBe("delivered");
+    expect(mocks.add).not.toHaveBeenCalled();
+    expect(mocks.apiAddTab).toHaveBeenCalledExactlyOnceWith(context.sessionId, { harness: "codex", model: "codex-model", effort: "medium", permissionMode: "acceptEdits" }, WORK);
+    expect(mocks.patch).toHaveBeenCalledExactlyOnceWith(context.sessionId, { tabs: [{ id: "source" }, tab], activeTab: tab.id });
+    expect(mocks.selectAgent).toHaveBeenCalledExactlyOnceWith(context.sessionId, tab.id);
+    expect(created).toHaveBeenCalledWith({ sessionId: context.sessionId, tab });
+  });
+
+  it("starts a new session in a project, or a quick chat, on the chosen account beside its tab", async () => {
+    await moveChatToProject({ id: "chat", title: "Chat" }, { projectPath: "/repo", worktree: true }, { ...codex, account: WORK }, "Continue", vi.fn());
+    expect(mocks.create.mock.calls[0][0]).toMatchObject({ projectPath: "/repo", account: WORK, tab: codex });
+    expect(mocks.create.mock.calls[0][0].tab).not.toHaveProperty("account");
+    await launchContinuationInDestination(context, { projectPath: "/other", worktree: false }, { ...codex, account: WORK }, "Continue", vi.fn());
+    expect(mocks.create.mock.calls[1][0]).toMatchObject({ projectPath: "/other", account: WORK, tab: codex });
+    await launchContinuationInDestination(context, null, { ...codex, account: WORK }, "Continue", vi.fn());
+    expect(mocks.quick).toHaveBeenCalledExactlyOnceWith({ title: context.title, tab: codex, account: WORK });
   });
 });

@@ -263,8 +263,9 @@ export function IssuesView({
   // read from a running workspace while an issue is open, where they are chosen: browsing the list keeps nothing up.
   const cloudPlan = cloud?.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && selected ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
-  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
-  const { harness, modelId, effort, mode } = agentSelection;
+  // The project's default account comes first (#980); a cloud workspace has its own logins.
+  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient, undefined, undefined, cloud ? null : projectPath);
+  const { harness, modelId, effort, mode, accountId } = agentSelection;
   const pipelineLaunch = usePipelineLaunch(projectPath, pipelineDefaults, !cloud && !pipelineOffered ? "Start on a worktree branch to automate this session." : undefined, cloud ? "Cloud workspaces require a person to merge." : undefined, "issue");
   const [startNote, setStartNote] = useState<string | null>(null);
   const linkedIssueUrls = useMemo(
@@ -531,6 +532,8 @@ export function IssuesView({
           effort,
           permissionMode: mode,
         },
+        // Only with several accounts does the start name one.
+        ...(accountId ? { account: accountId } : {}),
       });
       upsertSession(s);
       // The pipeline starts with the session, and tells the author how to hand

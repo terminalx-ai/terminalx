@@ -150,8 +150,11 @@ export function NewSessionView({
   // Only the agents that are installed and whose local login was found just now: a guess is not "signed in".
   const signedIn = cloud ? [] : harnesses.filter((item) => item.available && readiness.values?.[item.id]?.state === "ready");
   const setupCommand = !projectless && !cloud ? setupScriptSummary(project?.scripts?.setup) : null;
-  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values);
-  const { harness, modelId, effort, mode } = agentSelection;
+  // A project's own default account comes first (#980); a chat has none.
+  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values, projectless || cloud ? null : project?.path ?? null);
+  const { harness, modelId, effort, mode, accountId } = agentSelection;
+  // Only with several accounts does a start name one; with one, the request is as it always was.
+  const onAccount = accountId ? { account: accountId } : {};
   const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
     projectless ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
@@ -359,7 +362,7 @@ export function NewSessionView({
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
       const files = attach.files;
-      const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
+      const s = await (quick ? createQuickChat : createChat)({ title, cwd: quickCwd, ...(store.newSessionSectionId ? { sectionId: store.newSessionSectionId } : {}), tab: { harness: harness.id, model: modelId, effort, permissionMode: mode }, ...onAccount });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -407,6 +410,7 @@ export function NewSessionView({
         baseRef: !preset?.cwd && useWorktree ? preset?.fromBranch ?? null : null,
         cwd: preset?.cwd ?? null,
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
+        ...onAccount,
         // Any run it leads waits for the person's Approve, whatever the project's setting.
         ...(orchestrate ? { orchestrate: true } : {}),
       });
