@@ -56,7 +56,7 @@ pub struct InspectedMachineCode {
 
 /// `MachinePairResult`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all_fields = "camelCase")]
 pub enum MachinePairResult {
     Paired { paired: bool, machine: PairedMachine },
     NotPaired { paired: bool, reason: &'static str, message: String },

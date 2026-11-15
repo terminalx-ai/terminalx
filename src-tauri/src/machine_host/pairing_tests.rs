@@ -190,7 +190,8 @@ async fn a_computer_pairs_by_code_once_the_machine_allows_it() {
     let pending = eventually("a computer waits for Allow", || rig.host.status().pending).await;
     assert_eq!(pending.fingerprint, inspected.fingerprint, "both screens show one fingerprint");
     assert_eq!(pending.transport, "direct");
-    assert_eq!(pending.platform.as_deref(), Some("macos"));
+    // The operating computer names the system it runs on: macOS here, Linux on CI.
+    assert_eq!(pending.platform.as_deref(), Some(std::env::consts::OS));
     assert!(rig.host.registry().list().unwrap().is_empty(), "nothing is written before Allow");
 
     // Another computer with the same code is refused; the same computer's
