@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::pairing::{Asking, Decision, Outcome};
 use super::registry::token_hash;
 use super::MachineHost;
-use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH, REFUSED_NOT_APPROVED};
+use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
 use crate::relay_e2ee::{begin_e2ee_session, E2eeHello, PayloadKind};
 use crate::remote::protocol::Authority;
 use crate::remote::server::{Peer, WorkspaceRpc};
@@ -294,7 +294,11 @@ async fn gave_up<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungsteni
     while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = socket.next().await {}
 }
 
-/// `pairing_refused`, sealed, then the socket closes.
+/// `pairing_refused`, sealed, then the socket closes. A token this machine
+/// does not know (`code-inactive`) may be a revoked computer's as well as a
+/// spent code's, so that close is `4401`, "Access removed", as a refused
+/// credential's always was: a computer that was connecting stops retrying,
+/// and one that was pairing has read the reason first.
 async fn refuse_pairing<S: AsyncRead + AsyncWrite + Unpin>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
     session: &mut crate::relay_e2ee::E2eeSession,
@@ -302,7 +306,11 @@ async fn refuse_pairing<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<()> {
     let refused = json!({ "type": "pairing_refused", "v": 1, "reason": reason });
     let _ = crate::remote::host::send_sealed(socket, session, &refused).await;
-    let _ = socket.close(None).await;
+    if reason == REFUSED_CODE_INACTIVE {
+        refuse(socket).await;
+    } else {
+        let _ = socket.close(None).await;
+    }
     bail!("pairing refused ({reason})")
 }
 

@@ -941,7 +941,10 @@ beside `deviceToken`. The machine host reads them; the phone host never sees the
    client key share the request; one with another key gets
    `pairing_refused` `another-computer`.
 4. An expired, used or ended code's token, or one that matches nothing, is a
-   wrong attempt: `pairing_refused` `code-inactive`.
+   wrong attempt: `pairing_refused` `code-inactive`, then close `4401`. The
+   machine cannot tell a revoked computer's token from a spent code's, so a
+   computer that was connecting sees "Access removed" (Connect, step 2) and
+   one that was pairing has read the reason first.
 
 `pairing_refused` is `{"type":"pairing_refused","v":1,"reason":…}`, sealed,
 then the socket closes. **Allow** writes the paired computer (token hash,
