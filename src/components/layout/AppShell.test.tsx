@@ -115,7 +115,13 @@ const mirrorApi = vi.hoisted(() => ({
   cloudMirrorStatus: vi.fn(),
   cloudMirrorClaimOwner: vi.fn(),
 }));
-vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() }, api: mirrorApi }));
+// The machine approval host (PRO-342) reads the machine host on mount; with no
+// `invoke` here that read fails, and the store reports it with the real errorMessage.
+vi.mock("@/lib/api", async (importOriginal) => ({
+  agent: { send: vi.fn() },
+  api: mirrorApi,
+  errorMessage: (await importOriginal<typeof import("@/lib/api")>()).errorMessage,
+}));
 const { bootCloudSessions } = vi.hoisted(() => ({ bootCloudSessions: vi.fn() }));
 vi.mock("@/lib/cloudSessions", () => ({ bootCloudSessions }));
 // The workspace connections other surfaces open; a test announces one as the connection layer would.

@@ -1,5 +1,7 @@
-//! The code a person compares on the Mac and on the phone before approving a
-//! pairing (docs/PAIRING-APPROVAL.md, PRO-314).
+//! The code a person compares on both screens before approving a pairing:
+//! a phone's (docs/PAIRING-APPROVAL.md, PRO-314) or an operating computer's
+//! (docs/MACHINES.md decision 5). Both builds compile it: the runtime's
+//! machine host shows it too.
 //!
 //! Both sides already hold every input before the Mac answers `e2ee_auth`: the
 //! host key and the one-time device token are in the pairing offer, and the

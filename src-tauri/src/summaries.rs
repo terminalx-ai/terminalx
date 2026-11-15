@@ -298,7 +298,7 @@ pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> 
             .and_then(|path| cached_first_request(&path, tab.follow.conversation.as_deref()))
             .unwrap_or_default();
         let agent_title = (tab.harness == "claude")
-            .then(|| tab.provider_session_id.as_deref())
+            .then_some(tab.provider_session_id.as_deref())
             .flatten()
             .and_then(|id| crate::harness::claude::transcript::locate(&session.cwd, id))
             .and_then(|path| cached_agent_title(&path));
