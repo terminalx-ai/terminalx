@@ -2,6 +2,13 @@
 //! host checkout or a cloud organization. The supervisor, rather than a view,
 //! owns this journal; deleting a VM must not delete it.
 
+/// Where the macOS setup's fixtures make their directories: short, because
+/// they hold Unix socket paths, and already canonical, because the paths are
+/// compared after canonicalization. `/tmp` is a link on macOS, so its target
+/// is named there; these tests also run on Linux, which has no `/private`.
+#[cfg(test)]
+pub(crate) const TEST_TEMP: &str = if cfg!(target_os = "macos") { "/private/tmp" } else { "/tmp" };
+
 pub mod desktop;
 pub mod bootstrap;
 mod creation;

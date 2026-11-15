@@ -165,7 +165,7 @@ mod tests {
     use super::*;
     #[test]
     fn host_plan_writer_has_no_guest_observations_and_never_replaces_intent() {
-        let temp = tempfile::tempdir_in("/private/tmp").unwrap();
+        let temp = tempfile::tempdir_in(crate::local_vm::TEST_TEMP).unwrap();
         let path = temp.path().canonicalize().unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();

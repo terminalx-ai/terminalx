@@ -31,7 +31,7 @@ impl Fixture {
     fn new(binary: Option<&Path>) -> Self {
         let temp = tempfile::Builder::new()
             .prefix("txo-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(crate::local_vm::TEST_TEMP)
             .unwrap();
         let base = temp.path().canonicalize().unwrap();
         std::fs::set_permissions(&base, Permissions::from_mode(0o700)).unwrap();

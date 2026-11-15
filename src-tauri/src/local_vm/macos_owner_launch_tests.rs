@@ -30,7 +30,7 @@ impl Fixture {
         let bytes = std::fs::read(binary).unwrap();
         let temp = tempfile::Builder::new()
             .prefix("txl")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(crate::local_vm::TEST_TEMP)
             .unwrap();
         let root = temp.path().canonicalize().unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();

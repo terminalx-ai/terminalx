@@ -27,7 +27,7 @@ fn binding(account: &str) -> Value {
 }
 impl Claim {
     fn new() -> Self {
-        let temp = tempfile::Builder::new().prefix("txk").tempdir_in("/private/tmp").unwrap();
+        let temp = tempfile::Builder::new().prefix("txk").tempdir_in(crate::local_vm::TEST_TEMP).unwrap();
         let base = temp.path().canonicalize().unwrap();
         let (keys, journal) = (base.join("root"), base.join("bo"));
         for dir in [&keys, &journal] {
