@@ -44,6 +44,7 @@ import {
   Search,
   Settings,
   Smartphone,
+  Laptop,
   Sparkles,
   Sun,
   Terminal,
@@ -140,6 +141,7 @@ const GROUP_CAPS: Record<string, number> = {
 const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   account: User,
   devices: Smartphone,
+  machines: Laptop,
   general: Settings,
   appearance: Palette,
   agents: Bot,

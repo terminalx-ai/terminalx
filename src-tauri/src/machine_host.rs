@@ -10,7 +10,10 @@
 
 pub(crate) mod direct;
 pub(crate) mod key;
+pub(crate) mod pairing;
 pub mod registry;
+#[cfg(all(test, feature = "desktop"))]
+mod pairing_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::control::ControlError;
 use crate::machine_wire::{self as wire, ComputerSummary, HostKeyState, Status};
+use self::pairing::{Asking, Decision, Pairing};
 use crate::relay_e2ee::HostKeypair;
 use crate::remote::server::WorkspaceRpc;
 use crate::sink::EventSink;
@@ -42,6 +46,10 @@ const SETTINGS_EVERY: u32 = 15;
 
 /// Held while a computer is connected and `pairing.keepAwake` is on.
 pub const COMPUTER_CONNECTED: crate::power::Reason = crate::power::Reason::new("A computer is operating this Mac through TerminalX");
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
 
 /// Make `path` a directory only this user can enter, or check that it is one.
 pub(crate) fn private_dir(path: &Path) -> Result<()> {
@@ -106,6 +114,8 @@ struct State {
     phones: HashMap<u64, mpsc::UnboundedSender<()>>,
     awake: Option<crate::power::Assertion>,
     last: Option<Status>,
+    /// The live code, the computer waiting for Allow, the attempt limit.
+    pairing: Pairing,
 }
 
 pub struct MachineHost {
@@ -269,6 +279,7 @@ impl MachineHost {
         // A key in error or a port it cannot bind leaves the window serving
         // phones on the port; a port still in use is the window's to give up.
         let takes_port = state.enabled && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
+        let (pending, code, paused_until) = state.pairing.view(now_ms());
         Status {
             enabled: state.enabled,
             host_key,
@@ -278,6 +289,9 @@ impl MachineHost {
             phone_route: state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()),
             computers,
             error,
+            pending,
+            code,
+            paused_until,
         }
     }
 
@@ -331,6 +345,8 @@ impl MachineHost {
             if state.phone_route.as_ref().is_some_and(|route| !route.attachment.valid()) {
                 state.phone_route = None;
             }
+            // A code or a request that ran out leaves the status at once.
+            state.pairing.tick(now_ms());
             (was, enabled)
         };
         let (was, enabled) = was;
@@ -356,6 +372,7 @@ impl MachineHost {
             listening.stop();
         }
         state.bind_error = None;
+        state.pairing.end(wire::REFUSED_CODE_INACTIVE);
         for (_, connections) in state.connections.drain() {
             for (_, cancel) in connections {
                 let _ = cancel.send(());
@@ -512,6 +529,185 @@ impl MachineHost {
             .map_err(|error| ControlError::new("attachment_expired", format!("{error:#}"), Some("Attach again, then repeat.".into())))
     }
 
+    /// Remove a paired computer, then close its connections: one admitted
+    /// meanwhile finds its record gone (`admit`). Whether it was paired.
+    pub fn revoke(&self, id: &str) -> Result<bool> {
+        let removed = self.registry.remove(id)?;
+        for (_, cancel) in self.state.lock().unwrap().connections.remove(id).unwrap_or_default() {
+            let _ = cancel.send(());
+        }
+        self.wake.notify_one();
+        Ok(removed)
+    }
+
+    /// A host that serves on `port` (0: any) with `keypair`, the switch on,
+    /// and no settings watcher: for in-process tests over a real socket.
+    #[cfg(test)]
+    pub(crate) fn serving_for_test(data_dir: &Path, rpc: Arc<WorkspaceRpc>, keypair: HostKeypair, approval_ttl_ms: i64) -> Result<Arc<Self>> {
+        let host = Arc::new(Self {
+            data_dir: data_dir.to_path_buf(),
+            keys: key::KeyStore::for_runtime(data_dir),
+            registry: registry::Registry::in_data_dir(data_dir),
+            sink: Arc::new(crate::sink::BroadcastSink::new(8)),
+            rpc: Mutex::new(Rpc::Ready(rpc.clone())),
+            state: Mutex::new(State { allowed: true, enabled: true, keypair: Some(keypair), pairing: Pairing::with_approval_ttl(approval_ttl_ms), ..State::default() }),
+            lifetime: None,
+            port: 0,
+            wake: Notify::new(),
+            settings_changed: Notify::new(),
+            next_connection: std::sync::atomic::AtomicU64::new(1),
+        });
+        let listening = direct::listen(host.clone(), rpc, 0)?;
+        host.state.lock().unwrap().listening = Some(listening);
+        Ok(host)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn port_for_test(&self) -> u16 {
+        self.state.lock().unwrap().listening.as_ref().expect("listening").address.port()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_code_for_test(&self) {
+        self.state.lock().unwrap().pairing.expire_code_for_test(now_ms());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_for_test(&self) {
+        self.stop_serving();
+    }
+
+    /// A new pairing code (docs/MACHINES.md, "As built (PRO-342)"). The
+    /// code is answered to the caller only: never logged, never in the status.
+    pub fn create_code(&self) -> Result<wire::CreatedCode, ControlError> {
+        let (public_key_b64, machine_id, port) = {
+            let state = self.state.lock().unwrap();
+            let not_enabled = |message: &str| ControlError::new("not_enabled", message, Some("Turn on \"Let other computers operate this Mac\".".into()));
+            if !state.enabled {
+                return Err(not_enabled("Other computers may not operate this machine now."));
+            }
+            let keypair = state.keypair.as_ref().ok_or_else(|| not_enabled("The machine's host key is not ready yet."))?;
+            let listening = state.listening.as_ref().ok_or_else(|| not_enabled("The machine is not listening for computers yet."))?;
+            (keypair.public_key_b64(), keypair.host_id(), listening.address.port())
+        };
+        // Read before the code exists, so it is not shortened by slow commands.
+        let machine = self.identity(&machine_id);
+        let endpoints = crate::direct_endpoints::machine_endpoints(port, wire::MACHINE_PATH);
+        let (token, expires_at) = {
+            let mut state = self.state.lock().unwrap();
+            match state.pairing.create(now_ms()) {
+                Ok(created) => created,
+                Err(until) => {
+                    let mut paused = ControlError::new("pairing_paused", "Too many wrong pairing attempts. Try again in a minute.", None::<String>);
+                    paused.details = Some(json!({ "pausedUntil": until }));
+                    return Err(paused);
+                }
+            }
+        };
+        let code = wire::MachineCode::new(token, public_key_b64, machine, endpoints, expires_at).encode().map_err(ControlError::internal)?;
+        self.wake.notify_one();
+        Ok(wire::CreatedCode { code, expires_at })
+    }
+
+    /// What `machine.describe` says of this machine.
+    fn identity(&self, machine_id: &str) -> wire::MachineIdentity {
+        let has_window = std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1");
+        let described = crate::remote::machine::describe(&crate::remote::machine::Identity { machine_id: machine_id.into(), has_window });
+        wire::MachineIdentity {
+            machine_id: machine_id.into(),
+            name: described["name"].as_str().unwrap_or(crate::machine_name::UNNAMED_HOST).chars().take(80).collect(),
+            os: wire::MachineOs {
+                family: described["os"]["family"].as_str().unwrap_or(std::env::consts::OS).into(),
+                version: described["os"]["version"].as_str().map(str::to_string),
+            },
+            version: described["version"].as_str().unwrap_or(env!("CARGO_PKG_VERSION")).into(),
+        }
+    }
+
+    /// Allow: write the paired computer, then spend the code and let the
+    /// waiting connection in. Blocking: writes the registry.
+    pub fn approve(&self, request_id: &str) -> Result<(), ControlError> {
+        let not_found = || ControlError::new("not_found", "No computer is waiting for that approval.", None::<String>);
+        let approving = self.state.lock().unwrap().pairing.approving(request_id, now_ms()).ok_or_else(not_found)?;
+        let now = now_ms();
+        // Paired again from the same computer: the same record, a new token.
+        let existing = self.registry.list().map_err(ControlError::internal)?.into_iter().find(|computer| computer.client_public_key_b64.as_deref() == Some(approving.client_key_b64.as_str()));
+        let id = existing.as_ref().map(|computer| computer.id.clone()).unwrap_or_else(|| format!("computer-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]));
+        let computer = registry::PairedComputer {
+            id: id.clone(),
+            token_hash: approving.token_hash,
+            label: approving.label,
+            platform: approving.platform,
+            client_public_key_b64: Some(approving.client_key_b64),
+            fingerprint: Some(approving.fingerprint),
+            approved_at: now,
+            last_seen_at: None,
+            relay_device_id: existing.as_ref().and_then(|computer| computer.relay_device_id.clone()),
+            other: existing.map(|computer| computer.other).unwrap_or_default(),
+        };
+        self.registry.put(computer).map_err(ControlError::internal)?;
+        if !self.state.lock().unwrap().pairing.approved(&approving.request_id) {
+            // It ended while the record was written: nothing is granted.
+            if let Err(error) = self.registry.remove(&id) {
+                log::warn!("machine host: remove a pairing that ended before Allow: {error:#}");
+            }
+            return Err(not_found());
+        }
+        log::info!("machine host: computer {id} was allowed to operate this machine");
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Don't allow: nothing is written and the code ends.
+    pub fn decline(&self, request_id: &str) {
+        if self.state.lock().unwrap().pairing.decline(request_id) {
+            log::info!("machine host: a computer was not allowed to operate this machine");
+        }
+        self.wake.notify_one();
+    }
+
+    /// A token that is not a paired computer's (docs/MACHINES.md rules 1, 3, 4).
+    pub(crate) fn ask(&self, asking: Asking<'_>) -> Decision {
+        let decision = self.state.lock().unwrap().pairing.ask(asking, now_ms());
+        self.wake.notify_one();
+        decision
+    }
+
+    /// A waiting connection closed.
+    pub(crate) fn leave(&self, request_id: &str) {
+        self.state.lock().unwrap().pairing.leave(request_id);
+        self.wake.notify_one();
+    }
+
+    /// A paired computer's token from another key (rule 2).
+    pub(crate) fn wrong_attempt(&self) {
+        self.state.lock().unwrap().pairing.wrong_attempt(now_ms());
+        self.wake.notify_one();
+    }
+
+    /// How long a computer waits for Allow.
+    pub(crate) fn approval_ttl(&self) -> Duration {
+        Duration::from_millis(self.state.lock().unwrap().pairing.approval_ttl_ms().max(0) as u64)
+    }
+
+    /// The paired computer whose token this is, if this is the key it paired
+    /// with (rule 2). Another key is a wrong attempt. Every computer paired by
+    /// code has its key pinned; a record with none was not paired here (the
+    /// PRO-341 shape, which only a person with this user's files writes) and
+    /// is admitted by its token, as PRO-341 admitted it.
+    pub(crate) fn paired_with_key(&self, computer: registry::PairedComputer, client_key_b64: &str) -> Option<registry::PairedComputer> {
+        let pinned = match computer.client_public_key_b64.as_deref() {
+            Some(pinned) => bool::from(subtle::ConstantTimeEq::ct_eq(pinned.as_bytes(), client_key_b64.as_bytes())),
+            None => true,
+        };
+        if pinned {
+            return Some(computer);
+        }
+        log::warn!("machine host: computer {}'s credential came with another key; refused", computer.id);
+        self.wrong_attempt();
+        None
+    }
+
     /// A runtime IPC command (`machine_wire`).
     pub fn execute(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         let result = match command {
@@ -546,11 +742,24 @@ impl MachineHost {
             wire::REVOKE => {
                 let revoke: wire::Revoke = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and id are required"))?;
                 self.attachment(&revoke.epoch, &revoke.lease)?;
-                let removed = self.registry.remove(&revoke.id).map_err(ControlError::internal)?;
-                for (_, cancel) in self.state.lock().unwrap().connections.remove(&revoke.id).unwrap_or_default() {
-                    let _ = cancel.send(());
-                }
+                let removed = self.revoke(&revoke.id).map_err(ControlError::internal)?;
                 Ok(json!({ "revoked": removed }))
+            }
+            wire::CREATE_CODE => {
+                let create: wire::CreateCode = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch and lease are required"))?;
+                self.attachment(&create.epoch, &create.lease)?;
+                self.create_code().map(|created| serde_json::to_value(created).expect("a code serialises"))
+            }
+            wire::APPROVE => {
+                let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
+                self.attachment(&answer.epoch, &answer.lease)?;
+                self.approve(&answer.request_id).map(|()| json!({ "approved": true }))
+            }
+            wire::DECLINE => {
+                let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
+                self.attachment(&answer.epoch, &answer.lease)?;
+                self.decline(&answer.request_id);
+                Ok(json!({ "declined": true }))
             }
             _ => Err(ControlError::new("unsupported", "Unknown machine host command.", None::<String>)),
         };
@@ -592,8 +801,9 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         })
     }
 
-    fn admit_computer(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
+    fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
         let Some(computer) = self.registry.find_by_relay_device(relay_device_id, token)? else { return Ok(None) };
+        let Some(computer) = self.paired_with_key(computer, client_key_b64) else { return Ok(None) };
         let tracked = self.admit(&computer.id, cancel)?;
         if let Err(error) = self.registry.touch(&computer.id, chrono::Utc::now().timestamp_millis()) {
             log::debug!("machine host: note when {} connected: {error:#}", computer.id);
