@@ -97,6 +97,16 @@ function tabInputs(session: SessionSummary): StatusTab[] {
   return session.tabs.map((tab, index) => sent && sent.length === session.tabs.length ? sent[index] : { status: tab.status });
 }
 
+/**
+ * A tab alone: only its agent's state, as the rules read one tab with nothing
+ * about the branch. A tab whose turn has finished shows Done's tick (22.04),
+ * where the rules, which read the branch for that, would leave it idle.
+ */
+function tabRowStatus(fact: StatusTab): RowStatus {
+  const status = rowStatus(sessionStatus({ tabs: [fact] }));
+  return status.mark === "idle" && fact.status === "completed" ? { ...status, mark: "done" } : status;
+}
+
 function chatRow(session: SessionSummary): ChatRow {
   const status = rowStatus(sessionStatus(statusInput(session)));
   const facts = tabInputs(session);
@@ -104,8 +114,7 @@ function chatRow(session: SessionSummary): ChatRow {
   const tabs = session.tabs.map((tab, index): TabRow => ({
     id: tab.id,
     name: chats[index].name,
-    // A tab alone: only its agent's state, as the rules read one tab with nothing about the branch.
-    status: rowStatus(sessionStatus({ tabs: [facts[index]] })),
+    status: tabRowStatus(facts[index]),
     time: parsedTime(tab.modified),
   }));
   // The tab a tap opens: the most urgent by the same rules, else the first.

@@ -57,6 +57,8 @@ describe("a row's status", () => {
     expect(row.status.words).toBe("Needs your answer");
     expect(row.needsYou).toBe(true);
     expect(row.tabs.map((tab) => tab.status.words)).toEqual(["No changes", "Working", "Needs your answer"]);
+    // A tab whose turn finished shows Done's tick; the session's own row still reads the branch (22.04).
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["done", "working", "answer"]);
     // A tap opens the tab that is waiting.
     expect(row.tabId).toBe("mixed-t2");
     const working = one(reported("w", [{ status: "idle" }, { status: "waiting", activity: "needs_permission" }, { status: "in_progress" }]));
@@ -66,6 +68,12 @@ describe("a row's status", () => {
   it("reads a waiting tab from an older Mac, which sends no row facts, as needing the person", () => {
     const row = one(session("old", { tabs: [{ id: "a", harness: "claude", status: "idle" }, { id: "b", harness: "claude", status: "waiting" }] }));
     expect([row.status.words, row.status.mark, row.needsYou, row.tabId]).toEqual(["Needs you", "answer", true, "b"]);
+  });
+
+  it("keeps an idle tab's mark idle, and a finished one-tab session's row on the branch's word", () => {
+    const row = one(reported("two", [{ status: "idle" }, { status: "completed" }]));
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["idle", "done"]);
+    expect(one(reported("n", [{ status: "completed" }])).status.mark).toBe("idle");
   });
 
   it("never shows the linked issue's state", () => {
