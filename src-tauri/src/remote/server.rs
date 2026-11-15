@@ -1377,7 +1377,10 @@ impl WorkspaceRpc {
     fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         self.check_named_project(method, &params)?;
         let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
-        let _configuration_admission = configuration.then(|| self.collab.enter_admission());
+        // Raw input only enters a queue here. Its final physical writer holds
+        // admission after acquiring the PTY lock; taking it at ingress would
+        // block acknowledgement of a queued request behind a partial write.
+        let _configuration_admission = (configuration && method != "pty.write").then(|| self.collab.enter_admission());
         if configuration {
             if !self.access(peer).can_configure() {
                 return Err(RpcError::forbidden("Agent settings and terminal input need independent approval rights"));
