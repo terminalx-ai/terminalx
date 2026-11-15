@@ -28,7 +28,6 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message};
 
-use super::collab::Members;
 use super::protocol::{self, Authority};
 use super::server::{Peer, WorkspaceRpc, MAX_FRAME_BYTES};
 use crate::relay_e2ee::{answer_relay_challenge, begin_e2ee_session, E2eeHello, E2eeSession, HostKeypair, PayloadKind, RelayProofContext};
@@ -127,7 +126,9 @@ pub struct RelaySession {
     pub revocations: Vec<Revocation>,
     /// Who the workspace is shared with and how (contract §21.3); absent
     /// from an API before PRO-30.
-    pub collaboration: Option<Members>,
+    pub collaboration: Option<Value>,
+    /// Native request context, never read from the server response or a link file.
+    pub(crate) collaboration_v2: bool,
 }
 
 /// The runtime's identity and API session. Calls may block; the host runs
@@ -167,7 +168,7 @@ struct FileLinkContents {
     #[serde(default)]
     revocations: Vec<Revocation>,
     #[serde(default)]
-    collaboration: Option<Members>,
+    collaboration: Option<Value>,
 }
 
 impl FileLink {
@@ -211,6 +212,7 @@ impl RuntimeLink for FileLink {
             attachments: contents.attachments,
             revocations: contents.revocations,
             collaboration: contents.collaboration,
+            collaboration_v2: false,
         })
     }
 
@@ -276,6 +278,8 @@ pub fn token_identity(token: &str) -> Result<TokenIdentity> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Device {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collaboration: Option<super::collab::v2::Stamp>,
     #[serde(with = "hash_b64")]
     token_hash: [u8; 32],
     authority: Authority,
@@ -364,6 +368,26 @@ pub struct RelayHost {
     state: Mutex<HostState>,
     status: tokio::sync::watch::Sender<HostStatus>,
     devices_path: Option<PathBuf>,
+    /// A machine's paired computers and phones (PRO-341).
+    routes: Mutex<Option<Arc<dyn MachineRoutes>>>,
+}
+
+/// What a machine adds to its relay host (docs/MACHINES.md, "How PRO-341
+/// builds it"): the computers it paired are admitted by their relay device id
+/// and token, and a connection for any other device is a phone, which goes
+/// to the window.
+/// Each method may read the registry file, so the relay host calls them off
+/// its async tasks.
+pub trait MachineRoutes: Send + Sync + 'static {
+    /// Whether the relay device id is a paired computer's.
+    fn is_computer(&self, relay_device_id: &str) -> bool;
+    /// The paired computer with this relay device id, if `token` is its: its
+    /// id and its tracked connection, which `cancel` closes on revocation.
+    fn admit_computer(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>>;
+    /// The connection ended.
+    fn release_computer(&self, computer_id: &str, tracked: u64);
+    /// Pass a phone's relay connection to the window. Whether one took it.
+    fn forward_phone(&self, forwarded: crate::machine_wire::Forwarded) -> bool;
 }
 
 impl RelayHost {
@@ -383,7 +407,7 @@ impl RelayHost {
                 Err(error) => log::warn!("relay host: could not read the device list: {error}"),
             }
         }
-        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path })
+        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path, routes: Mutex::new(None) })
     }
 
     /// Whether the device list is on disk (or there is no disk to keep it on).
@@ -422,6 +446,15 @@ impl RelayHost {
 
     pub fn status(&self) -> tokio::sync::watch::Receiver<HostStatus> {
         self.status.subscribe()
+    }
+
+    /// A machine's computers and phones, beside the link's attachments.
+    pub fn set_routes(&self, routes: Arc<dyn MachineRoutes>) {
+        *self.routes.lock().unwrap() = Some(routes);
+    }
+
+    fn routes(&self) -> Option<Arc<dyn MachineRoutes>> {
+        self.routes.lock().unwrap().clone()
     }
 
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
@@ -501,7 +534,7 @@ impl RelayHost {
         self.rpc.set_generation(identity.runtime_generation);
         // Who has access is known before any client can connect, not only
         // after the first refresh (contract §21.5).
-        self.rpc.set_collaboration(session.collaboration.clone());
+        self.install_session_policy(&session, identity.runtime_generation, None)?;
         let (mut socket, relay_generation) =
             self.open_control(&cell_url, assignment_epoch, &session.relay_token, &identity).await?;
         let (commands, mut command_rx) = mpsc::unbounded_channel();
@@ -678,6 +711,19 @@ impl RelayHost {
                             let host = self.clone();
                             let live = live.clone();
                             tokio::spawn(async move {
+                                // On a machine, a device that is neither attached
+                                // through the link nor a paired computer is a
+                                // phone. The registry is a file: read off this loop.
+                                if let Some(routes) = host.routes() {
+                                    let attached = host.state.lock().unwrap().devices.contains_key(&connection.relay_device_id);
+                                    let device = connection.relay_device_id.clone();
+                                    let lookup = routes.clone();
+                                    let computer = attached || tokio::task::spawn_blocking(move || lookup.is_computer(&device)).await.unwrap_or(true);
+                                    if !computer {
+                                        host.forward_phone(&routes, &live, &connection);
+                                        return;
+                                    }
+                                }
                                 if let Err(error) = host.serve_connection(live, connection).await {
                                     log::debug!("relay host: client connection ended: {error:#}");
                                 }
@@ -712,14 +758,15 @@ impl RelayHost {
                         let _ = live.commands.send(ControlCommand::Reregister);
                         return;
                     }
-                    self.rpc.set_collaboration(session.collaboration.clone());
-                    if self.apply_revocations(&live, &session.revocations) {
-                        self.complete_revocations(&session.revocations).await;
+                    // Bind the entire response to the generation of this registered
+                    // connection, not to any caller-supplied policy field.
+                    if !token_identity(&session.relay_token).is_ok_and(|identity| identity.runtime_generation == runtime_generation) {
+                        log::warn!("ignoring refresh from a different runtime generation");
+                        tokio::time::sleep(SESSION_POLL_INTERVAL).await;
+                        continue;
                     }
-                    for attachment in session.attachments {
-                        if let Err(error) = self.answer_attachment(&live, &director_url, attachment).await {
-                            log::warn!("relay host: could not answer an attachment: {error:#}");
-                        }
+                    if let Err(error) = self.apply_refreshed_session(&live, &director_url, session, runtime_generation).await {
+                        log::warn!("collaboration refresh refused: {error:#}");
                     }
                 }
                 Err(error) if error.downcast_ref::<Revoked>().is_some() => {
@@ -730,6 +777,41 @@ impl RelayHost {
             }
             tokio::time::sleep(SESSION_POLL_INTERVAL).await;
         }
+    }
+
+    /// Policy, observed provenance revocations, then pending attachments from
+    /// this response. Never pair a device from a refused or retired snapshot.
+    async fn apply_refreshed_session(&self, live: &Live, director_url: &str, session: RelaySession, generation: u64) -> Result<()> {
+        let policy = self.install_session_policy(&session, generation, Some(live));
+        // Revocations have independent authority. A malformed or unsupported
+        // policy must not keep its revoked devices connected or reconnectable.
+        if self.apply_revocations(Some(live), &session.revocations) {
+            self.complete_revocations(&session.revocations).await;
+        }
+        policy?;
+        for attachment in session.attachments {
+            if let Err(error) = self.answer_attachment(live, director_url, attachment).await {
+                log::warn!("relay host: could not answer an attachment: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
+    fn install_session_policy(&self, session: &RelaySession, generation: u64, live: Option<&Live>) -> Result<()> {
+        let previous: Vec<_> = self.state.lock().unwrap().devices.iter().map(|(device_id, device)| {
+            let stamp = device.user_id.as_deref().and_then(|user| self.rpc.collab.runtime_policy.stamp(user));
+            (device_id.clone(), device.attachment_id.clone(), stamp)
+        }).collect();
+        install_session_collaboration(&self.rpc, session, generation)?;
+        let changed: Vec<_> = previous.into_iter().filter(|(_, _, stamp)| session.collaboration_v2 && stamp.as_ref().is_none_or(|stamp| !self.rpc.collab.runtime_policy.same_member(stamp)))
+            .map(|(device_id, id, _)| Revocation { id, device_id }).collect();
+        // Retire saved credentials too: reconnecting an old workspace/session
+        // attachment must not evade its observed source change. On restart,
+        // absent native provenance retires saved v2 attachments conservatively.
+        if !self.apply_revocations(live, &changed) {
+            bail!("could not persist collaboration attachment revocations");
+        }
+        Ok(())
     }
 
     /// Tell the API each applied revocation, so it stops listing it. A
@@ -754,13 +836,15 @@ impl RelayHost {
     /// Whether the revocations are durable: a revocation confirmed to the API
     /// is never listed again, so it must not be confirmed while the device
     /// list on disk still admits the device.
-    fn apply_revocations(&self, live: &Live, revocations: &[Revocation]) -> bool {
+    fn apply_revocations(&self, live: Option<&Live>, revocations: &[Revocation]) -> bool {
         let mut state = self.state.lock().unwrap();
         let mut changed = false;
         for revocation in revocations {
             if state.devices.remove(&revocation.device_id).is_some() {
                 changed = true;
-                let _ = live.commands.send(ControlCommand::Revoke { device_id: revocation.device_id.clone() });
+                if let Some(live) = live {
+                    let _ = live.commands.send(ControlCommand::Revoke { device_id: revocation.device_id.clone() });
+                }
             }
             for cancel in state.connections.remove(&revocation.device_id).unwrap_or_default() {
                 let _ = cancel.send(());
@@ -782,6 +866,12 @@ impl RelayHost {
         if !valid_opaque_id(&attachment.device_id) || attachment.device_token.len() < 16 {
             bail!("invalid attachment device");
         }
+        let collaboration = {
+            let _admission = self.rpc.collab.enter_admission();
+            let stamp = attachment.user_id.as_deref().and_then(|user| self.rpc.collab.runtime_policy.stamp(user));
+            anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(stamp.as_ref()), "attachment policy unavailable");
+            stamp
+        };
         let (respond, receive) = oneshot::channel();
         live.commands
             .send(ControlCommand::CreateInvite { device_id: attachment.device_id.clone(), respond })
@@ -809,10 +899,13 @@ impl RelayHost {
         // Admit the device before publishing the code, so the first connect
         // cannot race the registration.
         {
+            let _admission = self.rpc.collab.enter_admission();
+            anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(collaboration.as_ref()), "attachment policy changed while creating invite");
             let mut state = self.state.lock().unwrap();
             state.devices.insert(
                 attachment.device_id.clone(),
                 Device {
+                    collaboration,
                     token_hash: Sha256::digest(attachment.device_token.as_bytes()).into(),
                     authority,
                     attachment_id: attachment.id.clone(),
@@ -828,6 +921,25 @@ impl RelayHost {
         tokio::task::spawn_blocking(move || link.complete_attachment(&attachment_id, &pairing_code)).await??;
         self.state.lock().unwrap().completed.insert(key);
         Ok(())
+    }
+
+    /// Pass a phone's relay connection to the window: it opens the data leg.
+    fn forward_phone(&self, routes: &Arc<dyn MachineRoutes>, live: &Live, connection: &ConnectionOpen) {
+        let forwarded = crate::machine_wire::Forwarded::Relay {
+            cell_url: live.cell_url.clone(),
+            relay_host_id: self.keypair.host_id(),
+            generation: live.relay_generation,
+            connection: crate::machine_wire::RelayConnection {
+                conn_id: connection.conn_id.clone(),
+                conn_ticket: connection.conn_ticket.clone(),
+                kind: connection.kind.clone(),
+                relay_device_id: connection.relay_device_id.clone(),
+                attach_deadline_ms: connection.attach_deadline_ms,
+            },
+        };
+        if !routes.forward_phone(forwarded) {
+            log::debug!("relay host: no window takes phones; a phone connection is dropped");
+        }
     }
 
     fn close_all_connections(&self) {
@@ -875,112 +987,68 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
+        let (device, computer) = self.admit(&connection.relay_device_id, token, cancel_tx).await?;
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) =
+        let (peer, notifications) =
             Peer::for_installation(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), device.installation_key.clone());
-        // Slow mutations (Git network calls, agent prompts) answer from their
-        // own task, so this connection keeps reading, streaming and honouring
-        // a revocation meanwhile. Everything else is answered in order, which
-        // keeps terminal writes ordered.
-        let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
         log::info!("relay host: attachment {} connected ({:?})", device.attachment_id, device.authority);
-        let result = async {
-            loop {
-                tokio::select! {
-                    _ = cancel.recv() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    // The person lost access to the workspace (contract §21.5).
-                    _ = peer.closed() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    notification = notifications.recv() => {
-                        let Some(notification) = notification else { return Ok(()) };
-                        send_sealed(&mut socket, &mut session, &notification).await?;
-                    }
-                    answer = answers.recv() => {
-                        if let Some(answer) = answer {
-                            send_sealed(&mut socket, &mut session, &answer).await?;
-                        }
-                    }
-                    incoming = socket.next() => {
-                        crate::data_privacy::require_network()?;
-                        let Some(incoming) = incoming else { return Ok(()) };
-                        match incoming? {
-                            Message::Text(text) => {
-                                if text.len() > MAX_FRAME_BYTES * 2 {
-                                    bail!("client frame over the limit");
-                                }
-                                let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
-                                let request: Value = serde_json::from_slice(&plaintext)?;
-                                let response = match request["method"].as_str() {
-                                    Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
-                                    // Connecting can take seconds, so from its own
-                                    // task; answered in order with the stream's data.
-                                    Some("ports.open") => {
-                                        let rpc = self.rpc.clone();
-                                        let peer = peer.clone();
-                                        let ticket = crate::github_process::ticket();
-                                        tokio::spawn(async move {
-                                            let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
-                                            response.await;
-                                        });
-                                        continue;
-                                    }
-                                    Some(method) if SLOW_METHODS.contains(&method) => {
-                                        let answer = self.rpc.handle_owned(peer.clone(), request);
-                                        let answers = answers_tx.clone();
-                                        tokio::spawn(async move {
-                                            let _ = answers.send(answer.await);
-                                        });
-                                        continue;
-                                    }
-                                    _ => self.rpc.handle(&peer, &request).await,
-                                };
-                                send_sealed(&mut socket, &mut session, &response).await?;
-                            }
-                            Message::Binary(bytes) => {
-                                // Binary streams are not part of workspace RPC v1; the
-                                // frame is still authenticated so the counters stay aligned.
-                                let _ = session.open(&bytes, PayloadKind::Binary)?;
-                            }
-                            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                            Message::Close(_) => return Ok(()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        let result = serve_rpc(&mut socket, &mut session, &self.rpc, &peer, notifications, &mut cancel, |request| {
+            (request["method"] == "pairing.provisionRelay").then(|| {
+                let request = request.clone();
+                let (host, live, connection) = (self.clone(), live.clone(), connection.clone());
+                Box::pin(async move { host.provision_resume(&live, &connection, &request).await }) as futures_util::future::BoxFuture<'static, Value>
+            })
+        })
         .await;
-        self.rpc.disconnect(&peer);
         drop(cancel);
+        if let (Some((computer_id, tracked)), Some(routes)) = (&computer, self.routes()) {
+            routes.release_computer(computer_id, *tracked);
+        }
         if let Some(senders) = self.state.lock().unwrap().connections.get_mut(&connection.relay_device_id) {
             senders.retain(|sender| !sender.is_closed());
         }
         result
     }
 
-    fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Device> {
+    /// The device, and the paired computer's tracked connection when it is one.
+    async fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let attached = self.state.lock().unwrap().devices.contains_key(relay_device_id);
+        if let (false, Some(routes)) = (attached, self.routes()) {
+            // A paired computer: full operating rights (decision 5). Its
+            // connection closes with every other one when the runtime loses
+            // its credential, is fenced or loses the control connection, and
+            // with its record when the machine revokes it.
+            {
+                let mut state = self.state.lock().unwrap();
+                let senders = state.connections.entry(relay_device_id.to_string()).or_default();
+                senders.retain(|sender| !sender.is_closed());
+                senders.push(cancel.clone());
+            }
+            let (device_id, token) = (relay_device_id.to_string(), token.to_string());
+            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, cancel))
+                .await??
+                .ok_or_else(|| anyhow!("device token refused"))?;
+            let device = Device { collaboration: None, token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
+            return Ok((device, Some((computer_id, tracked))));
+        }
+        let _admission = self.rpc.collab.enter_admission();
         let mut state = self.state.lock().unwrap();
         // The relay credential named the device; the token must be that
         // device's, so an invite cannot be used with another attachment's token.
         let device = state.devices.get(relay_device_id).ok_or_else(|| anyhow!("device is not attached"))?.clone();
+        anyhow::ensure!(self.rpc.collab.runtime_policy.attachment_current(device.collaboration.as_ref()), "attachment collaboration provenance retired");
         if !bool::from(device.token_hash.ct_eq(&hash)) {
             bail!("device token refused");
         }
         let senders = state.connections.entry(relay_device_id.to_string()).or_default();
         senders.retain(|sender| !sender.is_closed());
         senders.push(cancel);
-        Ok(device)
+        Ok((device, None))
     }
 
     /// Install a resume credential for the device of an invite connection,
@@ -1018,6 +1086,14 @@ impl RelayHost {
             Err(error) => protocol::failure(id, &protocol::RpcError::new("unavailable", format!("{error:#}"))),
         }
     }
+}
+
+/// The same generation-bound policy installation precedes initial registration
+/// and every refresh's revocations and pending attachments. `RelaySession`
+/// comes from the authenticated native link, never RPC parameters.
+pub(crate) fn install_session_collaboration(rpc: &WorkspaceRpc, session: &RelaySession, generation: u64) -> Result<()> {
+    anyhow::ensure!(token_identity(&session.relay_token)?.runtime_generation == generation, "refresh token generation mismatch");
+    rpc.set_refresh_collaboration(session.collaboration.clone(), generation, session.collaboration_v2)
 }
 
 /// Start serving a workspace through the relay: learn the runtime
@@ -1067,6 +1143,7 @@ pub async fn serve_machine(
     sessions: Option<crate::session::SessionManager>,
     devices_path: Option<PathBuf>,
     agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+    routes: Option<Arc<dyn MachineRoutes>>,
 ) -> Result<Arc<RelayHost>> {
     let generation = runtime_generation(&link).await;
     let identity = super::machine::Identity {
@@ -1079,6 +1156,10 @@ pub async fn serve_machine(
         rpc.set_agents(agents);
     }
     let host = RelayHost::new(link, rpc, devices_path);
+    // Before it registers, so no connection is answered without them.
+    if let Some(routes) = routes {
+        host.set_routes(routes);
+    }
     tokio::spawn(host.clone().run());
     Ok(host)
 }
@@ -1124,7 +1205,7 @@ impl std::fmt::Display for Fenced {
 
 impl std::error::Error for Fenced {}
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionOpen {
     conn_id: String,
@@ -1170,10 +1251,117 @@ async fn next_json(socket: &mut Socket) -> Result<Value> {
     }
 }
 
-async fn send_sealed(socket: &mut Socket, session: &mut E2eeSession, value: &Value) -> Result<()> {
+pub(crate) async fn send_sealed<S>(socket: &mut S, session: &mut E2eeSession, value: &Value) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
     let frame = session.seal(value.to_string().as_bytes(), PayloadKind::Text)?;
     socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await?;
     Ok(())
+}
+
+/// Serve workspace RPC to an authenticated peer on an E2EE socket until
+/// either side closes, `cancel` fires (a revocation) or the peer loses access.
+/// Every route of a host serves through here: the relay's data legs and a
+/// machine's direct listener (`machine_host`). `extra` answers the few
+/// requests a route serves itself, as the relay does `pairing.provisionRelay`.
+///
+/// Slow mutations (Git network calls, agent prompts) answer from their own
+/// task, so the connection keeps reading, streaming and honouring a
+/// revocation meanwhile. Everything else is answered in order, which keeps
+/// terminal writes ordered.
+pub(crate) async fn serve_rpc<S>(
+    socket: &mut S,
+    session: &mut E2eeSession,
+    rpc: &Arc<WorkspaceRpc>,
+    peer: &Arc<Peer>,
+    mut notifications: super::server::Notifications,
+    cancel: &mut mpsc::UnboundedReceiver<()>,
+    extra: impl Fn(&Value) -> Option<futures_util::future::BoxFuture<'static, Value>>,
+) -> Result<()>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = cancel.recv() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                // The person lost access to the workspace (contract §21.5).
+                _ = peer.closed() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                notification = notifications.recv() => {
+                    let Some(notification) = notification else { return Ok(()) };
+                    send_sealed(socket, session, &notification).await?;
+                }
+                answer = answers.recv() => {
+                    if let Some(answer) = answer {
+                        send_sealed(socket, session, &answer).await?;
+                    }
+                }
+                incoming = socket.next() => {
+                    crate::data_privacy::require_network()?;
+                    let Some(incoming) = incoming else { return Ok(()) };
+                    match incoming? {
+                        Message::Text(text) => {
+                            if text.len() > MAX_FRAME_BYTES * 2 {
+                                bail!("client frame over the limit");
+                            }
+                            let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
+                            let request: Value = serde_json::from_slice(&plaintext)?;
+                            if let Some(answer) = extra(&request) {
+                                let response = answer.await;
+                                send_sealed(socket, session, &response).await?;
+                                continue;
+                            }
+                            let response = match request["method"].as_str() {
+                                // Connecting can take seconds, so from its own
+                                // task; answered in order with the stream's data.
+                                Some("ports.open") => {
+                                    let rpc = rpc.clone();
+                                    let peer = peer.clone();
+                                    let ticket = crate::github_process::ticket();
+                                    tokio::spawn(async move {
+                                        let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
+                                        response.await;
+                                    });
+                                    continue;
+                                }
+                                Some(method) if SLOW_METHODS.contains(&method) => {
+                                    let answer = rpc.handle_owned(peer.clone(), request);
+                                    let answers = answers_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = answers.send(answer.await);
+                                    });
+                                    continue;
+                                }
+                                _ => rpc.handle(peer, &request).await,
+                            };
+                            send_sealed(socket, session, &response).await?;
+                        }
+                        Message::Binary(bytes) => {
+                            // Binary streams are not part of workspace RPC v1; the
+                            // frame is still authenticated so the counters stay aligned.
+                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                        }
+                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
+                        Message::Close(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    .await;
+    rpc.disconnect(peer);
+    result
 }
 
 pub(crate) fn websocket_config() -> WebSocketConfig {
@@ -1261,6 +1449,248 @@ mod tests {
         assert!(token_identity(&jwt(json!({ "sub": "x" }))).is_err());
         let legacy = token_identity(&jwt(json!({ "sub": "a", "cloudProfileId": "b", "organizationId": "c" }))).unwrap();
         assert_eq!(legacy.runtime_generation, 0);
+    }
+
+    /// PRO-341: a paired computer's relay connection closes with every
+    /// other one when the runtime loses its credential, is fenced or loses
+    /// the control connection (`close_all_connections`).
+    #[tokio::test]
+    async fn a_paired_computers_connection_closes_with_every_other() {
+        struct Link;
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] {
+                [3; 32]
+            }
+            fn session(&self) -> Result<RelaySession> {
+                bail!("not in this test")
+            }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct Routes;
+        impl MachineRoutes for Routes {
+            fn is_computer(&self, relay_device_id: &str) -> bool {
+                relay_device_id == "relay-desk"
+            }
+            fn admit_computer(&self, relay_device_id: &str, token: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token").then(|| ("desk".to_string(), 1)))
+            }
+            fn release_computer(&self, _: &str, _: u64) {}
+            fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
+                false
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(Link), rpc, None);
+        host.set_routes(Arc::new(Routes));
+        let (cancel, mut cancelled) = mpsc::unbounded_channel();
+        let (device, computer) = host.admit("relay-desk", "desk-token", cancel).await.unwrap();
+        assert_eq!(device.authority, Authority::Manage);
+        assert_eq!(computer, Some(("desk".to_string(), 1)));
+        let (refused, _) = mpsc::unbounded_channel();
+        assert!(host.admit("relay-desk", "another-token", refused).await.is_err(), "another device's token");
+        host.close_all_connections();
+        assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn phase2_collaboration_v2_refresh_attachment_route_fences_negotiation_generation_and_reconnect() {
+        struct Link {
+            session: Mutex<RelaySession>,
+            completed: Mutex<Vec<String>>,
+        }
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { [3; 32] }
+            fn session(&self) -> Result<RelaySession> { Ok(self.session.lock().unwrap().clone()) }
+            fn complete_attachment(&self, id: &str, _: &str) -> Result<()> {
+                self.completed.lock().unwrap().push(id.into()); Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> { Ok(()) }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 7, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        rpc.collab.runtime_policy.bind(root.path(), 7).unwrap();
+        let response = |revision: &str, source: &str, capabilities: &str, generation: u64, suffix: &str| {
+            let attachments = ["runtime", "session"].into_iter().map(|scope| json!({
+                "id":format!("att-{scope}-{suffix}"), "deviceId":format!("dev-{scope}-{suffix}"),
+                "deviceToken":"attachment-token-long-enough", "userId":"driver", "scope":scope, "expiresAt":now_ms()+60_000,
+            })).collect();
+            let session = crate::cloud_bootstrap::Session {
+                workspace_id:"ws".into(), organization_id:"org".into(), relay_host_id:"host".into(),
+                relay_token:jwt(json!({"sub":"host","cloudProfileId":"profile","organizationId":"org","runtimeGeneration":generation})),
+                relay_token_expires_at:0, director_url:"http://127.0.0.1:1".into(),
+                access_mode:crate::cloud_bootstrap::AccessMode::Private, attachments, revocations:vec![], quiesce:None, environment:None,
+                collaboration:Some(json!({"v":2,"revision":revision,"members":[
+                    {"userId":"driver","role":"driver","canApprove":true,"writeSource":source}
+                ]})),
+            };
+            super::super::bootstrap_link::relay_session(&session, capabilities)
+        };
+        let link = Arc::new(Link { session:Mutex::new(response("1", "explicit", crate::cloud_bootstrap::CAPABILITIES, 7, "first")), completed:Mutex::new(vec![]) });
+        let devices_path = root.path().join("devices.json");
+        let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
+        let (commands, mut receive) = mpsc::unbounded_channel();
+        let live = Live { commands, cell_url:"http://127.0.0.1:1".into(), assignment_epoch:1, relay_generation:1 };
+        let invites = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = invites.clone();
+        let relay = tokio::spawn(async move {
+            while let Some(command) = receive.recv().await {
+                if let ControlCommand::CreateInvite { respond, .. } = command {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = respond.send(Ok(("invite".into(), now_ms()+60_000)));
+                }
+            }
+        });
+        // Actual link fetch and refresh application must reject unnegotiated
+        // v2 before creating either kind of attachment, despite valid fields.
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(invites.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(link.completed.lock().unwrap().is_empty());
+        let mut unknown = response("1", "explicit", "collaboration-v2", 7, "unknown");
+        unknown.collaboration.as_mut().unwrap()["v"] = json!(9);
+        *link.session.lock().unwrap() = unknown;
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(invites.load(std::sync::atomic::Ordering::SeqCst), 0);
+        *link.session.lock().unwrap() = response("1", "explicit", "collaboration-v2", 7, "first");
+        host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        assert_eq!(link.completed.lock().unwrap().len(), 2);
+        let mut cancellations = Vec::new();
+        for scope in ["runtime", "session"] {
+            let (cancel, cancelled) = mpsc::unbounded_channel();
+            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.unwrap();
+            assert_eq!(device.user_id.as_deref(), Some("driver"));
+            cancellations.push(cancelled);
+        }
+        // Same role and approval, different DRIVE source. Old saved credentials
+        // and observed connections of both scopes must be retired; new pending
+        // attachments use the newly installed Everyone map.
+        *link.session.lock().unwrap() = response("2", "everyone", "collaboration-v2", 7, "next");
+        host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+        for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok()); }
+        for scope in ["runtime", "session"] {
+            let (cancel, _) = mpsc::unbounded_channel();
+            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.is_err());
+        }
+        let saved = std::fs::read_to_string(&devices_path).unwrap();
+        assert!(!saved.contains("-first"));
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        assert!(rpc.collab.runtime_policy.everyone("driver"));
+        // A retired response cannot pair new devices or overwrite current access.
+        *link.session.lock().unwrap() = response("3", "explicit", "collaboration-v2", 6, "stale");
+        assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err());
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        assert!(rpc.collab.runtime_policy.everyone("driver"));
+        // Pause a real invite request, retire its captured generation, then
+        // complete it. Neither device insertion nor publishing may resurrect it.
+        let (race_commands, mut race_receive) = mpsc::unbounded_channel();
+        let race_live = Live { commands:race_commands, ..live.clone() };
+        let pending_host = host.clone();
+        let pending_session = response("3", "everyone", "collaboration-v2", 7, "raced");
+        let pending = tokio::spawn(async move {
+            pending_host.apply_refreshed_session(&race_live, "http://127.0.0.1:1", pending_session, 7).await
+        });
+        let command = tokio::time::timeout(Duration::from_secs(5), race_receive.recv()).await.unwrap().unwrap();
+        let ControlCommand::CreateInvite { respond, .. } = command else { panic!("expected pending invite") };
+        rpc.set_generation(8);
+        respond.send(Ok(("late-invite".into(), now_ms()+60_000))).unwrap();
+        pending.await.unwrap().unwrap();
+        assert_eq!(link.completed.lock().unwrap().len(), 4);
+        let (cancel, _) = mpsc::unbounded_channel();
+        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", cancel).await.is_err());
+        relay.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn phase2_collaboration_v2_rejected_refresh_still_retires_independent_revocations() {
+        use std::sync::atomic::Ordering;
+
+        struct Link {
+            session: Mutex<RelaySession>,
+            paired: Mutex<Vec<String>>,
+            revoked: Mutex<Vec<String>>,
+        }
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { [3; 32] }
+            fn session(&self) -> Result<RelaySession> { Ok(self.session.lock().unwrap().clone()) }
+            fn complete_attachment(&self, id: &str, _: &str) -> Result<()> {
+                self.paired.lock().unwrap().push(id.into()); Ok(())
+            }
+            fn complete_revocation(&self, id: &str) -> Result<()> {
+                self.revoked.lock().unwrap().push(id.into()); Ok(())
+            }
+        }
+        let member = json!({"userId":"driver", "role":"driver", "canApprove":true, "writeSource":"explicit"});
+        for (policy, negotiated) in [
+            (json!({"v":2, "revision":"01", "members":[member.clone()]}), true),
+            (json!({"v":9, "revision":"2", "members":[member.clone()]}), true),
+            (json!({"v":2, "revision":"2", "members":[member.clone()]}), false),
+            (json!({"v":1, "members":"malformed"}), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let rpc = WorkspaceRpc::new(root.path(), 7, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+            rpc.collab.runtime_policy.bind(root.path(), 7).unwrap();
+            let attachments = |suffix: &str| ["runtime", "session"].into_iter().map(|scope| {
+                serde_json::from_value::<Attachment>(json!({
+                    "id":format!("att-{scope}-{suffix}"), "deviceId":format!("dev-{scope}-{suffix}"),
+                    "deviceToken":"attachment-token-long-enough", "userId":"driver", "scope":scope, "expiresAt":now_ms()+60_000,
+                })).unwrap()
+            }).collect();
+            let initial = RelaySession {
+                relay_token:jwt(json!({"sub":"host", "cloudProfileId":"profile", "organizationId":"org", "runtimeGeneration":7})),
+                director_url:"http://127.0.0.1:1".into(), attachments:attachments("old"), revocations:vec![],
+                collaboration:Some(json!({"v":2, "revision":"1", "members":[member.clone()]})), collaboration_v2:true,
+            };
+            let link = Arc::new(Link { session:Mutex::new(initial), paired:Mutex::new(vec![]), revoked:Mutex::new(vec![]) });
+            let devices_path = root.path().join("devices.json");
+            let host = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path.clone()));
+            let (commands, mut receive) = mpsc::unbounded_channel();
+            let live = Live { commands, cell_url:"http://127.0.0.1:1".into(), assignment_epoch:1, relay_generation:1 };
+            let invites = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = invites.clone();
+            let relay = tokio::spawn(async move {
+                while let Some(command) = receive.recv().await {
+                    if let ControlCommand::CreateInvite { respond, .. } = command {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let _ = respond.send(Ok(("invite".into(), now_ms()+60_000)));
+                    }
+                }
+            });
+            host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.unwrap();
+            let mut cancellations = Vec::new();
+            for scope in ["runtime", "session"] {
+                let (cancel, cancelled) = mpsc::unbounded_channel();
+                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.unwrap();
+                cancellations.push(cancelled);
+            }
+            {
+                let mut session = link.session.lock().unwrap();
+                session.collaboration = Some(policy.clone());
+                session.collaboration_v2 = negotiated;
+                session.attachments = attachments("pending");
+                session.revocations = ["runtime", "session"].into_iter().map(|scope| Revocation {
+                    id:format!("att-{scope}-old"), device_id:format!("dev-{scope}-old"),
+                }).collect();
+            }
+            assert!(host.apply_refreshed_session(&live, "http://127.0.0.1:1", host.fetch_session().await.unwrap(), 7).await.is_err(), "policy must be refused: {policy}");
+            for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok(), "revoked connection survives rejected policy: {policy}"); }
+            assert_eq!(link.revoked.lock().unwrap().len(), 2, "durable revocations must be acknowledged: {policy}");
+            assert_eq!(link.paired.lock().unwrap().len(), 2, "rejected policy must not publish new attachments: {policy}");
+            assert_eq!(invites.load(Ordering::SeqCst), 2);
+            assert!(!std::fs::read_to_string(&devices_path).unwrap().contains("-old"));
+            let restored = RelayHost::new(link.clone(), rpc.clone(), Some(devices_path));
+            for scope in ["runtime", "session"] {
+                for runtime in [&host, &restored] {
+                    let (cancel, _) = mpsc::unbounded_channel();
+                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
+                }
+            }
+            relay.abort();
+        }
     }
 
     #[test]

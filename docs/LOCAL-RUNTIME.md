@@ -212,11 +212,16 @@ agent took it) and `shown` (the window's `drawn_at`, `answered_at` and
 
 Background duties include the automation scheduler, pipeline runtime observer,
 paired-device admission and writes, notification decisions and tray count/actions.
-The paired-device network endpoint remains window-owned: phones cannot connect
-while the desktop is closed, but pending provider questions remain in the owner.
-Closing the window revokes its mobile attachment and undelivered mobile permits.
-The Machines epic moves the endpoint into the runtime when "Let other computers
-operate this Mac" is on ([MACHINES.md](MACHINES.md), decision 4).
+Phones are served by the window: they cannot connect while the desktop is
+closed, but pending provider questions remain in the owner. Closing the window
+revokes its mobile attachment and undelivered mobile permits. The window owns
+the direct endpoint (TCP 6768) unless "Let other computers operate this Mac"
+(`machines.allowOperating`) is on. Then the runtime owns it: it serves operating
+computers on `/machine/1` itself, with the window open or closed, and passes
+every other connection to the window over a private Unix socket the window
+registers, so phones work as before while the window is open
+([MACHINES.md](MACHINES.md), decision 4 and "How PRO-341 builds it";
+`src-tauri/src/machine_wire.rs`).
 
 The optional macOS `local-ui` feature hosts an AppKit accessory menu-bar item and
 notifications inside the owner. The packaged helper enables it; ordinary/cloud

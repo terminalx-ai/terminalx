@@ -197,10 +197,14 @@ pub struct RequestPrivacy {
     effort: Option<crate::data_privacy::Ticket>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permission_mode: Option<crate::data_privacy::Ticket>,
+    // Opaque native request ids, never authority on their own. Losing the
+    // associated in-memory permit (restart/adoption) withdraws the edit.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    collaboration: std::collections::HashMap<String, String>,
 }
 
 impl RequestPrivacy {
-    pub fn is_empty(&self) -> bool { self.model.is_none() && self.effort.is_none() && self.permission_mode.is_none() && self.model_request_id.is_none() }
+    pub fn is_empty(&self) -> bool { self.model.is_none() && self.effort.is_none() && self.permission_mode.is_none() && self.model_request_id.is_none() && self.collaboration.is_empty() }
 }
 
 /// The fields of a tab this module owns.
@@ -262,6 +266,7 @@ impl Settings {
             self.requested_model = Some(model.to_string());
             self.request_privacy.model_request_id = Some(uuid::Uuid::new_v4().to_string());
         }
+        self.stamp_collaboration("model", self.requested_model.is_some());
     }
 
     /// The same for effort. Asking for no effort in particular is not
@@ -280,6 +285,7 @@ impl Settings {
             self.requested_effort = None;
             self.request_privacy.effort = None;
         }
+        self.stamp_collaboration("effort", self.requested_effort.is_some());
     }
 
     /// Whether anything asked for is still waiting on the provider.
@@ -299,6 +305,31 @@ impl Settings {
         } else {
             self.requested_permission_mode = Some(mode.to_string());
         }
+        self.stamp_collaboration("mode", self.requested_permission_mode.is_some());
+    }
+
+    fn stamp_collaboration(&mut self, setting: &str, pending: bool) {
+        if pending && crate::remote::collab::v2::current().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+            self.request_privacy.collaboration.insert(setting.into(), uuid::Uuid::new_v4().to_string());
+        } else {
+            self.request_privacy.collaboration.remove(setting);
+        }
+    }
+
+    pub(crate) fn collaboration_requests(&self) -> &std::collections::HashMap<String, String> { &self.request_privacy.collaboration }
+
+    pub(crate) fn retain_collaboration_requests(&mut self, mut allowed: impl FnMut(&str) -> bool) {
+        for (key, value, ticket) in [
+            ("model", &mut self.requested_model, &mut self.request_privacy.model),
+            ("effort", &mut self.requested_effort, &mut self.request_privacy.effort),
+            ("mode", &mut self.requested_permission_mode, &mut self.request_privacy.permission_mode),
+        ] {
+            if let Some(id) = self.request_privacy.collaboration.get(key) {
+                if value.is_some() && !allowed(id) { *value = None; *ticket = None; }
+                if value.is_none() { self.request_privacy.collaboration.remove(key); }
+            }
+        }
+        if self.requested_model.is_none() { self.request_privacy.model_request_id = None; }
     }
 
     /// The provider is in `mode`, already read through [`Stance::mode`]. As
@@ -308,6 +339,7 @@ impl Settings {
         if self.requested_permission_mode.as_deref() == Some(mode) {
             self.requested_permission_mode = None;
             self.request_privacy.permission_mode = None;
+            self.request_privacy.collaboration.remove("mode");
         }
         self.permission_mode = mode.to_string();
     }
@@ -331,9 +363,9 @@ impl Settings {
     /// Remote requests stay pending until a launch holds their admission
     /// leases; otherwise a later toggle could no longer withdraw them.
     pub fn settled_without_process(&mut self) {
-        let remote_model = self.request_privacy.model.as_ref().and_then(|_| self.requested_model.take());
-        let remote_effort = self.request_privacy.effort.as_ref().and_then(|_| self.requested_effort.take());
-        let remote_mode = self.request_privacy.permission_mode.as_ref().and_then(|_| self.requested_permission_mode.take());
+        let remote_model = (self.request_privacy.model.is_some() || self.request_privacy.collaboration.contains_key("model")).then(|| self.requested_model.take()).flatten();
+        let remote_effort = (self.request_privacy.effort.is_some() || self.request_privacy.collaboration.contains_key("effort")).then(|| self.requested_effort.take()).flatten();
+        let remote_mode = (self.request_privacy.permission_mode.is_some() || self.request_privacy.collaboration.contains_key("mode")).then(|| self.requested_permission_mode.take()).flatten();
         let privacy = self.request_privacy.clone();
         self.launched();
         self.requested_model = remote_model;
@@ -379,6 +411,7 @@ impl Settings {
                 self.requested_model = None;
                 self.request_privacy.model = None;
                 self.request_privacy.model_request_id = None;
+                self.request_privacy.collaboration.remove("model");
             }
             self.model = model.to_string();
         }
@@ -386,6 +419,7 @@ impl Settings {
             if self.requested_effort.as_deref() == Some(effort) {
                 self.requested_effort = None;
                 self.request_privacy.effort = None;
+                self.request_privacy.collaboration.remove("effort");
             }
             self.effort = Some(effort.to_string());
         }
@@ -393,6 +427,7 @@ impl Settings {
 
     /// The provider took the change it was asked for.
     pub fn accepted(&mut self, setting: Setting) {
+        self.request_privacy.collaboration.remove(match setting { Setting::Model => "model", Setting::Effort => "effort" });
         match setting {
             Setting::Model => {
                 self.request_privacy.model = None;
@@ -421,6 +456,7 @@ impl Settings {
         if value.is_some_and(|value| waiting.as_deref() != Some(value)) {
             return None;
         }
+        self.request_privacy.collaboration.remove(match setting { Setting::Model => "model", Setting::Effort => "effort" });
         match setting {
             Setting::Model => { self.request_privacy.model = None; self.request_privacy.model_request_id = None; },
             Setting::Effort => self.request_privacy.effort = None,

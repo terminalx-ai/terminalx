@@ -63,7 +63,7 @@ beforeEach(() => {
   mocks.push.mockReset(); mocks.replace.mockReset(); mocks.uuids = 0;
   const host = { id: "mac-1", label: "Mac", hostName: "Studio", provenance: { kind: "explicit" } };
   mocks.app = {
-    ready: true, session: null, hosts: [host], activeHost: host, connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingSessions: false,
+    ready: true, session: null, hosts: [host], activeHost: host, connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [],
     connection: { restart: vi.fn() }, refreshSessions: vi.fn(async () => undefined), forgetHost: vi.fn(), renameHost: vi.fn(), reconnectHost: vi.fn(), connectHost: vi.fn(),
     api: {
       features: vi.fn(async () => ({ sessionCreate: 1, macSettings: 1 })),

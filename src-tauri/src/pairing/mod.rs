@@ -10,6 +10,7 @@ mod direct;
 mod fingerprint;
 mod guest;
 mod host_poll;
+mod machine_route;
 mod mobile;
 use crate::local_runtime::mobile::model;
 use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
@@ -68,8 +69,16 @@ struct Inner {
     /// The pending device's phone waits for the person to approve it here.
     /// Dropping it declines every connection that waits on it.
     pending_approval: Option<PendingApproval>,
+    /// Phones can reach this window directly: on its own listener, or
+    /// through the runtime's (`direct_via_runtime`, PRO-341).
     direct_listener_started: bool,
     direct_listener_retrying: bool,
+    /// Something asked for direct connections (saved phones, a pairing code),
+    /// so they come back when the runtime gives the port up again.
+    direct_wanted: bool,
+    direct_via_runtime: bool,
+    /// The window's own listener on the port.
+    direct_accept: Option<tauri::async_runtime::JoinHandle<()>>,
     last_error: Option<String>,
 }
 
@@ -115,6 +124,8 @@ pub struct PairingManager {
     /// fingerprint of a phone paired before PRO-314 without a Keychain call.
     host_public: Mutex<Option<[u8; 32]>>,
     keep_awake: Mutex<KeepAwake>,
+    /// Whether the runtime hosts operating computers, and so owns the port.
+    machine: Mutex<machine_route::MachineSide>,
 }
 
 /// Reasons a `pairing_refused` message gives the phone.
@@ -212,6 +223,7 @@ impl PairingManager {
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
             keep_awake: Mutex::new(KeepAwake::default()),
+            machine: Mutex::default(),
         }
     }
 
@@ -247,6 +259,15 @@ impl PairingManager {
             settings.mobile.broadcast_settings_changed();
             settings.reload_keep_awake();
         }));
+        let machine = Arc::downgrade(self);
+        sink.listen(
+            crate::machine_wire::CHANGED_EVENT,
+            Box::new(move |payload| {
+                if let Some(manager) = machine.upgrade() {
+                    manager.machine_host_changed(payload);
+                }
+            }),
+        );
         let events = self.clone();
         sink.listen(
             "agent_event",
@@ -283,11 +304,13 @@ impl PairingManager {
         self.mobile.attach_models(cache);
     }
 
-    pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
+    pub(crate) fn attach_runtime(self: &Arc<Self>, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
         // What a phone may be offered is the attached runtime's (#730), and
         // the connections the previous attachment admitted are done.
         self.mobile.broadcast_capabilities_changed();
+        // A runtime that hosts operating computers owns the port (PRO-341).
+        self.reconcile_machine_soon();
     }
 
     /// No desktop sharing mutex spans an RPC. Once attached, transport failure
@@ -554,6 +577,8 @@ impl PairingManager {
             }
         }
         self.keep_awake.lock().unwrap().assertion = None;
+        // The runtime passes no more phones to a stopped window.
+        self.machine.lock().unwrap().stop();
     }
 
     /// Name this Mac for the user's other devices, or with `None` let it follow
@@ -967,6 +992,10 @@ impl PairingManager {
                 if manager.is_stopped() {
                     break;
                 }
+                // The runtime took the port meanwhile (PRO-341).
+                if manager.runtime_owns_direct() {
+                    break;
+                }
                 match manager.ensure_direct_listener() {
                     Ok(()) => {
                         manager.emit();
@@ -986,14 +1015,19 @@ impl PairingManager {
     fn ensure_direct_listener(self: &Arc<Self>) -> std::io::Result<()> {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
+        inner.direct_wanted = true;
         if inner.direct_listener_started {
             return Ok(());
         }
+        if self.runtime_owns_direct() {
+            // The runtime holds the port and passes phones here (PRO-341).
+            drop(inner);
+            return self.take_phones_from_runtime();
+        }
         let listener = direct::bind(self.direct_port)?;
         inner.direct_listener_started = true;
-        drop(inner);
         let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
+        inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -1023,7 +1057,7 @@ impl PairingManager {
                     }
                 });
             }
-        });
+        }));
         Ok(())
     }
 
