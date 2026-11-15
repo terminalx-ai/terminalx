@@ -94,14 +94,57 @@ fn earlier_tries(piece: &Piece) -> Option<String> {
 /// (`engine::take_over`): the piece as its workers had it, what each try came
 /// to and where its work is, and how to hand the piece back. Built from what
 /// the run recorded; nothing of a worker's conversation.
-/// `by_person`: a person asked for it from the Run view; else the lead asked with `terminalx runs take-over`.
-pub fn take_over(run: &Run, piece: &Piece, head: &str, by_person: bool) -> String {
+/// Who has the lead take a piece over.
+#[derive(Debug, Clone, Copy)]
+pub enum TakenBy<'a> {
+    /// A person, from the Run view.
+    Person,
+    /// The lead itself, with `terminalx runs take-over`.
+    Lead,
+    /// The run, by itself (#1004): the stop needed no person's judgment.
+    Run(&'a super::ToLead),
+}
+
+/// `by`: who asked for it (a person from the Run view, the lead with `terminalx runs take-over`, or the run by itself).
+pub fn take_over(run: &Run, piece: &Piece, head: &str, by: TakenBy) -> String {
     let brief = &piece.brief;
-    let who = if by_person { "The person asked you to take over" } else { "You took over" };
-    let mut out = format!(
-        "{who} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
-        piece.id, piece.title, run.id
-    );
+    let mut out = match by {
+        TakenBy::Person | TakenBy::Lead => format!(
+            "{} piece {} (\"{}\") of run {}: its workers could not finish it. Finish it yourself, in your own checkout. You are not held to the files it owns: its workers were.\n\n",
+            if matches!(by, TakenBy::Person) { "The person asked you to take over" } else { "You took over" },
+            piece.id, piece.title, run.id
+        ),
+        TakenBy::Run(to_lead) => {
+            let what = match to_lead.reason {
+                super::LeadFor::Review => "Its result passed every check TerminalX runs before a review, but no verifier gave a verdict on it. Review the diff yourself: if it does what the piece asks, bring that commit into your checkout as it is and finish the piece; if not, fix it there.",
+                super::LeadFor::NoModelAbove => "Its tries fell short and there is no model above the last one to try it on. Finish it yourself, in your own checkout.",
+            };
+            format!(
+                "TerminalX handed you piece {} (\"{}\") of run {} by itself: {} {what} You are not held to the files it owns: its workers were. Nobody asked the person: this needs no judgment of theirs.\n\n",
+                piece.id, piece.title, run.id, to_lead.stuck.trim_end_matches('.'),
+            )
+        }
+    };
+    if let (TakenBy::Run(super::ToLead { reason: super::LeadFor::Review, .. }), Some(attempt)) = (by, piece.tries.iter().rev().find(|attempt| attempt.step != super::ladder::Step::Lead)) {
+        let commit = attempt.verification.as_ref().and_then(|check| check.facts.as_ref()).and_then(|facts| facts.commit.as_deref());
+        let base = attempt.base_commit.as_deref();
+        let mut lines = Vec::new();
+        if let Some(branch) = attempt.branch.as_deref() {
+            lines.push(format!("The result is on `{branch}`{}.", commit.map(|commit| format!(", at {}", &commit[..commit.len().min(12)])).unwrap_or_default()));
+        }
+        if let (Some(base), Some(commit)) = (base, commit.or(attempt.branch.as_deref())) {
+            lines.push(format!("Read it with `git diff {}...{}`.", &base[..base.len().min(12)], &commit[..commit.len().min(12)]));
+        }
+        if let Some(gates) = attempt.verification.as_ref().map(|check| &check.gates) {
+            let passed: Vec<String> = gates.iter().filter(|gate| gate.passed).map(|gate| gate.gate.name().to_string()).collect();
+            if !passed.is_empty() {
+                lines.push(format!("Passed already, without a model: {}.", passed.join(", ")));
+            }
+        }
+        if !lines.is_empty() {
+            section(&mut out, "The result to review", &lines.join(" "));
+        }
+    }
     section(&mut out, "Goal", &brief.goal);
     if !brief.scope.trim().is_empty() {
         section(&mut out, "Scope", &brief.scope);
@@ -227,6 +270,7 @@ mod tests {
             limits: Default::default(),
             usage: Default::default(),
             pause: None,
+            events: Vec::new(),
             created: "2026-11-11T00:00:00Z".into(),
             modified: "2026-11-11T00:00:00Z".into(),
         }

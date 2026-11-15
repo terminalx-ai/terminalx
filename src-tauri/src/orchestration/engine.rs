@@ -35,10 +35,10 @@ use super::ladder::{self, Step, Verdict};
 use super::plan::{self, Plan, PlanError};
 use super::routing::{self, LeadModel};
 use super::verify::{self as checks, Gate, GateResult, Tally, Verification, Verifier};
-use super::{brief, guard, plan as plans, store, Approval, Hold, MergeState, Outcome, Piece, PieceState, Run, RunState, SessionRef, Try, TryReport};
+use super::{brief, guard, plan as plans, store, Approval, AutoStep, Hold, LeadFor, MergeState, Outcome, Piece, PieceState, Run, RunEvent, RunState, SessionRef, ToLead, Try, TryReport};
 use crate::models::Model;
 use crate::status::usage::UsageWindow;
-use crate::store::settings::OrchestratorLimits;
+use crate::store::settings::{AutoDecide, OrchestratorLimits};
 use crate::worker_report::Status;
 
 /// One start at a time: two callers must not both find the same piece ready.
@@ -209,7 +209,15 @@ pub trait Host: Send + Sync {
     fn check_waits(&self, run_id: &str);
     /// Gates 2 to 4 on a worker's result ([`checks::gates`]): git and the
     /// piece's commands, in the worker's worktree. No session is started.
-    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> checks::Checked;
+    /// What `known` says of the commit's commands stands for them: they are
+    /// not run again, and a failure the base has too is passed over (#1004).
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef, known: &checks::Known) -> checks::Checked;
+    /// Run one command of a piece's checks on the commit its result `commit`
+    /// started from (where it forks from `base`), in a checkout of the app's
+    /// own: what it prints there says whether a failure of the result's is
+    /// already on the base (#1004). Never in the worker's worktree, nor the
+    /// lead's checkout.
+    fn on_base(&self, run: &Run, piece: &Piece, worker: &SessionRef, base: &str, commit: &str, command: &checks::CommandRun) -> checks::CommandRun;
     /// Make a verifier for a piece's result: a conversation in the worker's
     /// worktree that cannot edit files, on `model` at `effort`. It is not the
     /// worker's conversation and is given none of it. Nothing is sent yet.
@@ -372,6 +380,7 @@ pub fn create(host: &dyn Host, plan: &Plan, lead_session: &str, lead_tab: Option
         merge: None,
         usage: Default::default(),
         pause: None,
+        events: Vec::new(),
         created: now.clone(),
         modified: now,
     };
@@ -667,7 +676,9 @@ fn update_usage(host: &dyn Host, run: &mut Run) {
 /// person lets it go on.
 fn pause(host: &dyn Host, id: &str, pause: Pause, held: &[String]) -> Result<Run, EngineError> {
     let mut paused_now = false;
-    let (run, ()) = store::update(id, |run| {
+    let auto = stored(id).map(|run| host.limits(&run.project_path).auto).unwrap_or_default();
+    let now_ms = host.now_ms();
+    let (run, waits) = store::update(id, |run| {
         for piece in run.pieces.iter_mut().filter(|piece| held.contains(&piece.id)) {
             piece.queued_for = Some(Hold::Budget);
         }
@@ -676,10 +687,23 @@ fn pause(host: &dyn Host, id: &str, pause: Pause, held: &[String]) -> Result<Run
             run.state = RunState::NeedsYou;
             run.reason = Some(pause.message.clone());
             run.pause = Some(pause.clone());
+            return Ok(schedule_reset(run, &auto, now_ms));
         }
-        Ok(())
+        Ok(None)
     })
     .map_err(EngineError::internal)?;
+    if let Some(event) = waits.filter(|_| paused_now) {
+        changed(host, &run);
+        host.watch();
+        host.tell_lead(
+            &run,
+            &format!(
+                "Run {id} reached its budget and starts no new piece: {}\n\nWorkers already in a turn finish it. {} Nothing is asked of the person, and you need do nothing: do not start the remaining work another way. End your turn; you are told here when the run goes on.",
+                pause.message, event.message
+            ),
+        );
+        return Ok(run);
+    }
     if paused_now {
         changed(host, &run);
         let reset = match pause.window.as_ref().and_then(|window| window.resets_at) {
@@ -695,6 +719,22 @@ fn pause(host: &dyn Host, id: &str, pause: Pause, held: &[String]) -> Result<Run
         );
     }
     Ok(run)
+}
+
+/// A run paused on its own points of a window goes on by itself once that
+/// window resets (#1004), when Settings let it: the reset gives the points
+/// back, and nothing about the run is any person's call. A window past the
+/// app's ceiling, or a dollar budget, still waits for the person; so does a
+/// reset already past, which the run could not go on after (`watch`).
+fn schedule_reset(run: &mut Run, auto: &AutoDecide, now_ms: i64) -> Option<RunEvent> {
+    if !auto.resume_after_reset || run.state != RunState::NeedsYou {
+        return None;
+    }
+    let pause = run.pause.as_mut().filter(|pause| pause.kind == budget::PauseKind::Points && pause.resume_at.is_none())?;
+    let at = pause.window.as_ref().and_then(|window| window.resets_at).filter(|at| *at > now_ms)?;
+    (pause.resume_at, pause.by_itself) = (Some(at), true);
+    let message = format!("It goes on by itself when the usage window resets at {}.", budget::reset_time(at, now_ms));
+    Some(run.record(AutoStep::WaitsForReset, None, message, Some(run.reason.clone().unwrap_or_default())))
 }
 
 fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, EngineError> {
@@ -863,8 +903,19 @@ fn set_piece(id: &str, piece_id: &str, change: impl FnOnce(&mut Piece)) -> Resul
     Ok(run)
 }
 
-/// The run with each piece brought up to date with its worker.
+/// The run with each piece brought up to date with its worker, and what
+/// that read found taken further where no person's judgment is needed
+/// (#1004): a verifier that gave no verdict is asked again, and a piece the
+/// run gives the lead is handed over.
 pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
+    let run = read_workers(host, id)?;
+    decide(host, id, run)
+}
+
+/// The run with each piece brought up to date with its worker, and nothing
+/// sent to anyone for it: what a person's own action on the run reads first,
+/// so their choice is the one that is made.
+fn read_workers(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     let run = stored(id)?;
     if matches!(run.state, RunState::AwaitingApproval | RunState::Planned) {
         // Nothing runs yet; the windows it would draw on are kept current for the person deciding.
@@ -896,6 +947,25 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             Some((piece.id.clone(), worker.clone(), host.worker(&worker), cost))
         })
         .collect();
+    // A worker a piece no longer belongs to: the lead took the piece over, or a newer try has
+    // another worker. It is read only to say that what it reports is passed over (#1004).
+    let stale: Vec<(String, SessionRef, WorkerNow)> = run
+        .pieces
+        .iter()
+        .filter(|piece| !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Done))
+        .flat_map(|piece| {
+            let current = current_worker(piece);
+            let mut earlier: Vec<SessionRef> = piece.worker.iter().chain(piece.tries.iter().filter_map(|attempt| attempt.worker.as_ref())).filter(|worker| **worker != run.lead && Some(*worker) != current.as_ref()).cloned().collect();
+            earlier.dedup();
+            earlier.into_iter().map(|worker| (piece.id.clone(), worker)).collect::<Vec<_>>()
+        })
+        .filter_map(|(piece_id, worker)| match host.worker(&worker) {
+            // The report its own try already holds was read when it was its worker: nothing late.
+            WorkerNow::Reported { ref result, .. } if run.piece(&piece_id).is_some_and(|piece| piece.tries.iter().any(|attempt| attempt.worker.as_ref() == Some(&worker) && attempt.report.as_ref().is_some_and(|report| report.result == *result))) => None,
+            now @ WorkerNow::Reported { .. } => Some((piece_id, worker, now)),
+            _ => None,
+        })
+        .collect();
     // The verifiers still reading a result: each is read as a worker is.
     let reading: Vec<(String, usize, SessionRef, VerifierNow, Option<checks::Tokens>)> = run
         .pieces
@@ -925,14 +995,30 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
     // What the lead's session has cost, while it resolves a conflict a person gave it.
     let lead_usd = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).and_then(|_| host.worker_cost(&run.lead).usd);
     let now_ms = host.now_ms();
+    let auto = host.limits(&run.project_path).auto;
     let (after, reached) = store::update(id, |run| {
         let rules = run.ladder();
         if !run.state.followed() {
             return Ok(None);
         }
+        for (piece_id, worker, now) in &stale {
+            let WorkerNow::Reported { status, result, .. } = now else { continue };
+            let Some(piece) = run.pieces.iter().find(|piece| piece.id == *piece_id) else { continue };
+            // Still not the worker of the piece as it is stored now, and not said before.
+            if current_worker(piece).as_ref() == Some(worker) {
+                continue;
+            }
+            let said = format!("{}: {}", serde_json::to_value(status).ok().and_then(|status| status.as_str().map(str::to_owned)).unwrap_or_default(), failure_text(result));
+            if run.events.iter().any(|event| event.step == AutoStep::IgnoredStaleReport && event.piece.as_deref() == Some(piece_id.as_str()) && event.stuck.as_deref() == Some(said.as_str())) {
+                continue;
+            }
+            let whose = if piece.state == PieceState::Lead { "the lead has the piece now" } else { "a newer try has the piece now" };
+            run.record(AutoStep::IgnoredStaleReport, Some(piece_id), format!("Ignored a late report from an earlier worker of {piece_id}: {whose}, so it changed nothing."), Some(said));
+        }
         for (piece_id, worker, now, cost) in seen {
-            // A piece whose worker was replaced meanwhile is not this worker's to decide.
-            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none()) else { continue };
+            // A piece whose worker was replaced meanwhile is not this worker's to decide; nor is a
+            // piece whose current try is another's (the lead's, once it took the piece over).
+            let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.worker.as_ref() == Some(&worker) && current_worker(piece).is_none_or(|current| current == worker) && !matches!(piece.state, PieceState::Stopped | PieceState::Skipped | PieceState::Lead) && piece.held.is_none()) else { continue };
             // What a worker reported stands when its session is deleted afterwards: the report
             // was read, and its branch is still in the repository.
             if piece.state == PieceState::Done && now == WorkerNow::Gone {
@@ -1013,13 +1099,24 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 }
             }
             if let Some(failure) = short {
-                climb(piece, &failure, &models, &rules);
+                climb(piece, &failure, &models, &rules, &auto);
             }
         }
         for (piece_id, index, session, now, tokens) in reading {
             let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.state == PieceState::Verifying) else { continue };
             let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()).and_then(|check| check.review.as_mut()) else { continue };
             let Some(verifier) = review.verifiers.get_mut(index).filter(|verifier| verifier.session.as_ref() == Some(&session) && !verifier.settled()) else { continue };
+            // Asked again for a verdict, its new turn has not shown yet: what is read is still the reply before.
+            let before = match &now {
+                VerifierNow::Replied(reply) => Some(Some(reply.as_str())),
+                VerifierNow::Stuck(_) => Some(None),
+                _ => None,
+            };
+            if before.is_some_and(|reply| verifier.not_yet(reply, now_ms)) {
+                continue;
+            }
+            // In its own conversation it still has the diff: no verdict is asked for again there (#1004).
+            let ask = |verifier: &checks::Verifier| auto.reask_verifier && verifier.asked_again < checks::VERDICT_ASKS;
             match now {
                 VerifierNow::Working => {
                     verifier.waiting = None;
@@ -1031,9 +1128,11 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                     continue;
                 }
                 VerifierNow::Replied(reply) => match checks::verdict(&reply) {
-                    Ok(verdict) => (verifier.verdict, verifier.evidence) = (Some(verdict.decision), verdict.evidence),
+                    Ok(verdict) => (verifier.verdict, verifier.evidence, verifier.ask_again) = (Some(verdict.decision), verdict.evidence, None),
+                    Err(problem) if ask(verifier) => (verifier.ask_again, verifier.unread) = (Some(problem), Some(checks::Verifier::digest(&reply))),
                     Err(problem) => verifier.problem = Some(problem),
                 },
+                VerifierNow::Stuck(why) if ask(verifier) => (verifier.ask_again, verifier.unread) = (Some(why), None),
                 VerifierNow::Stuck(why) => verifier.problem = Some(why),
                 VerifierNow::Gone => verifier.problem = Some("Its conversation was closed before it gave a verdict.".into()),
             }
@@ -1052,7 +1151,7 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 }
                 continue;
             }
-            counted(piece, &models, &rules);
+            counted(piece, &models, &rules, &auto);
         }
         follow_resolution(run, lead_usd);
         apply_usage(run, &usage, false);
@@ -1095,14 +1194,24 @@ pub fn refreshed(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
 }
 
 /// A gate's failure as the next try reads it.
+/// The worker of a piece's current try, the one its reports are read from:
+/// the lead's session once the lead took it over; the piece's own worker for
+/// a try stored before tries named theirs.
+fn current_worker(piece: &Piece) -> Option<SessionRef> {
+    // A try planned and not started yet has none, and neither has the piece: the ladder let its last worker go.
+    piece.tries.last().and_then(|attempt| attempt.worker.clone()).or_else(|| piece.worker.clone())
+}
+
 fn gate_failure(gate: &GateResult) -> String {
     format!("The result did not pass the {} check, which TerminalX ran on it after the worker reported done.\n{}", gate.gate.name(), gate.detail.as_deref().unwrap_or_default())
 }
 
 /// End the check of a piece's current try. Passed: the piece is done.
 /// Failed: the try fell short, and `said` is the failure text the ladder
-/// gives the next one. Inconclusive: the piece is blocked, and `said` is why.
-fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model], rules: &ladder::Rules) {
+/// gives the next one. Inconclusive: the piece is blocked, and `said` is why;
+/// with the run asking its reviewer again (#1004), its verifiers were asked
+/// again already, and the piece goes to the lead to review the diff.
+fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
     let at = crate::store::index::now();
     let Some(attempt) = piece.tries.last_mut() else { return };
     let check = attempt.verification.get_or_insert_with(Verification::default);
@@ -1116,23 +1225,37 @@ fn conclude(piece: &mut Piece, outcome: checks::Outcome, said: Option<String>, m
             attempt.outcome = Some(Outcome::CheckFailed);
             attempt.detail = Some(failure.clone());
             attempt.ended = Some(at);
-            climb(piece, &failure, models, rules);
+            climb(piece, &failure, models, rules, auto);
         }
         checks::Outcome::Inconclusive => {
+            let said = said.unwrap_or_default();
             piece.state = PieceState::Blocked;
-            piece.note = Some(format!("Its result could not be checked. {} The gates before the review passed; read the diff, or stop the run.", said.unwrap_or_default()));
+            if auto.reask_verifier {
+                let asked = check.review.as_ref().map_or(0, |review| review.verifiers.iter().map(|verifier| verifier.asked_again).max().unwrap_or(0));
+                let stuck = match asked {
+                    0 => "its result passed every gate before review, and no verifier could give a verdict on it".to_string(),
+                    asked => format!("its result passed every gate before review, and no verifier gave a verdict on it, asked {} more {}", asked, if asked == 1 { "time" } else { "times" }),
+                };
+                piece.note = Some(format!("Its result could not be checked. {said} The gates before the review passed, so the lead reviews the diff itself."));
+                piece.to_lead = Some(ToLead { reason: LeadFor::Review, stuck, waits: None });
+            } else {
+                piece.note = Some(format!("Its result could not be checked. {said} The gates before the review passed; read the diff, or stop the run."));
+            }
         }
     }
 }
 
 /// Count the verdicts of a piece's review once every verifier has given
 /// one or stopped without, and end the check with what they come to.
-fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules) {
+fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
     let Some(attempt) = piece.tries.last_mut() else { return };
     let Some(check) = attempt.verification.as_mut().filter(|check| check.review_open()) else { return };
     let Some(review) = check.review.as_ref() else { return };
+    let again = review.verifiers.iter().filter(|verifier| !verifier.settled() && (verifier.ask_again.is_some() || verifier.asked_again > 0)).map(|verifier| verifier.asked_again).max();
     piece.note = if review.verifiers.iter().any(|verifier| verifier.waiting.is_some()) {
         Some("A verifier needs you: open its conversation to answer its permission request or question. Verification resumes there.".into())
+    } else if let Some(asked) = again {
+        Some(format!("Its verifier gave no verdict, and is asked again for one ({} of {}).", (asked + 1).min(checks::VERDICT_ASKS), checks::VERDICT_ASKS))
     } else {
         attempt.report.as_ref().map(|report| report.result.clone())
     };
@@ -1151,7 +1274,7 @@ fn counted(piece: &mut Piece, models: &[Model], rules: &ladder::Rules) {
         }
         Tally::Inconclusive(why) => (checks::Outcome::Inconclusive, Some(why)),
     };
-    conclude(piece, outcome, said, models, rules);
+    conclude(piece, outcome, said, models, rules, auto);
 }
 
 /// The current try of `piece_id` is the one whose check began at `started`,
@@ -1187,27 +1310,50 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         }
         let Some(piece) = run.piece(&piece_id).filter(|piece| piece.check_waits()) else { continue };
         let (Some(worker), Some(started)) = (piece.worker.clone(), piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).and_then(|check| check.started.clone())) else { continue };
-        let checked = host.check(&run, piece, &worker);
         let limits = host.limits(&run.project_path);
+        let auto = limits.auto;
+        let checked = checked_on_base(host, &run, piece, &worker, &auto);
         let failed = checked.gates.iter().find(|gate| !gate.passed).map(gate_failure);
         let reasons = if checked.passed() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
+        // The done-checks that fail here as they fail on the base: passed over, and said (#1004).
+        let on_base: Vec<checks::CommandRun> = checked.gates.iter().filter(|gate| gate.passed).flat_map(|gate| &gate.commands).filter(|ran| ran.base_failure()).cloned().collect();
+        let passed_over = |run: &mut Run, accepted: bool| -> Option<RunEvent> {
+            let first = on_base.first()?;
+            let named = on_base.iter().map(|ran| format!("`{}`", ran.run)).collect::<Vec<_>>().join(", ");
+            let (checks_word, also) = if on_base.len() == 1 { ("check", "also fails") } else { ("checks", "also fail") };
+            let tests: Vec<String> = checks::failures(first.output.as_deref().unwrap_or_default()).into_iter().take(5).collect();
+            let stuck = Some(format!("{named} failed on its result{}.", if tests.is_empty() { String::new() } else { format!(" ({})", tests.join(", ")) }));
+            let message = match accepted {
+                true => format!("Accepted {piece_id}: its failing {checks_word}, {named}, {also} on the base."),
+                false => format!("Passed over {piece_id}'s failing {checks_word}, {named}: {} {also} on the base. A verifier reads the result next.", if on_base.len() == 1 { "it" } else { "they" }),
+            };
+            Some(run.record(AutoStep::AcceptedBaseFailure, Some(&piece_id), message, stuck))
+        };
         // Gates 1 to 4 passed and nothing calls for a reader, or a gate failed: settled with no session.
         if reasons.is_empty() {
             let models = if failed.is_some() { host.models() } else { Vec::new() };
-            let (after, ()) = store::update(id, |run| {
+            let (after, events) = store::update(id, |run| {
                 let rules = run.ladder();
+                let mut events = Vec::new();
                 if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
                     if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
                         check.gates.extend(checked.gates.iter().cloned());
                         check.facts = Some(checked.facts.clone());
                     }
-                    conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models, &rules);
+                    conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models, &rules, &auto);
+                    if failed.is_none() && !on_base.is_empty() {
+                        let named = on_base.iter().map(|ran| format!("`{}`", ran.run)).collect::<Vec<_>>().join(", ");
+                        piece.note = Some(format!("Accepted: {named} {} on the commit it started from as well, so that failure was already there and is not this piece's.", if on_base.len() == 1 { "fails" } else { "fail" }));
+                        events.extend(passed_over(run, true));
+                    }
                 }
                 settle(run);
-                Ok(())
+                Ok(events)
             })
             .map_err(EngineError::internal)?;
             announce(host, &run, &after);
+            tell_events(host, &after, &events);
+            hand_off(host, id)?;
             continue;
         }
         // The model step: the routing table's `verify` row, not the worker's model.
@@ -1221,22 +1367,23 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
             .map(|number| {
                 let made = host.create_verifier(&run, piece, &worker, &chosen.model, chosen.effort.as_deref(), number);
                 let problem = made.as_ref().err().map(|error| format!("It could not be started: {error:#}"));
-                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, waiting: None, tokens: None }
+                Verifier { session: made.ok(), model: chosen.model.clone(), effort: chosen.effort.clone(), verdict: None, evidence: Vec::new(), problem, waiting: None, tokens: None, asked_again: 0, ask_again: None, unread: None, asked_at: None }
             })
             .collect();
         // Stored before anything is sent: a verifier is known as one, and held to reading, from its first turn.
         let review = checks::Review { reasons, voters, threshold, verifiers: verifiers.clone(), prompt_chars: prompt.chars().count() };
-        let (after, kept) = store::update(id, |run| {
-            let Some(piece) = checked_try(run, &piece_id, &worker, &started) else { return Ok(false) };
+        let (after, (kept, events)) = store::update(id, |run| {
+            let Some(piece) = checked_try(run, &piece_id, &worker, &started) else { return Ok((false, Vec::new())) };
             if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
                 check.gates.extend(checked.gates.iter().cloned());
                 check.facts = Some(checked.facts.clone());
                 check.review = Some(review);
             }
-            Ok(true)
+            Ok((true, passed_over(run, false).into_iter().collect::<Vec<_>>()))
         })
         .map_err(EngineError::internal)?;
         announce(host, &run, &after);
+        tell_events(host, &after, &events);
         if !kept {
             continue;
         }
@@ -1260,18 +1407,66 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                         }
                     }
                 }
-                counted(piece, &models, &rules);
+                counted(piece, &models, &rules, &auto);
             }
             settle(run);
             Ok(())
         })
         .map_err(EngineError::internal)?;
         announce(host, &after, &last);
+        hand_off(host, id)?;
         if last.pieces.iter().any(|piece| piece.state == PieceState::Verifying) {
             host.watch();
         }
     }
     stored(id)
+}
+
+/// Gates 2 to 4 on a piece's result, as [`Host::check`] runs them; and, where
+/// the run decides that itself (#1004), a done-check that fails is run again
+/// on the commit the result started from. A failure that is already there in
+/// the same way ([`checks::same_failure`]) is not the result's: it is passed
+/// over, and the checks after it are run, on the same commit. One that the
+/// base does not have stands, with what the base run showed added to it, so
+/// the next try reads that the failure is its own.
+fn checked_on_base(host: &dyn Host, run: &Run, piece: &Piece, worker: &SessionRef, auto: &AutoDecide) -> checks::Checked {
+    let mut checked = host.check(run, piece, worker, &checks::Known::default());
+    if !auto.accept_base_failures {
+        return checked;
+    }
+    // Each pass gets past one more command, so this ends; the bound holds whatever a host does.
+    for _ in 0..piece.done_checks.len() + 2 {
+        // Where the try started: the baseline it was given, else where it forks from the lead's branch.
+        let base = piece.tries.last().and_then(|attempt| attempt.base_commit.clone()).unwrap_or_else(|| checked.base.clone());
+        let Some(commit) = checked.facts.commit.clone() else { break };
+        let Some(gate) = checked.gates.iter_mut().find(|gate| gate.gate == Gate::Commands && !gate.passed) else { break };
+        // A command that did not finish, or was not run, says nothing of how it would have ended.
+        let Some(failed) = gate.commands.last_mut().filter(|ran| !ran.passed && ran.exit_code.is_some() && ran.on_base.is_none()) else { break };
+        let there = host.on_base(run, piece, worker, &base, &commit, failed);
+        failed.on_base = Some(Box::new(there.clone()));
+        if !failed.base_failure() {
+            let how = match (there.passed, there.exit_code) {
+                (true, _) => "it passes there".to_string(),
+                (false, None) => "it did not finish there".to_string(),
+                (false, Some(code)) => format!("it exits {code} there too, but not with the same failures"),
+            };
+            let detail = gate.detail.clone().unwrap_or_default();
+            gate.detail = Some(format!("{detail}\nTerminalX ran it on the commit this result started from (`{}`) as well: {how}. The failure is this result's.", &base[..base.len().min(12)]));
+            break;
+        }
+        let known = checks::Known { commit, runs: gate.commands.clone() };
+        checked = host.check(run, piece, worker, &known);
+    }
+    checked
+}
+
+/// Tell the lead of the steps the run took by itself, one message each: what
+/// was stuck, what the run did, and why. A hand-off is told by its own brief.
+fn tell_events(host: &dyn Host, run: &Run, events: &[RunEvent]) {
+    for event in events.iter().filter(|event| event.step != AutoStep::HandedToLead) {
+        let stuck = event.stuck.as_deref().map(|stuck| format!(" {stuck}")).unwrap_or_default();
+        host.tell_lead(run, &format!("Run {}: {}{stuck} TerminalX did this by itself, as Settings → Orchestration let it: nothing is asked of you or the person. Go on as you were.", run.id, event.message));
+    }
 }
 
 /// Say that a stored run changed. Every change the engine stores is said
@@ -1363,7 +1558,9 @@ fn on(model: &str, effort: Option<&str>) -> String {
 /// of the ladder. Either the piece is queued again on what that step names,
 /// for a fresh worker, or it is blocked with what was tried. Its last try
 /// already carries its outcome. Safe to repeat on a piece that is blocked.
-fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rules) {
+/// A ladder that ends for want of a model above, not of tries, hands the
+/// piece to the lead when the run decides that itself (#1004).
+fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rules, auto: &AutoDecide) {
     // A piece stored before tries were kept has no ladder to climb.
     let Some(last) = piece.tries.last().cloned() else { return };
     let tries = piece.tries.len();
@@ -1372,6 +1569,7 @@ fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rul
         true => Verdict::Blocked("The try after a person widened its files fell short too.".into()),
         false => ladder::next(&piece.agent, tries, rules, &last.model, last.effort.as_deref(), last.tier, models),
     };
+    let none_above = matches!(verdict, Verdict::NoneAbove(_));
     match verdict {
         Verdict::Again(next) => {
             piece.note = Some(format!("Try {tries} fell short on {}. Try {} runs on {} ({}).", on(&last.model, last.effort.as_deref()), tries + 1, on(&next.model, next.effort.as_deref()), ladder::describe(next.step)));
@@ -1388,10 +1586,16 @@ fn climb(piece: &mut Piece, failure: &str, models: &[Model], rules: &ladder::Rul
             piece.merge = None;
             piece.state = PieceState::Queued;
         }
-        Verdict::Blocked(why) => {
+        Verdict::Blocked(why) | Verdict::NoneAbove(why) => {
             let tried: Vec<String> = piece.tries.iter().map(|attempt| on(&attempt.model, attempt.effort.as_deref())).collect();
             piece.state = PieceState::Blocked;
-            piece.note = Some(format!("Blocked after {tries} {}: {}. {why} Last failure: {failure}", if tries == 1 { "try" } else { "tries" }, tried.join(", then ")));
+            piece.note = Some(format!("Blocked after {tries} {}: {}. {why}{} Last failure: {failure}", if tries == 1 { "try" } else { "tries" }, tried.join(", then "), if none_above && auto.lead_when_ladder_ends { " It goes to the lead." } else { "" }));
+            if none_above && auto.lead_when_ladder_ends && piece.to_lead.is_none() {
+                let why = why.trim_end_matches('.');
+                let mut why = why.chars();
+                let why: String = why.next().map(|first| first.to_lowercase().chain(why).collect()).unwrap_or_default();
+                piece.to_lead = Some(ToLead { reason: LeadFor::NoModelAbove, stuck: format!("its try on {} fell short, and {why}", on(&last.model, last.effort.as_deref())), waits: None });
+            }
         }
     }
 }
@@ -1414,7 +1618,7 @@ pub struct CheckFailed {
 /// the ladder, with `output` as the failure text its next worker is given.
 pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> Result<CheckFailed, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     if !(run.state.live() || run.state == RunState::Done) {
         return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A done-check is reported for a piece of a run that is.", state_name(run.state)), None));
     }
@@ -1439,6 +1643,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     let checks: Vec<&str> = piece.done_checks.iter().map(super::Check::text).collect();
     let failure = format!("The done-check did not hold: {}\n{}", checks.join("; "), failure_text(output));
     let models = host.models();
+    let auto = host.limits(&run.project_path).auto;
     let (run, ()) = store::update(id, |run| {
         let rules = run.ladder();
         // A run that was done is not, with a piece whose check failed.
@@ -1451,7 +1656,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
                 attempt.detail = Some(failure.clone());
                 attempt.ended = Some(crate::store::index::now());
             }
-            climb(piece, &failure, &models, &rules);
+            climb(piece, &failure, &models, &rules, &auto);
         }
         settle(run);
         Ok(())
@@ -1459,6 +1664,7 @@ pub fn check_failed(host: &dyn Host, id: &str, piece_id: &str, output: &str) -> 
     .map_err(EngineError::internal)?;
     changed(host, &run);
     let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
+    hand_off(host, id)?;
     let start = launch_ready(host, id, Launch::Retries)?;
     Ok(CheckFailed { retried: start.started.iter().any(|started| started == piece_id), run: start.run, piece: piece_id.to_string(), blocked, failed: start.failed })
 }
@@ -1488,7 +1694,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     // The hold a merge pass takes, kept to the end: no pass begins and merges the commit
     // that is being sent back between the look at its merge below and the piece going back to work.
     let _no_merge = super::merge::hold_for_send_back(id).map_err(|error| EngineError { message: format!("{} A piece is sent back once that has ended.", error.message), ..error })?;
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     if !run.state.live() {
         return Err(EngineError::new("run_not_running", format!("Run {id} is not running ({}). A piece is sent back in a run that is.", state_name(run.state)), None));
     }
@@ -1563,6 +1769,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     // Its session is gone: a fresh worker on a branch cut from the lead's, which has the merged pieces in it.
     let failure = failure_text(&text);
     let models = host.models();
+    let auto = host.limits(&run.project_path).auto;
     let (run, ()) = store::update(id, |run| {
         let rules = run.ladder();
         if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
@@ -1572,7 +1779,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
                 attempt.ended = Some(crate::store::index::now());
             }
             piece.merge = None;
-            climb(piece, &failure, &models, &rules);
+            climb(piece, &failure, &models, &rules, &auto);
         }
         settle(run);
         Ok(())
@@ -1580,6 +1787,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
     .map_err(EngineError::internal)?;
     changed(host, &run);
     let blocked = run.piece(piece_id).is_some_and(Piece::gave_up);
+    hand_off(host, id)?;
     let start = launch_ready(host, id, Launch::Retries)?;
     Ok(SentBack { run: start.run, piece: piece_id.to_string(), fresh_worker: true, blocked, failed: start.failed })
 }
@@ -1594,7 +1802,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
 /// settled is added to what the run has used ([`follow_resolution`]).
 pub fn resolve_in_lead(host: &dyn Host, id: &str, piece_id: &str) -> Result<Run, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     // Before the budget: a run that has ended is not paused again by being past it.
     if matches!(run.state, RunState::Stopped | RunState::Done) {
         let mut error = EngineError::new("run_ended", format!("Run {id} has ended ({}): nothing more is merged in it, so the lead is not asked to resolve a conflict.", state_name(run.state)), Some("Merge the branch you want by hand, or create a new run for what is left."));
@@ -1718,7 +1926,7 @@ pub struct Skipped {
 /// so it works while the run is paused on its budget.
 pub fn skip(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Skipped, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     acting_on(&run, "skip a piece")?;
     let piece = piece_of(&run, piece_id)?;
     // The lead may give up on a piece it took over, too.
@@ -1787,7 +1995,7 @@ pub struct Widened {
 /// as any worker does, within the budget and the worker limits.
 pub fn widen(host: &dyn Host, id: &str, piece_id: &str, files: &[String], by: By) -> Result<Widened, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     let piece = blocked(&run, piece_id, "widen a piece's files")?;
     // A person approved the files each piece owns: changing them is theirs, as editing the plan is.
     person_only(&run, piece_id, by, "widen the files a piece owns")?;
@@ -1874,7 +2082,7 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
     if text.trim().is_empty() {
         return Err(EngineError::new("empty_note", "The note is empty: say what the worker should know or do.", None));
     }
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     let piece = blocked(&run, piece_id, "send a piece's worker a note")?;
     let worker = piece.worker.clone().or_else(|| piece.tries.iter().rev().find_map(|attempt| attempt.worker.clone())).filter(|worker| host.worker(worker) != WorkerNow::Gone);
     let Some(worker) = worker else {
@@ -1892,6 +2100,8 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
             piece.note = Some("A person sent its worker a note.".into());
             if let Some(attempt) = piece.tries.last_mut() {
                 (attempt.outcome, attempt.ended, attempt.verification, attempt.report) = (None, None, None, None);
+                // Its reports are read as the current try's: it is that try's worker again.
+                attempt.worker = Some(worker.clone());
             }
         }
         settle(run);
@@ -1926,47 +2136,253 @@ pub fn note(host: &dyn Host, id: &str, piece_id: &str, text: &str, by: By) -> Re
 /// run's budget counts: a run past it does not start it.
 pub fn take_over(host: &dyn Host, id: &str, piece_id: &str, by: By) -> Result<Run, EngineError> {
     let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
-    let piece = blocked(&run, piece_id, "hand a piece to the lead")?;
+    // The person's choice, or the lead's, is the one made: the run hands nothing over first.
+    let run = read_workers(host, id)?;
+    blocked(&run, piece_id, "hand a piece to the lead")?;
     // It lifts the piece out of the files a person approved for it.
     person_only(&run, piece_id, by, "hand a piece to the lead")?;
-    if let Some(other) = run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).filter(|resolving| run.piece(&resolving.piece).is_some_and(|other| other.state == PieceState::Lead || other.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict))) {
-        let mut error = EngineError::new("lead_busy", format!("The lead is already working on piece {} for you: it takes one piece at a time.", other.piece), Some("Wait until that piece is settled, or skip it."));
-        error.details = json!({"piece": piece_id, "busyWith": other.piece});
+    lead_takes(host, &run, piece_id, match by { By::Person => Taker::Person, By::Cli => Taker::Lead })
+}
+
+/// Who has the lead take a piece over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Taker {
+    Person,
+    Lead,
+    /// The run itself (#1004): the piece's `to_lead` says why. Not a scope
+    /// change a person approved against: the piece's goal and files stand.
+    Run,
+}
+
+/// The piece the lead is working on for the run now, when it is on one: a
+/// piece it took over, or a conflict it resolves. It takes one at a time.
+fn lead_busy_with(run: &Run) -> Option<String> {
+    run.merge.as_ref().and_then(|merge| merge.resolving.as_ref()).filter(|resolving| run.piece(&resolving.piece).is_some_and(|other| other.state == PieceState::Lead || other.current_merge().is_some_and(|merge| merge.state == MergeState::Conflict))).map(|resolving| resolving.piece.clone())
+}
+
+/// The lead takes a blocked piece over: `run` as just read. What is checked
+/// first is checked again where the piece is stored, so two reads that both
+/// find it to hand over hand it over once.
+fn lead_takes(host: &dyn Host, run: &Run, piece_id: &str, taker: Taker) -> Result<Run, EngineError> {
+    let id = run.id.as_str();
+    let piece = blocked(run, piece_id, "hand a piece to the lead")?;
+    if let Some(other) = lead_busy_with(run) {
+        let mut error = EngineError::new("lead_busy", format!("The lead is already working on piece {other} for you: it takes one piece at a time."), Some("Wait until that piece is settled, or skip it."));
+        error.details = json!({"piece": piece_id, "busyWith": other});
         return Err(error);
     }
-    if let Some(reached) = budget::reached(&run, host.now_ms()) {
+    if let Some(reached) = budget::reached(run, host.now_ms()) {
         return Err(over_budget(host, id, reached, "hand the piece to the lead"));
     }
-    let Some(head) = host.lead_head(&run) else {
+    let Some(head) = host.lead_head(run) else {
         return Err(EngineError::new("lead_not_found", "The lead's checkout cannot be read, so its work on the piece could not be told from what was there before.", None));
+    };
+    let to_lead = piece.to_lead.clone();
+    let by = match (taker, to_lead.as_ref()) {
+        (Taker::Person, _) => brief::TakenBy::Person,
+        (Taker::Lead, _) => brief::TakenBy::Lead,
+        (Taker::Run, Some(to_lead)) => brief::TakenBy::Run(to_lead),
+        (Taker::Run, None) => return Err(EngineError::new("piece_not_blocked", format!("Piece {piece_id} is not to be handed to the lead."), None)),
     };
     let lead = host.lead(&run.lead.session_id).ok();
     let login = lead.as_ref().map(|lead| host.login(&lead.agent)).unwrap_or(Login::Subscription);
     let lead_usd = host.worker_cost(&run.lead).usd.unwrap_or(0.0);
-    let prompt = brief::take_over(&run, piece, &head, by == By::Person);
+    let prompt = brief::take_over(run, piece, &head, by);
     let at = crate::store::index::now();
-    let (after, ()) = store::update(id, |run| {
+    let (after, taken) = store::update(id, |run| {
+        // As it was read: still blocked, the lead free, and for the run's own hand-off still to be made.
+        let free = lead_busy_with(run).is_none();
+        let Some(piece) = run.pieces.iter().find(|piece| piece.id == piece_id) else { return Ok(false) };
+        if !free || !matches!(piece.state, PieceState::Blocked | PieceState::Failed) || (taker == Taker::Run && piece.to_lead.is_none()) {
+            return Ok(false);
+        }
         let merge = run.merge.get_or_insert_with(Default::default);
         merge.end_resolving();
         merge.resolving = Some(super::Resolution { piece: piece_id.to_string(), login, lead_usd, usd: 0.0 });
+        let lead_ref = run.lead.clone();
         if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id) {
             let mut attempt = Try::planned(Step::Lead, lead.as_ref().map_or("", |lead| lead.model.as_str()), None, None);
-            attempt.worker = Some(run.lead.clone());
+            attempt.worker = Some(lead_ref);
             attempt.from_commit = Some(head.clone());
             attempt.started = Some(at.clone());
             piece.tries.push(attempt);
             piece.state = PieceState::Lead;
             piece.queued_for = None;
-            piece.note = Some("Taken over by the lead: it finishes the piece in its own checkout.".into());
+            piece.to_lead = None;
+            piece.note = Some(match &to_lead {
+                Some(to_lead) if taker == Taker::Run => match to_lead.reason {
+                    LeadFor::Review => "Handed to the lead by the run: it reviews the diff itself, since no verifier gave a verdict.".to_string(),
+                    LeadFor::NoModelAbove => "Handed to the lead by the run: no model is left above the last try's to try it on.".to_string(),
+                },
+                _ => "Taken over by the lead: it finishes the piece in its own checkout.".to_string(),
+            });
+        }
+        if let (Taker::Run, Some(to_lead)) = (taker, &to_lead) {
+            let what = match to_lead.reason {
+                LeadFor::Review => "to review",
+                LeadFor::NoModelAbove => "to finish",
+            };
+            run.record(AutoStep::HandedToLead, Some(piece_id), format!("Handed {piece_id} to the lead {what}: {}.", to_lead.stuck), None);
         }
         settle(run);
-        Ok(())
+        Ok(true)
     })
     .map_err(EngineError::internal)?;
+    if !taken {
+        let mut error = EngineError::new("piece_not_blocked", format!("Piece {piece_id} changed as it was handed to the lead: it was not handed over."), Some("`terminalx runs show --json` says where it stands now."));
+        error.details = json!({"piece": piece_id});
+        return Err(error);
+    }
     changed(host, &after);
+    // Its earlier workers report nothing more: one still in a turn is stopped, and what it would
+    // report is passed over meanwhile (`read_workers`).
+    let mut earlier: Vec<SessionRef> = piece.worker.iter().chain(piece.tries.iter().filter_map(|attempt| attempt.worker.as_ref())).filter(|worker| **worker != run.lead).cloned().collect();
+    earlier.dedup();
+    let mut stopped = Vec::new();
+    for worker in earlier {
+        match host.stop_worker(&worker) {
+            Ok(true) => stopped.push(worker),
+            Ok(false) => {}
+            Err(error) => log::warn!("stop the earlier worker {} of piece {piece_id} in run {id}: {error:#}", worker.session_id),
+        }
+    }
+    let after = match stopped.is_empty() {
+        true => after,
+        false => {
+            let (after, ()) = store::update(id, |run| {
+                run.record(AutoStep::StoppedOldWorker, Some(piece_id), format!("Stopped the earlier worker of {piece_id}: the lead has the piece now, and it would only report over the lead's work."), None);
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            changed(host, &after);
+            after
+        }
+    };
     host.tell_lead(&after, &prompt);
     Ok(after)
+}
+
+/// What a read found that the run takes further itself (#1004), outside the
+/// store's lock and without the start lock, whoever read it: the verifiers to
+/// ask again for a verdict, and the pieces to hand to the lead. Each is taken
+/// where it is stored, so a second read that finds the same does nothing.
+fn decide(host: &dyn Host, id: &str, run: Run) -> Result<Run, EngineError> {
+    // Paused on its own points before it could go on by itself (a run from before #1004, or the
+    // switch turned on since): it does now.
+    let auto = host.limits(&run.project_path).auto;
+    let run = match run.pause.as_ref().is_some_and(|pause| pause.kind == budget::PauseKind::Points && pause.resume_at.is_none()) && auto.resume_after_reset && run.state == RunState::NeedsYou {
+        false => run,
+        true => {
+            let now_ms = host.now_ms();
+            let (after, event) = store::update(id, |run| Ok(schedule_reset(run, &auto, now_ms))).map_err(EngineError::internal)?;
+            if let Some(event) = event {
+                changed(host, &after);
+                host.watch();
+                host.tell_lead(&after, &format!("Run {id} is paused on its budget: {} {} Nothing is asked of the person, and you need do nothing: you are told here when the run goes on.", after.reason.as_deref().unwrap_or_default(), event.message));
+            }
+            after
+        }
+    };
+    let asks: Vec<(String, SessionRef, String)> = run
+        .pieces
+        .iter()
+        .filter(|piece| piece.state == PieceState::Verifying)
+        .flat_map(|piece| {
+            let review = piece.tries.last().and_then(|attempt| attempt.verification.as_ref()).filter(|check| check.review_open()).and_then(|check| check.review.as_ref());
+            review.into_iter().flat_map(|review| &review.verifiers).filter_map(|verifier| Some((piece.id.clone(), verifier.session.clone()?, verifier.ask_again.clone()?))).collect::<Vec<_>>()
+        })
+        .collect();
+    let pending = run.pieces.iter().any(|piece| piece.state == PieceState::Blocked && piece.to_lead.is_some());
+    if asks.is_empty() && !pending {
+        return Ok(run);
+    }
+    if !asks.is_empty() {
+        let now_ms = host.now_ms();
+        // Taken where it is stored: the ask is made once, however many reads found it.
+        let (after, taken) = store::update(id, |run| {
+            let mut taken = Vec::new();
+            for (piece_id, session, problem) in &asks {
+                let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == *piece_id && piece.state == PieceState::Verifying) else { continue };
+                let Some(review) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).filter(|check| check.review_open()).and_then(|check| check.review.as_mut()) else { continue };
+                let Some(verifier) = review.verifiers.iter_mut().find(|verifier| verifier.session.as_ref() == Some(session) && verifier.ask_again.as_ref() == Some(problem)) else { continue };
+                verifier.ask_again = None;
+                verifier.asked_again += 1;
+                verifier.asked_at = Some(now_ms);
+                let asked = verifier.asked_again;
+                piece.note = Some(format!("Its verifier gave no verdict, and is asked again for one ({asked} of {}).", checks::VERDICT_ASKS));
+                let event = run.record(AutoStep::AskedVerifierAgain, Some(piece_id), format!("Asked {piece_id}'s verifier again for its verdict ({asked} of {}).", checks::VERDICT_ASKS), Some(problem.clone()));
+                taken.push((piece_id.clone(), session.clone(), problem.clone(), asked, event));
+            }
+            Ok(taken)
+        })
+        .map_err(EngineError::internal)?;
+        if !taken.is_empty() {
+            changed(host, &after);
+            host.watch();
+        }
+        for (piece_id, session, problem, asked, event) in taken {
+            match host.brief_verifier(&session, &checks::ask_again_prompt(&problem, asked)) {
+                Ok(()) => tell_events(host, &after, std::slice::from_ref(&event)),
+                // Not asked after all: what it gave stands, and the review is counted with it.
+                Err(error) => {
+                    let models = host.models();
+                    let auto = host.limits(&after.project_path).auto;
+                    let (last, ()) = store::update(id, |run| {
+                        let rules = run.ladder();
+                        if let Some(piece) = run.pieces.iter_mut().find(|piece| piece.id == piece_id && piece.state == PieceState::Verifying) {
+                            if let Some(verifier) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()).and_then(|check| check.review.as_mut()).and_then(|review| review.verifiers.iter_mut().find(|verifier| verifier.session.as_ref() == Some(&session) && !verifier.settled())) {
+                                verifier.problem = Some(format!("{problem} It was asked again, and did not take the message: {error:#}"));
+                            }
+                            counted(piece, &models, &rules, &auto);
+                        }
+                        settle(run);
+                        Ok(())
+                    })
+                    .map_err(EngineError::internal)?;
+                    announce(host, &after, &last);
+                }
+            }
+        }
+    }
+    hand_off(host, id)?;
+    stored(id)
+}
+
+/// Hand the lead each blocked piece the run gives it by itself (#1004). One
+/// the lead cannot take yet (it is busy with another piece, or the run is
+/// past its budget) waits, with why, and is handed over by a later read.
+fn hand_off(host: &dyn Host, id: &str) -> Result<(), EngineError> {
+    let run = stored(id)?;
+    if !run.state.followed() {
+        return Ok(());
+    }
+    let pending: Vec<String> = run.pieces.iter().filter(|piece| piece.state == PieceState::Blocked && piece.to_lead.is_some()).map(|piece| piece.id.clone()).collect();
+    for piece_id in pending {
+        let run = stored(id)?;
+        // Paused on its budget: the hand-off is a model call it counts, and waits like any.
+        let held = match run.state {
+            RunState::NeedsYou => Err(EngineError::new("budget_reached", run.reason.clone().unwrap_or_else(|| "The run is paused on its budget.".into()), None)),
+            _ => lead_takes(host, &run, &piece_id, Taker::Run).map(|_| ()),
+        };
+        if let Err(error) = held {
+            let waits = match error.code {
+                "lead_busy" => format!("It goes to the lead once the lead is done with piece {}.", error.details["busyWith"].as_str().unwrap_or("it has")),
+                "budget_reached" => "It goes to the lead once the run goes on: the run is past its budget.".to_string(),
+                _ => format!("It goes to the lead once it can: {}", error.message),
+            };
+            let (after, moved) = store::update(id, |run| {
+                let Some(to_lead) = run.pieces.iter_mut().find(|piece| piece.id == piece_id).and_then(|piece| piece.to_lead.as_mut()) else { return Ok(false) };
+                let moved = to_lead.waits.as_deref() != Some(waits.as_str());
+                to_lead.waits = Some(waits.clone());
+                Ok(moved)
+            })
+            .map_err(EngineError::internal)?;
+            if moved {
+                changed(host, &after);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What checking the lead's work on a piece it took over came to.
@@ -1987,7 +2403,7 @@ pub struct Finished {
 /// the lead, and what the check printed is kept on its try.
 pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) -> Result<Finished, EngineError> {
     let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     acting_on(&run, "finish a piece")?;
     let piece = piece_of(&run, piece_id)?;
     let since = piece.tries.last().filter(|attempt| attempt.step == Step::Lead && piece.state == PieceState::Lead).and_then(|attempt| attempt.from_commit.clone());
@@ -2067,6 +2483,8 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
     if by == By::Person {
         host.tell_lead(&after, &format!("The person checked piece {piece_id} of run {id}: what you committed passed its checks, so it is done. Start what waited for it with `terminalx runs start {id} --json`."));
     }
+    // The lead is free again: a piece the run gives it next goes to it now.
+    hand_off(host, id)?;
     // What waited on it may start, and its slot is free for a queued piece: started under the same lock.
     drop(starting);
     host.fill_later();
@@ -2167,7 +2585,7 @@ pub struct Stop {
 pub fn stop(host: &dyn Host, id: &str, by: By) -> Result<Stop, EngineError> {
     let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     // Read the workers first: a piece whose worker has just reported done is done, not stopped.
-    let run = refreshed(host, id)?;
+    let run = read_workers(host, id)?;
     if run.state == RunState::Done {
         return Err(EngineError::new("run_ended", format!("Run {id} is done: every piece finished. There is nothing to stop."), None));
     }
@@ -2287,16 +2705,28 @@ fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Resu
         error.details = json!({"run": id, "pause": reached});
         return Err(error);
     }
-    store::update(id, |run| {
+    let now_ms = host.now_ms();
+    let (_, by_itself) = store::update(id, |run| {
+        let paused = run.pause.take();
         run.usage = current.usage.clone();
         run.state = RunState::Running;
         run.reason = None;
-        run.pause = None;
-        Ok(())
+        let at = paused.as_ref().and_then(|pause| pause.resume_at);
+        if let (true, Some(at)) = (by_reset, at) {
+            let by_itself = paused.as_ref().is_some_and(|pause| pause.by_itself);
+            let stuck = paused.map(|pause| pause.message);
+            run.record(AutoStep::WentOnAfterReset, None, format!("Gone on: the usage window reset at {}.", budget::reset_time(at, now_ms)), stuck.filter(|_| by_itself));
+            return Ok(by_itself);
+        }
+        Ok(false)
     })
     .map_err(EngineError::internal)?;
     let start = launch_ready(host, id, Launch::Held)?;
-    let how = if by_reset { "Its usage window reset, as the person asked, so the run goes on." } else { "The person let it go on." };
+    let how = match (by_reset, by_itself) {
+        (true, true) => "Its usage window reset, so the run went on by itself: nothing was asked of the person.",
+        (true, false) => "Its usage window reset, as the person asked, so the run goes on.",
+        _ => "The person let it go on.",
+    };
     let started = if start.started.is_empty() { "No piece waited to start; call `terminalx runs start` when the next one is ready.".to_string() } else { format!("Workers were started for: {}.", start.started.join(", ")) };
     host.tell_lead(&start.run, &format!("Run {id} is running again. {how} {started}"));
     Ok(start)
@@ -2525,6 +2955,7 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     }
     let mut why: Vec<String> = changed.iter().map(|piece| match piece.state {
         PieceState::Done => format!("{} is done: its result passed its checks.", piece.id),
+        PieceState::Blocked if piece.to_lead.is_some() => format!("{} goes to you: {}", piece.id, piece.to_lead.as_ref().and_then(|to_lead| to_lead.waits.clone()).unwrap_or_else(|| "TerminalX hands it to you by itself.".into())),
         PieceState::Blocked if piece.gave_up() => format!("{} is blocked after {} tries.", piece.id, piece.tries.len()),
         state => format!("{} is {}.", piece.id, name(state)),
     }).collect();
@@ -2542,11 +2973,15 @@ pub fn wake(began: &Run, now: &Run, all: bool) -> Option<Value> {
     } else if ended {
         why.push(format!("The run is {}.", state_name(now.state)));
     } else if !under_way && ready.is_empty() {
-        let held: Vec<String> = now.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Blocked | PieceState::Failed)).map(|piece| piece.id.clone()).collect();
+        let held: Vec<String> = now.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Blocked | PieceState::Failed) && piece.to_lead.is_none()).map(|piece| piece.id.clone()).collect();
+        let coming: Vec<String> = now.pieces.iter().filter(|piece| piece.state == PieceState::Blocked && piece.to_lead.is_some()).map(|piece| piece.id.clone()).collect();
         let yours: Vec<String> = now.pieces.iter().filter(|piece| piece.state == PieceState::Lead).map(|piece| piece.id.clone()).collect();
         let mut said = String::new();
         if !held.is_empty() {
             said.push_str(&format!(" Held up by: {}. `terminalx runs show` says why for each; the person decides what happens to a blocked piece.", held.join(", ")));
+        }
+        if !coming.is_empty() {
+            said.push_str(&format!(" Handed to you next, by TerminalX itself: {}; its brief comes as a message once you are free.", coming.join(", ")));
         }
         if !yours.is_empty() {
             said.push_str(&format!(" Taken over by you: {}. Finish {} in your checkout, commit, then `terminalx runs finish <piece>`.", yours.join(", "), if yours.len() == 1 { "it" } else { "them" }));

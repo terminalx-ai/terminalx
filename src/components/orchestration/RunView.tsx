@@ -12,7 +12,7 @@ import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  blockedSubtitle, budgetText, capAt, checksFrom, dollarsText, donePieces, mergeButton, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMode, pieceNumbers, skippedWith,
+  AUTO_STEP_LABEL, blockedSubtitle, budgetText, goesToLead, waitsForReset, capAt, checksFrom, dollarsText, donePieces, mergeButton, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMode, pieceNumbers, skippedWith,
   planOf, raisesMode, readOnlyPieces, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
@@ -24,7 +24,7 @@ import { familyNeeds, modelTier, pieceSpend, runSpend, type Need } from "@/lib/r
 import { formatCost } from "@/components/session/SessionCost";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
 import { relativeTime } from "@/lib/time";
-import type { Cap, CommandRun, GateResult, OrchestratorLimits, PieceTry, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
+import type { Cap, CommandRun, GateResult, OrchestratorLimits, PieceTry, Run, RunEvent, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 export { PLAN_A_RUN_PROMPT };
@@ -132,7 +132,7 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
           <div className="min-w-0 flex-1 basis-[20rem]">
             <div className={cn(kicker, "flex items-center gap-1.5", waiting && "text-accent")}>
               {waiting && <ShieldAlert aria-hidden className="size-3.5" />}
-              <span data-testid="run-state">{RUN_STATE_LABEL[run.state]}</span>
+              <span data-testid="run-state">{waitsForReset(run) ? "Run paused until the window resets" : RUN_STATE_LABEL[run.state]}</span>
             </div>
             <h1 className="mt-0.5 break-words text-[19px] font-semibold leading-7 tracking-tight">{run.goal}</h1>
             <p className="mt-1 text-[13px] text-muted-foreground" data-testid="run-subtitle">{merging ? mergeSubtitle(run) : (!editable && blockedSubtitle(run)) || subtitle(run)}</p>
@@ -179,6 +179,7 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
         {merging
           ? <MergeTable run={run} selected={selected} onSelect={select} />
           : <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} costOf={ledger.costOf} onSelect={select} onChange={change} />}
+        {!editable && <RunEvents run={run} numbers={numbers} onSelect={select} />}
         <p className="flex items-start gap-2 px-6 py-4 text-xs text-faint">
           <Info aria-hidden className="mt-0.5 size-3.5 shrink-0" />
           <span data-testid="run-footnote">{merging ? mergeFootnote(run) : footnote(run)}</span>
@@ -216,7 +217,7 @@ function subtitle(run: Run): string {
       return `The lead split this into ${count}. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.`;
     default: {
       // A run held up by a blocked piece, with nothing else running, says so (18.03); while workers run, the Needs you list names it.
-      const blocked = run.pieces.filter((piece) => piece.state === "blocked");
+      const blocked = run.pieces.filter((piece) => piece.state === "blocked" && !goesToLead(piece));
       if (blocked.length && run.state === "running" && !run.pieces.some((piece) => piece.state === "running")) {
         const numbers = pieceNumbers(run);
         const names = blocked.map((piece) => numbers[piece.id]).join(", ");
@@ -349,6 +350,8 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
   const pause = run.pause;
   const resetsAt = pause?.window?.resetsAt;
   const resumeAt = pause?.resumeAt;
+  // Paused on its own points, it goes on by itself (#1004): what the person can do stays, and nothing waits on them.
+  const byItself = waitsForReset(run);
   return (
     <section role="status" aria-label="Run paused" className="mx-6 mb-3 flex flex-col gap-2.5 rounded-lg bg-warning/10 px-3.5 py-3 hairline" data-testid="run-paused">
       <div className="flex items-start gap-2 text-[13px]">
@@ -356,7 +359,7 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
         <div className="min-w-0 flex-1">
           <div className="font-medium">{pause?.window ? `Paused: the ${windowName(pause.window)} window` : pause?.kind === "dollars" ? "Paused: the dollar budget" : "Paused"}</div>
           <p className="mt-0.5 text-muted-foreground">{pause?.message ?? run.reason}</p>
-          <p className="mt-1 text-xs text-faint">Workers already in a turn finish it; no new piece starts until you let the run go on.</p>
+          <p className="mt-1 text-xs text-faint">{byItself ? "Workers already in a turn finish it; no new piece starts before the reset. You need do nothing." : "Workers already in a turn finish it; no new piece starts until you let the run go on."}</p>
           {run.pieces.some((piece) => piece.state === "done") && <p className="mt-1 text-xs text-faint" data-testid="run-paused-merge">Merging the accepted pieces asks no model, so Merge and Skip work while the run is paused. Having the lead resolve a conflict does not.</p>}
         </div>
       </div>
@@ -769,24 +772,80 @@ function gateFailureLine(gate: GateResult): string {
 }
 
 /** One command of the command gate: what was run, how it ended, and for one that failed the end of what it printed. */
-function CommandCard({ command, label }: { command: CommandRun; label?: string }) {
+function CommandCard({ command, label, passedOver = false }: { command: CommandRun; label?: string; /** It failed here and on the base alike, so the gate passed over it (#1004). */ passedOver?: boolean }) {
   const lines = (command.output ?? "").split("\n").filter((line) => line.trim()).slice(-12);
   return (
-    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : "failed"}>
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : passedOver ? "onBase" : "failed"}>
       <div className="flex items-center gap-2 text-xs">
         <Terminal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="text-muted-foreground">{label ?? (command.project ? "Project check" : "Done-check")}</span>
-        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : "text-destructive")}>
-          {command.passed ? `passed · ${durationText(command.millis)}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
+        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : passedOver ? "text-warning" : "text-destructive")}>
+          {command.passed ? `passed · ${durationText(command.millis)}` : passedOver ? `fails on the base too · exit ${command.exitCode}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
         </span>
       </div>
       <div className="mt-1 break-all font-mono text-xs">{command.run}</div>
+      {command.onBase && <OnBaseLine base={command.onBase} passedOver={passedOver} />}
       {lines.length > 0 && (
         <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[17px] text-muted-foreground scrollbar-thin">
           {lines.map((line, index) => <div key={index}>{line.split(/(FAILED|panicked|error(?=[:\[]))/).map((part, at) => (at % 2 ? <span key={at} className="text-destructive">{part}</span> : part))}</div>)}
         </pre>
       )}
     </div>
+  );
+}
+
+/** How a failed command came out on the commit the result started from (#1004), and what that made of the failure. */
+function OnBaseLine({ base, passedOver }: { base: CommandRun; passedOver: boolean }) {
+  const same = passedOver;
+  const how = base.passed ? "passed" : base.exitCode != null ? `failed · exit ${base.exitCode}` : "did not finish";
+  return (
+    <p className={cn("mt-1.5 text-xs", same ? "text-muted-foreground" : "text-destructive")} data-testid="done-check-base" data-same={same}>
+      On the base: {how}. {same ? "The same failure is already there, so it is not this piece's." : base.passed ? "Only this piece's change fails it." : "It fails otherwise there: this failure is the piece's own."}
+    </p>
+  );
+}
+
+/** A blocked piece the run hands to the lead by itself (#1004): why, and why it is not there yet. */
+function ToLeadNote({ piece }: { piece: RunPiece }) {
+  const toLead = piece.toLead!;
+  return (
+    <p className="flex items-start gap-2 rounded-lg bg-well px-3 py-2 text-xs text-muted-foreground hairline" data-testid="piece-to-lead">
+      <Sparkles aria-hidden className="mt-0.5 size-3.5 shrink-0 text-accent" />
+      <span className="min-w-0 flex-1">
+        Goes to the lead by itself{toLead.for === "review" ? ", to review the diff" : ", to finish"}: <Prose text={toLead.stuck} />. {toLead.waits ?? "It is handed over at the next read of the run."} You can still decide otherwise below.
+      </span>
+    </p>
+  );
+}
+
+/** What the run did by itself (#1004), newest first: where a stop needed no person, the step it took and why. */
+function RunEvents({ run, numbers, onSelect }: { run: Run; numbers: Record<string, number>; onSelect: (id: string) => void }) {
+  const [all, setAll] = useState(false);
+  const events = [...(run.events ?? [])].reverse();
+  if (!events.length) return null;
+  const shown = all ? events : events.slice(0, 5);
+  return (
+    <section aria-label="What the run decided" className="mx-6 mt-4" data-testid="run-events">
+      <div className={cn(kicker, "mb-2")}>What the run decided</div>
+      <ol className="flex flex-col divide-y divide-hairline rounded-lg bg-well hairline">
+        {shown.map((event, index) => <RunEventRow key={`${event.at}-${index}`} event={event} number={event.piece ? numbers[event.piece] : undefined} onSelect={onSelect} />)}
+      </ol>
+      {events.length > shown.length && <Button size="xs" variant="ghost" className="mt-1" onClick={() => setAll(true)}>Show all {events.length}</Button>}
+    </section>
+  );
+}
+
+function RunEventRow({ event, number, onSelect }: { event: RunEvent; number?: number; onSelect: (id: string) => void }) {
+  return (
+    <li className="flex min-w-0 items-start gap-3 px-3 py-2 text-xs" data-testid="run-event" data-step={event.step}>
+      <span className="w-24 shrink-0 text-faint" title={new Date(event.at).toLocaleString()}>{relativeTime(event.at)}</span>
+      <span className="min-w-0 flex-1">
+        <span className="font-medium text-foreground">{AUTO_STEP_LABEL[event.step]}</span>
+        {event.piece && number != null && <> · <button type="button" className="text-muted-foreground underline-offset-2 hover:underline" onClick={() => onSelect(event.piece!)}>piece {number}</button></>}
+        <span className="block text-muted-foreground"><Prose text={event.message} /></span>
+        {event.stuck && <span className="mt-0.5 block break-words text-faint"><Prose text={event.stuck} /></span>}
+      </span>
+    </li>
   );
 }
 
@@ -838,7 +897,8 @@ function Checks({ piece }: { piece: RunPiece }) {
   if (at < 0) return null;
   const check = tries[at].verification!;
   const failed = check.gates.find((gate) => !gate.passed);
-  const commands = check.gates.flatMap((gate) => gate.commands ?? []);
+  // A command that failed in a gate that passed is a failure the base has too, passed over (#1004).
+  const commands = check.gates.flatMap((gate) => (gate.commands ?? []).map((command) => ({ command, passedOver: gate.passed && !command.passed })));
   const outside = failed?.gate === "scope" ? (failed.detail ?? "").split("\n").filter((line) => line.startsWith("- ")).map((line) => line.slice(2)) : [];
   // The gate under way: the first that has not run, while nothing has failed and the check is open.
   const next = !failed && !check.outcome ? GATE_ORDER.find((gate) => !check.gates.some((ran) => ran.gate === gate) && (gate !== "review" || !!check.review)) : undefined;
@@ -871,7 +931,7 @@ function Checks({ piece }: { piece: RunPiece }) {
             <span>The change is outside this piece's files. A worker may not edit another piece's files.</span>
           </p>
         )}
-        {commands.map((command, index) => <CommandCard key={index} command={command} />)}
+        {commands.map(({ command, passedOver }, index) => <CommandCard key={index} command={command} passedOver={passedOver} />)}
         {check.review && <ReviewCard agent={piece.agent} review={check.review} check={check} />}
         {check.outcome === "passed" && !check.review && <p className="mt-2 text-[11.5px] leading-[17px] text-faint">Accepted without a model: the checks above were enough.</p>}
         {check.outcome === "inconclusive" && <p className="mt-2 text-[12.5px] leading-[18px] text-warning">{check.failure}</p>}
@@ -1300,7 +1360,10 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
             {unmerged.state === "conflict" && <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onResolve}><Sparkles />Resolve in lead</Button>}
             <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onSkip}><SkipForward />Skip</Button>
           </> : stuck ? (
-            <BlockedActions run={run} piece={piece} busy={busy} act={act} />
+            <div className="flex w-full flex-col gap-2.5">
+              {piece.toLead && <ToLeadNote piece={piece} />}
+              <BlockedActions run={run} piece={piece} busy={busy} act={act} />
+            </div>
           ) : piece.state === "lead" && !["stopped", "done"].includes(run.state) ? <>
             <Button size="sm" variant="accent" disabled={busy} title="Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass." onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
               {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Check and finish

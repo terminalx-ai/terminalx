@@ -666,6 +666,12 @@ pub struct Piece {
     /// One line on the state: the worker's result, or why it is not done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The run gives it to the lead by itself (#1004): set where it is
+    /// blocked, cleared once the lead has it. While it stands the lead could
+    /// not take it yet (it is busy with another piece, or the run is past its
+    /// budget), and it is handed over as soon as it can be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_lead: Option<ToLead>,
     /// What came of merging its accepted result into the lead's branch.
     /// Absent before that was tried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -782,6 +788,70 @@ pub enum Hold {
     Budget,
 }
 
+/// Why the run hands a blocked piece to the lead by itself (#1004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeadFor {
+    /// Its result passed every gate before review, and no verifier gave a
+    /// verdict, asked again or not: the lead reviews the diff itself.
+    Review,
+    /// Its ladder has no model above the last one that fell short.
+    NoModelAbove,
+}
+
+/// A hand-off to the lead the run decided on and has yet to make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToLead {
+    #[serde(rename = "for")]
+    pub reason: LeadFor,
+    /// What was stuck, in a sentence: what the lead is told it takes over from.
+    pub stuck: String,
+    /// Why it has not been handed over yet, while the lead cannot take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<String>,
+}
+
+/// A step the run took by itself where it would have stopped for a person (#1004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoStep {
+    /// A verifier gave no verdict and was asked again for one.
+    AskedVerifierAgain,
+    /// A piece went to the lead: no verdict came, or no model was left above.
+    HandedToLead,
+    /// A done-check failed, and it fails on the base as well: the piece was accepted.
+    AcceptedBaseFailure,
+    /// Paused on its points of a window: it goes on by itself at the reset.
+    WaitsForReset,
+    /// The window reset and the run went on.
+    WentOnAfterReset,
+    /// A worker the piece no longer belongs to (the lead took it over, or a
+    /// newer try runs) reported: the report was read, and changed nothing.
+    IgnoredStaleReport,
+    /// The lead took a piece over, and the piece's earlier worker, still in a
+    /// turn, was stopped so it reports nothing more.
+    StoppedOldWorker,
+}
+
+/// One automatic step, as the Run view lists it and the lead is told it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEvent {
+    pub at: String,
+    pub step: AutoStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub piece: Option<String>,
+    /// What the run did and why, in a sentence: "Accepted mac: its failing check, `cargo t`, also fails on the base."
+    pub message: String,
+    /// What was stuck, when the message does not say it all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<String>,
+}
+
+/// The most events a run keeps: the oldest go first. A run takes a few dozen.
+pub const EVENTS_KEPT: usize = 200;
+
 /// Who approved a run, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -849,6 +919,9 @@ pub struct Run {
     /// Why it is `needsYou`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause: Option<budget::Pause>,
+    /// The steps it took by itself where it would have stopped for a person (#1004), oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<RunEvent>,
     pub created: String,
     pub modified: String,
 }
@@ -870,6 +943,15 @@ impl Run {
 
     pub fn piece(&self, id: &str) -> Option<&Piece> {
         self.pieces.iter().find(|piece| piece.id == id)
+    }
+
+    /// Note a step it took by itself; the oldest are let go past [`EVENTS_KEPT`].
+    pub fn record(&mut self, step: AutoStep, piece: Option<&str>, message: impl Into<String>, stuck: Option<String>) -> RunEvent {
+        let event = RunEvent { at: crate::store::index::now(), step, piece: piece.map(str::to_owned), message: message.into(), stuck };
+        self.events.push(event.clone());
+        let over = self.events.len().saturating_sub(EVENTS_KEPT);
+        self.events.drain(..over);
+        event
     }
 
     /// Its workers in a turn now: what the worker limits count.

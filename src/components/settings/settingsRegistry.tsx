@@ -417,6 +417,30 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reviewDiffLines" },
   }),
   defineSetting({
+    id: "orchestrator.reaskVerifier", section: "orchestrator", title: "Ask the reviewer again when it gives no verdict",
+    description: "Up to 2 more times, in its own conversation. If there is still none, the lead reviews the diff itself. Off, the piece waits for you.",
+    searchTerms: ["orchestrator", "verifier", "reviewer", "verdict", "ask again", "retry", "review", "lead", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reaskVerifier" },
+  }),
+  defineSetting({
+    id: "orchestrator.acceptBaseFailures", section: "orchestrator", title: "Accept a piece whose only failing check also fails on the base",
+    description: "A failing check is run again on the commit the piece started from. If it fails there the same way, the piece is accepted with a note, and no try is used. Off, it counts against the piece's tries.",
+    searchTerms: ["orchestrator", "base", "flaky", "failing", "test", "check", "done check", "main", "accept", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.acceptBaseFailures" },
+  }),
+  defineSetting({
+    id: "orchestrator.leadWhenLadderEnds", section: "orchestrator", title: "Hand a piece to the lead when no higher model is left",
+    description: "The lead finishes it in its own checkout, with the last worker's report. Off, the piece waits for you.",
+    searchTerms: ["orchestrator", "ladder", "model", "tier", "escalate", "take over", "lead", "blocked", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.leadWhenLadderEnds" },
+  }),
+  defineSetting({
+    id: "orchestrator.resumeAfterReset", section: "orchestrator", title: "Go on when the usage window resets",
+    description: "A run that used its points of a window goes on by itself once the window resets. Pause when a window passes still stops every run. Off, it waits for you.",
+    searchTerms: ["orchestrator", "budget", "points", "window", "reset", "resume", "subscription", "pause", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.resumeAfterReset" },
+  }),
+  defineSetting({
     id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",
     description: "The model tier and effort each kind of piece starts on, for Claude Code workers and for Codex workers. A piece that falls short is retried on more effort, then on the next model up.",
     searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",

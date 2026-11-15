@@ -1331,3 +1331,85 @@ describe("a session with no run (18.08)", () => {
     await waitFor(() => expect(screen.getByTestId("run-limits").textContent).toBe("Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass"));
   });
 });
+
+describe("what a run decides on its own (#1004)", () => {
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const decided = (extra: Partial<Run> = {}): Run => {
+    const run = waiting();
+    return {
+      ...run, state: "running", approval: { at: at(60) },
+      pieces: [
+        { ...run.pieces[0], id: "mac", title: "Mac permissions", state: "done", attempts: 1, worker: { sessionId: "w-mac", tabId: "t" },
+          tries: [{ step: "first", model: "sonnet", effort: "medium", worker: { sessionId: "w-mac", tabId: "t" }, outcome: "done", verification: { outcome: "passed", gates: [
+            { gate: "report", passed: true }, { gate: "scope", passed: true }, { gate: "branch", passed: true },
+            { gate: "commands", passed: true, detail: "`cargo t computer` exited 101 here and on the commit the result started from alike, so that failure is not the result's.", commands: [
+              { run: "cargo t computer", exitCode: 101, passed: false, millis: 61_000, output: "test computer::permissions::tests::probe ... FAILED", onBase: { run: "cargo t computer", exitCode: 101, passed: false, millis: 58_000, output: "test computer::permissions::tests::probe ... FAILED" } },
+            ] },
+          ] } }] },
+        { ...run.pieces[1], id: "titles", title: "Session titles", state: "blocked", attempts: 2, worker: { sessionId: "w-titles", tabId: "t" }, note: "Blocked after 2 tries: opus at medium, then opus at high. No top model of Claude Code is installed (Fable), so there is no model above it to move to. It goes to the lead.",
+          toLead: { for: "noModelAbove", stuck: "its try on opus at high fell short, and no top model of Claude Code is installed (Fable), so there is no model above it to move to", waits: "It goes to the lead once the lead is done with piece phone-model." } },
+        { ...run.pieces[2], id: "phone-model", title: "Phone connection model", dependsOn: [], state: "lead", attempts: 2 },
+      ],
+      events: [
+        { at: at(30), step: "acceptedBaseFailure", piece: "mac", message: "Accepted mac: its failing check, `cargo t computer`, also fails on the base.", stuck: "`cargo t computer` failed on its result (computer::permissions::tests::probe)." },
+        { at: at(20), step: "askedVerifierAgain", piece: "phone-model", message: "Asked phone-model's verifier again for its verdict (1 of 2).", stuck: "The reply has no `terminalx-verdict` block." },
+        { at: at(10), step: "handedToLead", piece: "phone-model", message: "Handed phone-model to the lead to review: its result passed every gate before review, and no verifier gave a verdict on it, asked 2 more times." },
+      ],
+      ...extra,
+    };
+  };
+
+  it("lists the steps the run took by itself, newest first, each opening its piece", async () => {
+    await open(decided());
+    const events = screen.getByRole("region", { name: "What the run decided" });
+    const rows = within(events).getAllByTestId("run-event");
+    expect(rows.map((entry) => entry.dataset.step)).toEqual(["handedToLead", "askedVerifierAgain", "acceptedBaseFailure"]);
+    expect(rows[0].textContent).toContain("To the lead · piece 3");
+    expect(rows[0].textContent).toContain("Handed phone-model to the lead to review");
+    expect(rows[2].textContent).toContain("Failing on base · piece 1");
+    expect(rows[2].textContent).toContain("Accepted mac: its failing check, cargo t computer, also fails on the base.");
+    expect(rows[2].textContent).toContain("(computer::permissions::tests::probe)");
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "piece 3" }));
+    await waitFor(() => expect(detail().textContent).toContain("Phone connection model"));
+  });
+
+  it("shows only the last five, and all on asking", async () => {
+    const many = Array.from({ length: 7 }, (_, index) => ({ at: at(70 - index), step: "askedVerifierAgain" as const, piece: "phone-model", message: `Ask ${index + 1}.` }));
+    await open(decided({ events: many }));
+    expect(screen.getAllByTestId("run-event").map((entry) => entry.textContent?.match(/Ask \d/)?.[0])).toEqual(["Ask 7", "Ask 6", "Ask 5", "Ask 4", "Ask 3"]);
+    fireEvent.click(screen.getByRole("button", { name: "Show all 7" }));
+    expect(screen.getAllByTestId("run-event")).toHaveLength(7);
+  });
+
+  it("does not list a piece the run hands to the lead as waiting on the person, and says why it waits", async () => {
+    await open(decided());
+    // Nothing waits on the person: no blocked line, no Needs you.
+    expect(screen.getByTestId("run-subtitle").textContent).not.toContain("blocked");
+    expect(screen.queryByText("Needs you")).toBeNull();
+    fireEvent.click(row("titles"));
+    const note = await screen.findByTestId("piece-to-lead");
+    expect(note.textContent).toBe("Goes to the lead by itself, to finish: its try on opus at high fell short, and no top model of Claude Code is installed (Fable), so there is no model above it to move to. It goes to the lead once the lead is done with piece phone-model. You can still decide otherwise below.");
+    // The person's own ways on stay.
+    expect(within(detail()).getByRole("button", { name: "Take over in lead" })).toBeTruthy();
+  });
+
+  it("shows a check that fails on the base too as passed over, with how it ended there", async () => {
+    await open(decided());
+    fireEvent.click(row("mac"));
+    const card = await within(detail()).findByTestId("done-check");
+    expect(card.dataset.check).toBe("onBase");
+    expect(card.textContent).toContain("fails on the base too · exit 101");
+    expect(within(card).getByTestId("done-check-base").textContent).toBe("On the base: failed · exit 101. The same failure is already there, so it is not this piece's.");
+  });
+
+  it("says a run paused on its own points goes on by itself, and asks nothing", async () => {
+    const resets = Date.now() + 3_600_000;
+    const pause = { kind: "points" as const, message: "This run has used about 26 points of the Claude 5h window, past its budget of 25.", resumeAt: resets, byItself: true };
+    await open(decided({ state: "needsYou", reason: pause.message, pause, events: [{ at: at(1), step: "waitsForReset", message: "It goes on by itself when the usage window resets at 16:10." }] }));
+    expect(screen.getByTestId("run-state").textContent).toBe("Run paused until the window resets");
+    const notice = screen.getByTestId("run-paused");
+    expect(notice.textContent).toContain("no new piece starts before the reset. You need do nothing.");
+    expect(within(notice).getByTestId("run-resumes-at").textContent).toContain("Goes on by itself at");
+    expect(within(notice).queryByRole("button", { name: "Resume now" })).toBeNull();
+  });
+});

@@ -48,8 +48,10 @@ export interface RunPause {
   kind: "dollars" | "points" | "window";
   message: string;
   window?: RunWindowUse;
-  /** The person asked for it to go on when the window resets: then, in ms since the epoch. */
+  /** It goes on when the window resets: then, in ms since the epoch. */
   resumeAt?: number;
+  /** The run set `resumeAt` itself (#1004): its own points of a window were spent, and nobody was asked. */
+  byItself?: boolean;
 }
 
 /** A model's place in its vendor's line-up; the routing table names tiers, not versions (PRO-275). */
@@ -91,6 +93,8 @@ export interface CommandRun {
   millis: number;
   /** The last 100 lines it printed, kept for one that failed. */
   output?: string;
+  /** It failed, and was run again on the commit the result started from (#1004): how it came out there. */
+  onBase?: CommandRun;
 }
 
 export interface GateResult {
@@ -122,6 +126,8 @@ export interface RunVerifier {
   /** A resumable permission request or question needs attention. */
   waiting?: string;
   tokens?: VerifierTokens;
+  /** How often it was asked again for a verdict it did not give (#1004), at most 2. */
+  askedAgain?: number;
 }
 
 /** The model step of a check: who was asked, why, and what they said. */
@@ -284,6 +290,30 @@ export interface RunPiece {
   merge?: PieceMerge;
   /** Files its last report or check names outside what it owns (`runs show`). */
   outside?: OutsideFile[];
+  /** Blocked, and the run hands it to the lead by itself (#1004): no person is asked. */
+  toLead?: ToLead;
+}
+
+/** Why the run gives a blocked piece to the lead by itself (`orchestration::ToLead`). */
+export interface ToLead {
+  /** `review`: no verifier gave a verdict, so the lead reads the diff. `noModelAbove`: no model is left above the last try's. */
+  for: "review" | "noModelAbove";
+  stuck: string;
+  /** Why it is not with the lead yet, while the lead is on another piece or the run is past its budget. */
+  waits?: string;
+}
+
+/** A step a run took by itself, where no person's judgment was needed (#1004). */
+export type AutoStep = "askedVerifierAgain" | "handedToLead" | "acceptedBaseFailure" | "waitsForReset" | "wentOnAfterReset" | "ignoredStaleReport" | "stoppedOldWorker";
+
+export interface RunEvent {
+  at: string;
+  step: AutoStep;
+  piece?: string;
+  /** What the run did, as the Run view and the lead's messages say it. */
+  message: string;
+  /** What was stuck, when the message does not say it. */
+  stuck?: string;
 }
 
 /** What came of bringing a piece's accepted result into the lead's branch (`orchestration::MergeState`). */
@@ -379,6 +409,8 @@ export interface Run {
   usage?: RunUsage;
   /** Why it is `needsYou`. */
   pause?: RunPause;
+  /** The steps it took by itself, oldest first; the last 200 are kept (#1004). */
+  events?: RunEvent[];
   created: string;
   modified: string;
   /** Its workers in a turn now: what the worker limits count. */
@@ -479,7 +511,20 @@ export interface OrchestratorSettings {
   reviewDiffLines: number;
   /** The rows of the routing table changed for the app; absent when none is. */
   routing?: RoutingRows;
+  /** What a run decides on its own, where a stop needs no person's judgment (#1004). App-wide only; each is on unless turned off. */
+  reaskVerifier: boolean;
+  acceptBaseFailures: boolean;
+  leadWhenLadderEnds: boolean;
+  resumeAfterReset: boolean;
   projects: Record<string, ProjectOrchestratorSettings>;
+}
+
+/** The four switches of what a run decides on its own (#1004). */
+export interface AutoDecide {
+  reaskVerifier: boolean;
+  acceptBaseFailures: boolean;
+  leadWhenLadderEnds: boolean;
+  resumeAfterReset: boolean;
 }
 
 /** What holds for runs in one project: its own answers, the app's where it gave none. */
@@ -497,6 +542,7 @@ export interface OrchestratorLimits {
   effortCeiling: string;
   reviewDiffLines: number;
   routing: RoutingTable;
+  auto: AutoDecide;
 }
 
 export interface ProjectOrchestratorSettings {
@@ -534,4 +580,9 @@ export interface OrchestratorPatch {
   routing?: Partial<Record<PieceKind, Partial<Record<RoutedAgent, Route | null>>>>;
   /** Take every override away first. */
   resetRouting?: boolean;
+  /** App-wide only (#1004). */
+  reaskVerifier?: boolean;
+  acceptBaseFailures?: boolean;
+  leadWhenLadderEnds?: boolean;
+  resumeAfterReset?: boolean;
 }

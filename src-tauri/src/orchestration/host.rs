@@ -127,6 +127,37 @@ pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
 
 /// The commit a worker's branch is cut from: the lead's branch, or the commit
 /// it has checked out when it is on none.
+/// The checkout a project's base commits are run in (#1004): one of the
+/// app's own, kept between runs so what a check builds (ignored files: a
+/// `target`, `node_modules`) is there the next time. Held while a command runs
+/// in it: two checks of one project take turns. `repo` is any checkout of the
+/// project; `commit` a result that forks from `base`, and it is the commit
+/// where they fork that is checked out.
+fn base_checkout(repo: &Path, root: &Path, project: &str, base: &str, commit: &str) -> anyhow::Result<(PathBuf, std::sync::MutexGuard<'static, ()>)> {
+    use sha2::Digest;
+    static HELD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // One at a time: a command running in the checkout is not switched under.
+    let held = HELD.lock().unwrap_or_else(|error| error.into_inner());
+    let fork = crate::git::run(repo, &["merge-base", base, commit]).context("find where the result forks from its base")?;
+    let fork = fork.trim();
+    let dir = root.join(&format!("{:x}", sha2::Sha256::digest(project.as_bytes()))[..16]);
+    let ours = crate::git::run(&dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
+    let theirs = crate::git::run(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).context("read the project's repository")?;
+    if ours.as_deref().map(str::trim) != Some(theirs.trim()) {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+        }
+        std::fs::create_dir_all(root)?;
+        let _ = crate::git::run(repo, &["worktree", "prune"]);
+        crate::git::run(repo, &["worktree", "add", "--detach", "--force", &dir.to_string_lossy(), fork]).context("add the base checkout")?;
+    } else {
+        crate::git::run(&dir, &["checkout", "--detach", "--force", fork]).context("check out the base commit")?;
+        // What a command left there before goes; what is ignored (build output) stays.
+        crate::git::run(&dir, &["clean", "-fdq"]).context("clean the base checkout")?;
+    }
+    Ok((dir, held))
+}
+
 fn lead_base(cwd: &Path) -> anyhow::Result<String> {
     match crate::git::current_branch(cwd) {
         Some(branch) => Ok(branch),
@@ -356,7 +387,7 @@ impl Host for ManagerHost {
         }
     }
 
-    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> Checked {
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef, known: &verify::Known) -> Checked {
         let Ok(session) = index::get(&worker.session_id) else {
             return Checked::unreadable(Gate::Branch, "The worker's session was deleted, so its worktree cannot be checked.");
         };
@@ -369,7 +400,20 @@ impl Host for ManagerHost {
         // The mode the worker was started in decides, with the person's approval, whether its commands are run unasked.
         let commands = verify::may_run_commands(run.approval.is_some(), piece.started_mode.as_deref().unwrap_or_else(|| piece.mode(&run.worker_mode)));
         let marks = crate::store::root().ok().map(|root| root.join("run-checks"));
-        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
+        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT, known)
+    }
+
+    fn on_base(&self, run: &Run, _piece: &Piece, worker: &SessionRef, base: &str, commit: &str, command: &verify::CommandRun) -> verify::CommandRun {
+        let not_run = |why: String| verify::CommandRun { run: command.run.clone(), project: command.project, exit_code: None, passed: false, millis: 0, output: Some(why), on_base: None };
+        let Ok(session) = index::get(&worker.session_id) else { return not_run("The worker's session was deleted, so the commit its result started from could not be found.".into()) };
+        let root = match crate::store::root() {
+            Ok(root) => root.join("run-bases"),
+            Err(error) => return not_run(format!("The app's own folder could not be read: {error:#}")),
+        };
+        match base_checkout(Path::new(&session.cwd), &root, &run.project_path, base, commit) {
+            Ok((checkout, _held)) => verify::run_command(&checkout, &command.run, command.project, verify::COMMAND_TIMEOUT),
+            Err(error) => not_run(format!("The commit the result started from could not be checked out: {error:#}")),
+        }
     }
 
     fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
@@ -742,7 +786,7 @@ mod tests {
         piece.tries.push(serde_json::from_str(&serde_json::to_string(&attempt).unwrap()).unwrap());
         commit_file(&cwd, "consumer.ts", "import type { Contract } from './contracts';\n");
         let checkout = verify::Checkout { cwd: cwd.clone(), base: "lead".into(), branch: Some("consumer".into()), commands: true, marks: None };
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.passed(), "{:?}", checked.gates);
         assert_eq!(checked.base, base);
         assert_eq!(checked.facts.files, ["consumer.ts"]);
@@ -751,17 +795,17 @@ mod tests {
 
         // Lead conflict checks still use the live lead branch, not the scope baseline.
         commit_file(repo.path(), "consumer.ts", "conflicting lead implementation\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.gates.iter().any(|gate| gate.gate == verify::Gate::Branch && !gate.passed));
         // Inherited files are not exempt from ownership: editing them is still refused.
         commit_file(&cwd, "contracts.ts", "unauthorized change\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (verify::Gate::Scope, false));
         assert!(checked.gates[0].detail.as_ref().unwrap().contains("contracts.ts"));
         // Rewriting history cannot discard the accepted starting code unnoticed.
         git(&cwd, &["reset", "--hard", &lead]);
         commit_file(&cwd, "consumer.ts", "missing dependencies\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.gates[0].detail.as_ref().unwrap().contains("starting commit"));
     }
 
@@ -823,5 +867,37 @@ mod tests {
         assert!(activity_of(&building).command_running);
         building.push(event(8, "2026-11-11T10:20:00Z", json!({"type": "background_tasks_changed", "tasks": []})));
         assert!(!activity_of(&building).command_running);
+    }
+
+    /// #1004: a failing check is run again on the commit the result forks from, in a checkout
+    /// of the app's own that is kept between checks: what a command left there goes, and
+    /// what is ignored (build output) stays.
+    #[test]
+    fn a_check_runs_on_the_base_in_a_checkout_of_the_apps_own_kept_between_checks() {
+        let repo = repository();
+        commit_file(repo.path(), ".gitignore", "target/\n");
+        let base = commit_file(repo.path(), "check.sh", "test \"$(cat state)\" = good\n");
+        commit_file(repo.path(), "state", "bad\n");
+        let fork = git(repo.path(), &["rev-parse", "HEAD"]);
+        let worker = worktree(repo.path(), "worker", &fork);
+        let result = commit_file(&worker, "state", "good\n");
+        let root = tempfile::tempdir().unwrap();
+        let (dir, held) = super::base_checkout(&worker, root.path(), "/projects/app", "lead", &result).unwrap();
+        // At the fork, not at the result nor in the worker's worktree.
+        assert!(dir.starts_with(root.path()));
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), fork);
+        let ran = super::verify::run_command(&dir, "sh check.sh", false, std::time::Duration::from_secs(10));
+        assert_eq!((ran.passed, ran.exit_code), (false, Some(1)));
+        assert!(super::verify::run_command(&worker, "sh check.sh", false, std::time::Duration::from_secs(10)).passed);
+        // What a command leaves in it goes before the next check; what is ignored stays.
+        std::fs::write(dir.join("left-over"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/cache"), "built").unwrap();
+        drop(held);
+        let (again, _held) = super::base_checkout(&worker, root.path(), "/projects/app", &base, &result).unwrap();
+        assert_eq!((again.clone(), git(&again, &["rev-parse", "HEAD"])), (dir.clone(), base));
+        assert!(!again.join("left-over").exists() && again.join("target/cache").exists());
+        // The repository knows it as a worktree of its own, detached: no branch is held.
+        assert!(git(repo.path(), &["worktree", "list", "--porcelain"]).contains(&format!("worktree {}\nHEAD", std::fs::canonicalize(&dir).unwrap().display())));
     }
 }
