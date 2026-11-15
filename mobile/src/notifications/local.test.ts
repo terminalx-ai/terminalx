@@ -168,6 +168,14 @@ describe("subscribing", () => {
     const { local } = await modules();
     await expect(local.restoreLocalNotifications(state.connection, "mac")).resolves.toBe(false);
     expect(state.subscribes).toEqual([]);
+    // Turned on in iOS Settings, then back in the app: it subscribes without reconnecting.
+    fake.permission = { granted: true, status: "granted" };
+    await expect(local.refreshLocalNotifications()).resolves.toBe("granted");
+    expect(live(state)).toHaveLength(1);
+    // And off again: it stops.
+    fake.permission = { granted: false, status: "denied" };
+    await expect(local.refreshLocalNotifications()).resolves.toBe("denied");
+    expect(live(state)).toEqual([]);
   });
 });
 
