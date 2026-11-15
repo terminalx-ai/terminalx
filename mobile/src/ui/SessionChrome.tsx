@@ -45,7 +45,8 @@ export function SessionHeader({ title, subtitle, connection, onBack, view, onVie
 
 /**
  * The chats this branch holds, as tabs, as the Mac's tab strip shows them:
- * each by its agent's mark and its own title, the open one underlined, and
+ * each by its agent's mark and the name made for it, else its own title
+ * (`branchChats`), the open one underlined, and
  * `+` for another chat in the same branch.
  */
 /**

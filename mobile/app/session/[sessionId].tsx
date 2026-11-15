@@ -30,6 +30,7 @@ import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome"
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
+import { StatusLine, statusLineState } from "@mobile/ui/StatusLine";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { holdSend, releaseSend, showConversation, takeHeldSend, useConversationState } from "@mobile/state/conversation-state";
@@ -147,8 +148,10 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const [held, setHeld] = useConversationState(`${stateKey}:held`, false);
   // In flight as a ref too: the held send and a tap can land in the same render.
   const sendInFlight = useRef(false);
+  // A send that failed, said for this visit only: a sent message shows in the
+  // transcript itself, and nothing about a send outlives leaving the screen.
   // `resend`: the send failed with the connection, and sending the same draft again can help.
-  const [sendFeedback, setSendFeedback] = useConversationState<{ kind: "error" | "success"; message: string; resend?: boolean } | null>(`${stateKey}:sendFeedback`, null);
+  const [sendFailure, setSendFailure] = useState<{ message: string; resend?: boolean } | null>(null);
   const [attachments, setAttachments] = useConversationState<MobileAttachment[]>(`${stateKey}:attachments`, []);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [answeringPermission, setAnsweringPermission] = useConversationState<string | null>(`${stateKey}:answeringPermission`, null);
@@ -285,7 +288,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       draftEdited.current = true;
       setHeld(true);
       holdSend(stateKey, hostId, () => sendLatest.current(true));
-      setSendFeedback({ kind: "success", message: "Sends when connected." });
+      setSendFailure(null);
       return;
     }
     if (sending || sendInFlight.current) return;
@@ -293,9 +296,9 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     setHeld(false);
     draftEdited.current = true;
     setSending(true);
-    setSendFeedback(null);
+    setSendFailure(null);
     const showError = (message: string) => {
-      setSendFeedback({ kind: "error", message: `Message not sent: ${message}` });
+      setSendFailure({ message: `Message not sent: ${message}` });
       app.connection.reportError("Session message failed", message);
     };
     try {
@@ -316,12 +319,10 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
         const inputs = attachments.map(({ mediaType, data, name }) => ({ mediaType, data, name }));
         const sent = await app.api.sendSession(tabId, text, inputs, sendId.id);
         if (!sent.sent) return showError(sent.message);
-        setSendFeedback({ kind: "success", message: sent.queued ? "Queued for the agent." : "Sent to the agent." });
       } else {
         const posted = await app.api.postNote(sessionId, text, sendId.id);
         if (!posted.sent) return showError(posted.message);
         setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
-        setSendFeedback({ kind: "success", message: "Note added." });
       }
       setDraft("");
       setDraftId(null);
@@ -338,11 +339,11 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       // A Mac that never answered most likely has it: sending it again could
       // give the agent the same prompt twice, or add the note twice (#675).
       if (mayHaveArrived(problem)) {
-        return setSendFeedback({ kind: "error", message: sendToAgent
+        return setSendFailure({ message: sendToAgent
           ? `Not confirmed: ${problemText(problem)}, so the message may have reached the agent. Check the conversation before sending it again.`
           : `Not confirmed: ${problemText(problem)}, so the note may have been added. Check the notes before adding it again.` });
       }
-      setSendFeedback({ kind: "error", message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
+      setSendFailure({ message: `Not sent: ${problemText(problem)}. Your message is still in the box.`, resend: canRetry(problem) });
     } finally {
       sendInFlight.current = false;
       setSending(false);
@@ -450,6 +451,10 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   // Once the wait is a real one, the box says a message waits for the connection.
   const placeholder = state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
 
+  // Opening a conversation shows it, not the keyboard: one still up from the
+  // screen before (a new session's first message) goes, and the composer
+  // takes focus only when tapped.
+  useEffect(() => { Keyboard.dismiss(); }, []);
   // Over the keyboard the composer needs no room for the home indicator.
   const [keyboardShown, setKeyboardShown] = useState(false);
   useEffect(() => {
@@ -466,7 +471,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     setHeld(false);
     const next = typedBefore.current ? `${typedBefore.current} ${said}` : said;
     setDraft(next);
-    setSendFeedback(null);
+    setSendFailure(null);
     void AsyncStorage.setItem(cacheKey, next);
   });
   const beginDictation = async () => { typedBefore.current = draft.trimEnd(); await dictation.start(); };
@@ -485,11 +490,13 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       const choice = options[index];
       if (choice === "Photo Library") void pickPhotos();
       else if (choice === "Choose File") void pickAttachments();
-      else if (choice === "Worktree note") { setSendToAgent(false); setSendFeedback(null); }
+      else if (choice === "Worktree note") { setSendToAgent(false); setSendFailure(null); }
     });
   };
 
   const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
+  const tabStatus = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.status;
+  const status = useMemo(() => statusLineState({ transcript, events, tabStatus }), [events, tabStatus, transcript]);
 
   // One answer at a time, to a permission request or a question: the card it
   // was for goes when the Mac's decision event arrives, and a refusal (the
@@ -570,13 +577,17 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
       {attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}
       {dictation.error ? <Text accessibilityLiveRegion="polite" style={[styles.attachmentError, { color: palette.danger }]}>{dictation.error}</Text> : null}
-      {sendFeedback ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.faint }]}>{sendFeedback.message}</Text>{sendFeedback.resend ? <Button label="Send again" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}
+      {/* What the agent is doing now, right under the latest card and over the composer (22.03). Stop is the turn's interrupt, as the composer's square button is. */}
+      <StatusLine state={status} onStop={controls ? controls.interrupt : undefined} stopping={!!controls?.working} />
+      {/* A held message is still to go, so the line says so until it does (#983); nothing else about a send is kept. */}
+      {held && !sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.muted }]}>Sends when connected.</Text></View> : null}
+      {sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.danger }]}>{sendFailure.message}</Text>{sendFailure.resend ? <Button label="Resend" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}
       {/* After the best chat apps: a slim pill until it is in use, then the message on top and what to send it with beneath. */}
       <Glass style={[styles.inputGlass, expanded ? styles.inputOpen : styles.inputPill]}>
-        {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFeedback(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
+        {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFailure(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
         <View style={expanded ? styles.inputColumn : styles.inputRow}>
           {!expanded && sendToAgent ? <RoundButton label="Add attachment" icon={<Plus size={21} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
-          <TextInput value={draft} onFocus={() => { composerFocused.current = true; setFocused(true); }} onBlur={() => { composerFocused.current = false; setFocused(false); }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, expanded ? styles.composeOpen : styles.composePill, { color: palette.ink }]} />
+          <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; setFocused(true); }} onBlur={() => { composerFocused.current = false; setFocused(false); }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, expanded ? styles.composeOpen : styles.composePill, { color: palette.ink }]} />
           {!expanded ? mic : null}
           {!expanded ? action : null}
           {expanded && dictation.listening ? <View style={styles.toolbar}>
@@ -842,10 +853,10 @@ const styles = StyleSheet.create({
   composePill: { flex: 1, minHeight: 42, maxHeight: 42, paddingTop: 11, paddingBottom: 9 },
   composeOpen: { minHeight: 44, maxHeight: 150, paddingTop: 10, paddingBottom: 4 },
   noteBanner: { flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, paddingTop: 8 },
-  noteBannerText: { flex: 1, fontSize: 12 },
+  noteBannerText: { flex: 1, fontSize: 13 },
   toolbar: { flexDirection: "row", alignItems: "center", gap: 2 },
   chips: { alignItems: "center", gap: 6, paddingHorizontal: 6 },
-  sendFeedback: { flex: 1, fontSize: 12, lineHeight: 17, paddingHorizontal: 6 },
+  sendFeedback: { flex: 1, fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
   resend: { minHeight: 36, paddingHorizontal: 12 },
   notice: { padding: 15, gap: 8 },
@@ -862,7 +873,7 @@ const styles = StyleSheet.create({
   fileAttachment: { alignItems: "center", justifyContent: "center", padding: 5, gap: 2 },
   fileAttachmentName: { width: 48, fontSize: 8, textAlign: "center" },
   removeAttachment: { position: "absolute", right: -4, top: -4, width: 22, height: 22, borderRadius: 11, backgroundColor: "#252525dd", alignItems: "center", justifyContent: "center" },
-  attachmentError: { fontSize: 12, lineHeight: 17, paddingHorizontal: 6 },
+  attachmentError: { fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   disabled: { opacity: 0.4 },
   composeInput: { paddingHorizontal: 10, fontSize: 17, letterSpacing: -0.2 },
   send: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
