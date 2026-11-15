@@ -192,6 +192,7 @@ mod workspace_setup;
 mod action_runner;
 mod stray_processes;
 pub mod serve;
+pub mod serve_cli;
 pub mod sink;
 mod recovery;
 mod reply_block;
