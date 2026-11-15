@@ -81,6 +81,14 @@ const PAGE_BYTES: usize = 1024 * 1024;
 const INSTALL: &str = super::transport::LINUX_INSTALL;
 #[cfg(not(target_os = "linux"))]
 const INSTALL: &str = "/Users/lume/.terminalx-local";
+/// The runtime the guest itself launches. On Linux it is the root-sealed copy
+/// (#978), never the one under the account's own installation.
+fn runtime_executable() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    return PathBuf::from(super::transport::SEALED_RUNTIME);
+    #[cfg(not(target_os = "linux"))]
+    PathBuf::from(INSTALL).join("bin/terminalx-serve")
+}
 pub(super) fn installation() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     { super::macos_account::installation() }
@@ -120,6 +128,8 @@ pub struct Identity {
     pub environment_id: String,
     pub generation: String,
     pub protocol: u32,
+    /// The SHA-256 of the key only the installing host holds (`guest_key.rs`).
+    pub host_key_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<super::linux_profile::Account>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +161,9 @@ impl Identity {
         if let Some(account)=&identity.macos_account { account.check_current(base)?; }
         validate_id(&identity.environment_id)?;
         validate_id(&identity.generation)?;
+        if identity.host_key_sha256.len() != 64 || !identity.host_key_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("Guest identity has no host key; install the runtime again from the host");
+        }
         if identity.protocol != PROTOCOL {
             bail!("Incompatible local guest protocol");
         }
@@ -163,6 +176,15 @@ impl Identity {
         }
         if self.macos_account.is_some() {
             super::transport::validate_runtime_sha(runtime.context("Personalized runtime digest required")?)?;
+        }
+        Ok(())
+    }
+
+    /// Only the installing host holds the key; a worker, which runs as this
+    /// account and can read everything the runtime reads, cannot answer it.
+    fn check_host(&self, offered: &str) -> Result<()> {
+        if !super::guest_key::matches(&self.host_key_sha256, offered) {
+            bail!("This request does not carry the installing host's key; no operation was routed");
         }
         Ok(())
     }
@@ -191,6 +213,9 @@ pub struct Request {
     pub expected_runtime_sha256: Option<String>,
     #[serde(default, rename = "expectedMacosAccount")]
     pub expected_macos_account: Option<super::macos_account::Account>,
+    /// The installing host's key (`guest_key.rs`); never logged or stored.
+    #[serde(rename = "hostKey")]
+    pub host_key: String,
     pub method: String,
     pub params: Value,
 }
@@ -227,7 +252,19 @@ struct Record {
     boot_identity: Option<String>,
     #[serde(default)]
     prior_external_outcome_unknown: bool,
+    /// Its worker was stopped and seen gone since its last execution began,
+    /// so a cancellation needs no reboot to prove it (review 2).
+    #[serde(default)]
+    worker_exit_confirmed: bool,
+    /// Failed attempts to retain this task's results (`RETENTION_ATTEMPTS`).
+    #[serde(default)]
+    retention_failures: u32,
 }
+
+/// How often retention is tried before it stops: an output over its bounds
+/// fails the same way every time, and each attempt holds the state lock
+/// through `git add --all` and the artifact writes (review 2).
+const RETENTION_ATTEMPTS: u32 = 3;
 
 struct RecoveryReceipt {
     target: TaskTarget,
@@ -286,6 +323,29 @@ pub struct Guest {
     setup_actor: setup::Actor,
     attachment_peers: Mutex<BTreeMap<String, setup::desktop_mcp::Peer>>,
     _lock: File,
+}
+
+/// A Linux guest process that receives the host key, `local-vm-rpc` or the
+/// activated owner, runs as the same account as the workers it supervises.
+/// Marked non-dumpable first thing, its /proc entries (the stdin pipe at
+/// fd/0, mem, environ) become root's and same-account ptrace is refused, so a
+/// worker cannot read the key out of it (#978 review). Known residual,
+/// tracked in #1000: `local-vm-rpc` forwards the key to the owner's control
+/// socket and token under the account's own runtime directory, which a
+/// worker as that account can replace; and one can race exec-to-prctl.
+/// Closing both needs the owner under its own account.
+#[cfg(target_os = "linux")]
+pub fn seal_key_holder() {
+    let rpc = std::env::args().nth(1).as_deref() == Some("local-vm-rpc");
+    if !rpc && std::env::var_os("TERMINALX_LINUX_ACTIVATION").is_none() {
+        return;
+    }
+    // SAFETY: PR_SET_DUMPABLE takes plain integer arguments and touches no memory.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        // Refuse to hold the key while readable by the workers.
+        eprintln!("terminalx-serve: cannot protect the host key from same-account processes");
+        std::process::exit(70);
+    }
 }
 
 fn linux_activation_identity() -> Option<Value> {
@@ -485,6 +545,7 @@ impl Guest {
         // Re-read the installation identity so an in-place rollback/reinstall
         // invalidates even a process that is still running.
         let identity = Identity::load(&self.base)?;
+        identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
         identity.check_account(request.expected_macos_account.as_ref(), request.expected_runtime_sha256.as_deref())?;
         if identity != self.state.lock().unwrap().identity {
@@ -516,12 +577,20 @@ impl Guest {
                     .as_u64()
                     .context("A nonnegative sequence cursor is required")?;
                 let state = self.state.lock().unwrap();
+                // The guest's own verdict that it holds no record of this
+                // bound task, distinct from any failure to answer (#978
+                // review): only this lets the host stop polling an abandoned
+                // task. Identity and generation are checked first.
+                validate_target(&state.identity, &target)?;
+                if !state.records.contains_key(&target.task_id) {
+                    return Ok(json!({"absent":true,"target":target}));
+                }
                 let record = bound(&state, &target)?;
                 serde_json::to_value(page(&record.task, after)?).map_err(Into::into)
             }
             "task.cancel" => self.cancel(&target(&request.params)?),
             "task.recover" => self.recover(&request.params),
-            "task.followup" | "task.permission" => self.mutate(&request.method, &request.params),
+            "task.followup" | "task.permission" | "task.answer" => self.mutate(&request.method, &request.params),
             "task.artifact" => self.artifact(&request.params),
             _ => bail!("Unsupported bounded guest method"),
         }
@@ -808,6 +877,8 @@ impl Guest {
                 artifacts_pending: false,
                 boot_identity: self.boot_identity.clone(),
                 prior_external_outcome_unknown: false,
+                worker_exit_confirmed: false,
+                retention_failures: 0,
             },
         );
         self.save(&state)?; // Before directories, files, sessions or prompts.
@@ -835,15 +906,21 @@ impl Guest {
             }
             if record.artifacts_pending {
                 match self.retain(record) {
-                    Ok(()) => record.artifacts_pending = false,
+                    Ok(()) => { record.artifacts_pending = false; record.retention_failures = 0; }
                     Err(error) => {
                         let prior = if record.prior_external_outcome_unknown {
                             PRIOR_OUTCOME_UNKNOWN
                         } else {
                             ""
                         };
-                        record.task.detail =
-                            Some(format!("Result retention incomplete: {error:#}. {prior}"))
+                        record.retention_failures += 1;
+                        if record.retention_failures >= RETENTION_ATTEMPTS {
+                            record.artifacts_pending = false;
+                            record.task.detail = Some(format!("Result retention stopped after {RETENTION_ATTEMPTS} attempts: {error:#}. The results kept so far are listed. {prior}"));
+                            event(&mut record.task, json!({"type":"retentionStopped","attempts":RETENTION_ATTEMPTS}));
+                        } else {
+                            record.task.detail = Some(format!("Result retention incomplete: {error:#}. {prior}"));
+                        }
                     }
                 }
             }
@@ -872,6 +949,7 @@ impl Guest {
             let record = state.records.get_mut(&id).unwrap();
             record.task.status = TaskStatus::Starting;
             record.boot_identity = self.boot_identity.clone();
+            record.worker_exit_confirmed = false;
             event(&mut record.task, json!({"type":"starting"}));
             self.save(&state)?; // Whole-workflow lease before any effect.
             let result = self.launch(state.records.get_mut(&id).unwrap());
@@ -926,10 +1004,12 @@ impl Guest {
             let bytes = STANDARD.decode(&file.content_base64)?;
             atomic_private_write(&path, &bytes)?;
         }
-        git(&cwd, &["init", "--quiet"], None)?;
-        git(&cwd, &["add", "--all", "--", "."], None)?;
+        private_directory(&self.base.join("repositories"))?;
+        let repository = self.repository(&record.task)?;
+        git(&repository, &cwd, &["init", "--quiet"], None)?;
+        git(&repository, &cwd, &["add", "--all", "--", "."], None)?;
         record.baseline = Some(
-            String::from_utf8(git(&cwd, &["write-tree"], None)?)?
+            String::from_utf8(git(&repository, &cwd, &["write-tree"], None)?)?
                 .trim()
                 .into(),
         );
@@ -1069,7 +1149,9 @@ impl Guest {
             // No task releases the desktop while an autonomous CLI remains
             // alive. A later explicit follow-up resumes this conversation.
             if self.manager.is_running(&session, &tab) {
+                // Seen gone here and now: a later cancel needs no reboot.
                 self.stop_worker(&session, &tab)?;
+                record.worker_exit_confirmed = true;
             }
             record.task.status = if auth_failed {
                 TaskStatus::Waiting
@@ -1088,6 +1170,7 @@ impl Guest {
                 (false, false) => None,
             };
             record.artifacts_pending = true;
+            record.retention_failures = 0;
             let status = record.task.status;
             event(
                 &mut record.task,
@@ -1143,7 +1226,13 @@ impl Guest {
                 .as_ref()
                 .is_some_and(|(session, tab)| self.manager.is_running(session, tab))
             {
-                if let Err(error) = cancel_after_boot_change(record, self.boot_identity.as_deref())
+                if record.worker_exit_confirmed {
+                    // Stopped and seen gone already, waiting for guest login, say.
+                    record.task.status = TaskStatus::Canceled;
+                    record.artifacts_pending = true;
+                    record.retention_failures = 0;
+                    event(&mut record.task, json!({"type":"canceled","workerExitConfirmed":true}));
+                } else if let Err(error) = cancel_after_boot_change(record, self.boot_identity.as_deref())
                 {
                     unknown(record, &format!("Cannot confirm worker exit: {error:#}"));
                 }
@@ -1163,6 +1252,7 @@ impl Guest {
                     self.collect(record)?;
                     record.task.status = TaskStatus::Canceled;
                     record.artifacts_pending = true;
+                    record.retention_failures = 0;
                     event(&mut record.task, json!({"type":"canceled"}));
                 }
                 Err(error) => unknown(record, &format!("Worker exit unconfirmed: {error:#}")),
@@ -1550,6 +1640,17 @@ impl Guest {
                     .context("A bounded follow-up text is required")?
                     .to_owned(),
             )
+        } else if method == "task.answer" {
+            // A guest question (AskUserQuestion), answered from the task card
+            // (review 2): only while that worker's question is still open.
+            let request = params["requestId"].as_str().context("requestId is required")?;
+            answers(params)?;
+            if !self.manager.pending_permissions().iter().any(|p| {
+                p.session_id == session && p.tab_id == tab && p.request_id == request && p.tool_name == "AskUserQuestion"
+            }) {
+                bail!("This question is not open for this task");
+            }
+            None
         } else {
             let request = params["requestId"]
                 .as_str()
@@ -1580,10 +1681,13 @@ impl Guest {
         record.task.outcome = None;
         if text.is_some() {
             record.boot_identity = self.boot_identity.clone();
+            record.worker_exit_confirmed = false;
         }
         self.save(&state)?;
         let result = if let Some(text) = text {
             self.manager.send(&session, &tab, text, vec![]).map(|_| ())
+        } else if method == "task.answer" {
+            self.manager.answer_questions(&session, &tab, params["requestId"].as_str().unwrap(), answers(params)?)
         } else {
             self.manager.respond_permission(
                 &session,
@@ -1624,9 +1728,11 @@ impl Guest {
             if index.try_exists()? {
                 fs::remove_file(&index)?;
             }
-            git(&cwd, &["read-tree", baseline], Some(&index))?;
-            git(&cwd, &["add", "--all", "--", "."], Some(&index))?;
+            let repository = self.repository(&record.task)?;
+            git(&repository, &cwd, &["read-tree", baseline], Some(&index))?;
+            git(&repository, &cwd, &["add", "--all", "--", "."], Some(&index))?;
             let patch = git(
+                &repository,
                 &cwd,
                 &[
                     "diff",
@@ -1724,6 +1830,13 @@ impl Guest {
         Ok(json!({"artifact":artifact,"contentBase64":STANDARD.encode(bytes)}))
     }
 
+    /// The task's Git repository, kept in the runtime's directory beside the
+    /// workspace and out of the worker's reach (`git`).
+    fn repository(&self, task: &Task) -> Result<PathBuf> {
+        validate_id(&task.target.task_id)?;
+        Ok(self.base.join("repositories").join(&task.target.task_id))
+    }
+
     fn workspace(&self, task: &Task) -> Result<PathBuf> {
         let path = self.base.join("workspaces").join(&task.target.workspace_id);
         if Path::new(&task.guest_cwd) != path
@@ -1757,7 +1870,8 @@ impl Guest {
     fn disposition(&self) -> Result<Value> {
         let state = self.state.lock().unwrap();
         let tasks = state.records.values().map(|record| -> Result<Value> {
-            let status = self.workspace(&record.task).and_then(|cwd| git(&cwd,&["status","--porcelain=v1","--untracked-files=all"],None));
+            let status = self.workspace(&record.task).and_then(|cwd| git(&self.repository(&record.task)?, &cwd,
+                &["status","--porcelain=v1","--untracked-files=all","--ignore-submodules=all"],None));
             let event_digests = record.task.events.iter().map(|e| -> Result<Value> {
                 Ok(json!({"seq":e.seq,"digest":digest(&serde_json::to_vec(e)?)}))
             }).collect::<Result<Vec<_>>>()?;
@@ -2017,6 +2131,17 @@ fn validate_target(identity: &Identity, target: &TaskTarget) -> Result<()> {
     Ok(())
 }
 
+/// A question's answers, by question, each bounded.
+fn answers(params: &Value) -> Result<std::collections::HashMap<String, String>> {
+    let answers: std::collections::HashMap<String, String> =
+        serde_json::from_value(params["answers"].clone()).context("Answers by question are required")?;
+    if answers.is_empty() || answers.len() > 16
+        || answers.iter().any(|(question, answer)| question.len() > 4096 || answer.trim().is_empty() || answer.len() > 16 * 1024) {
+        bail!("Answer each question with bounded text");
+    }
+    Ok(answers)
+}
+
 fn worker(task: &Task) -> Result<(String, String)> {
     Ok((
         task.worker_session_id
@@ -2026,14 +2151,22 @@ fn worker(task: &Task) -> Result<(String, String)> {
     ))
 }
 
+/// Records an event, within the per-task budget the host keeps too
+/// (`journal::MAX_TASK_EVENTS`): past it the event is counted, not kept, so a
+/// task's history cannot grow this state, written on every tick, without
+/// bound (review 2). The sequence still moves, so the host sees the gap.
 fn event(task: &mut Task, payload: Value) {
     task.last_event_seq += 1;
     task.updated_at = now();
-    task.events.push(TaskEvent {
-        seq: task.last_event_seq,
-        timestamp: task.updated_at.clone(),
-        payload,
-    });
+    let event = TaskEvent { seq: task.last_event_seq, timestamp: task.updated_at.clone(), payload };
+    let size = serde_json::to_vec(&event).map_or(u64::MAX, |bytes| bytes.len() as u64);
+    if task.events_dropped == 0 && task.events.len() < super::journal::MAX_TASK_EVENTS
+        && task.event_bytes.saturating_add(size) <= super::journal::MAX_TASK_EVENT_BYTES {
+        task.event_bytes += size;
+        task.events.push(event);
+    } else {
+        task.events_dropped += 1;
+    }
 }
 
 fn unknown(record: &mut Record, detail: &str) {
@@ -2122,6 +2255,7 @@ fn cancel_after_boot_change(record: &mut Record, current: Option<&str>) -> Resul
     record.task.detail = Some(PRIOR_OUTCOME_UNKNOWN.into());
     record.artifacts_pending =
         record.task.worker_session_id.is_some() && record.task.worker_tab_id.is_some();
+    record.retention_failures = 0;
     let previous = record.boot_identity.clone();
     event(
         &mut record.task,
@@ -2189,7 +2323,8 @@ fn page(task: &Task, after: u64) -> Result<Task> {
         }
         expected += 1;
     }
-    if task.last_event_seq != expected - 1 {
+    let retained_last = expected - 1;
+    if task.last_event_seq != retained_last + task.events_dropped {
         bail!("Guest event cursor differs from retained history");
     }
     let mut result = task.clone();
@@ -2204,6 +2339,10 @@ fn page(task: &Task, after: u64) -> Result<Task> {
         result.events.push(ev.clone());
     }
     result.last_event_seq = result.events.last().map_or(after, |e| e.seq);
+    // Every kept event is sent: those the budget did not keep are passed over.
+    if task.events_dropped > 0 && result.last_event_seq >= retained_last {
+        result.last_event_seq = task.last_event_seq;
+    }
     if result.last_event_seq < task.last_event_seq {
         result.status = if task.status == TaskStatus::OutcomeUnknown {
             TaskStatus::OutcomeUnknown
@@ -2281,7 +2420,8 @@ fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInp
     let mut total = 0;
     for file in files {
         validate_relative(&file.path)?;
-        if file.path.split('/').any(|p| p == ".git") || !paths.insert(&file.path) {
+        // Case-insensitively: on APFS `.Git` names the same directory.
+        if file.path.split('/').any(|p| p.eq_ignore_ascii_case(".git")) || !paths.insert(&file.path) {
             bail!("Duplicate path or imported Git control directory");
         }
         let approved = task
@@ -2421,19 +2561,34 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
+/// Git over a task's workspace with nothing its worker can configure (review
+/// 2): the repository lives in the runtime's own directory (`repository`),
+/// never in the worker-writable workspace, so no `.git/config` there defines
+/// a filter, hook or fsmonitor that would run here after the worker exited.
+/// System and global configuration and attributes are off as well, and
+/// submodules, which carry configuration of their own, are never entered.
+fn git(repository: &Path, cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
     command
         .current_dir(cwd)
         .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.attributesFile=/dev/null",
+            "-c", "core.untrackedCache=false",
+            "-c", "diff.ignoreSubmodules=all",
+            "-c", "status.submoduleSummary=false",
+            "-c", "submodule.recurse=false",
         ])
         .args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
+        .env("GIT_DIR", repository)
+        .env("GIT_WORK_TREE", cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_INDEX_FILE");
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
@@ -2457,7 +2612,7 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>, depth: usize)
     }
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        if entry.file_name().eq_ignore_ascii_case(".git") {
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -2580,11 +2735,17 @@ fn task_launch_config(
             identity.generation.clone(),
         ),
     ];
-    let install = match &identity.macos_account {
-        Some(account) => account.installation()?,
-        None => PathBuf::from(INSTALL),
+    // A personalized macOS guest runs from its own account's installation;
+    // every other guest keeps the fixed one (on Linux, the root-sealed copy).
+    let (install, runtime) = match &identity.macos_account {
+        Some(account) => {
+            let install = account.installation()?;
+            let runtime = install.join("bin/terminalx-serve");
+            (install, runtime)
+        }
+        None => (PathBuf::from(INSTALL), runtime_executable()),
     };
-    let server = json!({"command":install.join("bin/terminalx-serve"),"args":["local-vm-computer","--stdio","--task",target],
+    let server = json!({"command":runtime,"args":["local-vm-computer","--stdio","--task",target],
         "env":{"TERMINALX_LOCAL_VM_ENVIRONMENT_ID":identity.environment_id,"TERMINALX_LOCAL_VM_GENERATION":identity.generation,
         "TERMINALX_HOME":install.join("runtime")}});
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -2657,6 +2818,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         let request: Request = serde_json::from_slice(&bytes)?;
         check_runtime(request.expected_runtime_sha256.as_deref(), &super::bootstrap::owner_runtime_sha256()?)?;
         let (base, identity) = installed_identity()?;
+        identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
         identity.check_account(request.expected_macos_account.as_ref(), request.expected_runtime_sha256.as_deref())?;
         std::env::set_var("TERMINALX_HOME", base.join("runtime"));
@@ -2670,7 +2832,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         }
         crate::control::call(
             "local_vm.guest",
-            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256,"expectedMacosAccount":request.expected_macos_account}),
+            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256,"expectedMacosAccount":request.expected_macos_account,"hostKey":request.host_key}),
             Duration::from_secs(40),
         )
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
@@ -2695,8 +2857,11 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::journal::{new_id, InputFile, Journal, TaskInput};
+    use super::super::journal::{new_id, Journal, TaskInput};
     use super::*;
+
+    /// The key the test host installed its guest with.
+    pub(super) const HOST_KEY: &str = "5f3c0e7a9b1d2f4e6a8c0b2d4f6e8a1c3b5d7f9e1a3c5e7b9d1f3a5c7e9b1d3f";
 
     fn setup() -> (crate::store::TempHome, Guest, Task) {
         let home = crate::store::temp_home();
@@ -2711,6 +2876,7 @@ mod tests {
             environment_id: env.id.clone(),
             generation: env.generation.clone(),
             protocol: PROTOCOL,
+            host_key_sha256: super::super::guest_key::verifier(HOST_KEY),
         };
         atomic_private_write(
             &base.join("identity.json"),
@@ -2755,6 +2921,8 @@ mod tests {
         (home, guest, task)
     }
 
+    // macOS desktop attachment; a Linux guest has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_host_adapter_routes_real_guest_leases_and_recovers_lost_receipts_without_replay() {
         use super::super::attachment::{Adapter,Binding,recover_using};
@@ -2799,9 +2967,29 @@ mod tests {
         assert_eq!(replies.len(),3);assert_eq!(replies[0]["result"]["protocolVersion"],"2025-06-18");
         assert_eq!(replies[1]["result"]["tools"],json!([catalog["tool"]]));assert!(replies[2]["result"]["content"].is_array());
         assert_eq!(effects.get(),3);
+        // Review 2: malformed input and other notifications are answered or
+        // ignored rather than ending the adapter, and however serving ends,
+        // here a parent check failing mid-session, its lease is closed.
+        let mut third=binding.clone();third.lease_id=new_id();
+        let input=["not json".to_string(),json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}).to_string(),
+            json!({"jsonrpc":"1.0","id":4,"method":"ping"}).to_string(),json!({"jsonrpc":"2.0","id":5,"method":"ping"}).to_string(),
+            json!({"jsonrpc":"2.0","id":6,"method":"ping"}).to_string()].join("\n")+"\n";
+        let mut output=Vec::new();let checks=std::cell::Cell::new(0);
+        let error=super::super::attachment::serve_using(&root,&journal,third.clone(),&mut std::io::Cursor::new(input),&mut output,&mut rpc,
+            &mut |_|{checks.set(checks.get()+1);if checks.get()>5 {bail!("parent tab changed")}Ok(())}).unwrap_err();
+        assert!(error.to_string().contains("parent tab changed"),"{error:#}");
+        let replies:Vec<Value>=String::from_utf8(output).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(),3);
+        assert_eq!((replies[0]["id"].clone(),replies[0]["error"]["code"].clone()),(Value::Null,json!(-32700)));
+        assert_eq!(replies[1]["id"],4);assert!(replies[1]["error"].is_object());
+        assert_eq!(replies[2]["id"],5);assert!(replies[2]["result"].is_object());
+        let retained:Value=serde_json::from_slice(&fs::read(root.join("macos-attachments").join(format!("{}.json",third.lease_id))).unwrap()).unwrap();
+        assert_eq!(retained["status"],"released");
         journal.submit("after-release",task.input).unwrap();
     }
 
+    // macOS desktop attachment; a Linux guest has none.
+    #[cfg(target_os = "macos")]
     #[test]
     fn discovery_uses_retained_ownership_and_unknown_helper_exit_cannot_advertise_capability() {
         use super::super::attachment::{Binding,probe_using,recover_using};
@@ -2839,6 +3027,8 @@ mod tests {
         assert!(journal.submit("unknown-discovery-blocks-task",task.input).is_err());
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn release_tombstone_blocks_late_acquisition_and_missing_mcp_exit_stays_fenced() {
         let (_home,guest,_task)=setup();let identity=guest.state.lock().unwrap().identity.clone();
@@ -2857,6 +3047,8 @@ mod tests {
         assert!(guest.attachment_tools(&binding).is_err());
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn attached_guest_calls_are_exclusive_durable_and_never_replayed_after_unknown_exit() {
         let (_home, guest, task) = setup();
@@ -2907,6 +3099,8 @@ mod tests {
         assert_eq!(released["calls"]["input-lost"]["status"],"outcomeUnknown");
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn idle_attached_guest_release_retains_history_and_rejects_delayed_input() {
         let (_home, guest, _task)=setup();
@@ -3016,12 +3210,12 @@ mod tests {
             Journal::open_existing(&crate::store::root().unwrap().join("host-journal")).unwrap();
         journal.cancel(&task.target).unwrap();
         guest.cancel(&task.target).unwrap();
-        let key = "interrupted-desktop-check";
+        let key = "interrupted-account-check";
         let params = request(
             &guest,
             "environment.setupAction",
             json!({
-                "action":"desktop.verify", "idempotencyKey":key, "confirm":true
+                "action":"provider.codexAccount.verify", "idempotencyKey":key, "confirm":true
             }),
         )
         .params;
@@ -3213,7 +3407,7 @@ mod tests {
             &guest,
             "environment.setupAction",
             json!({
-            "action":"driver.start","idempotencyKey":"setup-exact-key","confirm":true}),
+            "action":"provider.codexAccount.verify","idempotencyKey":"setup-exact-key","confirm":true}),
         )
         .params;
         let count = std::sync::atomic::AtomicUsize::new(0);
@@ -3270,7 +3464,7 @@ mod tests {
             .is_err());
         assert_eq!(count.load(Ordering::Relaxed), 1);
         let mut changed = params.clone();
-        changed["action"] = json!("desktop.verify");
+        changed["action"] = json!("provider.codexDeviceLogin.start");
         assert!(guest
             .setup_action_using(&changed, |_, _, _, _| panic!("changed key effect"))
             .is_err());
@@ -3288,7 +3482,7 @@ mod tests {
             &guest,
             "environment.setupAction",
             json!({
-            "action":"desktop.verify","idempotencyKey":"setup-disk-key","confirm":true}),
+            "action":"provider.codexAccount.verify","idempotencyKey":"setup-disk-key","confirm":true}),
         )
         .params;
         let path = guest.base.join("runtime").join(STATE);
@@ -3471,6 +3665,7 @@ mod tests {
     fn installed_guest_guard_precedes_all_generic_owner_window_mobile_and_sharing_routes() {
         let (_home, guest, task) = setup();
         let req = request(&guest, "desktop.state", json!({}));
+        let digest = Identity::load(&guest.base).unwrap().host_key_sha256;
         let endpoint = crate::hooks::prepare_control().unwrap();
         let service = crate::control::ControlService::headless(
             guest.sink.clone(),
@@ -3501,11 +3696,26 @@ mod tests {
             assert!(!response.ok, "{command}");
             assert_eq!(response.error.unwrap().code, "unsupported", "{command}");
         }
+        // What a worker can read is not enough to drive the guest: the
+        // control token, and in identity.json only the digest of the host's
+        // key. Without the key itself nothing is routed (review 2: a waiting
+        // task must not grant itself approval).
+        for offered in [json!(null), json!(""), json!(digest), json!("0".repeat(64))] {
+            let mut params = json!({"method":"task.permission","params":req.params,"expectedRuntimeSha256":req.expected_runtime_sha256});
+            if !offered.is_null() { params["hostKey"] = offered.clone(); }
+            let response = service.handle(crate::control::ControlRequest {
+                id: new_id(),
+                token: String::new(),
+                command: "local_vm.guest".into(),
+                params,
+            });
+            assert!(!response.ok, "{offered}");
+        }
         let response = service.handle(crate::control::ControlRequest {
             id: new_id(),
             token: String::new(),
             command: "local_vm.guest".into(),
-            params: json!({"method":req.method,"params":req.params}),
+            params: json!({"method":req.method,"params":req.params,"hostKey":req.host_key,"expectedRuntimeSha256":req.expected_runtime_sha256}),
         });
         assert!(response.ok);
         assert_eq!(
@@ -3525,6 +3735,8 @@ mod tests {
             artifacts_pending: false,
             boot_identity: None,
             prior_external_outcome_unknown: false,
+            worker_exit_confirmed: false,
+            retention_failures: 0,
         }
     }
 
@@ -3685,8 +3897,10 @@ mod tests {
         params["environmentId"] = json!(identity.environment_id);
         params["generation"] = json!(identity.generation);
         Request {
-            expected_runtime_sha256: None,
+            // As the host sends it; a Linux guest refuses a request without it.
+            expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
             expected_macos_account: None,
+                host_key: HOST_KEY.into(),
             method: method.into(),
             params,
         }
@@ -3810,8 +4024,9 @@ mod tests {
             let response: Task = serde_json::from_value(
                 guest
                     .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 expected_macos_account: None,
+                host_key: HOST_KEY.into(),
                         method: req.method.clone(),
                         params: req.params.clone(),
                     })
@@ -3837,8 +4052,9 @@ mod tests {
         changed["text"] = json!("Different input");
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 expected_macos_account: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: changed
             })
@@ -3849,8 +4065,9 @@ mod tests {
         wrong["target"]["workspaceId"] = json!(new_id());
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 expected_macos_account: None,
+                host_key: HOST_KEY.into(),
                 method: req.method,
                 params: wrong
             })
@@ -3875,8 +4092,9 @@ mod tests {
         assert!(retained.prior_external_outcome_unknown);
         guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 expected_macos_account: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone(),
             })
@@ -3931,8 +4149,9 @@ mod tests {
         );
         assert!(guest
             .dispatch(Request {
-                expected_runtime_sha256: None,
+                expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
                 expected_macos_account: None,
+                host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone()
             })
@@ -4544,6 +4763,9 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
+    // Starts the fixture's desktop task, which a Linux guest refuses without a
+    // container binding before any receipt is read.
+    #[cfg(target_os = "macos")]
     #[test]
     fn lost_start_receipt_and_restart_never_create_a_second_worker_or_replay() {
         let (_home, guest, mut task) = setup();
@@ -4584,6 +4806,105 @@ mod tests {
             .holds_desktop());
     }
 
+    /// Review 2: a guest question could not be answered from the task card.
+    #[test]
+    fn a_guest_question_is_answered_only_while_open_and_with_bounded_answers() {
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        seed(&guest, record(task.clone()));
+        let ask = |answers: Value| guest.dispatch(request(&guest, "task.answer",
+            json!({"target":task.target,"requestId":"question-1","answers":answers,"idempotencyKey":new_id()})));
+        for invalid in [json!({}), json!({"Which?":"  "}), json!(["a"])] {
+            let error = format!("{:#}", ask(invalid.clone()).unwrap_err());
+            assert!(error.contains("Answer each question") || error.contains("Answers by question are required"), "{invalid}: {error}");
+        }
+        assert!(format!("{:#}", ask(json!({"Which file?":"main.rs"})).unwrap_err()).contains("not open"));
+        assert_eq!(guest.state.lock().unwrap().records[&task.target.task_id].task.status, TaskStatus::Waiting, "nothing was sent");
+    }
+
+    /// Review 2: cancelling a task that waits for guest login, whose worker
+    /// this runtime already stopped, left it outcomeUnknown until a reboot.
+    #[test]
+    fn a_task_whose_worker_was_seen_stopped_cancels_without_a_reboot() {
+        {
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        task.detail = Some("Guest provider login is required; explicit follow-up after login".into());
+        let mut stopped = record(task.clone());
+        stopped.boot_identity = guest.boot_identity.clone();
+        stopped.worker_exit_confirmed = true;
+        seed(&guest, stopped);
+        let canceled: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
+        assert_eq!(canceled.status, TaskStatus::Canceled);
+        assert!(canceled.events.iter().any(|e| e.payload["type"] == "canceled" && e.payload["workerExitConfirmed"] == true));
+        }
+        // Without that confirmation, the same boot still cannot prove it.
+        let (_home, guest, mut task) = setup();
+        task.status = TaskStatus::Waiting;
+        task.worker_session_id = Some(new_id());
+        task.worker_tab_id = Some(new_id());
+        let mut unconfirmed = record(task.clone());
+        unconfirmed.boot_identity = guest.boot_identity.clone();
+        seed(&guest, unconfirmed);
+        let unknown: Task = serde_json::from_value(guest.dispatch(request(&guest, "task.cancel", json!({"target":task.target}))).unwrap()).unwrap();
+        assert_eq!(unknown.status, TaskStatus::OutcomeUnknown);
+    }
+
+    /// Review 2: the guest kept every event forever, until its state grew past
+    /// its bound and the runtime would not start.
+    #[test]
+    fn guest_history_keeps_the_budget_and_pages_past_what_it_did_not_keep() {
+        let (_home, _guest, mut task) = setup();
+        task.events.clear();
+        task.last_event_seq = 0;
+        let max = super::super::journal::MAX_TASK_EVENTS as u64;
+        for _ in 0..max + 5 {
+            event(&mut task, json!({"progress":"x"}));
+        }
+        assert_eq!((task.events.len() as u64, task.events_dropped, task.last_event_seq), (max, 5, max + 5));
+        let first = page(&task, 0).unwrap();
+        assert_eq!(first.events.len(), 256);
+        assert_eq!(first.last_event_seq, 256);
+        let last_kept = page(&task, max - 1).unwrap();
+        assert_eq!(last_kept.events.len(), 1);
+        assert_eq!(last_kept.last_event_seq, max + 5, "past the last kept event to the cursor");
+        let past = page(&task, max).unwrap();
+        assert!(past.events.is_empty());
+        assert_eq!((past.last_event_seq, past.events_dropped), (max + 5, 5));
+    }
+
+    /// Review 2: a retention that failed was retried on every tick, forever,
+    /// holding the state lock through git add --all and the artifact writes.
+    #[test]
+    fn a_failing_retention_stops_after_its_attempts_and_says_so() {
+        let (_home, guest, mut task) = setup();
+        // Settled, but with no worker session to read results from.
+        task.status = TaskStatus::Completed;
+        let mut settled = record(task.clone());
+        settled.artifacts_pending = true;
+        seed(&guest, settled);
+        for attempt in 1..=RETENTION_ATTEMPTS {
+            guest.tick().unwrap();
+            let state = guest.state.lock().unwrap();
+            let kept = &state.records[&task.target.task_id];
+            assert_eq!(kept.retention_failures, attempt);
+            assert_eq!(kept.artifacts_pending, attempt < RETENTION_ATTEMPTS);
+        }
+        guest.tick().unwrap();
+        let state = guest.state.lock().unwrap();
+        let kept = &state.records[&task.target.task_id];
+        assert_eq!(kept.retention_failures, RETENTION_ATTEMPTS, "no attempt after the last");
+        assert!(kept.task.detail.as_deref().unwrap().starts_with("Result retention stopped after"));
+        assert_eq!(kept.task.events.iter().filter(|e| e.payload["type"] == "retentionStopped").count(), 1);
+    }
+
+    // Starts the fixture's desktop task, which a Linux guest refuses without a
+    // container binding before it reads the tombstone.
+    #[cfg(target_os = "macos")]
     #[test]
     fn cancel_before_a_delayed_start_leaves_a_durable_tombstone() {
         let (_home, guest, task) = setup();
@@ -4631,8 +4952,8 @@ mod tests {
                 "task.poll",
                 json!({"target":task.target,"after":0}),
             ))
-            .unwrap_err();
-        assert!(missing.to_string().contains("outcomeUnknown"));
+            .unwrap();
+        assert_eq!(missing, json!({"absent":true,"target":task.target}));
         assert!(!Path::new(&task.guest_cwd).exists());
     }
 
@@ -4662,11 +4983,13 @@ mod tests {
         assert!(page(&task, 0).unwrap_err().to_string().contains("gap"));
     }
 
+    // The macOS desktop guest; a Linux guest runs shell and file tasks only.
+    #[cfg(target_os = "macos")]
     #[test]
     fn selected_files_require_exact_content_manifest_and_safe_paths() {
         let (_home, guest, mut task) = setup();
         let bytes = b"selected context only";
-        task.input.files = vec![InputFile {
+        task.input.files = vec![super::super::journal::InputFile {
             path: "src/input.txt".into(),
             sha256: digest(bytes),
             bytes: bytes.len() as u64,
@@ -4681,9 +5004,15 @@ mod tests {
         let mut altered = files.clone();
         altered[0].content_base64 = STANDARD.encode(b"changed");
         assert!(validate_task(&identity, &guest.base, &task, &altered).is_err());
-        let mut unsafe_files = files;
+        let mut unsafe_files = files.clone();
         unsafe_files[0].path = "../host-file".into();
         assert!(validate_task(&identity, &guest.base, &task, &unsafe_files).is_err());
+        // A Git control directory in any spelling APFS treats as `.git`.
+        for path in [".git/config", ".Git/config", "src/.GIT/hooks/pre-commit"] {
+            let mut planted = files.clone();
+            planted[0].path = path.into();
+            assert!(validate_task(&identity, &guest.base, &task, &planted).unwrap_err().to_string().contains("Git control directory"), "{path}");
+        }
     }
 
     #[test]
@@ -4880,15 +5209,39 @@ mod tests {
             .any(|(name, _)| name.contains("TOKEN") || name.contains("KEY")));
     }
 
+    /// Review 2: retention ran Git with the workspace's own configuration, so
+    /// a worker that could only edit files could define a filter that ran
+    /// after its exit was confirmed.
+    #[test]
+    fn retention_git_never_runs_what_the_workspace_configures() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cwd, repository, ran) = (dir.path().join("workspace"), dir.path().join("repository"), dir.path().join("ran"));
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        let planted = format!("[filter \"planted\"]\n\tclean = touch {0}\n\tsmudge = touch {0}\n[core]\n\tfsmonitor = touch {0}\n\thooksPath = {1}\n",
+            ran.display(), dir.path().display());
+        fs::write(cwd.join(".git/config"), &planted).unwrap();
+        fs::write(cwd.join(".gitattributes"), "* filter=planted diff=planted\n").unwrap();
+        fs::write(cwd.join("output.txt"), "changed").unwrap();
+        git(&repository, &cwd, &["init", "--quiet"], None).unwrap();
+        git(&repository, &cwd, &["add", "--all", "--", "."], None).unwrap();
+        git(&repository, &cwd, &["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all"], None).unwrap();
+        git(&repository, &cwd, &["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"], None).unwrap();
+        assert!(!ran.exists(), "nothing the workspace configured ran");
+        assert!(!fs::read_to_string(repository.join("config")).unwrap().contains("planted"));
+        assert!(repository.join("HEAD").exists() && !cwd.join(".git/HEAD").exists(), "the repository is the runtime's");
+    }
+
     #[test]
     fn real_shell_pty_outputs_files_and_patch_are_retained_without_commits() {
         let (_home, guest, mut task) = setup();
         let cwd = PathBuf::from(&task.guest_cwd);
         fs::create_dir(&cwd).unwrap();
         fs::write(cwd.join("selected.txt"), b"before\n").unwrap();
-        git(&cwd, &["init", "--quiet"], None).unwrap();
-        git(&cwd, &["add", "--all", "--", "."], None).unwrap();
-        let baseline = String::from_utf8(git(&cwd, &["write-tree"], None).unwrap())
+        private_directory(&guest.base.join("repositories")).unwrap();
+        let repository = guest.repository(&task).unwrap();
+        git(&repository, &cwd, &["init", "--quiet"], None).unwrap();
+        git(&repository, &cwd, &["add", "--all", "--", "."], None).unwrap();
+        let baseline = String::from_utf8(git(&repository, &cwd, &["write-tree"], None).unwrap())
             .unwrap()
             .trim()
             .to_owned();

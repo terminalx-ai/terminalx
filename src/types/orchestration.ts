@@ -119,6 +119,8 @@ export interface RunVerifier {
   evidence?: string[];
   /** Why it gave no verdict. */
   problem?: string;
+  /** A resumable permission request or question needs attention. */
+  waiting?: string;
   tokens?: VerifierTokens;
 }
 
@@ -178,6 +180,8 @@ export interface PieceTry {
   branch?: string;
   /** Absent while it runs, and before it starts. */
   outcome?: TryOutcome;
+  /** Automatic archival is held at this HEAD until it changes or cleanup is retried. */
+  archiveFailure?: { head: string | null; reason: string };
   /** The worker's result line, or the failure text the next try is given. */
   detail?: string;
   /** What its worker's session used, at API list prices. */
@@ -192,6 +196,7 @@ export interface PieceTry {
   outputTokens?: number;
   /** A try the lead took over: the commit its branch was at then. */
   fromCommit?: string;
+  baseCommit?: string;
   started?: string;
   ended?: string;
 }
@@ -355,7 +360,11 @@ export interface Run {
   /** The mode of a piece that names none. */
   workerMode: string;
   planEdited?: boolean;
+  /** A person changed its limits before it started. */
+  limitsEdited?: boolean;
   approval?: { at: string };
+  /** A person started this `planned` run from the Run view (PRO-365); absent when the lead started it. */
+  startedByPerson?: { at: string };
   reason?: string;
   /** The command run in the lead's checkout after each piece is merged; the project's own check when absent. */
   integrationCheck?: string;
@@ -433,6 +442,8 @@ export interface RunStart {
   started: string[];
   waiting: RunWaiting[];
   failed: { piece: string; error: string }[];
+  /** What a person changed before the lead's `runs start` started a `planned` run. */
+  edited?: string;
 }
 
 export interface RunStop {

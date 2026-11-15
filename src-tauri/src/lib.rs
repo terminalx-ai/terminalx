@@ -148,6 +148,7 @@ mod container_vm;
 mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
+mod machine_name;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -173,8 +174,10 @@ mod quit;
 mod native_menu;
 #[cfg(feature = "desktop")]
 mod chat_windows;
-mod relay_e2ee;
+pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_host;
+pub mod machine_wire;
 mod session;
 mod sidebar_activity;
 mod session_archive;
@@ -203,6 +206,7 @@ mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
 mod orchestration;
+mod orchestration_archive;
 mod worker_report;
 mod workspaces;
 mod workspace_restore;
@@ -990,6 +994,7 @@ pub fn run() {
             commands::orchestration_create,
             commands::orchestrator_limits,
             commands::orchestration_approve,
+            commands::orchestration_start,
             commands::orchestration_stop,
             commands::orchestration_update_plan,
             commands::orchestration_merge,
@@ -1158,6 +1163,7 @@ pub fn run() {
                 #[cfg(feature = "desktop")]
                 commands::shutdown_codex_sign_in();
                 let state = app.state::<AppState>();
+                state.dictation.shutdown(&state.transcription.engine);
                 state.stats_usage.shutdown();
                 // Cmd+Q/relaunch need not destroy a window first. Close the
                 // agent PTYs here too so their MCP pipes receive EOF, just as

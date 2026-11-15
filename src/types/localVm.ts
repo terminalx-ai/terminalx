@@ -29,7 +29,7 @@ export interface LocalVmTaskInput {
   desktop: boolean;
 }
 
-export type LocalVmTaskStatus = "queued" | "starting" | "running" | "waiting" | "canceling" | "completed" | "failed" | "canceled" | "outcomeUnknown";
+export type LocalVmTaskStatus = "queued" | "starting" | "running" | "waiting" | "canceling" | "completed" | "failed" | "canceled" | "outcomeUnknown" | "abandoned";
 
 export interface LocalVmTaskEvent {
   seq: number;
@@ -60,6 +60,12 @@ export interface LocalVmTask {
   createdAt: string;
   updatedAt: string;
   lastEventSeq: number;
+  /** Recorded before the guest was first asked to start it. */
+  dispatchStarted?: boolean;
+  /** Guest events past the host's per-task budget: counted, not kept. */
+  eventsDropped?: number;
+  /** Events of a finished task kept in its history file, not in `events`; read with `task.history`. */
+  archivedEvents?: number;
   events: LocalVmTaskEvent[];
   artifacts: LocalVmArtifact[];
   outcome: string | null;
@@ -75,6 +81,10 @@ export interface LocalVmEnvironment {
   createdAt: string;
   deletedAt: string | null;
   keepAwake: boolean;
+  /** Created by TerminalX; one that was not is detached from TerminalX, never deleted. */
+  owned?: boolean;
+  /** Detached from TerminalX with its VM kept (`deletedAt` says when). */
+  detached?: boolean;
   /** Retained guest desktop hold; viewer closure does not return control to queued tasks. */
   manualControl?: boolean;
   provision?: LocalVmEnvironmentInspection;
@@ -195,6 +205,8 @@ export interface LocalVmCreationCapability {
   available: boolean;
   firstAccountPersonalization: boolean;
   accountBoundTransport: boolean;
+  /** Whether an existing stock Cua VM can be enrolled; false while its shared account has a published password. */
+  existingVmEnrollment?: boolean;
   reasonCode: string;
 }
 

@@ -1,7 +1,7 @@
 import { CircleAlert, LoaderCircle, ShieldAlert } from "@/icons";
 import { cn } from "@/lib/cn";
 import { isMac, useShortcutKeys } from "@/lib/hotkeys";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import type { Run } from "@/types/orchestration";
 
 /** What a lead's title bar says of its run (18.01, 18.03): that it needs the person, else how many workers run. `null` for neither. */
@@ -20,7 +20,7 @@ export function runPillOf(run: Run | null | undefined): { kind: "needs" | "appro
 
 /** The pill itself: opens the Run view. */
 export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: () => void }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const pill = runPillOf(run);
   if (!pill) return null;
   const Icon = pill.kind === "running" ? LoaderCircle : pill.kind === "approval" ? ShieldAlert : CircleAlert;
@@ -33,7 +33,7 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
         pill.kind === "running" ? "bg-veil-raised text-muted-foreground hover:text-foreground" : "bg-accent text-accent-foreground hover:bg-accent/90",
       )}
     >
-      <Icon aria-hidden className={cn("size-3.5", pill.kind === "running" && animations && "animate-spin")} />
+      <Icon aria-hidden className={cn("size-3.5", pill.kind === "running" && !reduced && "animate-spin")} />
       {pill.text}
     </div>
   );

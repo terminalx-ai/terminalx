@@ -1976,6 +1976,11 @@ impl SessionManager {
                 self.accepting_work()?;
                 serde_json::to_value(engine::start(&host, string("id")?).map_err(refused)?)?
             }
+            // A person's Start run on a `planned` run (PRO-365): recorded as theirs, and the lead is told.
+            "startPlanned" => {
+                self.accepting_work()?;
+                serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?
+            }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
             // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.
             "merge" => {
@@ -2884,6 +2889,14 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
+        crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3461,7 +3474,7 @@ impl SessionManager {
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
-        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -3473,7 +3486,7 @@ impl SessionManager {
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
-        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -3936,6 +3949,16 @@ impl SessionManager {
         false
     }
 
+    fn set_stopped_status(&self, rt: &mut TabRuntime) {
+        if rt.recovery == Some(RecoveryKind::SignedOut) {
+            // Stopping the process does not authenticate it. Keep the same
+            // incident (and banner) until a new authenticated turn starts.
+            self.set_display_status(rt, TabStatus::Idle);
+        } else {
+            self.set_status(rt, TabStatus::Idle);
+        }
+    }
+
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
         self.stop_with(session_id, tab_id, false)
@@ -4160,7 +4183,7 @@ impl SessionManager {
             self.settle_settings_without_process(&mut rt);
             // A reply nobody has read yet is still unread once its agent goes.
             if !(keep_unread && rt.status == TabStatus::Completed) {
-                self.set_status(&mut rt, TabStatus::Idle);
+                self.set_stopped_status(&mut rt);
             }
             (panes, pid)
         };
@@ -4229,6 +4252,7 @@ impl SessionManager {
             self.sink.emit("pty_closed", &pane);
         }
         crate::session_ops::close_tab_entry(session_id, tab_id).map_err(anyhow::Error::msg)?;
+        self.observer.automation_failed(session_id, tab_id, "Its tab was closed.");
         self.sink.emit("session_updated", &index::get(session_id)?);
         self.sink.emit("tab_state_changed", &index::tab_state()?);
         Ok(())
@@ -7326,10 +7350,27 @@ impl SessionManager {
             );
             self.apply(&mut rt, payload, None);
         }
+        let verifier_permission = gate == "PermissionRequest" && {
+            let known = crate::orchestration::store::is_verifier(&frame.session, &frame.tab);
+            crate::orchestration::guard::reads_only(known, known.is_none().then(|| index::get(&frame.session).ok()).flatten().as_ref(), &frame.tab)
+        };
         let waiting = Waiting { kind, gate: gate.to_string(), request_id, local_owner };
         // Teardown or a settings restart may replace this CLI while the hook
         // waits. An answer for that old launch cannot start the new one's work.
-        self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)))
+        let mut reply = self.await_decision(rt_arc, waiting, rx, |rt| matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(frame)));
+        // A provider permission refusal is separate from verifier policy and
+        // from an executed command's nonzero exit. Preserve that distinction
+        // in the hook answer the model receives, not just the chat's error row.
+        if verifier_permission {
+            if let Some(output) = reply.output.as_mut() {
+                let decision = &mut output["hookSpecificOutput"]["decision"];
+                if decision["behavior"] == "deny" {
+                    let reason = decision["message"].as_str().unwrap_or("Permission denied.");
+                    decision["message"] = serde_json::json!(format!("{reason} Provider permission was not granted for this verifier call; it did not run. Use Read, Grep or Glob on permitted worktree files, or judge the supplied diff. An allowance for one outside-worktree Read does not grant other tools or commands access."));
+                }
+            }
+        }
+        reply
     }
 
     /// TerminalX runs an approved discovery command's programs itself,
@@ -7378,7 +7419,11 @@ impl SessionManager {
             }
         }
         let Some(ran) = ran else { return unanswered() };
-        let report = ran.report();
+        let mut report = ran.report();
+        if ran.status != 0 {
+            let at = report.find("\n\nOutput").unwrap_or(report.len());
+            report.insert_str(at, "\nThis is the vetted executor's result, rather than a verifier policy refusal or provider permission denial. Search exit status 1 can mean no matches. Review the output; use Read, Grep or Glob on permitted files for another lookup.");
+        }
         let output = match (kind, answering) {
             // The same `PreToolUse` denial carries the result for both agents. Claude Code
             // ignores an answer in another hook's form ("Hook returned incorrect event name").

@@ -32,8 +32,7 @@ desktop = [
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-updater",
     "dep:cpal",
-    # macOS only: keychain, AppKit alerts, dictation and local transcription.
-    "dep:security-framework",
+    # macOS only: AppKit alerts, dictation and local transcription.
     "dep:objc2",
     "dep:objc2-app-kit",
     "dep:objc2-av-foundation",
@@ -130,7 +129,9 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 notify-rust = { version = "4", optional = true }
-security-framework = { version = "3.7", optional = true }
+# The Keychain, which the runtime reads too: it keeps the machine's host key
+# there (docs/MACHINES.md decision 4).
+security-framework = "3.7"
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSSecureTextField", "NSTextField", "NSWindow", "NSResponder", "NSView", "NSColor", "NSPasteboard", "NSAccessibility", "NSWorkspace"], optional = true }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"], optional = true }
@@ -151,6 +152,12 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.test]
+# The tests wait on processes, terminals and files far more than they compute:
+# unoptimised, the suite runs as fast, and this crate's test build takes a
+# fraction of the processor time and memory. Dependencies keep the level above.
+opt-level = 0
 
 [profile.release]
 codegen-units = 1

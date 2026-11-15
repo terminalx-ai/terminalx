@@ -3,7 +3,6 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTabs, NewChatSheet, SessionHeader } from "./SessionChrome";
-import { shortProject } from "./ChatListRow";
 
 const mocks = vi.hoisted(() => ({ app: {} as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -89,12 +88,6 @@ describe("the session's bar", () => {
     // No terminal on this Mac: no switch.
     await render(<SessionHeader title="develop-widget" onBack={vi.fn()} onView={onView} />);
     expect(button("Chat") ?? button("Terminal")).toBeUndefined();
-  });
-
-  it("shortens a project to lead a row's title without crowding its branch", () => {
-    expect(shortProject("terminalx")).toBe("terminalx");
-    expect(shortProject("opengateway-web")).toBe("opengatew…");
-    expect(shortProject("Latent-mac-app")).toBe("Latent-ma…");
   });
 });
 

@@ -13,7 +13,58 @@ use serde_json::{json, Value};
 use std::{path::Path, process::Command, time::Duration};
 
 const SCRIPT: &str = include_str!("guest_linux_install.py");
+const RUNTIME_SCRIPT: &str = include_str!("guest_linux_runtime.py");
 const BUDGET: Duration = Duration::from_secs(120);
+
+/// The installer's filesystem helpers, without its entrypoint, for the
+/// activation and sealed-runtime programs that are loaded after them.
+pub(super) fn helpers() -> &'static str {
+    SCRIPT
+        .split("\nif __name__ == \"__main__\":")
+        .next()
+        .expect("installer source has helpers")
+}
+
+/// The root program that seals the runtime and launches RPCs from it (#978).
+pub(super) fn runtime_script() -> String {
+    format!("{}\n{RUNTIME_SCRIPT}", helpers())
+}
+
+/// `exec` of the sealed-runtime program, as root, in the exact container.
+/// Only the root program reads `runtime_sha256`; the guest account never
+/// chooses what runs.
+pub(super) fn runtime_command(binary: &Path, id: &str, header: &Value) -> Result<Command> {
+    use base64::Engine;
+    let envelope = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(header)?);
+    if envelope.len() > 4096 {
+        bail!("Sealed runtime envelope exceeds its bound");
+    }
+    let mut command = Command::new(binary);
+    command.args(["exec", "-i", "--user", "0:0", "--workdir", "/", id, "/usr/bin/python3", "-I", "-c"]);
+    command.arg(runtime_script()).arg(envelope);
+    process::remove_control_credentials(&mut command);
+    Ok(command)
+}
+
+/// Store the host's verified artifact as the root-owned runtime. Idempotent:
+/// an identical sealed runtime is observed, a different one is refused.
+fn seal_at(binary: &Path, target: &Target, intent: &Value, artifact: &[u8]) -> Result<Value> {
+    inspect_at(binary, target)?;
+    let sha = intent["runtimeSha256"].as_str().context("Artifact digest missing")?;
+    if journal::digest(artifact) != sha {
+        bail!("Delivered artifact changed");
+    }
+    let header = json!({"action":"seal","runtimeSha256":sha,"bytes":artifact.len()});
+    let result = super::transport::decode(&process::run(
+        &mut runtime_command(binary, container(target)?, &header)?,
+        artifact,
+        BUDGET,
+    )?)?;
+    if result["status"] != "sealed" || result["runtimeSha256"] != sha || result["path"] != super::transport::SEALED_RUNTIME {
+        bail!("Guest did not confirm the sealed runtime");
+    }
+    Ok(result)
+}
 
 fn container(target: &Target) -> Result<&str> {
     target.require(Capability::AttachedDesktop)?;
@@ -162,30 +213,57 @@ fn prepare(
     if account.architecture != architecture {
         bail!("Trusted artifact does not match the dedicated guest architecture");
     }
+    let environment_id = journal::new_id();
+    let host_key_sha256 = super::guest_key::verifier(&super::guest_key::ensure(root, &environment_id)?);
     let binding = InstallBinding {
         target: target.clone(),
-        environment_id: journal::new_id(),
+        environment_id,
         generation: journal::new_id(),
         architecture,
         account: Some(account),
+        host_key_sha256,
     };
     linux_profile::prepare(root, key, &binding, &artifact)
 }
-fn deliver(root: &Path, journal: &Journal, key: &str) -> Result<Value> {
-    linux_profile::trusted_record(root, key)?;
+/// The container engine for a target: the selected one in production, a
+/// disposable stand-in in fixtures.
+pub(super) type Engine<'a> = &'a dyn Fn(&Target) -> Result<std::path::PathBuf>;
+fn selected(target: &Target) -> Result<std::path::PathBuf> {
+    crate::container_vm::selected_runtime(target)
+}
+/// `request` holds the compiled-catalog gate (`trusted_record`) before this.
+pub(super) fn deliver_with(root: &Path, journal: &Journal, key: &str, engine: Engine) -> Result<Value> {
     linux_profile::execute_prepared(root, journal, key, |binding, path, intent| {
         let artifact = linux_profile::read(
             path,
             intent["bytes"].as_u64().context("Artifact size missing")?,
         )?;
+        let binary = engine(&binding.target)?;
         // No retry when exec/receipt delivery is lost. Recovery invokes only
         // the receipt action, which obtains the original guest mutation lock.
-        invoke(
+        invoke_at(
+            &binary,
             &binding.target,
             &header("install", key, intent)?,
             Some(&artifact),
         )?;
-        invoke(&binding.target, &header("receipt", key, intent)?, None)
+        let receipt = invoke_at(&binary, &binding.target, &header("receipt", key, intent)?, None)?;
+        seal_at(&binary, &binding.target, intent, &artifact)?;
+        Ok(receipt)
+    })
+}
+/// Recovery observes the original receipt, then completes the idempotent seal
+/// from the host's retained artifact, so a lost seal never strands the key path.
+pub(super) fn reconcile_with(root: &Path, key: &str, engine: Engine) -> Result<Value> {
+    linux_profile::reconcile_prepared(root, key, true, |binding, intent| {
+        let binary = engine(&binding.target)?;
+        let receipt = invoke_at(&binary, &binding.target, &header("receipt", key, intent)?, None)?;
+        let artifact = linux_profile::read(
+            &linux_profile::directory(root, key)?.join("runtime.elf"),
+            intent["bytes"].as_u64().context("Artifact size missing")?,
+        )?;
+        seal_at(&binary, &binding.target, intent, &artifact)?;
+        Ok(receipt)
     })
 }
 
@@ -245,6 +323,7 @@ pub(super) fn enroll_serving_using(
         deleted_at: None,
         keep_awake: false,
         owned: false,
+        detached: false,
         provision: None,
         manual_control: false,
         setup: None,
@@ -271,6 +350,7 @@ pub(super) fn enroll_serving_using(
         || observed["identity"]["generation"] != env.generation
         || observed["identity"]["protocol"] != journal::PROTOCOL
         || observed["identity"]["account"] != json!(account)
+        || observed["identity"]["hostKeySha256"] != binding.host_key_sha256
         || observed["manualControl"] != false
     {
         bail!("Serving guest account/identity differs from the original installed runtime");
@@ -346,12 +426,8 @@ pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
                 super::transport::linux_rpc(env, "describe", json!({}), Duration::from_secs(45))
             })
         }
-        "computer.deliverLinuxRuntime" => deliver(&root, &journal, key),
-        "computer.reconcileLinuxRuntime" => {
-            linux_profile::reconcile_prepared(&root, key, true, |binding, intent| {
-                invoke(&binding.target, &header("receipt", key, intent)?, None)
-            })
-        }
+        "computer.deliverLinuxRuntime" => deliver_with(&root, &journal, key, &selected),
+        "computer.reconcileLinuxRuntime" => reconcile_with(&root, key, &selected),
         _ => bail!("Unknown Linux installation action"),
     }
 }

@@ -11,6 +11,8 @@ import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
 import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
 import { claimCloudMirrorOwner, purgeCloudMirrors } from "@/lib/cloudMirror";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
+import { featureFlagEnabled, featureFlags } from "@/lib/featureFlags";
+import { forgetOrganizationRoster, setRosterContext } from "@/lib/organizationRoster";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
@@ -84,7 +86,10 @@ function applyStatus(status: AccountStatus) {
     // its connections and what they cached.
     for (const orgId of change.left) dropCloudOrg(orgId);
   }
-  for (const orgId of leftMemberships(state.status, status)) forgetCloudOrg(orgId, status.state === "signed-in" ? (status.identity?.email ?? null) : null);
+  for (const orgId of leftMemberships(state.status, status)) {
+    forgetOrganizationRoster(orgId);
+    forgetCloudOrg(orgId, status.state === "signed-in" ? (status.identity?.email ?? null) : null);
+  }
   // Signing out here (not a launch that finds nobody signed in) forgets the
   // setup records: they name organizations and hold a prepared prompt.
   if (state.status.state === "signed-in" && status.state === "signed-out") forgetOtherSetups(null);
@@ -101,9 +106,16 @@ function applyStatus(status: AccountStatus) {
     const left = new Set(leftMemberships(state.status, status));
     if (left.size > 0) void purgeCloudMirrors((orgId) => !left.has(orgId));
   }
+  syncRosterContext(status);
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);
+}
+
+/** Retire cached reads and polling while privacy disables cloud work, including live policy changes. */
+function syncRosterContext(status: AccountStatus) {
+  setRosterContext(status.identity?.organizationId ?? null, status.context?.revision ?? "",
+    privacyEnabled() ? [] : status.organizations?.filter((org) => featureFlagEnabled(status, featureFlags.teamRoster, org.id)).map((org) => org.id) ?? []);
 }
 
 /** Apply the server-confirmed removal through the same membership cleanup as role refresh.
@@ -132,6 +144,7 @@ export async function deleteOrganization(confirmation: { organizationId: string;
 
 /** Close one organization's cloud connections and drop what they cached in memory. */
 function dropCloudOrg(orgId: string) {
+  forgetOrganizationRoster(orgId);
   closeCloudConnectionsIn(orgId);
   closeWorkspaceConnectionsIn(orgId);
   dropCloudTerminalsIn(orgId);
@@ -286,6 +299,7 @@ export function bootAccount(): Promise<void> {
     try {
       await listen<AccountStatus>("account_status", (event) => applyStatus(event.payload));
       subscribeDataPrivacy(() => {
+        syncRosterContext(state.status);
         set({ status: { ...state.status } });
         scheduleRefresh(state.status);
         if (!privacyEnabled()) { void refreshAccount(); void refreshAccountRoles(true); }

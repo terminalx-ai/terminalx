@@ -11,10 +11,12 @@ description: >-
 TerminalX's Local VM is a Linux (XFCE) desktop in a container on this machine, with Firefox. The
 user sees it live in TerminalX's right panel, Computer tab, and may take control of it.
 
-While it runs, every new agent gets its tools as the `computer` MCP server. A tab can instead be
+While it runs, every new agent gets its tools as the `computer` MCP server. With Settings →
+Experimental → Local VM tasks on, a tab can instead be
 given one exact computer in the Computer tab (stop the tab's agent first); that tab then uses only
 that computer, and a computer that is gone, stopped or replaced fails the start rather than
-falling back to another one. Clearing the choice returns the tab to the Local VM. Either way the
+falling back to another one. Clearing the choice, or turning that switch off, returns the tab to
+the Local VM. Either way the
 agent, its shell and the project files stay on this machine; only desktop actions go to the VM.
 
 ## Rules

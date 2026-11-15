@@ -62,7 +62,7 @@ fn changed_receipts_and_competing_ownership_refuse_then_original_stop_releases()
     f.prepare(key);
     f.deliver(key);
     enabled(&f);
-    let desktop = Guard::attach(&f.root(), &f.binding.target, &f.journal).unwrap();
+    let desktop = Guard::attach(&f.root(), &f.binding.target, &f.journal, None).unwrap();
     assert!(
         change_using(&f.root(), &f.journal, key, "start", |_, _| panic!(
             "desktop owned"
@@ -113,7 +113,7 @@ fn enrollment_requires_original_serving_instance_then_provider_readiness_remains
     .unwrap();
     let mut description = json!({"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"platform":"linux",
         "runtimeSha256":record["intent"]["runtimeSha256"],"taskMode":"shellFiles","manualControl":false,
-        "identity":{"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"account":f.binding.account},
+        "identity":{"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"account":f.binding.account,"hostKeySha256":f.binding.host_key_sha256},
         "activation":{"id":record["activation"]["id"],"instance":"replacement"}});
     assert!(
         linux_install::enroll_serving_using(

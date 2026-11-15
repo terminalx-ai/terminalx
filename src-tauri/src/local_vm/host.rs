@@ -85,6 +85,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
     match method {
         "enrollContainer" => super::transport::enroll(&journal, params),
         "enroll" => {
+            super::creation::require_personal_account()?;
             compatible()?;
             let sandbox = field(&params, "sandbox")?;
             let info = inspect_sandbox(sandbox)?;
@@ -197,8 +198,12 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             super::macos_keys::produce(&root()?,super::macos_transport::binding(&env)?,method=="environment.reconcileGuestKey")
         }
         "environment.install" => {
+            // The owner's own runtime only, never a path a caller names (review 2).
+            if params.get("runtimePath").is_some() {
+                bail!("The guest runtime is always this owner's own; no other binary is installed");
+            }
             let env = environment(&journal, &params)?;
-            install_guest(&env, Path::new(field(&params, "runtimePath")?))?;
+            install_current_guest(&env)?;
             Ok(json!({"installed":true,"credentialsCopied":false}))
         }
         "environment.releaseDesktop" => {
@@ -289,7 +294,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             record_manual_control(&journal, &env, &response)?;
             Ok(response)
         }
-        "task.cancel" | "task.followup" | "task.permission" | "task.recover" => {
+        "task.cancel" | "task.followup" | "task.permission" | "task.answer" | "task.recover" => {
             let target: TaskTarget =
                 serde_json::from_value(params.get("target").cloned().context("target required")?)?;
             let (task, env) = bound_environment(&journal, &target)?;
@@ -345,13 +350,65 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             }
             Ok(result)
         }
+        "task.abandon" => abandon(&journal, &params),
+        "task.history" => {
+            // A finished task's events live in its history file, not in the
+            // polled state (#978); the task card reads them when opened.
+            let target: TaskTarget =
+                serde_json::from_value(params.get("target").cloned().context("target required")?)?;
+            let task = journal::bound(&mut journal.read()?, &target)?.clone();
+            Ok(json!({"target":task.target,"events":journal::retained_events(&root()?, &task)?}))
+        }
         "task.artifact" => artifact(&journal, &params),
         "task.applyPatch" => apply_patch(&journal, &params),
         _ => bail!("Unknown local VM method"),
     }
 }
 
-fn retain_cancellation(task: &mut Task, response: &Value) {
+/// Ends a task whose guest can no longer answer (review 2): a VM that is gone
+/// or will not boot otherwise held Stop all and Delete VM refused for good.
+/// Only on the person's confirmation, only while the guest cannot be reached
+/// (one that answers is cancelled as usual). The task ends Abandoned, its
+/// outcome unknown: nothing is replayed, the guest keeps its own record, whose
+/// lease still keeps a later task from starting beside a live worker, and the
+/// supervisor reads that record again if the guest comes back (#978).
+fn abandon(journal: &Journal, params: &Value) -> Result<Value> {
+    confirm(params)?;
+    let target: TaskTarget = serde_json::from_value(params.get("target").cloned().context("target required")?)?;
+    let (task, env) = bound_environment(journal, &target)?;
+    if task.status.terminal() {
+        return Ok(serde_json::to_value(task)?);
+    }
+    abandon_using(journal, &target, guest_rpc(&env, "describe", json!({})))
+}
+
+fn abandon_using(journal: &Journal, target: &TaskTarget, reached: Result<Value>) -> Result<Value> {
+    let error = match reached {
+        Ok(_) => bail!("The guest answered, so cancel this task instead; it was not abandoned"),
+        Err(error) => crate::remote::protocol::redact(&format!("{error:#}")),
+    };
+    let task = journal.transaction(|state| {
+        let task = journal::bound(state, target)?;
+        if !task.status.terminal() {
+            if task.dispatch_started {
+                // Not Failed (#978): an unreachable guest may be a stopped or
+                // suspended VM whose worker resumes when it starts again. The
+                // supervisor keeps polling, and the guest's record replaces this.
+                task.status = journal::TaskStatus::Abandoned;
+                task.detail = Some(format!("Abandoned: the guest could not be reached ({error}). The outcome is unknown: nothing was replayed, the guest keeps its own record, and if the VM comes back this task shows what its worker did."));
+            } else {
+                // No start request was ever sent, so nothing ran in the guest.
+                task.status = journal::TaskStatus::Canceled;
+                task.detail = Some(format!("Abandoned before it was sent to the guest ({error}). Nothing ran."));
+            }
+            task.updated_at = journal::now();
+        }
+        Ok(task.clone())
+    })?;
+    Ok(serde_json::to_value(task)?)
+}
+
+pub(super) fn retain_cancellation(task: &mut Task, response: &Value) {
     // A tombstone prevents a delayed start but cannot erase evidence of an
     // earlier dispatch whose guest record has disappeared or rolled back.
     if response["absent"] == true {
@@ -545,7 +602,8 @@ pub(super) fn guest_rpc_ready(
     }
     params["environmentId"] = json!(env.id);
     params["generation"] = json!(env.generation);
-    let request = serde_json::to_vec(&json!({"method":method,"params":params}))?;
+    let key = super::guest_key::read(&root()?, &env.id)?;
+    let request = zeroize::Zeroizing::new(serde_json::to_vec(&json!({"method":method,"params":params,"hostKey":key.as_str()}))?);
     // -i uses argv and authenticated Cua guest transport, not an HTTP endpoint
     // exposed to the LAN. The guest helper reads its own owner-only token.
     let bytes = cua(
@@ -562,18 +620,7 @@ pub(super) fn guest_rpc_ready(
         &request,
         budget,
     )?;
-    let response: Value = serde_json::from_slice(&bytes).context("Invalid guest response")?;
-    if response.get("ok") == Some(&Value::Bool(false)) {
-        bail!(
-            "Guest request refused: {}",
-            response
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("guest unavailable")
-        );
-    }
-    Ok(response.get("result").cloned().unwrap_or(response))
+    super::transport::decode(&bytes)
 }
 
 fn compatible() -> Result<()> {
@@ -773,6 +820,7 @@ fn reserve_creation(
             deleted_at: None,
             keep_awake: false,
             owned: true,
+            detached: false,
             provision: Some(progress(
                 "queued",
                 "Waiting for disclosed tool preparation before creating the VM",
@@ -880,8 +928,14 @@ pub fn export_files(source: &Path, manifest: &[journal::InputFile]) -> Result<Va
     Ok(json!(files))
 }
 
+/// Installs this owner's own executable, and only while it still has the
+/// bytes this owner started with: a replaced file is never installed.
 pub(crate) fn install_current_guest(env: &Environment) -> Result<()> {
-    install_guest(env, &std::env::current_exe()?)
+    let runtime = std::env::current_exe()?;
+    if journal::digest(&fs::read(&runtime)?) != super::bootstrap::owner_runtime_sha256()? {
+        bail!("This app's runtime changed on disk since it started; restart TerminalX before installing the guest runtime");
+    }
+    install_guest(env, &runtime)
 }
 
 pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
@@ -984,6 +1038,8 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
 
 pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result<()> {
     if env.transport.is_personalized() { return super::macos_transport::require_available(); }
+    // Its provider would sign in to the stock image's shared account.
+    super::creation::require_personal_account()?;
     env.transport.require_legacy()?;
     if harness != "codex" {
         bail!("This prepared profile supports automatic Codex setup; existing other provider installations are preserved");
@@ -1177,7 +1233,8 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
     journal::atomic_private_write(
         &identity_path,
         &serde_json::to_vec(
-            &json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL}),
+            &json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL,
+                "hostKeySha256":super::guest_key::verifier(&super::guest_key::ensure(&root()?, &env.id)?)}),
         )?,
     )?;
     cua(
@@ -1399,7 +1456,8 @@ pub(super) fn validate_quiescent_history(
         {
             bail!("Guest history is incomplete or rolled back");
         }
-        for event in &host.events {
+        let retained = if host.archived_events > 0 { journal::retained_events(&root()?, host)? } else { host.events.clone() };
+        for event in &retained {
             if events
                 .get(event.seq.saturating_sub(1) as usize)
                 .and_then(|e| e["digest"].as_str())
@@ -1429,6 +1487,7 @@ pub(super) fn validate_quiescent_history(
                     && t.provider_conversation_id.is_none()
                     && t.last_event_seq == 0
                     && t.events.is_empty()
+                    && t.archived_events == 0
             })
         {
             bail!("A guest tombstone cannot replace a dispatched task record or erase retained worker/history evidence");
@@ -1472,6 +1531,22 @@ fn delete(journal: &Journal, params: &Value) -> Result<Value> {
         || env.manual_control
     {
         bail!("Environment disposition changed; inspect again before deletion");
+    }
+    remove(journal, &env)
+}
+
+/// The last step of deletion, after every check above.
+fn remove(journal: &Journal, env: &Environment) -> Result<Value> {
+    // A VM TerminalX did not create is the person's own (review 2): it is
+    // detached, never removed, and its guest files stay where they are.
+    if !env.owned {
+        journal.transaction(|s| {
+            let current = s.environments.get_mut(&env.id).unwrap();
+            current.deleted_at = Some(journal::now());
+            current.detached = true;
+            Ok(())
+        })?;
+        return Ok(json!({"deleted":false,"detached":true,"vmKept":true,"historyRetained":true}));
     }
     // The UI lists uncommitted work and resume metadata before this call.
     // Deletion never traverses a host checkout or removes its journal/artifacts.
@@ -1606,6 +1681,66 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Review 2: deleting an enrolled VM ran `cua sb rm --force` on a VM the
+    /// person made themselves.
+    #[test]
+    fn a_vm_terminalx_did_not_create_is_detached_and_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Yours", "local:yours").unwrap();
+        assert!(!env.owned);
+        // No Cua runs here: with no pinned Cua, a removal would fail.
+        let result = remove(&journal, &env).unwrap();
+        assert_eq!(result, json!({"deleted":false,"detached":true,"vmKept":true,"historyRetained":true}));
+        let kept = journal.read().unwrap().environments[&env.id].clone();
+        assert!(kept.detached && kept.deleted_at.is_some());
+        assert_eq!(serde_json::to_value(&kept).unwrap()["detached"], true);
+    }
+    #[test]
+    fn a_task_whose_guest_cannot_answer_can_be_abandoned_and_one_that_answers_cannot() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Guest", "local:gone").unwrap();
+        let input = journal::TaskInput { parent_session_id: journal::new_id(), parent_tab_id: journal::new_id(), parent_message_id: journal::new_id(),
+            environment_id: env.id.clone(), prompt: "p".into(), harness: "codex".into(), model: String::new(), effort: None,
+            permission_mode: "manual".into(), files: vec![], desktop: true };
+        let task = journal.submit("gone", input).unwrap();
+        journal.transaction(|s| { let t = journal::bound(s, &task.target)?; t.status = journal::TaskStatus::OutcomeUnknown; t.dispatch_started = true; Ok(()) }).unwrap();
+        assert!(abandon_using(&journal, &task.target, Ok(json!({}))).is_err(), "a guest that answers is cancelled instead");
+        assert_eq!(journal.read().unwrap().tasks[&task.target.task_id].status, journal::TaskStatus::OutcomeUnknown);
+        let ended: Task = serde_json::from_value(abandon_using(&journal, &task.target, Err(anyhow::anyhow!("VM is stopped"))).unwrap()).unwrap();
+        // #978: not Failed. A stopped VM's worker may resume, so the outcome
+        // stays unknown and the supervisor keeps reading the guest's record.
+        assert_eq!(ended.status, journal::TaskStatus::Abandoned);
+        assert!(ended.detail.as_deref().unwrap().contains("outcome is unknown"));
+        assert!(ended.polled(), "the supervisor resumes polling when the VM comes back");
+        assert!(!super::super::supervisor::state_busy(&journal.read().unwrap()), "Stop all and Delete VM are no longer held");
+        assert!(abandon(&journal, &json!({"target":task.target})).is_err(), "only on confirmation");
+        // A task never sent to its guest ran nothing: it ends canceled and is never dispatched later.
+        let mut queued = task.input.clone();
+        queued.prompt = "never sent".into();
+        let unsent = journal.submit("unsent", queued).unwrap();
+        journal.transaction(|s| { journal::bound(s, &unsent.target)?.status = journal::TaskStatus::Starting; Ok(()) }).unwrap();
+        let ended: Task = serde_json::from_value(abandon_using(&journal, &unsent.target, Err(anyhow::anyhow!("VM is gone"))).unwrap()).unwrap();
+        assert_eq!(ended.status, journal::TaskStatus::Canceled);
+        assert!(!ended.polled());
+        let reopened = Journal::open_existing(temp.path()).unwrap();
+        assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id].status, journal::TaskStatus::Abandoned);
+    }
+    /// Review 2: a stock Cua VM's shared account has a published password, so
+    /// it is neither enrolled nor signed in to a provider, before any Cua call.
+    #[test]
+    fn a_stock_cua_vm_is_never_enrolled_or_signed_in_while_its_account_is_shared() {
+        let _home = crate::store::temp_home();
+        journal().unwrap().transaction(|state| { state.enabled = true; Ok(()) }).unwrap();
+        let error = request("enroll", json!({"name":"Existing","sandbox":"local:existing"})).unwrap_err();
+        assert!(format!("{error:#}").contains("published default password"), "{error:#}");
+        assert!(journal().unwrap().read().unwrap().environments.is_empty());
+        assert_eq!(super::super::creation::capability()["existingVmEnrollment"], false);
+        let env = journal().unwrap().enroll("Already enrolled", "local:existing").unwrap();
+        let error = prepare_guest_provider(&env, "codex").unwrap_err();
+        assert!(format!("{error:#}").contains("Nothing was enrolled or signed in"), "{error:#}");
+    }
     #[test]
     fn fresh_creation_refuses_unsupported_account_profile_before_reservation() {
         let temp = tempfile::tempdir().unwrap();
@@ -1629,6 +1764,8 @@ mod tests {
         }
         assert!(journal.read().unwrap().environments.is_empty());
     }
+    // A reservation exists only where creation passed its Apple Silicon gate.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn create_reservation_is_atomic_keyed_and_retains_deleted_receipt() {
         let temp = tempfile::tempdir().unwrap();

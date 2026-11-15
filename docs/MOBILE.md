@@ -10,6 +10,10 @@ The TerminalX companion is an Expo client of the deployed TerminalX account,
 pairing, relay, and runtime contracts. The Mac remains the source of truth for
 sessions and terminal state. The phone does not need a new hosted backend.
 
+Operating one desktop from another reuses this pairing (host key, one-time code,
+fingerprint, direct and relay routes) with a different scope and protocol; see
+[MACHINES.md](./MACHINES.md). A Mac keeps one host key for phones and computers.
+
 ## Product boundary and app shell
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “Scope” and
@@ -370,6 +374,19 @@ to the parked hook. Viewer devices are refused, terminal bytes are never
 written, and a lapsed request remains visible as a terminal fallback. The
 resulting `permission_decided` event is the local activity record and removes
 the card on every subscribed surface.
+
+An agent's question (Claude Code's `AskUserQuestion`) is answered the same way
+(#979). The phone draws the pending `questions_asked` event as a question card
+with every option, and a driver device calls `questions.respond` with the public
+session id, tab id, request id and `answers`: each question's text mapped to its
+answer, a multi-select answer being the chosen labels joined with ", " in the
+order picked. That is what the desktop card sends (`questionAnswers` in
+`packages/portable/src/transcript.ts` builds it for both), and an empty map
+skips the question. The host ends in the desktop's own `answer_questions`; a
+question the Mac or another device answered first is refused with "that question
+is no longer open", which the card says. A Mac names `questions: 1` in
+`sync.capabilities` when its runtime serves this; with one that does not, the
+phone shows the question and its options read-only, to be answered on the Mac.
 
 ## Persistence, sign-out, and privacy
 

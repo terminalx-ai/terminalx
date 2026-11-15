@@ -471,10 +471,10 @@ export function NewSessionView({
           <DictationStatus dictation={dictation} />
           {!cloud && !projectless && preset && !project && <p role="alert" className="mb-3 text-sm text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
           {!cloud && (
-            <div className="mb-3 space-y-2">
+            <div className="mb-3 space-y-2 empty:hidden">
               {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
               {(harness ? [harness] : store.harnesses).map((item) => (
-                <AgentSetup key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
+                <AgentSetup newSession key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
                   void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
                 }} />
               ))}

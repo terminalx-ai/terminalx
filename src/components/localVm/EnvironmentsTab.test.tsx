@@ -11,7 +11,8 @@ const calls = (method: string) => mocks.invoke.mock.calls.filter(([, args]) => a
 beforeEach(() => {
   localStorage.clear();
   mocks.invoke.mockReset(); mocks.invoke.mockResolvedValue(null);
-  mocks.state = { enabled: true, environments: { env: environment }, tasks: { task: task() } };
+  // A VM TerminalX created; one it did not is detached instead (see below).
+  mocks.state = { enabled: true, environments: { env: { ...environment, owned: true } }, tasks: { task: task() } };
 });
 afterEach(cleanup);
 
@@ -97,6 +98,21 @@ describe("local environment lifecycle", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: action === "stop" ? "Stop VM and its tasks" : "Delete VM and guest files" }));
     await waitFor(() => expect(calls(`environment.${action}`)).toHaveLength(1));
     expect(calls(`environment.${action}`)[0][1].params).toEqual(action === "delete" ? { environmentId: "env", generation: environment.generation, confirm: true } : { environmentId: "env", confirm: true });
+  });
+
+  it("detaches a VM TerminalX did not create, and says the VM is kept (review 2)", async () => {
+    mocks.state!.environments = { env: { ...environment, owned: false } };
+    mocks.state!.tasks = {};
+    mocks.invoke.mockResolvedValue({ status: "stopped", stages: [], deletion: { canDelete: true, reason: "Guest work inspected", tasks: [], guestWork: {} } });
+    render(<EnvironmentsTab />);
+    expect(screen.queryByRole("button", { name: "Delete VM…" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Remove from TerminalX…" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("so it is kept with its guest files");
+    const remove = within(dialog).getByRole("button", { name: "Remove from TerminalX and keep the VM" }) as HTMLButtonElement;
+    await waitFor(() => expect(remove.disabled).toBe(false));
+    fireEvent.click(remove);
+    await waitFor(() => expect(calls("environment.delete")).toHaveLength(1));
   });
 
   it("keeps deletion blocked when fresh guest-work inspection is unavailable", async () => {

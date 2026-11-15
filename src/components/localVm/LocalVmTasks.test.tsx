@@ -157,6 +157,21 @@ describe("selected local VM tasks", () => {
     expect(mocks.invoke.mock.calls.filter(([, args]) => args.method !== "computer.inventory")).toHaveLength(0);
   });
 
+  it.each([["", "bypassPermissions"], ["bypass", "bypassPermissions"]])("submits an older tab's mode spelling %j as the mode it names (review 2)", async (spelling, mode) => {
+    const parentTab = { ...tab, permissionMode: spelling };
+    mocks.invoke.mockImplementation(async (_command, { method, params }) => {
+      if (method === "computer.inventory") return { entries: [{ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, name: "macOS · Local guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] };
+      if (method === "describe") return description;
+      if (method === "task.submit") return task({ input: params.input, idempotencyKey: params.idempotencyKey });
+      return null;
+    });
+    mount(null, { ...session, tabs: [parentTab] }, parentTab);
+    await selectTask();
+    fireEvent.click(screen.getByRole("button", { name: "Submit selected task" }));
+    await screen.findByRole("article", { name: "Local VM task task" });
+    expect(calls("task.submit")[0][1].params.input.permissionMode).toBe(mode);
+  });
+
   it.each([null, "high"])("preserves provider-default model intent and inherited effort %s in the actual submission", async (effort) => {
     const parentTab = { ...tab, model: "", effort };
     mocks.invoke.mockImplementation(async (_command, { method, params }) => {

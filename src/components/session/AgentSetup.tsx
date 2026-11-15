@@ -40,7 +40,7 @@ function problemText(problem: SetupProblem, harness: HarnessInfo, detail?: strin
  * view: install the agent and sign in to it from here (PRO-152), or copy the
  * commands and run them in a terminal of one's own.
  */
-export function AgentSetup({ harness, value, checking, onRefresh, compact = false, headless = false }: {
+export function AgentSetup({ harness, value, checking, onRefresh, compact = false, headless = false, newSession = false }: {
   harness: HarnessInfo;
   value: AgentReadiness | null;
   checking: boolean;
@@ -49,6 +49,8 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
   compact?: boolean;
   /** Settings → Agents: the agent's tab says its status, version and path above this, so only what to do is shown. */
   headless?: boolean;
+  /** Keep the composer focused: only setup/recovery, without the executable path. */
+  newSession?: boolean;
 }) {
   const [copyStatus, setCopyStatus] = useState("");
   const [manual, setManual] = useState(false);
@@ -59,6 +61,7 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
   const status = active ? setupStatus(flow) : checking ? "Checking installation and login…" : READINESS_LABELS[state];
   const install = state === "missing";
   const showCommand = !compact || manual || !harness.installable;
+  if (newSession && state === "ready" && !active) return null;
   return <section aria-label={`${harness.name} setup`} className="min-w-0 rounded-lg bg-well p-3 text-xs">
     {!headless && <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       {compact && <span className="text-[13px] font-medium">{harness.name}</span>}
@@ -68,7 +71,7 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
       {/* The welcome screen checks every agent again from one button of its own. */}
       {!compact && <Button type="button" size="xs" variant="ghost" disabled={checking || active} onClick={onRefresh}>Check again</Button>}
     </div>}
-    {!compact && !headless && harness.path && <p className="mt-1 break-all font-mono text-[11px] text-faint">{harness.path}</p>}
+    {!newSession && !compact && !headless && harness.path && <p className="mt-1 break-all font-mono text-[11px] text-faint">{harness.path}</p>}
     {active ? <SetupRun harness={harness} flow={flow} /> : state === "ready" ? <p className="mt-1 text-muted-foreground">{compact
       ? `${harness.name} is ready. Open a project above to start a session with it.`
       : "Local login found. Provider access and model availability are checked when you run a task."}</p> : <>

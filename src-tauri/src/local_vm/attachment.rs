@@ -498,7 +498,60 @@ pub fn launch_args(
     })
 }
 
-fn serve(binding: Binding, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
+/// MCP messages from the agent, one line each; `None` once the agent has
+/// gone: its input ended, or its tab was stopped (`stdio_exit`).
+pub(super) trait Lines {
+    fn next_line(&mut self) -> Result<Option<String>>;
+}
+
+impl<R: BufRead> Lines for R {
+    fn next_line(&mut self) -> Result<Option<String>> {
+        let mut line = String::new();
+        let count = self.take(1024 * 1024 + 1).read_line(&mut line)?;
+        if count == 0 {
+            return Ok(None);
+        }
+        if count > 1024 * 1024 || !line.ends_with('\n') {
+            bail!("MCP input exceeds its bound");
+        }
+        Ok(Some(line))
+    }
+}
+
+/// The adapter's own stdin, read on a thread of its own so that a stop
+/// signal ends serving even while that read waits.
+struct Agent(std::sync::mpsc::Receiver<Option<Result<String>>>);
+
+impl Lines for Agent {
+    fn next_line(&mut self) -> Result<Option<String>> {
+        match self.0.recv() {
+            Ok(Some(line)) => line.map(Some),
+            Ok(None) | Err(_) => Ok(None),
+        }
+    }
+}
+
+fn agent() -> Result<Agent> {
+    let signals = super::stdio_exit::watch()?;
+    let (send, receive) = std::sync::mpsc::channel();
+    let stopped = send.clone();
+    std::thread::Builder::new().name("adapter-stop".into()).spawn(move || {
+        if signals.recv().is_some() { let _ = stopped.send(None); }
+    })?;
+    std::thread::Builder::new().name("adapter-input".into()).spawn(move || {
+        let mut input = std::io::stdin().lock();
+        loop {
+            match input.next_line() {
+                Ok(Some(line)) => if send.send(Some(Ok(line))).is_err() { return },
+                Ok(None) => { let _ = send.send(None); return }
+                Err(error) => { let _ = send.send(Some(Err(error))); return }
+            }
+        }
+    })?;
+    Ok(Agent(receive))
+}
+
+fn serve(binding: Binding, input: &mut impl Lines, output: &mut impl Write) -> Result<()> {
     let root = host::root()?;
     let journal = host::journal()?;
     serve_using(
@@ -515,40 +568,56 @@ pub(super) fn serve_using(
     root: &Path,
     journal: &Journal,
     binding: Binding,
-    input: &mut impl BufRead,
+    input: &mut impl Lines,
     output: &mut impl Write,
     rpc: &mut Rpc<'_>,
     check_parent: &mut dyn FnMut(&Binding) -> Result<()>,
 ) -> Result<()> {
     check_parent(&binding)?;
     let mut adapter = Adapter::begin(root, journal, binding, rpc)?;
+    let served = serve_lines(&mut adapter, input, output, rpc, check_parent);
+    // However serving ended, the lease is closed as it is at the end of input
+    // (review 2): the guest's release proof decides, so a call whose outcome
+    // is unknown keeps the desktop reserved, and nothing else does.
+    let closed = adapter.close(rpc);
+    match served {
+        Ok(()) => closed,
+        Err(error) => Err(error),
+    }
+}
+
+fn serve_lines(
+    adapter: &mut Adapter<'_>,
+    input: &mut impl Lines,
+    output: &mut impl Write,
+    rpc: &mut Rpc<'_>,
+    check_parent: &mut dyn FnMut(&Binding) -> Result<()>,
+) -> Result<()> {
     let mut initialized = false;
     let mut announced = false;
-    loop {
-        let mut line = String::new();
-        let count = input.take(1024 * 1024 + 1).read_line(&mut line)?;
-        if count == 0 {
-            break;
-        }
-        if count > 1024 * 1024 || !line.ends_with('\n') {
-            bail!("MCP input exceeds its bound");
-        }
-        let request: Value = serde_json::from_str(&line)?;
+    let reply = |output: &mut dyn Write, id: &Value, error: &str, code: i64| -> Result<()> {
+        writeln!(output, "{}", json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":error}}))?;
+        Ok(output.flush()?)
+    };
+    while let Some(line) = input.next_line()? {
         check_parent(&adapter.binding)?;
-        if request["jsonrpc"] != "2.0" {
-            bail!("JSON-RPC 2.0 is required");
-        }
-        let method = request["method"].as_str().context("MCP method required")?;
-        if method == "notifications/initialized" && initialized && request.get("id").is_none() {
-            announced = true;
+        // A malformed message is answered, or ignored without an ID; it is
+        // never the end of the adapter and its lease.
+        let Ok(request) = serde_json::from_str::<Value>(&line) else {
+            reply(output, &Value::Null, "Parse error", -32700)?;
             continue;
-        }
-        if !request
-            .get("id")
-            .is_some_and(|id| id.is_string() || id.is_i64() || id.is_u64())
-        {
-            bail!("A string or integer MCP request ID is required");
-        }
+        };
+        let id = request.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64()).cloned();
+        let method = request["method"].as_str().filter(|_| request["jsonrpc"] == "2.0");
+        let (Some(method), Some(id)) = (method, id) else {
+            // A notification needs no reply; only `initialized` changes anything.
+            if method == Some("notifications/initialized") && initialized && request.get("id").is_none() {
+                announced = true;
+            } else if let Some(id) = request.get("id").filter(|id| !id.is_null()) {
+                reply(output, id, "A JSON-RPC 2.0 request with a string or integer ID is required", -32600)?;
+            }
+            continue;
+        };
         let result = match method {
             "initialize" if !initialized && request["params"]["protocolVersion"].is_string() => {
                 initialized = true;
@@ -564,15 +633,15 @@ pub(super) fn serve_using(
             _ => Err(anyhow::anyhow!("Unsupported MCP method or lifecycle state")),
         };
         let response = match result {
-            Ok(result) => json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
             Err(error) => {
-                json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":error.to_string()}})
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}})
             }
         };
         writeln!(output, "{}", response)?;
         output.flush()?;
     }
-    adapter.close(rpc)
+    Ok(())
 }
 
 pub fn run_stdio_cli() -> Option<i32> {
@@ -586,11 +655,9 @@ pub fn run_stdio_cli() -> Option<i32> {
         }
         std::env::set_var("TERMINALX_HOME", &args[2]);
         let binding: Binding = serde_json::from_str(&args[1])?;
-        serve(
-            binding,
-            &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
-        )
+        // Before any other thread: a stop signal ends serving, not the process.
+        let mut input = agent()?;
+        serve(binding, &mut input, &mut std::io::stdout().lock())
     })();
     if let Err(error) = &result {
         eprintln!("macOS attachment: {error:#}");

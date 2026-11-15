@@ -18,7 +18,7 @@ export const SETTINGS_SECTIONS = [
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost and orchestration runs", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs and Local VM tasks", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 
@@ -26,7 +26,9 @@ export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 
 /** A section behind a switch in Settings → Experimental is found only while the switch is on. Shared with the row search. */
 export function settingsSectionOffered(tab: SettingsTab): boolean {
-  return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
+  if (tab === "orchestrator") return getExperimentalSettings()?.orchestratorRuns === true;
+  if (tab === "localVms") return getExperimentalSettings()?.localVmTasks === true;
+  return true;
 }
 
 /**

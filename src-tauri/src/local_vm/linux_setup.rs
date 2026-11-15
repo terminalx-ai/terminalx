@@ -126,7 +126,7 @@ mod tests {
         let params = json!({"environmentId":env.id,"generation":env.generation,"harness":"codex","idempotencyKey":"setup-one","confirm":true});
         let container = env.transport.container().unwrap();
         let owner =
-            super::super::admission::Guard::attach(dir.path(), &container, &journal).unwrap();
+            super::super::admission::Guard::attach(dir.path(), &container, &journal, None).unwrap();
         assert!(super::super::setup::queue(&journal, params.clone()).is_err());
         owner.completed().unwrap();
         let queued = super::super::setup::queue(&journal, params.clone()).unwrap();
@@ -136,7 +136,7 @@ mod tests {
             queued
         );
         assert!(initial(&env, "claude", "wrong-provider").is_err());
-        assert!(super::super::admission::Guard::attach(dir.path(), &container, &journal).is_err());
+        assert!(super::super::admission::Guard::attach(dir.path(), &container, &journal, None).is_err());
         let read = json!({"protocol":1,"environmentId":env.id,"generation":env.generation,
             "runtime":{"identity":{"protocol":1,"environmentId":env.id,"generation":env.generation},"state":"ready","executableSha256":"b".repeat(64)},
             "provider":{"harness":"codex","state":"unauthenticated","reasonCode":"guest_sign_in_required","actionCode":"provider.codexDeviceLogin.start"},
@@ -160,7 +160,7 @@ mod tests {
             .clone()
             .unwrap();
         assert!(ready(&env, &ready_report));
-        super::super::admission::Guard::attach(dir.path(), &container, &reopened)
+        super::super::admission::Guard::attach(dir.path(), &container, &reopened, None)
             .unwrap()
             .completed()
             .unwrap();

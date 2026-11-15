@@ -2,7 +2,7 @@ import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
 import type { ComputerContext, ComputerInventory, ComputerSelection, ComputerTarget } from "@/types/computer";
 import type { LocalVmStatus } from "@/lib/api";
-import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmGuestAccount, LocalVmGuestAccountStatus, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskEvent, LocalVmTaskTarget } from "@/types/localVm";
 
 export interface LinuxInstallRecord {
   activation?: { id: string; status: "outcomeUnknown" | "owned" | "stopped"; ready: false; detail?: string };
@@ -51,7 +51,7 @@ interface Requests {
   "environment.cancelProvision": { params: { environmentId: string }; result: LocalVmJson };
   "environment.start": { params: { environmentId: string }; result: LocalVmJson };
   "environment.stop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
-  "environment.install": { params: { environmentId: string; runtimePath: string }; result: LocalVmJson };
+  "environment.install": { params: { environmentId: string }; result: LocalVmJson };
   "environment.awake": { params: { environmentId: string; enabled: boolean }; result: LocalVmJson };
   "environment.desktop": { params: { environmentId: string; target?: LocalVmTaskTarget }; result: LocalVmJson };
   "environment.releaseDesktop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
@@ -61,10 +61,13 @@ interface Requests {
   "environment.confirmGuestAccount": { params: { idempotencyKey: string; confirm: true; observationSha256: string; account: LocalVmGuestAccount; parentSession: string; parentTab: string; parentConversation: string }; result: LocalVmJson };
   "task.submit": { params: LocalVmSubmission; result: LocalVmTask };
   "task.cancel": { params: { target: LocalVmTaskTarget }; result: LocalVmJson };
+  "task.abandon": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmJson };
+  "task.history": { params: { target: LocalVmTaskTarget }; result: { target: LocalVmTaskTarget; events: LocalVmTaskEvent[] } };
   "task.followup": { params: { target: LocalVmTaskTarget; text: string; idempotencyKey: string }; result: LocalVmJson };
   "task.recover": { params: LocalVmRecoveryRequest; result: LocalVmJson };
   "task.takeover": { params: { target: LocalVmTaskTarget; confirm: true }; result: LocalVmTakeoverResult };
   "task.permission": { params: { target: LocalVmTaskTarget; requestId: string; optionId: string; idempotencyKey: string }; result: LocalVmJson };
+  "task.answer": { params: { target: LocalVmTaskTarget; requestId: string; answers: Record<string, string>; idempotencyKey: string }; result: LocalVmJson };
   "task.artifact": { params: { target: LocalVmTaskTarget; artifactId: string }; result: LocalVmArtifactContent };
   "task.applyPatch": { params: { target: LocalVmTaskTarget; artifactId: string; destinationRoot: string; confirm: true }; result: LocalVmPatchResult };
 }
@@ -104,10 +107,13 @@ export function localVmRequest<M extends keyof Requests>(method: M, params: Requ
 export const LOCAL_VM_STATUS = {
   queued: "Queued for guest", starting: "Starting", running: "Running", waiting: "Needs attention",
   canceling: "Stopping", completed: "Completed", failed: "Failed", canceled: "Canceled", outcomeUnknown: "Outcome unknown",
+  abandoned: "Abandoned · outcome unknown",
 } satisfies Record<LocalVmTask["status"], string>;
 
 export function taskFinished(status: LocalVmTask["status"]): boolean {
-  return status === "completed" || status === "failed" || status === "canceled";
+  // An abandoned task's outcome is unknown, but the host no longer waits for
+  // it; if its guest comes back, the task shows the guest's status again.
+  return status === "completed" || status === "failed" || status === "canceled" || status === "abandoned";
 }
 
 /** The parent-message identity is the durable task card in one conversation. */
@@ -160,6 +166,33 @@ export async function contextManifest(sourceRoot: string, paths: string[]): Prom
     manifest.push({ path, bytes: bytes.byteLength, sha256: Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, "0")).join("") });
   }
   return manifest;
+}
+
+/** A question the guest worker asked (AskUserQuestion), still open. */
+export interface LocalVmQuestion {
+  requestId: string;
+  questions: { question: string; header: string | null; multiSelect: boolean; freeText: boolean; options: string[] }[];
+}
+
+/** Open guest questions: asked and not yet answered or denied (review 2). */
+export function pendingTaskQuestions(task: LocalVmTask): LocalVmQuestion[] {
+  if (taskFinished(task.status)) return [];
+  const pending = new Map<string, LocalVmQuestion>();
+  for (const event of task.events) {
+    const payload = taskEventPayload(event.payload);
+    if (!payload || typeof payload.requestId !== "string") continue;
+    if (payload.type === "permission_decided") pending.delete(payload.requestId);
+    if (payload.type !== "questions_asked" || !Array.isArray(payload.questions)) continue;
+    const questions = payload.questions.flatMap((item) => record(item) && typeof item.question === "string" ? [{
+      question: item.question,
+      header: typeof item.header === "string" ? item.header : null,
+      multiSelect: item.multiSelect === true,
+      freeText: item.freeText === true || !Array.isArray(item.options) || item.options.length === 0,
+      options: Array.isArray(item.options) ? item.options.flatMap((option) => record(option) && typeof option.label === "string" ? [option.label] : []) : [],
+    }] : []);
+    if (questions.length) pending.set(payload.requestId, { requestId: payload.requestId, questions });
+  }
+  return [...pending.values()];
 }
 
 export interface LocalVmApproval {

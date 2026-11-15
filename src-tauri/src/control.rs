@@ -500,6 +500,13 @@ impl ControlService {
                 if command == "runtime.dataPrivacy.refresh" {
                     return serde_json::to_value(crate::data_privacy::owner_status(lifetime.epoch())).map_err(ControlError::internal);
                 }
+                // Operating computers (PRO-341, `machine_wire`).
+                if command.starts_with("runtime.machineHost.") {
+                    return match crate::machine_host::installed() {
+                        Some(host) => host.execute(command, params),
+                        None => Err(ControlError::new("unsupported", "This runtime does not host operating computers.", None::<String>)),
+                    };
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
@@ -900,7 +907,12 @@ impl ControlService {
             "runs.start" => {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let start = engine::start(&host, &run.id).map_err(ControlError::of_run)?;
-                Ok(json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed}))
+                let mut started = json!({"run": engine::shown(&start.run), "started": start.started, "waiting": start.waiting, "failed": start.failed});
+                // A `planned` run the person changed before the lead started it (PRO-365).
+                if let Some(edited) = start.edited {
+                    started["edited"] = json!(edited);
+                }
+                Ok(started)
             }
             "runs.checkFailed" => {
                 if from_worker {
@@ -1819,7 +1831,7 @@ impl ControlService {
             // What the run's cleanup would do, asked without --yes: it removes nothing then.
             let mut verdicts: std::collections::HashMap<String, (Option<String>, String)> = std::collections::HashMap::new();
             let mut failed = None;
-            match merge::cleanup(&host, &run.id, false) {
+            match merge::cleanup_before_lead_removal(&host, &run.id, false) {
                 Err(error) if error.code == "confirmation_required" => {
                     for (list, going) in [("wouldRemove", true), ("wouldRefuse", false)] {
                         for fate in error.details[list].as_array().into_iter().flatten() {
@@ -1916,7 +1928,7 @@ impl ControlService {
         let host = crate::orchestration::host::ManagerHost::new(self.sink.clone(), self.manager.clone());
         let mut cleaned = Vec::new();
         for run in orphan_runs(&orphans) {
-            crate::orchestration::merge::cleanup(&host, &run, true).map_err(ControlError::of_run)?;
+            crate::orchestration::merge::cleanup_before_lead_removal(&host, &run, true).map_err(ControlError::of_run)?;
             cleaned.push(run);
         }
         // What the cleanup could not remove after all (a worker that wrote

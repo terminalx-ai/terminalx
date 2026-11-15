@@ -5,6 +5,15 @@ replaces it with the current Rust backend, built without Tauri. It runs the same
 harnesses (Claude/Codex PTY-first), hooks socket, control socket, transcript store and
 git/worktree code as the desktop app, with no WebView, GTK or audio libraries (PRO-42).
 
+The same runtime is also the host when another TerminalX desktop operates this computer
+(a Mac mini, a headless server). [MACHINES.md](MACHINES.md) records how: one connection per
+machine through the additive `machine/1` namespace, the host endpoint in the runtime, and
+which workspace methods a machine connection is served. With `machines.allowOperating`
+on in the data directory's `settings.json`, the runtime listens on TCP 6768
+(`TERMINALX_MACHINE_HOST_PORT` moves it) and, given `--relay-link`, answers the relay
+with the same host key, kept in `<data dir>/machine-host/host-key.json` (mode 0600). It
+needs no desktop libraries for this; the pairing module stays desktop-only.
+
 ## How it is built
 
 - `src-tauri` has a default `desktop` feature. It enables Tauri, its plugins,
@@ -244,6 +253,8 @@ Registration states are printed as `{"type":"relay","status":{...}}` lines.
 `--relay-link <file>` reads the relay session from a JSON file instead of the bootstrap;
 `scripts/remote-runtime/e2e.sh` uses it to run `serve/tests/relay_e2e.rs` against the
 terminalx-saas relay code.
+A local runtime given `--relay-link` and no `--project-root` serves every project it
+knows over that one connection (`machine/1`, PRO-340; [MACHINES.md](MACHINES.md#machine1)).
 
 ## Testing on Linux
 

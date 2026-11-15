@@ -10,8 +10,12 @@ mod direct;
 mod fingerprint;
 mod guest;
 mod host_poll;
+mod machine_route;
 mod mobile;
 use crate::local_runtime::mobile::model;
+use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+#[cfg(test)]
+use crate::machine_name::{COMPUTER_NAME_MAX_CHARS, UNNAMED_HOST};
 mod registry;
 mod relay;
 mod send_ids;
@@ -65,8 +69,16 @@ struct Inner {
     /// The pending device's phone waits for the person to approve it here.
     /// Dropping it declines every connection that waits on it.
     pending_approval: Option<PendingApproval>,
+    /// Phones can reach this window directly: on its own listener, or
+    /// through the runtime's (`direct_via_runtime`, PRO-341).
     direct_listener_started: bool,
     direct_listener_retrying: bool,
+    /// Something asked for direct connections (saved phones, a pairing code),
+    /// so they come back when the runtime gives the port up again.
+    direct_wanted: bool,
+    direct_via_runtime: bool,
+    /// The window's own listener on the port.
+    direct_accept: Option<tauri::async_runtime::JoinHandle<()>>,
     last_error: Option<String>,
 }
 
@@ -112,6 +124,8 @@ pub struct PairingManager {
     /// fingerprint of a phone paired before PRO-314 without a Keychain call.
     host_public: Mutex<Option<[u8; 32]>>,
     keep_awake: Mutex<KeepAwake>,
+    /// Whether the runtime hosts operating computers, and so owns the port.
+    machine: Mutex<machine_route::MachineSide>,
 }
 
 /// Reasons a `pairing_refused` message gives the phone.
@@ -209,6 +223,7 @@ impl PairingManager {
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
             keep_awake: Mutex::new(KeepAwake::default()),
+            machine: Mutex::default(),
         }
     }
 
@@ -244,6 +259,15 @@ impl PairingManager {
             settings.mobile.broadcast_settings_changed();
             settings.reload_keep_awake();
         }));
+        let machine = Arc::downgrade(self);
+        sink.listen(
+            crate::machine_wire::CHANGED_EVENT,
+            Box::new(move |payload| {
+                if let Some(manager) = machine.upgrade() {
+                    manager.machine_host_changed(payload);
+                }
+            }),
+        );
         let events = self.clone();
         sink.listen(
             "agent_event",
@@ -280,11 +304,13 @@ impl PairingManager {
         self.mobile.attach_models(cache);
     }
 
-    pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
+    pub(crate) fn attach_runtime(self: &Arc<Self>, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
         // What a phone may be offered is the attached runtime's (#730), and
         // the connections the previous attachment admitted are done.
         self.mobile.broadcast_capabilities_changed();
+        // A runtime that hosts operating computers owns the port (PRO-341).
+        self.reconcile_machine_soon();
     }
 
     /// No desktop sharing mutex spans an RPC. Once attached, transport failure
@@ -551,6 +577,8 @@ impl PairingManager {
             }
         }
         self.keep_awake.lock().unwrap().assertion = None;
+        // The runtime passes no more phones to a stopped window.
+        self.machine.lock().unwrap().stop();
     }
 
     /// Name this Mac for the user's other devices, or with `None` let it follow
@@ -964,6 +992,10 @@ impl PairingManager {
                 if manager.is_stopped() {
                     break;
                 }
+                // The runtime took the port meanwhile (PRO-341).
+                if manager.runtime_owns_direct() {
+                    break;
+                }
                 match manager.ensure_direct_listener() {
                     Ok(()) => {
                         manager.emit();
@@ -983,14 +1015,19 @@ impl PairingManager {
     fn ensure_direct_listener(self: &Arc<Self>) -> std::io::Result<()> {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
+        inner.direct_wanted = true;
         if inner.direct_listener_started {
             return Ok(());
         }
+        if self.runtime_owns_direct() {
+            // The runtime holds the port and passes phones here (PRO-341).
+            drop(inner);
+            return self.take_phones_from_runtime();
+        }
         let listener = direct::bind(self.direct_port)?;
         inner.direct_listener_started = true;
-        drop(inner);
         let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
+        inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -1020,7 +1057,7 @@ impl PairingManager {
                     }
                 });
             }
-        });
+        }));
         Ok(())
     }
 
@@ -1923,87 +1960,6 @@ fn valid_grant(
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
 
-/// The longest computer name sent to a phone.
-const COMPUTER_NAME_MAX_CHARS: usize = 64;
-
-/// A name as it may be shown on another device: no control or formatting
-/// characters, single spaces, at most [`COMPUTER_NAME_MAX_CHARS`]. `None`
-/// when nothing is left.
-fn presentable_name(raw: &str) -> Option<String> {
-    let cleaned: String = raw
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .filter(|c| !c.is_control() && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
-        .collect();
-    let name: String = cleaned.split(' ').filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ").chars().take(COMPUTER_NAME_MAX_CHARS).collect();
-    let name = name.trim_end().to_string();
-    (!name.is_empty()).then_some(name)
-}
-
-/// This computer's own name: the macOS computer name (System Settings →
-/// General → About → Name), the host name elsewhere. Read each time it is
-/// asked for, so a rename shows on the next connection.
-fn computer_name() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
-        if output.status.success() {
-            if let Some(name) = String::from_utf8(output.stdout).ok().and_then(|name| presentable_name(&name)) {
-                return Some(name);
-            }
-        }
-    }
-    ["COMPUTERNAME", "HOSTNAME"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(std::fs::read_to_string("/etc/hostname").ok())
-        .filter_map(|name| presentable_name(name.split('.').next().unwrap_or("")))
-        .next()
-        .or_else(system_host_name)
-}
-
-/// [`computer_name`], read again once it is a minute old: the work-status
-/// publisher asks for this Mac's name on each pass.
-fn recent_computer_name() -> Option<String> {
-    const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(60);
-    static RECENT: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
-    let mut recent = RECENT.lock().unwrap();
-    if let Some((at, name)) = recent.as_ref() {
-        if at.elapsed() < FRESH_FOR {
-            return name.clone();
-        }
-    }
-    let name = computer_name();
-    *recent = Some((std::time::Instant::now(), name.clone()));
-    name
-}
-
-/// The kernel's host name ("Studio.local" → "Studio"), for when nothing else
-/// names this computer. "localhost" names every computer, so it is no name.
-#[cfg(unix)]
-fn system_host_name() -> Option<String> {
-    let mut buffer = [0u8; 256];
-    // SAFETY: the call writes at most `buffer.len()` bytes into a buffer that outlives it.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return None;
-    }
-    let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
-    let name = String::from_utf8_lossy(&buffer[..end]);
-    presentable_name(name.split('.').next().unwrap_or("")).filter(|name| !name.eq_ignore_ascii_case("localhost"))
-}
-
-#[cfg(not(unix))]
-fn system_host_name() -> Option<String> {
-    None
-}
-
-/// The name every Mac saved as its own before #686 when it was opened from
-/// Finder or the Dock, which leaves no `HOSTNAME` to read. Nobody chose it,
-/// and on another computer it says the opposite of what is true.
-const PLACEHOLDER_HOST_NAME: &str = "This Mac";
-
-/// What others are shown when nothing names this computer.
-const UNNAMED_HOST: &str = "Unnamed Mac";
-
 /// The name an earlier version kept in `account.json` for `user_id`: one the
 /// user chose in Settings → Account, or the host name it found, but never the
 /// placeholder it saved when it found none.
@@ -2014,22 +1970,6 @@ fn saved_host_name(mirror: Option<&AccountMirror>, user_id: &str) -> Option<Stri
         .map(str::trim)
         .filter(|name| !name.is_empty() && *name != PLACEHOLDER_HOST_NAME)
         .map(str::to_string)
-}
-
-/// This Mac's name: the one chosen in Settings → Account, else one an earlier
-/// version saved, else the computer's own. `chosen` when it does not follow
-/// the computer's name.
-fn resolve_machine_name(chosen: Option<String>, saved: Option<String>, computer_name: Option<String>) -> MachineName {
-    let chosen = chosen.map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
-    let (name, chosen) = match (chosen, saved) {
-        (Some(name), _) => (name, true),
-        (None, Some(name)) => {
-            let differs = computer_name.as_deref() != Some(name.as_str());
-            (name, differs)
-        }
-        (None, None) => (computer_name.clone().unwrap_or_else(|| UNNAMED_HOST.into()), false),
-    };
-    MachineName { name, chosen, computer_name }
 }
 
 /// A name the user typed for this Mac, as it may be sent: 1 to 80 visible characters.
@@ -2311,6 +2251,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.promoteToAgent",
         "session.send",
         "permission.respond",
+        // Answering an agent's question, as the desktop's question card does (#979).
+        "questions.respond",
         "sessions.create",
         "mac.setSettings",
         // The session controls a phone has as the desktop does (#706).
@@ -2366,6 +2308,9 @@ mod tests {
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
         assert!(!allowed_method(DeviceScope::Viewer, "permission.respond"));
+        // #979: a question is answered by whoever may answer a permission request.
+        assert!(allowed_method(DeviceScope::Driver, "questions.respond"));
+        assert!(!allowed_method(DeviceScope::Viewer, "questions.respond"));
         assert!(allowed_method(
             DeviceScope::Driver,
             "pairing.provisionRelay"

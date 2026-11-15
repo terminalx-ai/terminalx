@@ -16,14 +16,17 @@ export function ComputerSelection({ context, active, children }: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // An owner that cannot read choices (Windows, or one older than the Local VM
+  // controller) cannot have saved one either: its agents get the Local VM as before.
+  const [unreadable, setUnreadable] = useState<string | null>(null);
   const [setupTarget, setSetupTarget] = useState<string | null>(null);
   const [checkedMac, setCheckedMac] = useState<string | null>(null);
   useEffect(() => {
     let current = true;
-    setLoaded(false); setSelection(null); setTarget(null); setCheckedMac(null);
+    setLoaded(false); setSelection(null); setTarget(null); setCheckedMac(null); setUnreadable(null);
     void localVmRequest("computer.selection", context).then((value) => {
       if (current) { setSelection(value); setTarget(value.target); setLoaded(true); }
-    }).catch((error) => { if (current) setError(errorMessage(error)); });
+    }).catch((error) => { if (current) setUnreadable(errorMessage(error)); });
     return () => { current = false; };
   }, [context.sessionId, context.tabId, context.conversation]);
   const checkedKey = target ? `${computerKey(target)}:${context.sessionId}:${context.tabId}:${context.conversation ?? ""}` : null;
@@ -35,6 +38,10 @@ export function ComputerSelection({ context, active, children }: {
     catch (error) { setError(errorMessage(error)); }
     finally { setBusy(false); }
   }
+  if (unreadable) return <div className="flex h-full flex-col">
+    <p role="status" className="border-b border-hairline p-3 text-xs text-muted-foreground">This tab's computer choice could not be read ({unreadable}), so its agent gets the Local VM, as before computers could be chosen.</p>
+    <div className="min-h-0 flex-1">{children(null)}</div>
+  </div>;
   return <div className="flex h-full flex-col">
     <div className="space-y-2 border-b border-hairline p-3 text-xs">
       <EnvironmentPicker entries={inventory?.entries ?? []} value={target} disabled={busy} onChange={(target) => { setTarget(target); setCheckedMac(null); }} />

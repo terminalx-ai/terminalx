@@ -8,13 +8,24 @@ pub(super) const PROFILE: &str = "macos-local-v1";
 const REASON: &str = "secureGuestBootstrapUnavailable";
 const DETAIL: &str = "Fresh VM creation is unavailable: this profile has no supported secure first-account personalization and account-bound transport. No new VM operation was dispatched. Existing compatible VMs can be enrolled and checked separately; enrollment does not create or secure an account.";
 
+/// Why a stock Cua macOS VM cannot be used yet (review 2): every one shares a
+/// `lume` account whose default password is published, so a provider sign-in
+/// kept there could be read by anything that reaches the VM over its network.
+pub(super) const SHARED_ACCOUNT_DETAIL: &str = "Using an existing Cua macOS VM is unavailable: its shared lume account has a published default password, so a provider sign-in kept there could be read by anything that reaches the VM over its network. It returns once TerminalX can set up a personal guest account. Nothing was enrolled or signed in.";
+
+/// Enrolling a stock VM and signing a provider in there wait, as creation
+/// does, for a personal guest account.
+pub(super) fn require_personal_account() -> Result<()> {
+    bail!(SHARED_ACCOUNT_DETAIL)
+}
+
 pub(super) fn capability() -> Value {
     // Lume 0.6.1's offline setup fixes the first account. Cua 0.7.0's
     // macOS adapter supplies no account binding to its Lume SSH transport.
     // Neither host compatibility nor successful SSH makes these supported.
     json!({"protocol":1,"profileId":PROFILE,"available":false,
         "firstAccountPersonalization":false,"accountBoundTransport":false,
-        "reasonCode":REASON})
+        "existingVmEnrollment":false,"reasonCode":REASON})
 }
 
 pub(super) fn require_supported() -> Result<()> {

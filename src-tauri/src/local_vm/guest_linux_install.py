@@ -94,6 +94,68 @@ def replace_receipt(path, value):
     sync_directory(path.parent)
 
 
+# The only runtime the host key reaches (#978). Root owns every component from
+# SEALED_ROOT down and nothing is writable by group or other, so the guest
+# account, and any worker running as it, cannot replace the inode or a parent.
+# Fixtures rebind these three names to a disposable directory they own.
+SEALED_ROOT = pathlib.Path("/")
+SEALED = pathlib.Path("/opt/terminalx-local/bin/terminalx-serve")
+SEALED_OWNER = 0
+
+
+def sealed_directories():
+    require(SEALED.is_absolute() and SEALED_ROOT in SEALED.parents, "Sealed runtime outside its root")
+    return [path for path in reversed(SEALED.parents) if path == SEALED_ROOT or SEALED_ROOT in path.parents]
+
+
+def check_sealed_directory(path):
+    info = os.lstat(path)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == SEALED_OWNER and not info.st_mode & 0o022,
+            "Sealed runtime directory is writable by the guest account: " + str(path))
+
+
+def open_sealed(expected):
+    """Descriptor of the sealed runtime, proven to hold the host's verified artifact."""
+    for directory in sealed_directories():
+        check_sealed_directory(directory)
+    fd = os.open(SEALED, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == SEALED_OWNER and not info.st_mode & 0o222,
+                "Sealed runtime is not a root-owned read-only file")
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        require(hasher.hexdigest() == expected, "Sealed runtime does not match the host's verified artifact")
+        os.lseek(fd, 0, os.SEEK_SET)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def seal(data, expected):
+    """Store the host's verified artifact as the sealed runtime. Never replaces one."""
+    require(digest(data) == expected, "Delivered artifact changed")
+    for directory in sealed_directories():
+        if directory != SEALED_ROOT and not os.path.lexists(directory):
+            os.mkdir(directory, 0o755)
+            os.chmod(directory, 0o755)
+            sync_directory(directory.parent)
+        check_sealed_directory(directory)
+    if not os.path.lexists(SEALED):
+        temporary = SEALED.parent / (".seal-" + str(uuid.uuid4()))
+        write_new(temporary, data, 0o555)
+        os.chmod(temporary, 0o555)
+        os.replace(temporary, SEALED)
+        sync_directory(SEALED.parent)
+    os.close(open_sealed(expected))  # an existing different runtime fails closed here
+    return "sealed"
+
+
 def validate(header, observed):
     require(set(header) == {"action", "requestDigest", "inputDigest", "intent"}, "Unknown installer fields")
     require(header["action"] in ("install", "receipt"), "Unknown installer action")
@@ -105,8 +167,10 @@ def validate(header, observed):
     require(set(intent) == {"binding", "profileId", "sourceCommit", "runtimeSha256", "protocol", "bytes"},
             "Unknown artifact intent")
     binding = intent["binding"]
-    require(set(binding) == {"target", "environmentId", "generation", "architecture", "account"},
+    require(set(binding) == {"target", "environmentId", "generation", "architecture", "account", "hostKeySha256"},
             "Invalid installation binding")
+    require(isinstance(binding["hostKeySha256"], str) and len(binding["hostKeySha256"]) == 64
+            and all(c in "0123456789abcdef" for c in binding["hostKeySha256"]), "Invalid host key digest")
     require(binding["account"] == observed and binding["architecture"] == observed["architecture"],
             "Guest account or architecture changed")
     for key in ("environmentId", "generation"):
@@ -126,7 +190,8 @@ def installed(home, intent):
     for directory in (base, base / "bin", base / "runtime"):
         private_directory(directory)
     binding = intent["binding"]
-    identity = {"environmentId": binding["environmentId"], "generation": binding["generation"], "protocol": 1, "account": binding["account"]}
+    identity = {"environmentId": binding["environmentId"], "generation": binding["generation"], "protocol": 1,
+                "account": binding["account"], "hostKeySha256": binding["hostKeySha256"]}
     require(json.loads(read(base / "identity.json", 4096)) == identity, "Installed timeline changed")
     require(json.loads(read(base / "account-binding.json", 4096)) == binding["account"], "Installed account changed")
     data = read(base / "bin/terminalx-serve", intent["bytes"])
@@ -178,7 +243,8 @@ def transact(home, observed, header, binary=None, after_intent=lambda: None):
             for name in ("bin", "runtime"):
                 (base / name).mkdir(mode=0o700)
             identity = {"environmentId": intent["binding"]["environmentId"],
-                        "generation": intent["binding"]["generation"], "protocol": 1, "account": observed}
+                        "generation": intent["binding"]["generation"], "protocol": 1, "account": observed,
+                        "hostKeySha256": intent["binding"]["hostKeySha256"]}
             write_new(base / "identity.json", canonical(identity))
             write_new(base / "account-binding.json", canonical(observed))
             write_new(base / "bin/terminalx-serve", binary, 0o700)

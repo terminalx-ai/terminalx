@@ -23,9 +23,12 @@ pub mod linux_profile;
 pub(crate) mod linux_install;
 pub mod macos_personalization;
 pub mod macos_account;
+// On every Unix, not only macOS: `macos_account` reads the OS account through it.
 pub(crate) mod guest_account;
 pub mod macos_transport;
 mod macos_keys;
+mod guest_key;
+pub(crate) mod stdio_exit;
 
 pub(crate) mod linux_activation;
 mod macos_endpoint;

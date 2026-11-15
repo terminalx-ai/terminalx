@@ -925,7 +925,7 @@ impl SessionManager {
         rt.stop_in_flight = false; rt.stopping = false;
         if retiring(&rt, &launch) { rt.stdio_retiring = None; }
         if unconfirmed { self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed, crate::recovery_log::Source::Delivery); }
-        else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_status(&mut rt, TabStatus::Idle); }
+        else if !retire && !(keep_unread && rt.status == TabStatus::Completed) { self.set_stopped_status(&mut rt); }
         Ok(())
     }
 

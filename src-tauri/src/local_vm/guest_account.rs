@@ -77,6 +77,9 @@ pub(super) fn current_user() -> Result<User> {
     }
 }
 
+// The stock `lume` account exists only in a macOS guest; the module itself
+// builds on every Unix because `macos_account` reads the account through it.
+#[cfg(target_os = "macos")]
 pub(super) fn check_legacy_user() -> Result<()> {
     let user = current_user()?;
     if user.short_name != "lume"

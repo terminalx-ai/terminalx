@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 
 use crate::control::ControlError;
 use crate::session::handover::{TabRecord, Unsettled};
-use crate::session::retire::Work;
+use crate::session::retire::{Work, WorkKind};
 
 /// The record format this build writes.
 pub const FORMAT: u32 = 1;
@@ -233,6 +233,24 @@ fn failed(error: anyhow::Error) -> ControlError {
     ControlError::new("handover_failed", format!("{error:#}"), None::<String>)
 }
 
+/// The Local VM work a handover has waited on for
+/// [`crate::local_vm::supervisor::HANDOVER_PATIENCE`] and would cut short,
+/// for the reader to be asked about rather than the update retrying.
+fn local_vm_asks() -> Vec<Work> {
+    #[cfg(unix)]
+    let asks = crate::local_vm::supervisor::handover_asks(std::time::SystemTime::now(), std::time::Instant::now());
+    #[cfg(not(unix))]
+    let asks: Vec<String> = Vec::new();
+    asks.into_iter().map(|title| Work { kind: WorkKind::LocalVm, session_id: None, tab_id: None, harness: None, title: Some(title), pane: None }).collect()
+}
+
+/// The Local VM work named in a handover's `stop`: what the reader agreed to cut.
+fn agreed_local_vm(stop: &Value) -> Vec<String> {
+    stop.as_array().into_iter().flatten()
+        .filter(|work| work["kind"] == "localVm")
+        .filter_map(|work| work["title"].as_str().map(str::to_owned)).collect()
+}
+
 /// `runtime.handover.plan`: whether this runtime can be handed over to
 /// `binary` (when named), and what would have to be stopped first.
 pub(crate) fn plan(lifetime: &super::Lifetime, params: &Value) -> Result<Value, ControlError> {
@@ -241,7 +259,9 @@ pub(crate) fn plan(lifetime: &super::Lifetime, params: &Value) -> Result<Value, 
     if let Some(binary) = params["binary"].as_str() {
         verify(&runtime.home, Path::new(binary)).map_err(|error| refused("handover_unsupported", format!("{error:#}")))?;
     }
-    Ok(json!({ "format": FORMAT, "unadoptable": runtime.manager.unadoptable() }))
+    let mut unadoptable = runtime.manager.unadoptable();
+    unadoptable.extend(local_vm_asks());
+    Ok(json!({ "format": FORMAT, "unadoptable": unadoptable }))
 }
 
 fn pinned(lifetime: &super::Lifetime, params: &Value) -> Result<(), ControlError> {
@@ -277,6 +297,14 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
     if unnamed > 0 {
         return Err(failed(Unkept(unnamed).into()));
     }
+    // Local VM work the handover has waited on long enough to ask about:
+    // cut only what the reader was shown and agreed to (review 3).
+    let agreed = agreed_local_vm(&params["stop"]);
+    let asked: Vec<Work> = local_vm_asks().into_iter().filter(|work| !work.title.as_ref().is_some_and(|title| agreed.contains(title))).collect();
+    if !asked.is_empty() {
+        let named: Vec<&str> = asked.iter().filter_map(|work| work.title.as_deref()).collect();
+        return Err(refused("handover_unadoptable", format!("{} would be cut short by the update; ask before updating.", named.join("; "))));
+    }
     // What the reader agreed to have stopped, as Stop stops it, and nothing else.
     for work in unadoptable.iter().filter(|work| named(work)) {
         let (Some(session), Some(tab)) = (&work.session_id, &work.tab_id) else { continue };
@@ -288,7 +316,7 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
     // This request is the handover itself: nothing waits for it.
     let _aside = crate::hooks::step_aside();
     std::thread::Builder::new().name("runtime-handover".into()).spawn(move || {
-        let outcome = hand_over(runtime, &verified, &ready, gone);
+        let outcome = hand_over(runtime, &verified, &ready, gone, &agreed);
         if let Err(error) = outcome {
             log::warn!("the runtime was not handed over: {error:#}");
             let _ = ready.send(Err(failed(error)));
@@ -307,10 +335,10 @@ pub(crate) fn begin(lifetime: &super::Lifetime, params: Value) -> Result<Value, 
 
 /// Hold everything still, write the record, and exec `binary`. Returns only
 /// when the handover is off, with everything going on as before.
-fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>) -> Result<()> {
-    // Local VM work is not carried: none is in flight or under way, and none
+fn hand_over(runtime: &Runtime, binary: &Verified, ready: &std::sync::mpsc::Sender<Result<(), ControlError>>, go: std::sync::mpsc::Receiver<()>, agreed: &[String]) -> Result<()> {
+    // No Local VM work is live but what the reader agreed to cut, and none
     // starts until the exec or until the handover is off.
-    let _vm = crate::local_vm::supervisor::prepare_handover().map_err(|error| Unsettled(format!("{error:#}")))?;
+    let _vm = crate::local_vm::supervisor::prepare_handover(SETTLE_WITHIN, agreed).map_err(|error| Unsettled(format!("{error:#}")))?;
     // No frame is answered from here on, once those under way are: what
     // they wait for (a pipeline step, the admission lock) is not held yet.
     runtime.bridge.freeze(SETTLE_WITHIN).map_err(|error| Unsettled(format!("{error:#}")))?;

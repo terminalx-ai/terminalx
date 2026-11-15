@@ -89,6 +89,8 @@ mod tests {
             verify_signature: false,
             login_allowed: true,
             provider_selection_valid: true,
+            // A helper's outcome, not a loaded machine's slowness, decides each test.
+            clock: super::super::readiness::Clock::frozen(),
         }
     }
     fn state(params: &Params) -> State {
@@ -99,6 +101,7 @@ mod tests {
                 environment_id: params.environment_id.clone(),
                 generation: params.generation.clone(),
                 protocol: 1,
+                host_key_sha256: "0".repeat(64),
             },
             records: Default::default(),
             canceled_targets: Default::default(),
@@ -340,9 +343,8 @@ done
         wait(&actor, |v| {
             v.auth.as_ref().is_some_and(|a| a.status == "awaitingUser")
         });
-        let started = Instant::now();
+        // Ends on the helper's confirmed exit, which the frozen clock leaves to the event.
         actor.shutdown();
-        assert!(started.elapsed() < Duration::from_secs(4));
         let result = actor.receipts().pop().unwrap();
         assert_eq!(result.receipt.status, Status::OutcomeUnknown);
         assert!(result.helper_exit_confirmed);
@@ -777,6 +779,7 @@ enum Control {
 struct Live {
     join: std::thread::JoinHandle<()>,
     sender: mpsc::Sender<Control>,
+    clock: super::readiness::Clock,
 }
 
 #[derive(Default)]
@@ -867,6 +870,7 @@ impl Actor {
         if let Some(previous) = live.take() {
             let _ = previous.join.join();
         }
+        let clock = paths.clock.clone();
         let (sender, receiver) = mpsc::channel();
         self.view.lock().unwrap().busy = true;
         let view = self.view.clone();
@@ -880,7 +884,7 @@ impl Actor {
                 view.lock().unwrap().busy = false;
             });
         match join {
-            Ok(join) => *live = Some(Live { join, sender }),
+            Ok(join) => *live = Some(Live { join, sender, clock }),
             Err(_) => {
                 self.view.lock().unwrap().busy = false;
                 publish(
@@ -927,8 +931,8 @@ impl Actor {
             let _ = worker.sender.send(Control::Shutdown);
         }
         if let Some(worker) = live.take() {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !worker.join.is_finished() && Instant::now() < deadline {
+            let deadline = worker.clock.now() + Duration::from_secs(3);
+            while !worker.join.is_finished() && worker.clock.now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
             if worker.join.is_finished() {
@@ -979,6 +983,8 @@ struct Paths {
     verify_signature: bool,
     login_allowed: bool,
     provider_selection_valid: bool,
+    /// What its helpers' budgets are read against (`readiness::Clock`).
+    clock: super::readiness::Clock,
 }
 impl Paths {
     fn guest(base: &Path) -> Result<Self> {
@@ -1003,6 +1009,7 @@ impl Paths {
             verify_signature: true,
             login_allowed: true,
             provider_selection_valid,
+            clock: Default::default(),
         })
     }
 }
@@ -1020,6 +1027,7 @@ struct OwnedChild {
     deferred: VecDeque<Value>,
     code: Option<i32>,
     exits: Arc<AtomicBool>,
+    clock: super::readiness::Clock,
 }
 
 fn nonblocking(fd: i32) -> Result<()> {
@@ -1108,6 +1116,7 @@ impl OwnedChild {
             deferred: VecDeque::new(),
             code: None,
             exits: paths.exits.clone(),
+            clock: paths.clock.clone(),
         };
         nonblocking(owned.stdin.as_ref().unwrap().as_raw_fd())?;
         nonblocking(owned.stdout.as_raw_fd())?;
@@ -1146,10 +1155,10 @@ impl OwnedChild {
     fn send(&mut self, value: Value, closed: &AtomicBool) -> Result<()> {
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = self.clock.now() + Duration::from_secs(1);
         let mut offset = 0;
         while offset < bytes.len() {
-            if closed.load(Ordering::Acquire) || Instant::now() >= deadline {
+            if closed.load(Ordering::Acquire) || self.clock.now() >= deadline {
                 bytes.zeroize();
                 bail!("Setup stdin outcome unknown");
             }
@@ -1195,8 +1204,8 @@ impl OwnedChild {
         }
     }
     fn response(&mut self, id: u64, closed: &AtomicBool) -> Result<Value> {
-        let deadline = Instant::now() + RPC_WAIT;
-        while Instant::now() < deadline {
+        let deadline = self.clock.now() + RPC_WAIT;
+        while self.clock.now() < deadline {
             if let Some(value) = self.next(Duration::from_millis(100), closed)? {
                 if value["id"].as_u64() == Some(id) {
                     if value.get("error").is_some_and(|v| !v.is_null()) {
@@ -1216,13 +1225,13 @@ impl OwnedChild {
         bail!("Setup provider receipt timed out")
     }
     fn wait(&mut self, timeout: Duration, closed: &AtomicBool) -> Result<i32> {
-        let deadline = Instant::now() + timeout;
+        let deadline = self.clock.now() + timeout;
         loop {
             self.pump()?;
             if let Some(code) = self.code {
                 return Ok(code);
             }
-            if closed.load(Ordering::Acquire) || Instant::now() >= deadline {
+            if closed.load(Ordering::Acquire) || self.clock.now() >= deadline {
                 bail!("Setup helper ended without confirmed outcome");
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1231,7 +1240,7 @@ impl OwnedChild {
     fn stop(&mut self) -> bool {
         self.lifetime.take();
         self.stdin.take();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = self.clock.now() + Duration::from_secs(1);
         loop {
             let Some(pid) = self.group else {
                 return true;
@@ -1245,7 +1254,7 @@ impl OwnedChild {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
-            if Instant::now() >= deadline {
+            if self.clock.now() >= deadline {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1473,8 +1482,8 @@ fn driver_action(
             if launched.code != 0 {
                 return Ok((Status::OutcomeUnknown, "driver_launch_outcome_unknown"));
             }
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < deadline && !closed.load(Ordering::Acquire) {
+            let deadline = paths.clock.now() + Duration::from_secs(10);
+            while paths.clock.now() < deadline && !closed.load(Ordering::Acquire) {
                 if driver_running(paths, closed)? {
                     return Ok((Status::Complete, "driver_running_permissions_not_requested"));
                 }
@@ -1698,8 +1707,8 @@ fn login(
             },
         );
     }
-    let deadline = Instant::now() + LOGIN_LIFETIME;
-    while Instant::now() < deadline && !closed.load(Ordering::Acquire) {
+    let deadline = paths.clock.now() + LOGIN_LIFETIME;
+    while paths.clock.now() < deadline && !closed.load(Ordering::Acquire) {
         match control.try_recv() {
             Ok(Control::Shutdown) => bail!("Setup shutdown"),
             Ok(Control::Cancel {

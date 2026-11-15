@@ -20,6 +20,36 @@ const DRIVER: &str = "/Applications/CuaDriver.app/Contents/MacOS/cua-driver";
 const PROBE_LIMIT: u64 = 64 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What a guest helper's budgets are read against (review 3): the real clock
+/// in a guest, and in a test one that stands still, so a helper slowed by a
+/// loaded machine still reaches the outcome under test and a budget runs
+/// out only when a test means it to. Polling intervals stay on the real clock.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Clock {
+    #[cfg(test)]
+    frozen: bool,
+}
+
+impl Clock {
+    pub(super) fn now(&self) -> Instant {
+        #[cfg(test)]
+        if self.frozen { return *FROZEN_AT.get_or_init(Instant::now); }
+        Instant::now()
+    }
+    /// Waits for `received` until `deadline` by this clock; a frozen one
+    /// waits for the value itself.
+    fn receive<T>(&self, received: &std::sync::mpsc::Receiver<T>, deadline: Instant) -> Result<T> {
+        #[cfg(test)]
+        if self.frozen { return received.recv().context("Readiness output was not received"); }
+        received.recv_timeout(deadline.saturating_duration_since(Instant::now())).context("Readiness output timed out")
+    }
+    #[cfg(test)]
+    pub(super) fn frozen() -> Self { Self { frozen: true } }
+}
+
+#[cfg(test)]
+static FROZEN_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum Harness {
@@ -429,7 +459,7 @@ fn command(program: &Path, home: &Path) -> Command {
     command
 }
 
-fn probe(command: &mut Command, timeout: Duration) -> Result<Probe> {
+fn probe(command: &mut Command, timeout: Duration, clock: &Clock) -> Result<Probe> {
     let mut child = ProbeChild(
         command
             .stdin(Stdio::null())
@@ -438,7 +468,7 @@ fn probe(command: &mut Command, timeout: Duration) -> Result<Probe> {
             .spawn()
             .context("Readiness probe could not start")?,
     );
-    let deadline = Instant::now() + timeout;
+    let deadline = clock.now() + timeout;
     let read = |mut pipe: Box<dyn Read + Send>| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -469,15 +499,15 @@ fn probe(command: &mut Command, timeout: Duration) -> Result<Probe> {
         if let Some(status) = child.0.try_wait()? {
             break status;
         }
-        if Instant::now() >= deadline {
+        if clock.now() >= deadline {
             bail!("Readiness probe timed out");
         }
         std::thread::sleep(Duration::from_millis(10));
     };
     Ok(Probe {
         code: status.code(),
-        stdout: stdout.recv_timeout(deadline.saturating_duration_since(Instant::now()))??,
-        stderr: stderr.recv_timeout(deadline.saturating_duration_since(Instant::now()))??,
+        stdout: clock.receive(&stdout, deadline)??,
+        stderr: clock.receive(&stderr, deadline)??,
     })
 }
 
@@ -487,6 +517,7 @@ pub(super) fn inspect_desktop() -> Result<Desktop> {
         Path::new(DRIVER),
         base.parent().context("Bound guest home missing")?,
         session_observation,
+        &Clock::default(),
     )
 }
 
@@ -494,6 +525,7 @@ fn inspect_desktop_with(
     program: &Path,
     home: &Path,
     session: impl FnOnce() -> Check,
+    clock: &Clock,
 ) -> Result<Desktop> {
     if !program.try_exists()? {
         return Ok(Desktop::unavailable(
@@ -502,7 +534,7 @@ fn inspect_desktop_with(
             Some("driver.install"),
         ));
     }
-    let version = probe(command(program, home).arg("--version"), PROBE_TIMEOUT);
+    let version = probe(command(program, home).arg("--version"), PROBE_TIMEOUT, clock);
     let installed_version = version
         .as_ref()
         .ok()
@@ -524,10 +556,11 @@ fn inspect_desktop_with(
         result.driver.installed_version = Some(installed_version);
         return Ok(result);
     }
-    let status = probe(command(program, home).arg("status"), PROBE_TIMEOUT);
+    let status = probe(command(program, home).arg("status"), PROBE_TIMEOUT, clock);
     let permissions = probe(
         command(program, home).args(["permissions", "status", "--json"]),
         PROBE_TIMEOUT,
+        clock,
     );
     let mut result =
         desktop_from_probes(installed_version, status.ok(), permissions.ok(), session());
@@ -673,6 +706,10 @@ fn permission(value: &Value, field: &str, reason: &'static str) -> Check {
 }
 
 pub(super) fn inspect_provider(home: &Path, harness: Harness) -> Provider {
+    inspect_provider_with(home, harness, &Clock::default())
+}
+
+fn inspect_provider_with(home: &Path, harness: Harness, clock: &Clock) -> Provider {
     let mut result = Provider {
         harness,
         check: Check::new(
@@ -784,6 +821,7 @@ pub(super) fn inspect_provider(home: &Path, harness: Harness) -> Provider {
                 "check_for_update_on_startup=false",
             ]),
         PROBE_TIMEOUT,
+        clock,
     );
     result.check = codex_auth_status(reply.ok());
     result.evidence = "localFileLoginStatus";
@@ -976,6 +1014,7 @@ mod tests {
             environment_id: super::super::super::journal::new_id(),
             generation: super::super::super::journal::new_id(),
             protocol: 1,
+            host_key_sha256: "0".repeat(64),
         };
         let binding = AccountBinding {
             executable_sha256: "a".repeat(64),
@@ -1072,6 +1111,7 @@ mod tests {
             environment_id: "env-1".into(),
             generation: "gen-1".into(),
             protocol: 1,
+            host_key_sha256: "0".repeat(64),
         };
         let state = State {
             attachments: Default::default(),
@@ -1162,7 +1202,7 @@ case "$*" in
 esac
 "##).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let result = inspect_desktop_with(&binary, home.path(), session).unwrap();
+        let result = inspect_desktop_with(&binary, home.path(), session, &Clock::frozen()).unwrap();
         assert_eq!(result.screen_recording.state, "required");
         assert_eq!(
             std::fs::read_to_string(home.path().join("invocations")).unwrap(),
@@ -1170,7 +1210,7 @@ esac
         );
         assert_eq!(result.capture.state, "notProbed");
         let missing =
-            inspect_desktop_with(&home.path().join("absent"), home.path(), session).unwrap();
+            inspect_desktop_with(&home.path().join("absent"), home.path(), session, &Clock::frozen()).unwrap();
         assert_eq!(missing.driver.check.state, "missing");
     }
 
@@ -1214,7 +1254,7 @@ esac
         let cache = b"retained-auth-placeholder";
         std::fs::write(auth.join("config.toml"), config).unwrap();
         std::fs::write(auth.join("auth.json"), cache).unwrap();
-        let result = inspect_provider(home.path(), Harness::Codex);
+        let result = inspect_provider_with(home.path(), Harness::Codex, &Clock::frozen());
         assert_eq!(result.check.state, "unknown");
         assert_eq!(std::fs::read(auth.join("config.toml")).unwrap(), config);
         assert_eq!(std::fs::read(auth.join("auth.json")).unwrap(), cache);
@@ -1388,6 +1428,7 @@ esac
         let value = probe(
             Command::new("/bin/sh").args(["-c", "printf data; exit 75"]),
             Duration::from_secs(1),
+            &Clock::frozen(),
         )
         .unwrap();
         assert_eq!(value.code, Some(75));
@@ -1395,13 +1436,16 @@ esac
         let start = Instant::now();
         assert!(probe(
             Command::new("/bin/sleep").arg("30"),
-            Duration::from_millis(40)
+            Duration::from_millis(40),
+            // The real clock: this budget is meant to run out.
+            &Clock::default(),
         )
         .is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(probe(
             Command::new("/bin/sh").args(["-c", "head -c 65537 /dev/zero"]),
-            Duration::from_secs(1)
+            Duration::from_secs(1),
+            &Clock::frozen(),
         )
         .is_err());
     }

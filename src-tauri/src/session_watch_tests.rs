@@ -783,7 +783,7 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
             ("ls; cat file", "file\nhello\n".into()),
             ("cat file | grep -n hello", "1:hello\n".into()),
         ];
-        if which::which("rg").is_ok() { commands.push(("pwd; rg --files", format!("{app_path}\nfile\n"))); }
+        if crate::binpath::find("rg").is_some() { commands.push(("pwd; rg --files", format!("{app_path}\nfile\n"))); }
         for (command, expected) in commands {
             let reply = rig.manager.on_hook(command_frame(&rig, gate, command, app_path));
             // TerminalX ran it and answers with its result: the provider
@@ -875,6 +875,100 @@ impl Drop for AsVerifier {
     }
 }
 
+#[test]
+#[cfg(unix)]
+fn verifier_lookups_keep_actionable_model_visible_outcomes() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
+        let _verifier = AsVerifier::noted();
+        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        let lines: String = (1..=70).map(|n| format!("line{n}\n")).collect();
+        std::fs::write(app.join("file"), &lines).unwrap();
+        std::fs::write(app.join("src/file"), "PATTERN\n").unwrap();
+        let mut outside = command_frame(&rig, "PermissionRequest", "", app.to_str().unwrap());
+        outside.payload["tool_name"] = json!("Read");
+        outside.payload["tool_input"] = json!({"file_path":"/outside-worktree/file"});
+        let allowed = answer_command(&rig, outside, "allow", false).output.unwrap();
+        assert_eq!(allowed["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // Native file tools retain the provider's path permissions.
+        for tool in ["Read", "Grep", "Glob"] {
+            let mut frame = command_frame(&rig, "PreToolUse", "", app.to_str().unwrap());
+            frame.payload["tool_name"] = json!(tool);
+            frame.payload["tool_input"] = match tool {
+                "Read" => json!({"file_path":app.join("file"), "offset":41, "limit":20}),
+                "Grep" => json!({"pattern":"PATTERN", "path":app.join("src"), "output_mode":"content"}),
+                _ => json!({"pattern":"src/**", "path":app}),
+            };
+            assert_eq!(rig.manager.on_hook(frame).output, Some(json!({})), "{kind:?}: {tool}: provider permissions remain in charge");
+        }
+        for (command, expected) in [
+            ("grep -n line60 file | head", "60:line60\n"),
+            ("sed -n 60p file", "line60\n"),
+            ("sed -n 41p file; sed -n 60p file", "line41\nline60\n"),
+            ("sed -n '41,42p' file", "line41\nline42\n"),
+            ("grep -rnE 'PATTERN' src", "src/file:1:PATTERN\n"),
+        ] {
+            let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, app.to_str().unwrap()));
+            let report = reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_owned();
+            assert_eq!(crate::harness::read_only::ran_result(&report), Some((0, expected.into())), "{kind:?}: {command}: {report}");
+        }
+        for (command, reason) in [
+            ("sed -i s/a/b/ file", "unsupported program or options"),
+            ("cat file > out", "unsupported shell syntax"),
+            ("cat $(touch out)", "unsupported shell syntax"),
+            ("grep line file | tee out", "unsupported program or options"),
+            ("sed -n 41p file; touch out", "unsupported program or options"),
+        ] {
+            let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, app.to_str().unwrap()));
+            let report = reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_owned();
+            assert!(report.contains(reason) && report.contains("command did not run") && report.contains("Read, Grep or Glob"), "{kind:?}: {report}");
+            assert!(crate::harness::read_only::ran_result(&report).is_none());
+        }
+        for (command, status) in [("cat missing", 1), ("grep absent file", 1), ("grep '[' file", 2)] {
+            let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, app.to_str().unwrap()));
+            let report = reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_owned();
+            let (actual, output) = crate::harness::read_only::ran_result(&report).unwrap();
+            assert_eq!(actual, status, "{report}");
+            assert_eq!(output.is_empty(), command == "grep absent file", "{report}");
+            assert!(report.contains("vetted executor's result") && report.contains("Read, Grep or Glob"), "{report}");
+            if command == "cat missing" { assert!(report.contains("missing")); }
+            // Codex gets a synthetic row; Claude gets its row from its transcript.
+            if kind == CliKind::Codex {
+                assert!(rig.events().iter().any(|event| matches!(&event.payload,
+                    Payload::ToolCallCompleted { result, .. } if result.is_error
+                        && result.text == RecoveryKind::Tool.message())),
+                    "the sanitized UI row must not replace the model's hook response");
+            }
+        }
+        let mut frame = command_frame(&rig, "PermissionRequest", "", app.to_str().unwrap());
+        frame.payload["tool_name"] = json!("Read");
+        frame.payload["tool_input"] = json!({"file_path":"/outside-worktree/file"});
+        let reply = answer_command(&rig, frame, "deny", false);
+        let output = reply.output.unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(output["hookSpecificOutput"]["decision"]["message"].as_str().unwrap().contains("Provider permission was not granted"));
+        // A native Grep may ask for its own permission too. Its denial must
+        // be actionable, and an earlier Read allowance cannot answer it.
+        for option in ["deny", "allow"] {
+            let mut frame = command_frame(&rig, "PermissionRequest", "", app.to_str().unwrap());
+            frame.payload["tool_name"] = json!("Grep");
+            frame.payload["tool_input"] = json!({"pattern":"PATTERN", "path":app.join("src")});
+            let output = answer_command(&rig, frame, option, false).output.unwrap();
+            let decision = &output["hookSpecificOutput"]["decision"];
+            assert_eq!(decision["behavior"], option);
+            if option == "deny" {
+                let reason = decision["message"].as_str().unwrap();
+                assert!(reason.contains("Provider permission was not granted") && reason.contains("permitted worktree files"), "{reason}");
+                assert!(crate::harness::read_only::ran_result(reason).is_none());
+            }
+        }
+        assert!(!app.join("out").exists());
+        assert_eq!(std::fs::read_to_string(app.join("file")).unwrap(), lines);
+        assert!(rig.manager.pending_permissions().is_empty());
+    }
+}
+
 /// A run's verifier asks at `PreToolUse`, in either agent, and TerminalX runs
 /// its read-only command itself (PRO-330). The answer is in that hook's own
 /// form: Claude Code 2.1.322 ignores one in `PermissionRequest` form ("Hook
@@ -906,7 +1000,7 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
         let refused = |reason: &str| {
             let output = answer(rig.manager.on_hook(frame()));
             assert_eq!(output, crate::orchestration::guard::refusal_output(reason)["hookSpecificOutput"], "{kind:?}");
-            assert!(["Read", "Grep", "Glob"].iter().all(|tool| reason.contains(tool)));
+            assert!(["Read", "Grep", "Glob", "command did not run"].iter().all(|tool| reason.contains(tool)));
             assert!(rig.manager.pending_permissions().is_empty(), "{kind:?}: refused, not asked");
         };
         // Read-only commands off: refused, whatever the sandbox.
@@ -924,6 +1018,12 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
         std::fs::create_dir_all(app.join(file).parent().unwrap()).unwrap();
         std::fs::write(app.join(file), text).unwrap();
         refused(crate::orchestration::guard::SANDBOXED);
+        // A shell refusal does not disable native worktree searches. The
+        // provider still owns the sandbox decision for this individual call.
+        let mut grep = frame();
+        grep.payload["tool_name"] = json!("Grep");
+        grep.payload["tool_input"] = json!({"pattern":"hello", "path":app, "output_mode":"content"});
+        assert_eq!(rig.manager.on_hook(grep).output, Some(json!({})));
     }
 }
 
@@ -3417,4 +3517,65 @@ fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
     assert!(rig.rt.lock().unwrap().stop_in_flight, "terminal completion cannot settle another stop operation");
     assert!(rig.rt.lock().unwrap().stopping);
     assert!(index::get(SESSION).is_ok(), "failed stop-all must retain session metadata");
+}
+
+/// #979: a paired phone answers an agent's question through the runtime's
+/// phone handler, and the agent gets what the desktop's card would have sent.
+/// A read-only phone, a tab of another session and a question already closed
+/// are each refused, and none of them answers anything.
+#[test]
+fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
+    use crate::local_runtime::{mobile, Lifetime};
+    let rig = Rig::in_mode(CliKind::Claude, "manual");
+    let device = |id: &str, scope: &str| json!({"id":id,"label":"Fixture","platform":"test","token":format!("{id}-hash"),
+        "scope":scope,"provenance":"explicit","bindingGeneration":0,"createdAt":index::now()});
+    store::write_json(&store::root().unwrap().join("devices.json"), &json!({"devices":[device("driver","driver"),device("viewer","viewer")]})).unwrap();
+    let lifetime = Lifetime::new(Duration::from_secs(60));
+    let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+    let actor: mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "phone", "driver").unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "watch", "viewer").unwrap();
+
+    let questions = json!({"questions":[
+        {"question":"Which checks should run?","header":"Checks","multiSelect":true,
+            "options":[{"label":"Lint, format","description":"Both"},{"label":"Tests","description":"Unit tests"}]},
+        {"question":"Which branch?","header":"Branch","multiSelect":false,"options":[{"label":"main","description":""}]},
+    ]});
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "AskUserQuestion", "tool_input": questions}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish the question");
+        std::thread::sleep(MOMENT);
+    };
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::QuestionsAsked { request_id, questions, .. } if *request_id == request && questions.len() == 2)));
+
+    // What the desktop's card sends for the same choices: labels joined with ", " in the order picked.
+    let answers = json!({"Which checks should run?":"Tests, Lint, format","Which branch?":"release/1.0"});
+    let answer = |connection: &str, tab: &str| mobile::execute(&rig.manager, &lifetime, "questions",
+        json!({"actor":actor,"connection":connection,"sessionId":SESSION,"tabId":tab,"requestId":request,"answers":answers}));
+    let refused = |result: Result<Value>| format!("{:#}", result.unwrap_err());
+
+    assert!(refused(answer("watch", TAB)).contains("read-only"), "a viewer may read the question, not answer it");
+    assert!(refused(answer("phone", "another-tab")).contains("does not belong to this session"));
+    assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "a refused answer leaves the question open");
+
+    assert_eq!(answer("phone", TAB).unwrap(), json!({"status":"answered"}));
+    let reply = worker.join().unwrap().output.expect("the agent is answered");
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], answers);
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["questions"], questions["questions"], "the questions go back as they were asked");
+    assert!(rig.rt.lock().unwrap().pending.is_empty());
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionDecided { request_id, label, .. } if *request_id == request && label == "Answered")),
+        "every device's card goes away on this event");
+    assert_eq!(*rig.observer.answered.lock().unwrap(), [(SESSION.to_string(), TAB.to_string())]);
+
+    // The Mac, or another phone, answered first: said, not swallowed.
+    assert!(refused(answer("phone", TAB)).contains("that question is no longer open"));
+    lifetime.command("runtime.detach", lease).unwrap();
 }

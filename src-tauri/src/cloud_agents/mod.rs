@@ -217,15 +217,25 @@ impl Settings {
 }
 
 /// [`AgentOps`] over the runtime's [`SessionManager`], limited to the
-/// sessions of one project root.
+/// sessions of one project root, or with no root to those of every project
+/// the machine knows (`machine/1`, PRO-340).
 pub struct ManagerOps {
     pub manager: SessionManager,
-    pub root: String,
+    pub root: Option<String>,
 }
 
 impl ManagerOps {
+    fn owns(&self, project_path: &str, machine: Option<&std::collections::HashMap<String, String>>) -> bool {
+        match (&self.root, machine) {
+            (Some(root), _) => crate::remote::session_target::owns_project(Path::new(root), project_path),
+            (None, Some(projects)) => projects.contains_key(project_path),
+            (None, None) => crate::remote::machine::ids_by_path().contains_key(project_path),
+        }
+    }
+
     fn entries(&self) -> Vec<index::SessionEntry> {
-        index::load().unwrap_or_default().into_iter().filter(|entry| crate::remote::session_target::owns_project(Path::new(&self.root), &entry.project_path)).collect()
+        let machine = self.root.is_none().then(crate::remote::machine::ids_by_path);
+        index::load().unwrap_or_default().into_iter().filter(|entry| self.owns(&entry.project_path, machine.as_ref())).collect()
     }
 }
 
@@ -297,7 +307,7 @@ impl AgentOps for ManagerOps {
     }
 
     fn session(&self, session_id: &str) -> Option<SessionSummary> {
-        let entry = index::get(session_id).ok().filter(|entry| crate::remote::session_target::owns_project(Path::new(&self.root), &entry.project_path))?;
+        let entry = index::get(session_id).ok().filter(|entry| self.owns(&entry.project_path, None))?;
         Some(SessionSummary { title: entry.title, branch: entry.branch })
     }
 
@@ -626,6 +636,11 @@ impl CloudAgents {
 
     pub fn state_dir(data_dir: &Path) -> PathBuf {
         data_dir.join("cloud-agent")
+    }
+
+    /// Where this state lives (created 0700), for stores kept beside it.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Stop taking new work: leave commands in the mailbox and follow-ups

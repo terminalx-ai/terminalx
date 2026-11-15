@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ pair: vi.fn(), camera: null as any, app: {} as
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: vi.fn() }) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: vi.fn() }), useFocusEffect: (effect: () => void) => useEffect(effect, [effect]) }));
 vi.mock("expo-camera", () => ({
   useCameraPermissions: () => [{ granted: true }, vi.fn()],
   CameraView: (props: any) => { mocks.camera = props; return <div data-camera />; },
@@ -24,9 +24,11 @@ vi.mock("react-native", () => {
     TextInput: ({ value, onChangeText }: any) => <input value={value} onInput={(e) => onChangeText(e.currentTarget.value)} />,
   };
 });
+// #987: the one way to add a machine is the + in the title.
+vi.mock("@mobile/ui/glass", () => ({ GlassIconButton: ({ label, onPress }: any) => <button aria-label={label} onClick={onPress} /> }));
 vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
-  Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children }: any) => <div>{children}</div>,
+  Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children, titleActions }: any) => <div>{titleActions}{children}</div>,
   SectionTitle: ({ children }: any) => <div>{children}</div>, EmptyState: () => null, StatusDot: () => null,
 }));
 
@@ -46,7 +48,7 @@ beforeEach(async () => {
   document.body.append(container);
   root = createRoot(container);
   await render();
-  await click("Use QR code or pairing code");
+  await click("Add a machine");
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
@@ -67,7 +69,7 @@ it("allows a fresh QR after failure and reopening the sheet", async () => {
   mocks.pair.mockRejectedValueOnce(new Error("test failure"));
   await act(async () => mocks.camera.onBarcodeScanned({ data: "failed-offer" }));
   await click("Close");
-  await click("Use QR code or pairing code");
+  await click("Add a machine");
   expect(mocks.camera.onBarcodeScanned).toBeTypeOf("function");
   await act(async () => mocks.camera.onBarcodeScanned({ data: "fresh-offer" }));
   expect(mocks.pair.mock.calls.map(([code]) => code)).toEqual(["failed-offer", "fresh-offer"]);
@@ -76,7 +78,7 @@ it("allows a fresh QR after failure and reopening the sheet", async () => {
 it("requests continuous autofocus each time the scanner opens", async () => {
   expect(mocks.camera.autofocus).toBe("off");
   await click("Close");
-  await click("Use QR code or pairing code");
+  await click("Add a machine");
   expect(mocks.camera.autofocus).toBe("off");
 });
 

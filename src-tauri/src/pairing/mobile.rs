@@ -419,6 +419,9 @@ pub(super) fn dispatch(
         "permission.respond" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(connection, params)))
         }
+        "questions.respond" => {
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_questions(connection, params)))
+        }
         // Session controls (`sessionControls`): the desktop's own operations,
         // which the runtime checks against this device's grant again.
         "session.markRead" => parse_params(params).and_then(|params: TabControlParams| connection.call("markRead", params.into_call())),
@@ -490,7 +493,8 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `terminal`: `terminal.open`, and terminal observations that carry the
     // pane's size, so the phone can emulate the screen and drive it.
     // `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1)] {
+    // `questions`: `questions.respond` answers an agent's question as the desktop's card does (#979).
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1), ("questions", 1)] {
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
@@ -706,6 +710,8 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
                 "harness": tab.harness,
                 "status": tab.status,
                 "markedUnread": tab.marked_unread,
+                // When the tab was last active: the phone's list shows it on each tab's row.
+                "modified": tab.modified,
             })).collect::<Vec<_>>(),
         }));
     }
@@ -1302,6 +1308,23 @@ fn respond_permission(connection: &MobileConnection, params: PermissionRespondPa
         "requestId":params.request_id,"optionId":params.option_id}))
 }
 
+/// An agent's question answered from the phone (#979). `answers` is what the
+/// desktop's card sends: each question's text to its answer, a multi-select
+/// answer being the chosen labels joined with ", ". Empty, it is a skip.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuestionsRespondParams {
+    session_id: String,
+    tab_id: String,
+    request_id: String,
+    answers: std::collections::HashMap<String, String>,
+}
+
+fn respond_questions(connection: &MobileConnection, params: QuestionsRespondParams) -> Result<Value> {
+    connection.call("questions", json!({"sessionId":params.session_id,"tabId":params.tab_id,
+        "requestId":params.request_id,"answers":params.answers}))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatNote {
@@ -1796,6 +1819,23 @@ mod tests {
         assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
         // Conditional summary reads must also see the metadata change.
         assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
+    }
+
+    #[test]
+    fn summaries_date_each_tab_by_its_own_last_activity() {
+        let _home = store::temp_home();
+        let session: SessionEntry = serde_json::from_value(json!({
+            "id": "s", "projectPath": "/p", "cwd": "/p", "title": "t", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-03T00:00:00Z",
+            "tabs": [
+                { "id": "a", "harness": "claude", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-02T08:00:00Z" },
+                { "id": "b", "harness": "codex", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-03T09:30:00Z" },
+            ],
+        }))
+        .unwrap();
+        index::save(&[session]).unwrap();
+        let tabs = summaries_with_row_statuses(Value::Null).unwrap()["sessions"][0]["tabs"].clone();
+        assert_eq!(tabs[0]["modified"], "2026-01-02T08:00:00Z");
+        assert_eq!(tabs[1]["modified"], "2026-01-03T09:30:00Z");
     }
 
     #[test]
@@ -2410,6 +2450,29 @@ mod tests {
         assert!(collapsed.ends_with('…'));
     }
 
+    /// #979: the answers are a map of text to text and nothing else, and the
+    /// method is offered only where the attached runtime serves it.
+    #[test]
+    fn question_answers_are_closed_and_offered_only_with_a_runtime_that_takes_them() {
+        let parsed: QuestionsRespondParams = serde_json::from_value(json!({
+            "sessionId": "session", "tabId": "tab", "requestId": "request",
+            "answers": { "Which one?": "A, B", "Why?": "Because, well" },
+        })).unwrap();
+        assert_eq!((parsed.session_id.as_str(), parsed.tab_id.as_str(), parsed.request_id.as_str()), ("session", "tab", "request"));
+        assert_eq!(parsed.answers["Which one?"], "A, B");
+        let skipped: QuestionsRespondParams = serde_json::from_value(json!({ "sessionId": "s", "tabId": "t", "requestId": "r", "answers": {} })).unwrap();
+        assert!(skipped.answers.is_empty(), "Skip is an empty answer set");
+        for refused in [
+            json!({ "sessionId": "s", "tabId": "t", "requestId": "r" }),
+            json!({ "sessionId": "s", "tabId": "t", "requestId": "r", "answers": { "Which one?": ["A", "B"] } }),
+            json!({ "sessionId": "s", "tabId": "t", "requestId": "r", "answers": {}, "optionId": "allow" }),
+        ] {
+            assert!(serde_json::from_value::<QuestionsRespondParams>(refused.clone()).is_err(), "{refused}");
+        }
+        assert_eq!(capabilities(&current_runtime())["questions"], 1);
+        assert!(capabilities(&runtime_of(Some("0.2.22"), None)).get("questions").is_none(), "an older runtime has no such operation: the phone shows the question read-only");
+    }
+
     #[test]
     fn permission_response_params_are_closed_and_session_scoped() {
         let parsed: PermissionRespondParams = serde_json::from_value(json!({
@@ -2488,8 +2551,9 @@ mod tests {
         let mut every = released.clone();
         every["closeTab"] = json!(1);
         every["layeredConfiguration"] = json!(1);
+        every["questions"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
-        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab and layered configuration came later");
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration and answering questions came later");
         let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");

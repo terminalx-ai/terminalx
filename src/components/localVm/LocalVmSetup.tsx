@@ -6,7 +6,7 @@ import { localVmRequest } from "@/lib/localVm";
 import type { LocalVmEnvironment, LocalVmJson, LocalVmSetupAction, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReport } from "@/types/localVm";
 import { localVmFieldClass } from "./fields";
 import { reconcileLocalVmState } from "./useLocalVmState";
-import { boundSetupReport, deviceLoginUrl, loadPendingSetup, pendingSetupAcknowledged, readinessLabel, runtimeUpdateAvailable, setupActions, setupDiagnostics, setupStatusLabel, setupStorageKey, type PendingSetup } from "./setup";
+import { boundSetupReport, deviceLoginUrl, loadPendingSetup, pendingSetupAcknowledged, readinessLabel, runtimeUpdateAvailable, sessionLabel, setupActions, setupDiagnostics, setupStatusLabel, setupStorageKey, type PendingSetup } from "./setup";
 
 const STEP_LABELS = { pending: "Waiting", working: "In progress", waiting: "Needs your attention", complete: "Complete", failed: "Could not finish", unknown: "Outcome unknown" };
 
@@ -148,7 +148,7 @@ export function LocalVmSetupProgress({ report }: { report: LocalVmSetupReport })
         {report.taskMode !== "shellFiles" ? <><dt>Computer control</dt><dd>{readinessLabel(readiness.driver.state)}{readiness.driver.installedVersion ? ` · installed ${readiness.driver.installedVersion}` : ""}</dd>
         <dt>Accessibility</dt><dd>{readinessLabel(readiness.accessibility.state)}</dd>
         <dt>Screen Recording</dt><dd>{readinessLabel(readiness.screenRecording.state)}</dd>
-        <dt>Guest session</dt><dd>{readinessLabel(readiness.session.state)}</dd>
+        <dt>Guest session</dt><dd>{sessionLabel(readiness.session)}</dd>
         <dt>Desktop</dt><dd>{readinessLabel(readiness.desktop.state)}</dd>
         <dt>Screen capture</dt><dd>{readinessLabel(readiness.capture.state)}</dd></> : null}
         <dt>Provider sign-in</dt><dd>{readinessLabel(readiness.provider.state)}</dd>

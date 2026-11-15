@@ -2804,6 +2804,8 @@ export interface ExperimentalSettings {
   sessionCost?: boolean;
   /** Show orchestration runs: a session's Run view and Settings → Orchestrator (PRO-274). */
   orchestratorRuns?: boolean;
+  /** Show Local VM tasks and chosen computers: Settings → Local VMs, a tab's computer choice, its task cards (PRO-114). */
+  localVmTasks?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -2812,6 +2814,7 @@ export const experimental = {
   setNativeCodex: (nativeCodex: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { nativeCodex }),
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
+  setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;
@@ -2835,6 +2838,8 @@ export const orchestration = {
   /** The model each tier of the routing table runs on today, per agent. */
   tierModels: (refresh = false) => invoke<TierModels>("orchestrator_tier_models", { refresh }),
   approve: (id: string) => invoke<RunStart>("orchestration_approve", { id }),
+  /** Start a `planned` run, of a project that asks for no approval, as the person (PRO-365); the lead is told. */
+  start: (id: string) => invoke<RunStart>("orchestration_start", { id }),
   /** Stop a run, or discard a plan nobody approved. */
   stop: (id: string) => invoke<RunStop>("orchestration_stop", { id }),
   updatePlan: (id: string, plan: RunPlan) => invoke<Run>("orchestration_update_plan", { id, plan }),

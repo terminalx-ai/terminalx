@@ -363,6 +363,26 @@ pub struct RelayHost {
     state: Mutex<HostState>,
     status: tokio::sync::watch::Sender<HostStatus>,
     devices_path: Option<PathBuf>,
+    /// A machine's paired computers and phones (PRO-341).
+    routes: Mutex<Option<Arc<dyn MachineRoutes>>>,
+}
+
+/// What a machine adds to its relay host (docs/MACHINES.md, "How PRO-341
+/// builds it"): the computers it paired are admitted by their relay device id
+/// and token, and a connection for any other device is a phone, which goes
+/// to the window.
+/// Each method may read the registry file, so the relay host calls them off
+/// its async tasks.
+pub trait MachineRoutes: Send + Sync + 'static {
+    /// Whether the relay device id is a paired computer's.
+    fn is_computer(&self, relay_device_id: &str) -> bool;
+    /// The paired computer with this relay device id, if `token` is its: its
+    /// id and its tracked connection, which `cancel` closes on revocation.
+    fn admit_computer(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>>;
+    /// The connection ended.
+    fn release_computer(&self, computer_id: &str, tracked: u64);
+    /// Pass a phone's relay connection to the window. Whether one took it.
+    fn forward_phone(&self, forwarded: crate::machine_wire::Forwarded) -> bool;
 }
 
 impl RelayHost {
@@ -382,7 +402,7 @@ impl RelayHost {
                 Err(error) => log::warn!("relay host: could not read the device list: {error}"),
             }
         }
-        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path })
+        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path, routes: Mutex::new(None) })
     }
 
     /// Whether the device list is on disk (or there is no disk to keep it on).
@@ -412,8 +432,24 @@ impl RelayHost {
         self.keypair.host_id()
     }
 
+    /// What this host serves. A machine's other routes (its direct listener)
+    /// serve the same one, so every route sees one set of terminals,
+    /// subscriptions and idempotency results.
+    pub fn rpc(&self) -> Arc<WorkspaceRpc> {
+        self.rpc.clone()
+    }
+
     pub fn status(&self) -> tokio::sync::watch::Receiver<HostStatus> {
         self.status.subscribe()
+    }
+
+    /// A machine's computers and phones, beside the link's attachments.
+    pub fn set_routes(&self, routes: Arc<dyn MachineRoutes>) {
+        *self.routes.lock().unwrap() = Some(routes);
+    }
+
+    fn routes(&self) -> Option<Arc<dyn MachineRoutes>> {
+        self.routes.lock().unwrap().clone()
     }
 
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
@@ -670,6 +706,19 @@ impl RelayHost {
                             let host = self.clone();
                             let live = live.clone();
                             tokio::spawn(async move {
+                                // On a machine, a device that is neither attached
+                                // through the link nor a paired computer is a
+                                // phone. The registry is a file: read off this loop.
+                                if let Some(routes) = host.routes() {
+                                    let attached = host.state.lock().unwrap().devices.contains_key(&connection.relay_device_id);
+                                    let device = connection.relay_device_id.clone();
+                                    let lookup = routes.clone();
+                                    let computer = attached || tokio::task::spawn_blocking(move || lookup.is_computer(&device)).await.unwrap_or(true);
+                                    if !computer {
+                                        host.forward_phone(&routes, &live, &connection);
+                                        return;
+                                    }
+                                }
                                 if let Err(error) = host.serve_connection(live, connection).await {
                                     log::debug!("relay host: client connection ended: {error:#}");
                                 }
@@ -822,6 +871,25 @@ impl RelayHost {
         Ok(())
     }
 
+    /// Pass a phone's relay connection to the window: it opens the data leg.
+    fn forward_phone(&self, routes: &Arc<dyn MachineRoutes>, live: &Live, connection: &ConnectionOpen) {
+        let forwarded = crate::machine_wire::Forwarded::Relay {
+            cell_url: live.cell_url.clone(),
+            relay_host_id: self.keypair.host_id(),
+            generation: live.relay_generation,
+            connection: crate::machine_wire::RelayConnection {
+                conn_id: connection.conn_id.clone(),
+                conn_ticket: connection.conn_ticket.clone(),
+                kind: connection.kind.clone(),
+                relay_device_id: connection.relay_device_id.clone(),
+                attach_deadline_ms: connection.attach_deadline_ms,
+            },
+        };
+        if !routes.forward_phone(forwarded) {
+            log::debug!("relay host: no window takes phones; a phone connection is dropped");
+        }
+    }
+
     fn close_all_connections(&self) {
         for (_, cancels) in self.state.lock().unwrap().connections.drain() {
             for cancel in cancels {
@@ -867,101 +935,55 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
+        let (device, computer) = self.admit(&connection.relay_device_id, token, cancel_tx).await?;
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) =
+        let (peer, notifications) =
             Peer::for_installation(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), device.installation_key.clone());
-        // Slow mutations (Git network calls, agent prompts) answer from their
-        // own task, so this connection keeps reading, streaming and honouring
-        // a revocation meanwhile. Everything else is answered in order, which
-        // keeps terminal writes ordered.
-        let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
         log::info!("relay host: attachment {} connected ({:?})", device.attachment_id, device.authority);
-        let result = async {
-            loop {
-                tokio::select! {
-                    _ = cancel.recv() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    // The person lost access to the workspace (contract §21.5).
-                    _ = peer.closed() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    notification = notifications.recv() => {
-                        let Some(notification) = notification else { return Ok(()) };
-                        send_sealed(&mut socket, &mut session, &notification).await?;
-                    }
-                    answer = answers.recv() => {
-                        if let Some(answer) = answer {
-                            send_sealed(&mut socket, &mut session, &answer).await?;
-                        }
-                    }
-                    incoming = socket.next() => {
-                        crate::data_privacy::require_network()?;
-                        let Some(incoming) = incoming else { return Ok(()) };
-                        match incoming? {
-                            Message::Text(text) => {
-                                if text.len() > MAX_FRAME_BYTES * 2 {
-                                    bail!("client frame over the limit");
-                                }
-                                let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
-                                let request: Value = serde_json::from_slice(&plaintext)?;
-                                let response = match request["method"].as_str() {
-                                    Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
-                                    // Connecting can take seconds, so from its own
-                                    // task; answered in order with the stream's data.
-                                    Some("ports.open") => {
-                                        let rpc = self.rpc.clone();
-                                        let peer = peer.clone();
-                                        let ticket = crate::github_process::ticket();
-                                        tokio::spawn(async move {
-                                            let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
-                                            response.await;
-                                        });
-                                        continue;
-                                    }
-                                    Some(method) if SLOW_METHODS.contains(&method) => {
-                                        let answer = self.rpc.handle_owned(peer.clone(), request);
-                                        let answers = answers_tx.clone();
-                                        tokio::spawn(async move {
-                                            let _ = answers.send(answer.await);
-                                        });
-                                        continue;
-                                    }
-                                    _ => self.rpc.handle(&peer, &request).await,
-                                };
-                                send_sealed(&mut socket, &mut session, &response).await?;
-                            }
-                            Message::Binary(bytes) => {
-                                // Binary streams are not part of workspace RPC v1; the
-                                // frame is still authenticated so the counters stay aligned.
-                                let _ = session.open(&bytes, PayloadKind::Binary)?;
-                            }
-                            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                            Message::Close(_) => return Ok(()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        let result = serve_rpc(&mut socket, &mut session, &self.rpc, &peer, notifications, &mut cancel, |request| {
+            (request["method"] == "pairing.provisionRelay").then(|| {
+                let request = request.clone();
+                let (host, live, connection) = (self.clone(), live.clone(), connection.clone());
+                Box::pin(async move { host.provision_resume(&live, &connection, &request).await }) as futures_util::future::BoxFuture<'static, Value>
+            })
+        })
         .await;
-        self.rpc.disconnect(&peer);
         drop(cancel);
+        if let (Some((computer_id, tracked)), Some(routes)) = (&computer, self.routes()) {
+            routes.release_computer(computer_id, *tracked);
+        }
         if let Some(senders) = self.state.lock().unwrap().connections.get_mut(&connection.relay_device_id) {
             senders.retain(|sender| !sender.is_closed());
         }
         result
     }
 
-    fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Device> {
+    /// The device, and the paired computer's tracked connection when it is one.
+    async fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let attached = self.state.lock().unwrap().devices.contains_key(relay_device_id);
+        if let (false, Some(routes)) = (attached, self.routes()) {
+            // A paired computer: full operating rights (decision 5). Its
+            // connection closes with every other one when the runtime loses
+            // its credential, is fenced or loses the control connection, and
+            // with its record when the machine revokes it.
+            {
+                let mut state = self.state.lock().unwrap();
+                let senders = state.connections.entry(relay_device_id.to_string()).or_default();
+                senders.retain(|sender| !sender.is_closed());
+                senders.push(cancel.clone());
+            }
+            let (device_id, token) = (relay_device_id.to_string(), token.to_string());
+            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, cancel))
+                .await??
+                .ok_or_else(|| anyhow!("device token refused"))?;
+            let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
+            return Ok((device, Some((computer_id, tracked))));
+        }
         let mut state = self.state.lock().unwrap();
         // The relay credential named the device; the token must be that
         // device's, so an invite cannot be used with another attachment's token.
@@ -972,7 +994,7 @@ impl RelayHost {
         let senders = state.connections.entry(relay_device_id.to_string()).or_default();
         senders.retain(|sender| !sender.is_closed());
         senders.push(cancel);
-        Ok(device)
+        Ok((device, None))
     }
 
     /// Install a resume credential for the device of an invite connection,
@@ -1047,6 +1069,56 @@ pub async fn serve_workspace(
     Ok(host)
 }
 
+/// Start serving every project of this machine through the relay
+/// (`machine/1`, PRO-340), as [`serve_workspace`] serves one root. The
+/// machine is named by the host key the link registers with, so its
+/// `machineId` is the relay host id; `has_window` says whether a desktop app
+/// runs here (`TERMINALX_LOCAL_DESKTOP`, set when the app starts the runtime).
+pub async fn serve_machine(
+    link: Arc<dyn RuntimeLink>,
+    sink: Arc<dyn crate::sink::EventSink>,
+    terminals: Arc<crate::pty::Terminals>,
+    sessions: Option<crate::session::SessionManager>,
+    devices_path: Option<PathBuf>,
+    agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+    routes: Option<Arc<dyn MachineRoutes>>,
+) -> Result<Arc<RelayHost>> {
+    let generation = runtime_generation(&link).await;
+    let identity = super::machine::Identity {
+        machine_id: HostKeypair::from_secret(link.host_secret()).host_id(),
+        has_window: std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1"),
+    };
+    let rpc = WorkspaceRpc::machine(identity, generation, sink, terminals, sessions)?;
+    if let Some(agents) = agents {
+        agents.set_generation(generation);
+        rpc.set_agents(agents);
+    }
+    let host = RelayHost::new(link, rpc, devices_path);
+    // Before it registers, so no connection is answered without them.
+    if let Some(routes) = routes {
+        host.set_routes(routes);
+    }
+    tokio::spawn(host.clone().run());
+    Ok(host)
+}
+
+/// The runtime generation in the link's Relay Token, waiting with backoff
+/// until the link yields a session.
+async fn runtime_generation(link: &Arc<dyn RuntimeLink>) -> u64 {
+    let mut attempt = 0u32;
+    loop {
+        let fetch = link.clone();
+        match tokio::task::spawn_blocking(move || fetch.session()).await.map_err(anyhow::Error::from).and_then(|session| session).and_then(|session| token_identity(&session.relay_token)) {
+            Ok(identity) => return identity.runtime_generation,
+            Err(error) => {
+                attempt += 1;
+                log::warn!("relay host: waiting for a runtime session: {error:#}");
+                tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+            }
+        }
+    }
+}
+
 /// A [`RuntimeLink`] returns this when the API rejects the runtime
 /// credential: the host disconnects every client and stops serving.
 #[derive(Debug)]
@@ -1071,7 +1143,7 @@ impl std::fmt::Display for Fenced {
 
 impl std::error::Error for Fenced {}
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionOpen {
     conn_id: String,
@@ -1117,10 +1189,117 @@ async fn next_json(socket: &mut Socket) -> Result<Value> {
     }
 }
 
-async fn send_sealed(socket: &mut Socket, session: &mut E2eeSession, value: &Value) -> Result<()> {
+pub(crate) async fn send_sealed<S>(socket: &mut S, session: &mut E2eeSession, value: &Value) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
     let frame = session.seal(value.to_string().as_bytes(), PayloadKind::Text)?;
     socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await?;
     Ok(())
+}
+
+/// Serve workspace RPC to an authenticated peer on an E2EE socket until
+/// either side closes, `cancel` fires (a revocation) or the peer loses access.
+/// Every route of a host serves through here: the relay's data legs and a
+/// machine's direct listener (`machine_host`). `extra` answers the few
+/// requests a route serves itself, as the relay does `pairing.provisionRelay`.
+///
+/// Slow mutations (Git network calls, agent prompts) answer from their own
+/// task, so the connection keeps reading, streaming and honouring a
+/// revocation meanwhile. Everything else is answered in order, which keeps
+/// terminal writes ordered.
+pub(crate) async fn serve_rpc<S>(
+    socket: &mut S,
+    session: &mut E2eeSession,
+    rpc: &Arc<WorkspaceRpc>,
+    peer: &Arc<Peer>,
+    mut notifications: super::server::Notifications,
+    cancel: &mut mpsc::UnboundedReceiver<()>,
+    extra: impl Fn(&Value) -> Option<futures_util::future::BoxFuture<'static, Value>>,
+) -> Result<()>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = cancel.recv() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                // The person lost access to the workspace (contract §21.5).
+                _ = peer.closed() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                notification = notifications.recv() => {
+                    let Some(notification) = notification else { return Ok(()) };
+                    send_sealed(socket, session, &notification).await?;
+                }
+                answer = answers.recv() => {
+                    if let Some(answer) = answer {
+                        send_sealed(socket, session, &answer).await?;
+                    }
+                }
+                incoming = socket.next() => {
+                    crate::data_privacy::require_network()?;
+                    let Some(incoming) = incoming else { return Ok(()) };
+                    match incoming? {
+                        Message::Text(text) => {
+                            if text.len() > MAX_FRAME_BYTES * 2 {
+                                bail!("client frame over the limit");
+                            }
+                            let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
+                            let request: Value = serde_json::from_slice(&plaintext)?;
+                            if let Some(answer) = extra(&request) {
+                                let response = answer.await;
+                                send_sealed(socket, session, &response).await?;
+                                continue;
+                            }
+                            let response = match request["method"].as_str() {
+                                // Connecting can take seconds, so from its own
+                                // task; answered in order with the stream's data.
+                                Some("ports.open") => {
+                                    let rpc = rpc.clone();
+                                    let peer = peer.clone();
+                                    let ticket = crate::github_process::ticket();
+                                    tokio::spawn(async move {
+                                        let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
+                                        response.await;
+                                    });
+                                    continue;
+                                }
+                                Some(method) if SLOW_METHODS.contains(&method) => {
+                                    let answer = rpc.handle_owned(peer.clone(), request);
+                                    let answers = answers_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = answers.send(answer.await);
+                                    });
+                                    continue;
+                                }
+                                _ => rpc.handle(peer, &request).await,
+                            };
+                            send_sealed(socket, session, &response).await?;
+                        }
+                        Message::Binary(bytes) => {
+                            // Binary streams are not part of workspace RPC v1; the
+                            // frame is still authenticated so the counters stay aligned.
+                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                        }
+                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
+                        Message::Close(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    .await;
+    rpc.disconnect(peer);
+    result
 }
 
 pub(crate) fn websocket_config() -> WebSocketConfig {
@@ -1208,6 +1387,53 @@ mod tests {
         assert!(token_identity(&jwt(json!({ "sub": "x" }))).is_err());
         let legacy = token_identity(&jwt(json!({ "sub": "a", "cloudProfileId": "b", "organizationId": "c" }))).unwrap();
         assert_eq!(legacy.runtime_generation, 0);
+    }
+
+    /// PRO-341: a paired computer's relay connection closes with every
+    /// other one when the runtime loses its credential, is fenced or loses
+    /// the control connection (`close_all_connections`).
+    #[tokio::test]
+    async fn a_paired_computers_connection_closes_with_every_other() {
+        struct Link;
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] {
+                [3; 32]
+            }
+            fn session(&self) -> Result<RelaySession> {
+                bail!("not in this test")
+            }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct Routes;
+        impl MachineRoutes for Routes {
+            fn is_computer(&self, relay_device_id: &str) -> bool {
+                relay_device_id == "relay-desk"
+            }
+            fn admit_computer(&self, relay_device_id: &str, token: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token").then(|| ("desk".to_string(), 1)))
+            }
+            fn release_computer(&self, _: &str, _: u64) {}
+            fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
+                false
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(Link), rpc, None);
+        host.set_routes(Arc::new(Routes));
+        let (cancel, mut cancelled) = mpsc::unbounded_channel();
+        let (device, computer) = host.admit("relay-desk", "desk-token", cancel).await.unwrap();
+        assert_eq!(device.authority, Authority::Manage);
+        assert_eq!(computer, Some(("desk".to_string(), 1)));
+        let (refused, _) = mpsc::unbounded_channel();
+        assert!(host.admit("relay-desk", "another-token", refused).await.is_err(), "another device's token");
+        host.close_all_connections();
+        assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
     }
 
     #[test]

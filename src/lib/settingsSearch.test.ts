@@ -4,7 +4,8 @@ import { noteExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingOffered } from "@/lib/settingsSections";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "./settingsSearch";
 
-const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on });
+const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on, localVmTasks: false });
+const localVmTasks = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: on });
 
 beforeEach(() => orchestratorRuns(false));
 afterEach(() => orchestratorRuns(false));
@@ -47,7 +48,8 @@ describe("settings row search", () => {
     expect(first("worktreeinclude")).toBe("repositories.filesToCopy");
     expect(first("files to copy")).toBe("repositories.filesToCopy");
     expect(first("variables")).toBe("environment.variables");
-    expect(first("local vm")).toBe("localVms.tasks");
+    // Settings → Local VMs is behind its Experimental switch, which is always found.
+    expect(first("local vm")).toBe("experimental.localVmTasks");
     expect(searchSettings("hotkeys").map((match) => match.section)).toContain("shortcuts");
     expect(searchSettings("zzzz-no-such-setting")).toEqual([]);
   });
@@ -134,7 +136,17 @@ describe("settings row search", () => {
     expect(behind.every((row) => settingOffered(row))).toBe(true);
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator").every((row) => settingOffered(row))).toBe(true);
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms").every((row) => settingOffered(row))).toBe(true);
+  });
+
+  it("finds Local VMs rows only while their Experimental switch is on", () => {
+    const named = () => searchSettings("local vm").map((match) => match.id);
+    expect(named()).not.toContain("localVms.tasks");
+    expect(named()).toContain("experimental.localVmTasks");
+    localVmTasks(true);
+    expect(named()).toContain("localVms.tasks");
+    localVmTasks(false);
+    expect(named()).not.toContain("localVms.tasks");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {

@@ -50,7 +50,9 @@ Options:
                          workspace RPC (terminals, files, Git, sessions),
                          with the relay session read from a JSON file; for
                          local development and the relay integration test
-                         (cloud workspaces get it from the bootstrap)
+                         (cloud workspaces get it from the bootstrap).
+                         A local runtime without --project-root serves every
+                         project it knows (machine/1)
   --self-test            Start, run one shell in a PTY, then exit
   --idle-grace-seconds N Local runtime idle grace (1–3600; default 60)
   --log-file <file>      Keep the log in <file>, with its stdout and stderr,
@@ -94,6 +96,21 @@ pub struct Options {
     /// A handover record: this process was the runtime it replaces, and
     /// takes over what that one ran (#765).
     pub adopt: Option<PathBuf>,
+}
+
+impl Options {
+    /// A local runtime that serves every project of its machine through the
+    /// relay (`machine/1`, PRO-340): a relay link and no project root.
+    pub fn serves_machine(&self) -> bool {
+        self.runtime_kind == RuntimeKind::Local && self.relay_link.is_some() && self.project_root.is_none()
+    }
+
+    /// Whether this runtime carries its computer's own work (issue
+    /// pipelines, automations, worktree retention): every local runtime but
+    /// a development relay server for one root.
+    fn runs_local_work(&self) -> bool {
+        self.runtime_kind == RuntimeKind::Local && !self.self_test && (self.relay_link.is_none() || self.serves_machine())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,9 +161,6 @@ fn parse(args: &[String]) -> Result<Command> {
     if options.runtime_kind == RuntimeKind::CloudWorkspace && options.project_root.is_none() {
         bail!("--runtime-kind cloud-workspace requires --project-root");
     }
-    if options.relay_link.is_some() && options.project_root.is_none() {
-        bail!("--relay-link requires --project-root: the relay serves one workspace");
-    }
     if options.adopt.is_some() && (options.runtime_kind != RuntimeKind::Local || options.self_test || options.relay_link.is_some()) {
         bail!("--adopt takes over a local runtime only");
     }
@@ -155,6 +169,9 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    // Before anything reads stdin, a socket or the host key (#978 review).
+    #[cfg(target_os = "linux")]
+    crate::local_vm::guest::seal_key_holder();
     #[cfg(target_os = "linux")]
     if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
@@ -358,14 +375,27 @@ fn run(options: Options) -> Result<()> {
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
     // link file in development and tests.
-    let link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
+    let mut link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
         (Some(path), _) => Some(Arc::new(crate::remote::host::FileLink::open(path).context("open the relay link")?)),
         (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
         (None, None) => None,
     };
+    // A local runtime hosts operating computers while the switch is on
+    // (PRO-341): it opens nothing until then.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        let parts = crate::machine_host::Parts { sink: runtime.sink.clone(), terminals: runtime.terminals.clone(), sessions: runtime.manager.clone() };
+        let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
+        let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
+        // One key answers on every route of a machine.
+        if let (Some(relay), true) = (link.take(), options.serves_machine()) {
+            link = Some(crate::machine_host::KeyedLink::wrap(&machine, relay));
+        }
+    }
     // The self-test checks the local runtime only.
     let mut agents = None;
-    if let (Some(link), Some(root), false) = (link, &runtime.project_root, options.self_test) {
+    // A root serves one workspace; none, on a local runtime, its machine.
+    if let (Some(link), true, false) = (link, runtime.project_root.is_some() || options.serves_machine(), options.self_test) {
+        let root = runtime.project_root.as_deref();
         agents = match start_cloud_agents(&runtime, root, &data_dir, cloud.as_ref(), options.relay_link.as_deref()) {
             Ok(agents) => Some(agents),
             Err(error) => {
@@ -401,6 +431,9 @@ fn run(options: Options) -> Result<()> {
                             // An explicitly configured relay server is a
                             // standing service, not a detached desktop owner.
                             options.relay_link.is_some()
+                                // Hosting operating computers is a standing
+                                // service, and a connected computer is a client.
+                                || crate::machine_host::installed().is_some_and(|host| host.keeps_runtime())
                                 || runtime.manager.has_background_work()
                                 || local_vm_busy()
                                 || runtime.manager.idle_process_roots().is_none()
@@ -676,7 +709,8 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
             log::warn!("{} handed-over hook(s) waited on a card no tab holds; they are answered as refused", parked.len());
         }
     }
-    if options.runtime_kind == RuntimeKind::Local && !guest_mode && options.relay_link.is_none() && !options.self_test {
+    // A guest runtime runs only its guest work (PRO-114).
+    if options.runs_local_work() && !guest_mode {
         manager.follow_terminals();
         let pipeline_host = Arc::new(crate::issue_pipeline::host::LocalHost::new(sink.clone(), manager.clone()));
         pipelines.attach(pipeline_host.clone());
@@ -718,7 +752,7 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         #[cfg(unix)]
         crate::agent_keys::start(lifetime)?;
         lifetime.ready();
-        if options.relay_link.is_none() && !options.self_test {
+        if options.runs_local_work() {
             crate::local_runtime::workspaces::start_retention(manager.clone(), lifetime.clone());
         }
     }
@@ -822,13 +856,13 @@ fn take_over(adopted: &mut crate::local_runtime::handover::Adopted, sink: &Arc<B
 /// development link file's `mailbox` section.
 fn start_cloud_agents(
     runtime: &Runtime,
-    root: &str,
+    root: Option<&str>,
     data_dir: &std::path::Path,
     cloud: Option<&(Arc<crate::cloud_bootstrap::Bootstrapped>, String)>,
     relay_link: Option<&std::path::Path>,
 ) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
     use crate::cloud_agents::{api::HttpMailboxApi, CloudAgents, Identity, ManagerOps};
-    let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.to_string() });
+    let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.map(str::to_string) });
     let mut generation = 0;
     let api: Option<(Arc<HttpMailboxApi>, Identity)> = match (cloud, relay_link) {
         (Some((cloud, origin)), _) => {
@@ -853,7 +887,10 @@ fn start_cloud_agents(
     let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
     agents.mark_interrupted_turns(&runtime.interrupted);
     agents.start();
-    start_issue_pipelines(runtime, &agents);
+    // A machine's pipelines already run as its own (`runs_local_work`).
+    if root.is_some() {
+        start_issue_pipelines(runtime, &agents);
+    }
     if let Some((cloud, _)) = cloud {
         watch_access(agents.clone(), cloud.clone());
         // A login brought or taken away changes what the tabs say (PRO-110).
@@ -864,7 +901,8 @@ fn start_cloud_agents(
             }
         });
     }
-    if let Some(http) = http {
+    // Launch intents and scheduled runs are a cloud workspace's.
+    if let (Some(http), Some(root)) = (http, root) {
         start_launch(runtime, root, data_dir, http.clone(), &agents);
         start_scheduled_runs(runtime, root, data_dir, http, &agents);
     }
@@ -985,23 +1023,37 @@ fn watch_access(agents: Arc<crate::cloud_agents::CloudAgents>, cloud: Arc<crate:
 fn start_relay_host(
     runtime: &Runtime,
     link: Arc<dyn crate::remote::host::RuntimeLink>,
-    root: &str,
+    root: Option<&str>,
     data_dir: &std::path::Path,
     agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
 ) {
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
-    let root = PathBuf::from(root);
+    let serves_machine = root.is_none();
+    let root = root.map(PathBuf::from);
     let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
-        let host = match crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await {
+        let served = match root {
+            Some(root) => crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
+            None => {
+                // The relay admits the machine's paired computers and passes
+                // on its phones (PRO-341).
+                let routes = crate::machine_host::installed().map(|machine| machine.clone() as Arc<dyn crate::remote::host::MachineRoutes>);
+                crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone(), routes).await
+            }
+        };
+        let host = match served {
             Ok(host) => host,
             Err(error) => {
                 log::error!("relay host: {error:#}");
                 return;
             }
         };
+        // The machine's direct listener serves this same RPC.
+        if let (true, Some(machine)) = (serves_machine, crate::machine_host::installed()) {
+            machine.use_rpc(host.rpc());
+        }
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();
@@ -1180,6 +1232,17 @@ mod tests {
         let Command::Serve(options) = parse(&[]).unwrap() else { panic!("expected serve") };
         assert_eq!(options.runtime_kind, RuntimeKind::Local);
         assert!(options.project_root.is_none() && options.data_dir.is_none() && !options.self_test);
+    }
+
+    #[test]
+    fn a_local_relay_runtime_without_a_root_serves_its_machine() {
+        let Command::Serve(machine) = parse(&args(&["--data-dir", "/home", "--relay-link", "/run/link.json"])).unwrap() else { panic!("expected serve") };
+        assert!(machine.serves_machine() && machine.runs_local_work());
+        let Command::Serve(workspace) = parse(&args(&["--data-dir", "/home", "--relay-link", "/run/link.json", "--project-root", "/w"])).unwrap() else { panic!("expected serve") };
+        assert!(!workspace.serves_machine() && !workspace.runs_local_work(), "a development relay server for one root, as before");
+        assert!(parse(&args(&["--runtime-kind", "cloud-workspace", "--relay-link", "/run/link.json"])).is_err(), "a cloud workspace still needs its root");
+        let Command::Serve(plain) = parse(&args(&["--data-dir", "/home"])).unwrap() else { panic!("expected serve") };
+        assert!(!plain.serves_machine() && plain.runs_local_work());
     }
 
     #[test]

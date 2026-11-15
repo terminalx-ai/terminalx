@@ -138,6 +138,7 @@ done
             verify_signature: false,
             login_allowed: false,
             provider_selection_valid: false,
+            clock: crate::local_vm::guest::readiness::Clock::frozen(),
         };
         let mut peer = Peer::start_with(&paths).unwrap();
         assert_eq!(peer.tools.as_array().unwrap().len(), 1);

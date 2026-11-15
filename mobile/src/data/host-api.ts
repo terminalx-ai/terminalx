@@ -25,7 +25,8 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
+  /** `modified`: when the tab was last active (RFC 3339); absent from older Macs. */
+  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean; modified?: string }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
@@ -41,8 +42,9 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `terminal`: `terminal.open`, and terminal output that says the pane's size, which the terminal view needs.
  * `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
+ * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -342,6 +344,18 @@ export class HostApi {
     const result = await this.connection.request<{ status?: string }>("permission.respond", { sessionId, tabId, requestId, optionId });
     if (result.ok && result.value.status === "answered") return { answered: true };
     return { answered: false, message: result.ok ? "The host did not answer this request." : result.refusal.message };
+  }
+
+  /**
+   * Answer an agent's question (#979), in the desktop card's format
+   * (`questionAnswers`): each question's text to its answer. `{}` skips it.
+   * Only for a Mac that names `questions`. A question the Mac or another
+   * device answered first comes back as the Mac's own message.
+   */
+  async answerQuestions(sessionId: string, tabId: string, requestId: string, answers: Record<string, string>): Promise<{ answered: true } | { answered: false; message: string }> {
+    const result = await this.connection.request<{ status?: string }>("questions.respond", { sessionId, tabId, requestId, answers });
+    if (result.ok && result.value.status === "answered") return { answered: true };
+    return { answered: false, message: result.ok ? "The host did not answer this question." : result.refusal.message };
   }
 
   /** Start the tab's agent in its terminal, as opening the desktop's terminal view does; a native Codex tab moves there for good. */

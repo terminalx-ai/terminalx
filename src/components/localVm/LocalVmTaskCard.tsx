@@ -2,12 +2,13 @@ import { useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { errorMessage } from "@/lib/api";
-import { LOCAL_VM_STATUS, latestTaskProgress, localVmModelLabel, localVmRequest, pendingTaskApprovals, taskFinished } from "@/lib/localVm";
+import { LOCAL_VM_STATUS, latestTaskProgress, localVmModelLabel, localVmRequest, pendingTaskApprovals, pendingTaskQuestions, taskFinished } from "@/lib/localVm";
 import { assertLocal, guestTaskPath } from "@/types/target";
-import type { LocalVmArtifact, LocalVmArtifactContent, LocalVmJson, LocalVmPatchResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifact, LocalVmArtifactContent, LocalVmJson, LocalVmPatchResult, LocalVmTask, LocalVmTaskEvent, LocalVmTaskTarget } from "@/types/localVm";
 import { localVmFieldClass } from "./fields";
 import { reconcileLocalVmState } from "./useLocalVmState";
 import { LocalVmTaskRecovery } from "./LocalVmTaskRecovery";
+import { LocalVmTaskQuestion } from "./LocalVmTaskQuestion";
 import { recoveryStorageKey } from "./recovery";
 
 export function artifactHref(artifact: LocalVmArtifactContent): string | null {
@@ -18,6 +19,22 @@ export function artifactHref(artifact: LocalVmArtifactContent): string | null {
     catch { /* A guest file path is display-only, never a host/browser fallback. */ }
   }
   return null;
+}
+
+/** How long a takeover waits for retained history: the supervisor polls every few seconds. */
+export const TAKEOVER_CONFIRMATION = { attempts: 20, intervalMs: 500 };
+
+/** Retained history showing `target` stopped with the manual hold, within the supervisor's polling. */
+async function retainedTakeover(target: LocalVmTaskTarget): Promise<boolean> {
+  const { attempts, intervalMs } = TAKEOVER_CONFIRMATION;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const state = await localVmRequest("state", {});
+    const stopped = state?.tasks?.[target.taskId];
+    const environment = state?.environments?.[target.environmentId];
+    if (stoppedTarget(stopped, target) && environment?.generation === target.generation && environment.manualControl === true) return true;
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
 }
 
 function stoppedTarget(task: LocalVmTask | undefined, target: LocalVmTaskTarget): boolean {
@@ -36,10 +53,28 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const [patchRoot, setPatchRoot] = useState(destinationRoot);
   const [patchResult, setPatchResult] = useState<LocalVmPatchResult | null>(null);
   const [takeoverOpen, setTakeoverOpen] = useState(false);
+  const [abandonOpen, setAbandonOpen] = useState(false);
   const lock = useRef(false);
+  // A finished task's events move to its history file (#978); read them only
+  // when the person opens them, not on every state poll.
+  const [history, setHistory] = useState<{ key: string; events: LocalVmTaskEvent[] | null; error: string | null }>({ key: "", events: null, error: null });
+  const historyKey = `${task.target.taskId}:${task.archivedEvents ?? 0}`;
+  const archived = history.key === historyKey ? history : { key: historyKey, events: null, error: null };
+  const retained = task.archivedEvents ? [...(archived.events ?? []), ...task.events] : task.events;
+  const retainedCount = (task.archivedEvents ?? 0) + task.events.length;
+  async function loadHistory() {
+    if (!task.archivedEvents || archived.events) return;
+    try {
+      const read = await localVmRequest("task.history", { target: task.target });
+      setHistory({ key: historyKey, events: read.events, error: null });
+    } catch (error) {
+      setHistory({ key: historyKey, events: null, error: errorMessage(error) });
+    }
+  }
   const finished = taskFinished(task.status);
   const canReply = !readOnly && !finished && task.status !== "canceling" && task.status !== "outcomeUnknown";
   const approvals = pendingTaskApprovals(task);
+  const questions = pendingTaskQuestions(task);
   const progress = latestTaskProgress(task);
   const href = useMemo(() => artifact ? artifactHref(artifact) : null, [artifact]);
 
@@ -66,7 +101,8 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         {task.input.desktop ? <Button size="xs" variant="outline" disabled={!!busy} onClick={() => void run("Opening guest desktop", async () => { setResult(await localVmRequest("environment.desktop", { environmentId: task.target.environmentId, target: task.target })); })}>Open desktop</Button> : null}
         {task.input.desktop && !finished ? <Button size="xs" variant="outline" disabled={!!busy || readOnly || task.status === "canceling"} onClick={() => setTakeoverOpen(true)}>Take over desktop…</Button> : null}
         {manualControl ? <Button size="xs" variant="outline" disabled={!!busy || readOnly} onClick={() => void run("Returning desktop control to queued tasks", async () => { setResult(await localVmRequest("environment.releaseDesktop", { environmentId: task.target.environmentId, confirm: true })); })}>Return control to queued tasks</Button> : null}
-        {task.input.desktop && !finished ? <Button size="xs" variant="outline" disabled={!!busy || readOnly || task.status === "canceling"} onClick={() => void run("Requesting cancellation", async () => { setResult(await localVmRequest("task.cancel", { target: task.target })); })}>Cancel task</Button> : null}
+        {!finished ? <Button size="xs" variant="outline" disabled={!!busy || readOnly || task.status === "canceling"} onClick={() => void run("Requesting cancellation", async () => { setResult(await localVmRequest("task.cancel", { target: task.target })); })}>Cancel task</Button> : null}
+        {!finished && task.dispatchStarted ? <Button size="xs" variant="ghost" disabled={!!busy || readOnly} onClick={() => setAbandonOpen(true)}>Abandon task…</Button> : null}
       </div>
       {task.input.desktop ? <p className="text-muted-foreground">Open desktop opens an interactive viewer. The workflow may still control it; take over before changing apps. Closing the viewer never stops a task. Other workflows sharing this VM may also use its desktop.</p> : <p className="text-muted-foreground">This task uses the Linux guest shell and files. Attached desktop tools wait until this workflow releases the container.</p>}
       {manualControl ? <p role="status" aria-label="Manual desktop control" className="text-warning">Manual desktop control is held. Queued tasks in this VM wait until you return control. Closing the viewer does not release this hold, and returning control does not resume the canceled task.</p> : null}
@@ -81,6 +117,12 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
           setResult(await localVmRequest("task.permission", { target: task.target, requestId: approval.requestId, optionId: option.id, idempotencyKey }));
         })}>{option.label}</Button>)}</div>
       </section>)}
+      {questions.map((question) => <LocalVmTaskQuestion key={question.requestId} question={question} disabled={!!busy || !canReply} onAnswer={(answers) => void run("Sending answers to the guest", async () => {
+        const key = JSON.stringify([question.requestId, answers]);
+        let idempotencyKey = permissionKeys.current.get(key);
+        if (!idempotencyKey) { idempotencyKey = crypto.randomUUID(); permissionKeys.current.set(key, idempotencyKey); }
+        setResult(await localVmRequest("task.answer", { target: task.target, requestId: question.requestId, answers, idempotencyKey }));
+      })} />)}
       {!finished ? <form className="space-y-1" onSubmit={(event) => {
         event.preventDefault();
         if (!canReply || !followup.trim()) return;
@@ -96,7 +138,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         <p className="break-all text-muted-foreground">SHA-256 {item.sha256}{item.expiresAt ? ` · expires ${item.expiresAt}` : ""}</p>
       </div>)}</section> : null}
       {artifact ? <section aria-label="Artifact preview" className="space-y-1"><h5 className="font-medium">{artifact.name}</h5>{typeof artifact.content === "string" ? <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words bg-well p-2">{artifact.content}</pre> : artifact.contentBase64 !== undefined ? <p>Binary artifact · {artifact.mediaType}</p> : null}{href ? <a className="underline" href={href} download={artifact.name} rel="noreferrer">{artifact.contentBase64 !== undefined ? "Download artifact" : "Open or save artifact"}</a> : <p>No safe downloadable content was returned by the guest.</p>}</section> : null}
-      {task.events.length ? <details><summary className="cursor-pointer text-muted-foreground">Retained task events · {task.events.length}</summary><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all">{task.events.map((event) => `${event.seq} · ${event.timestamp}\n${JSON.stringify(event.payload, null, 2)}`).join("\n")}</pre></details> : null}
+      {retainedCount ? <details onToggle={(event) => { if (event.currentTarget.open) void loadHistory(); }}><summary className="cursor-pointer text-muted-foreground">Retained task events · {retainedCount}</summary>{archived.error ? <p role="alert" className="text-destructive">{archived.error}</p> : task.archivedEvents && !archived.events ? <p role="status">Reading retained history…</p> : null}<pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all">{retained.map((event) => `${event.seq} · ${event.timestamp}\n${JSON.stringify(event.payload, null, 2)}`).join("\n")}</pre></details> : null}
       {busy ? <p role="status">{busy}…</p> : null}
       {error ? <p role="alert" className="text-destructive">{error}</p> : null}
       {result !== undefined ? <pre aria-label="Task action response" className="max-h-28 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(result, null, 2)}</pre> : null}
@@ -109,13 +151,20 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
           void run("Stopping task before desktop takeover", async () => {
             const takeover = await localVmRequest("task.takeover", { target: task.target, confirm: true });
             if (takeover?.ready !== true || takeover.manualControl !== true || !stoppedTarget(takeover.task, task.target)) throw new Error("The task has not confirmed it stopped with manual desktop control held. The desktop was not opened; refresh retained history before taking control.");
-            const state = await localVmRequest("state", {});
-            const stopped = state?.tasks?.[task.target.taskId];
-            const environment = state?.environments?.[task.target.environmentId];
-            if (!stoppedTarget(stopped, task.target) || environment?.generation !== task.target.generation || environment.manualControl !== true) throw new Error("Retained history has not confirmed the stopped task and manual desktop hold. The desktop was not opened; refresh retained history before taking control.");
+            // The host records the hold at once, but the stopped task reaches
+            // retained history on the supervisor's next poll (review 2).
+            const confirmed = await retainedTakeover(task.target);
+            if (!confirmed) throw new Error("Retained history has not confirmed the stopped task and manual desktop hold. The desktop was not opened; refresh retained history before taking control.");
             setResult(await localVmRequest("environment.desktop", { environmentId: task.target.environmentId, target: task.target }));
           });
         }}>Stop task and take over</Button></DialogFooter>
+      </DialogContent></Dialog>
+      <Dialog open={abandonOpen} onOpenChange={setAbandonOpen}><DialogContent>
+        <DialogHeader><DialogTitle>Abandon this task?</DialogTitle><DialogDescription>Only when its guest can no longer answer, because the VM is gone or will not start. The task is marked abandoned and its outcome stays unknown: whatever its worker was doing is not undone or replayed, and the guest keeps its own record. Stop all and Delete VM then stop waiting for it. If the VM starts again, the task shows what its worker did. If the guest answers, cancel the task instead.</DialogDescription></DialogHeader>
+        <DialogFooter><Button variant="ghost" onClick={() => setAbandonOpen(false)}>Keep waiting</Button><Button variant="destructive" disabled={!!busy || readOnly} onClick={() => {
+          setAbandonOpen(false);
+          void run("Abandoning task", async () => { setResult(await localVmRequest("task.abandon", { target: task.target, confirm: true })); });
+        }}>Abandon task</Button></DialogFooter>
       </DialogContent></Dialog>
       <Dialog open={!!patch} onOpenChange={(open) => { if (!open) setPatch(null); }}><DialogContent>
         <DialogHeader><DialogTitle>Import patch into this Mac?</DialogTitle><DialogDescription>This explicitly changes files and the Git index in the destination below. The backend checks the patch against the destination and reports conflicts. Inspect the artifact first; a conflict requires manual resolution. Guest files are never opened as host paths.</DialogDescription></DialogHeader>

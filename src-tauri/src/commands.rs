@@ -2567,6 +2567,8 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         })
         .map_err(err)?;
         let _ = app.emit("session_created", &entry);
+        // A fork with a worktree always creates it above; other forks share a checkout.
+        if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
         Ok(entry)
     })
     .await
@@ -4691,7 +4693,10 @@ mod command_tests {
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());
         assert_eq!(session.active_tab, None);
-        assert_eq!(session.worktree_name, None);
+        // Opening an existing checkout records its workspace identity without
+        // creating another worktree or inventing creation-time provenance.
+        assert_eq!(session.worktree_name.as_deref(), Some("external"));
+        assert!(session.base_ref.is_none() && session.worktree_base.is_none());
         assert_eq!(git(&project, &["worktree", "list", "--porcelain"]), before);
         assert_eq!(crate::store::index::load().unwrap(), vec![session]);
     }
@@ -5335,7 +5340,7 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>, local_vm_tasks: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
@@ -5345,6 +5350,9 @@ pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Optio
     }
     if let Some(on) = orchestrator_runs {
         settings.experimental.orchestrator_runs = on;
+    }
+    if let Some(on) = local_vm_tasks {
+        settings.experimental.local_vm_tasks = on;
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
@@ -5561,6 +5569,15 @@ pub fn orchestrator_limits(project_path: String) -> crate::store::settings::Orch
 pub async fn orchestration_approve(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.orchestration("approve", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
+}
+
+/// A person starts a `planned` run, of a project that asks for no approval,
+/// from the Run view (PRO-365): its ready pieces start as `runs start` starts
+/// them, and the lead is told.
+#[tauri::command]
+pub async fn orchestration_start(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("startPlanned", serde_json::json!({"id": id})).map_err(err)).await.map_err(err)?
 }
 
 /// Stop a run, or discard a plan nobody approved.
