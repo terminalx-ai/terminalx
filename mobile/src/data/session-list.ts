@@ -1,6 +1,6 @@
 import { projectHueByName } from "@terminalx/portable/botFace";
 import { isPlaceholderBranch } from "@terminalx/portable/worktreeNames";
-import { conversationLabel, providerName } from "./conversations";
+import { conversationLabel, providerName, tabTitle } from "./conversations";
 import type { SessionSummary } from "./host-api";
 
 /** What a chat asks of the reader: an answer, patience, or nothing. */
@@ -120,10 +120,13 @@ export function shortTime(time: number, now = Date.now()): string {
 /** One of the chats a branch holds: a tab on the Mac. */
 export interface BranchChat { id: string; name: string; harness: string; state: ChatState; unread: boolean }
 
-/** The chats a branch holds, as the Mac's tab strip lists them: each by its own title, else its agent's name. */
+/**
+ * The chats a branch holds, as the Mac's tab strip lists them: each by the
+ * name made for it, else its own title, else its agent's name.
+ */
 export function branchChats(session: SessionSummary): BranchChat[] {
   return session.tabs.map((tab) => {
-    const title = tab.title?.trim();
+    const title = tabTitle(tab);
     const own = title && title !== providerName(tab.harness);
     return {
       id: tab.id,
