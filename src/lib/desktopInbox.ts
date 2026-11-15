@@ -3,7 +3,7 @@ import { getAccount, subscribeAccount } from "@/lib/account";
 import { privacyEnabled, subscribeDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { CloudInboxSubscriber, type InboxEvent, type InboxStorage, type InboxTransport } from "@/lib/cloudInbox";
 import { configureCloudReadMarkers, enableCloudReadMarkerWrites, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
-import { invalidateCloudInboxWorkspace } from "@/lib/cloudCatalog";
+import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog } from "@/lib/cloudCatalog";
 
 /** Exact commands implemented by the shared contracts worker. Use the existing
  * privacy-aware invoke wrapper; tokens and account fencing remain native.
@@ -34,6 +34,8 @@ export function applyDesktopInboxEvent(event: InboxEvent) {
       break;
     case "workspace.read-marker-changed":
       reconcileCloudReadMarker(event.organizationId, event.workspaceId, event.payload);
+      // Hints are coalesced/budgeted; the payload need not be the latest PUT.
+      invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
   }
   // Accepted events are access hints and self read markers. None is a completion/attention
@@ -46,7 +48,7 @@ export function bootDesktopInbox() {
     setItem: (key, value) => localStorage.setItem(key, value),
     removeItem: (key) => localStorage.removeItem(key),
   };
-  const subscriber = new CloudInboxSubscriber(transport, storage, applyDesktopInboxEvent);
+  const subscriber = new CloudInboxSubscriber(transport, storage, applyDesktopInboxEvent, resyncCloudInboxCatalog);
   let identity: string | null = null;
   let revision: string | null = null;
   let generation = 0;

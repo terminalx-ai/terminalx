@@ -3,7 +3,7 @@ const f = vi.hoisted(() => ({
   status: { state: "signed-in", context: { account: "a", revision: "1" } },
   listeners: new Set<() => void>(), privacyListeners: new Set<() => void>(), private: false,
   api: { phase2DesktopContractsAvailable: vi.fn(), desktopInboxStream: vi.fn(), desktopInbox: vi.fn(), desktopInboxReceipts: vi.fn(), cloudWorkspaceReadMarker: vi.fn() },
-  invoke: vi.fn(), invalidate: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), enable: vi.fn(),
+  resync: vi.fn(), invoke: vi.fn(), invalidate: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), enable: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ invoke: f.invoke }));
 f.invoke.mockImplementation((command, args) => {
@@ -18,7 +18,7 @@ f.invoke.mockImplementation((command, args) => {
 });
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: f.status }), subscribeAccount: (fn: () => void) => { f.listeners.add(fn); return () => f.listeners.delete(fn); } }));
 vi.mock("@/lib/dataPrivacy", () => ({ PRIVACY_MESSAGE: "Turned off by data privacy mode", privacyEnabled: () => f.private, subscribeDataPrivacy: (fn: () => void) => { f.privacyListeners.add(fn); return () => f.privacyListeners.delete(fn); } }));
-vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudInboxWorkspace: f.invalidate }));
+vi.mock("@/lib/cloudCatalog", () => ({ invalidateCloudInboxWorkspace: f.invalidate, resyncCloudInboxCatalog: f.resync }));
 vi.mock("@/lib/cloudReadMarkers", async (original) => {
   const actual = await original<typeof import("./cloudReadMarkers")>();
   f.configure.mockImplementation(actual.configureCloudReadMarkers);
@@ -117,4 +117,25 @@ describe("desktop inbox integration", () => {
     expect(f.invalidate).toHaveBeenCalledWith("private", undefined, true);
     expect(f.reconcile).not.toHaveBeenCalled();
   });
+});
+
+it("treats a coalesced marker as a catalog invalidation, retaining the monotonic hint", () => {
+  const payload = { sessionId: "runtime-session", readAt: "2026-11-14T10:00:00Z" };
+  applyDesktopInboxEvent({ id: "40", workspaceId: "w", organizationId: "o", type: "workspace.read-marker-changed", payload, createdAt: payload.readAt });
+  expect(f.reconcile).toHaveBeenCalledWith("o", "w", payload);
+  expect(f.invalidate).toHaveBeenCalledWith("w", "o");
+});
+it("resyncs startup even beyond retained history, but never while held or private", async () => {
+  localStorage.setItem("terminalx.inbox.v1:a", '{"cursor":"9223372036854775807","seen":[],"receipts":[]}');
+  f.api.phase2DesktopContractsAvailable.mockResolvedValue(true);
+  bootDesktopInbox(); await vi.advanceTimersByTimeAsync(0);
+  expect(f.resync).toHaveBeenCalledTimes(1);
+  expect(f.api.desktopInboxStream).toHaveBeenCalledWith("9223372036854775807", "9223372036854775807");
+  resetDesktopInbox(); f.resync.mockClear();
+  f.api.phase2DesktopContractsAvailable.mockResolvedValue(false);
+  bootDesktopInbox(); await vi.advanceTimersByTimeAsync(0);
+  expect(f.resync).not.toHaveBeenCalled();
+  resetDesktopInbox(); f.private = true;
+  bootDesktopInbox(); await vi.advanceTimersByTimeAsync(0);
+  expect(f.resync).not.toHaveBeenCalled();
 });
