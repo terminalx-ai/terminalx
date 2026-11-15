@@ -38,6 +38,13 @@ const light: Record<ThemeName, Palette> = {
   Ember: dark.Ember,
 };
 
+export const THEMES: readonly ThemeName[] = ["Den", "Slate", "Moss", "Ember"];
+
+/** A theme's colours in the phone's current appearance: Settings draws each theme with its own (#987). */
+export function themePalette(name: ThemeName, scheme: string | null | undefined): Palette {
+  return (scheme === "light" ? light : dark)[name];
+}
+
 const ThemeContext = createContext<{ name: ThemeName; palette: Palette; setName(name: ThemeName): void } | null>(null);
 const THEME_KEY = "terminalx:theme";
 
@@ -46,7 +53,7 @@ export function ThemeProvider({ children }: PropsWithChildren) {
   const [name, setNameState] = useState<ThemeName>("Den");
   useEffect(() => { void AsyncStorage.getItem(THEME_KEY).then((value) => { if (value && value in dark) setNameState(value as ThemeName); }); }, []);
   const setName = (next: ThemeName) => { setNameState(next); void AsyncStorage.setItem(THEME_KEY, next); };
-  const value = useMemo(() => ({ name, palette: (scheme === "light" ? light : dark)[name], setName }), [name, scheme]);
+  const value = useMemo(() => ({ name, palette: themePalette(name, scheme), setName }), [name, scheme]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 

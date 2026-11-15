@@ -9,11 +9,13 @@ import { isAuthCallbackUrl, type CloudSession } from "../auth/protocol";
 import { HostApi, type SessionSummary } from "../data/host-api";
 import { handleNotificationEvent, restoreLocalNotifications } from "../notifications/local";
 import { discoverMachines, pairDiscoveredMachine, signOutPairing, type InstallationState } from "../pairing/account";
+import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing, type PairingProgress } from "../pairing/pair";
 import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/parse";
 import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
+import { readAccountMachinePrefs, setAccountMachineHidden, setAccountMachineName, takeAccountMachinePrefs, type AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 import { phoneNetwork } from "../transport/network";
@@ -23,7 +25,12 @@ interface AppContextValue {
   ready: boolean;
   session: CloudSession | null;
   hosts: StoredHost[];
+  /** Every machine signed in to the account, paired here or not (#987). */
+  accountHosts: AccountHost[];
+  /** The account's machines not paired on this phone. */
   availableHosts: AccountHost[];
+  /** Names typed on this phone, and hidden flags, for account machines not paired here (#987). */
+  accountMachinePrefs: AccountMachinePrefs;
   installationState: InstallationState;
   activeHost: StoredHost | null;
   connectionStage: ConnectionStage;
@@ -54,6 +61,10 @@ interface AppContextValue {
   renameHost(hostId: string, name: string): Promise<void>;
   /** Drop the connection to a computer and make it again (connecting to it if it was not the active one). */
   reconnectHost(hostId: string): Promise<void>;
+  /** Call an account machine that is not paired here something else on this phone; empty goes back to its own name. */
+  renameAccountMachine(hostId: string, name: string): Promise<void>;
+  /** Hide an account machine that is not paired here from this phone's list, or show it again. */
+  hideAccountMachine(hostId: string, hidden: boolean): Promise<void>;
   refreshSessions(silent?: boolean): Promise<void>;
   clearError(): void;
 }
@@ -68,7 +79,8 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<CloudSession | null>(null);
   const [hosts, setHosts] = useState<StoredHost[]>([]);
-  const [availableHosts, setAvailableHosts] = useState<AccountHost[]>([]);
+  const [accountHosts, setAccountHosts] = useState<AccountHost[]>([]);
+  const [accountMachinePrefs, setAccountMachinePrefs] = useState<AccountMachinePrefs>({});
   const [installationState, setInstallationState] = useState<InstallationState>("ready");
   const [activeHost, setActiveHost] = useState<StoredHost | null>(null);
   const activeHostRef = useRef<StoredHost | null>(null);
@@ -127,7 +139,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       activeHostRef.current = null;
       setActiveHost(null);
       setSessions([]);
-      setAvailableHosts([]);
+      setAccountHosts([]);
       forgetConversationState("");
       await clearTranscriptCaches();
       api.resetConnection(true);
@@ -148,7 +160,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       const currentSession = await refreshCloudSession(session);
       if (!currentSession) return;
       const result = await discoverMachines(currentSession);
-      setAvailableHosts(result.hosts);
+      setAccountHosts(result.hosts);
       setInstallationState(result.installationState);
       await loadHosts();
     } catch (cause) {
@@ -215,6 +227,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     const startup = new AbortController();
+    void readAccountMachinePrefs().then((prefs) => { if (!startup.signal.aborted) setAccountMachinePrefs(prefs); }).catch(() => undefined);
     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
       let effectiveSession = storedSession;
       if (storedSession) {
@@ -340,7 +353,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     await signOutPairing(session);
     await revokeCloudSession(session);
     setSession(null);
-    setAvailableHosts([]);
+    setAccountHosts([]);
     setSessions([]);
     await loadHosts();
   }, [api, connection, loadHosts, session]);
@@ -353,6 +366,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       const currentSession = await refreshCloudSession(session);
       if (!currentSession) return;
       await pairDiscoveredMachine(currentSession, host);
+      // A name typed on this phone before pairing stays its name once paired.
+      const { prefs, taken } = await takeAccountMachinePrefs(host.hostId);
+      if (taken?.customName) await setHostNames(host.hostId, { customName: taken.customName });
+      setAccountMachinePrefs(prefs);
       await refreshMachines();
     } catch (cause) {
       setError(readableError(cause));
@@ -404,6 +421,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [connection]);
 
   const forgetHost = useCallback(async (hostId: string) => {
+    // A machine still on the account would be offered again at once under "Available to pair":
+    // forgetting it also hides it on this phone (#987). Pairing it again shows it again.
+    const forgotten = (await readHosts()).find((host) => host.id === hostId);
+    const onAccount = forgotten ? accountHosts.find((host) => host.hostPublicKeyB64 === forgotten.publicKeyB64 && accountHostIdentityMatches(host)) : undefined;
     if (activeHostRef.current?.id === hostId) {
       // Where possible, the computer drops this phone from its paired devices too. It can only be asked
       // over a live connection to it; whatever it answers, the phone forgets it.
@@ -412,8 +433,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
     forgetConversationState(JSON.stringify([hostId]).slice(0, -1) + ",");
     await removeHost(hostId);
+    if (onAccount) setAccountMachinePrefs(await setAccountMachineHidden(onAccount.hostId, true));
     await loadHosts();
-  }, [api, disconnectHost, loadHosts]);
+  }, [accountHosts, api, disconnectHost, loadHosts]);
 
   const renameHost = useCallback(async (hostId: string, name: string) => {
     adoptHost(await setHostNames(hostId, { customName: cleanHostName(name) }));
@@ -429,7 +451,21 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (host) await connectHost(host);
   }, [connectHost, connection]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions]);
+  const renameAccountMachine = useCallback(async (hostId: string, name: string) => {
+    setAccountMachinePrefs(await setAccountMachineName(hostId, name));
+  }, []);
+
+  const hideAccountMachine = useCallback(async (hostId: string, hidden: boolean) => {
+    setAccountMachinePrefs(await setAccountMachineHidden(hostId, hidden));
+  }, []);
+
+  // Worked out from the current pairings, so a machine forgotten here is offered for pairing again at once.
+  const availableHosts = useMemo(() => {
+    const paired = new Set(hosts.map((host) => host.publicKeyB64));
+    return accountHosts.filter((host) => !paired.has(host.hostPublicKeyB64));
+  }, [accountHosts, hosts]);
+
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, accountHosts, availableHosts, accountMachinePrefs, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, pairingProgress, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, renameAccountMachine, hideAccountMachine, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

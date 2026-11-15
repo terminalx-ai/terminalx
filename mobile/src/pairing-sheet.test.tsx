@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
@@ -20,7 +20,7 @@ vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => tr
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({
   ready: true, session: null, hosts: [], error: null, clearError: () => {}, pairCode: mocks.pairCode,
 }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({}) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({}), useFocusEffect: (effect: () => void) => useEffect(effect, [effect]) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-camera", async () => {
   const { useEffect } = await import("react");
@@ -56,7 +56,7 @@ vi.mock("react-native", () => {
 vi.mock("@mobile/ui/primitives", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return { Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
-    Card: Box, Screen: Box, SectionTitle: Box, EmptyState: Box, StatusDot: () => null };
+    Card: Box, Screen: ({ children, titleActions }: any) => <div>{titleActions}{children}</div>, SectionTitle: Box, EmptyState: Box, StatusDot: () => null };
 });
 let root: Root;
 let container: HTMLDivElement;
@@ -65,7 +65,7 @@ const click = async (label: string) => { await act(async () => {
   if (!button) throw new Error(`Missing button: ${label}`);
   button.click();
 }); };
-const open = () => click("Use QR code or pairing code");
+const open = () => click("Add a machine");
 beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.pairCode.mockReset();

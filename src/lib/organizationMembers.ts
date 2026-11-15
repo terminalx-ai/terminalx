@@ -12,6 +12,8 @@ export interface OrganizationMember {
   email: string;
   displayName?: string;
   photoUrl?: string;
+  /** Membership creation time in milliseconds; absent on older servers. */
+  createdAt?: number;
   role: string;
 }
 

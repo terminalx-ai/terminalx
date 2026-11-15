@@ -881,3 +881,32 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   the new role. The revocation closes the connection, drops the queued
   follow-up and rotates the key. An outsider (not a member) never gets an
   attachment; that is the API's 404 and is tested there.
+
+### Cached organization roster and profiles (PRO-128)
+
+`organizationRoster.ts` keeps one in-memory roster per organization. Concurrent
+reads coalesce, consecutive Share-dialog opens reuse the result for one minute,
+and subscribed surfaces refresh expired rosters. Membership mutations replace the
+cached roster, retiring earlier reads; access/presence changes invalidate that
+organization. The desktop has no dedicated organization-event feed yet, so the
+expiry and Members refresh action also reconcile changes made elsewhere. Sign-out
+and leaving an organization discard its details and late responses.
+
+The Share dialog, Members page, participants bar and session-header faces use
+`MemberProfile`: a photo (initials if absent or broken), name, email, organization
+role, membership join date and a presence slot. Workspace driver/viewer roles stay
+on the surrounding workspace UI. Members' action menus offer View profile and
+Copy user info (name, email, user ID), with clipboard success/failure feedback.
+The desktop roster API and native bridge carry membership `createdAt` as epoch
+milliseconds; older servers omit it and profiles say the join date is unavailable.
+
+The roster enhancement is controlled per organization by `team.roster.v1` from
+PRO-252. A missing or false capability keeps the prior per-dialog reads, names
+and noninteractive initials. A capability refresh that kills the flag unmounts
+profiles and member action menus, clears cached details, stops polling and
+retires in-flight cache reads/mutations. The additive API timestamp remains
+available independently of rollout. The deployed server foundation supplies the
+per-organization flags; `src/lib/featureFlags.ts` shares the account's refresh.
+Data privacy mode also withdraws profiles, suppresses external avatar images,
+clears the roster cache, stops its polling and retires pending reads. Disabling
+privacy restores the server's current rollout state and fetches a fresh roster.

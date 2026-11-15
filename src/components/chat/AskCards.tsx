@@ -5,7 +5,7 @@ import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
-import { askAgentNote, type PendingAsk } from "@/lib/transcript";
+import { askAgentNote, questionAnswers, questionsLabel, toggleQuestionChoice, type PendingAsk, type QuestionChoices } from "@/lib/transcript";
 import { approvalFiles, rawPatch } from "@/lib/approvalDiff";
 import { ApprovalDiff, Counts } from "./ApprovalDiff";
 import { LinkedText } from "./LinkedText";
@@ -207,7 +207,7 @@ export function QuestionCard({
 }) {
   const blocked = !!blockedReason;
   /** Per question index, the chosen option indices, in the order they were picked. */
-  const [chosen, setChosen] = useState<Record<number, number[]>>({});
+  const [chosen, setChosen] = useState<QuestionChoices>({});
   /** Per question index, the typed answer. */
   const [free, setFree] = useState<Record<number, string>>({});
   const textProps = usePromptTextProps();
@@ -219,22 +219,10 @@ export function QuestionCard({
   }, []);
   const questions = ask.questions ?? [];
 
-  const toggle = (question: number, option: number, multi: boolean) => {
-    setChosen((c) => {
-      const cur = c[question] ?? [];
-      const next = !multi ? [option] : cur.includes(option) ? cur.filter((i) => i !== option) : [...cur, option];
-      return { ...c, [question]: next };
-    });
-  };
+  const toggle = (question: number, option: number, multi: boolean) => setChosen((c) => toggleQuestionChoice(c, question, option, multi));
 
-  const submit = () => {
-    const out: Record<string, string> = {};
-    questions.forEach((q, qi) => {
-      const v = free[qi]?.trim() || (chosen[qi] ?? []).map((oi) => q.options[oi].label).join(", ");
-      if (v) out[q.question] = v;
-    });
-    onAnswer(out);
-  };
+  // The phone's card sends the same (`questionAnswers`), so the agent reads one format from either device.
+  const submit = () => onAnswer(questionAnswers(questions, chosen, free));
 
   return (
     <form
@@ -246,7 +234,7 @@ export function QuestionCard({
     >
       <AskShell
         icon={<MessageCircleQuestion className="size-3.5" />}
-        label={questions.length > 1 ? `${questions.length} questions` : "Question"}
+        label={questionsLabel(questions.length)}
         tone="info"
         aside={aside}
         note={blocked ? blockedReason : null}

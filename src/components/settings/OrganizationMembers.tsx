@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Loader2, RefreshCw } from "@/icons";
+import { Check, Copy, Loader2, MoreHorizontal, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
   isInvitableEmail,
@@ -13,21 +13,33 @@ import {
   type PendingInvite,
 } from "@/lib/organizationMembers";
 
+import { readOrganizationRoster, mutateOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { useFeatureFlag, featureFlags } from "@/lib/featureFlags";
+import { MemberProfile } from "@/components/people/MemberProfile";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/menu";
+
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
 const roleLabel = (role: string) => ROLE_LABEL[role] ?? role;
 /** How long after a failed roster read the one automatic retry is made. */
 const MEMBERS_RETRY_DELAY_MS = 400;
 const selectClass = "h-7 rounded-md border border-hairline bg-background px-1.5 text-xs disabled:opacity-60";
 
-export function OrganizationMembers({
-  accountEmail,
-  contextRevision,
-}: {
+interface OrganizationMembersProps {
   accountEmail: string;
+  organizationId?: string;
   /** The account's context revision; a change reloads the roster. */
   contextRevision: string;
-}) {
-  const [roster, setRoster] = useState<OrganizationRoster | null>(null);
+}
+export function OrganizationMembers(props: OrganizationMembersProps) {
+  const profiles = useFeatureFlag(featureFlags.teamRoster, props.organizationId);
+  // A rollout kill unmounts open profiles, action menus and pending UI callbacks.
+  return <OrganizationMembersContent key={profiles ? "profiles" : "legacy"} {...props} profiles={profiles} />;
+}
+function OrganizationMembersContent({ accountEmail, contextRevision, organizationId, profiles }: OrganizationMembersProps & { profiles: boolean }) {
+  const cached = useOrganizationRoster(organizationId, profiles);
+  const [localRoster, setLocalRoster] = useState<OrganizationRoster | null>(null);
+  const { error: rosterError, loading: rosterLoading } = cached;
+  const roster = profiles ? cached.roster : localRoster;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -42,15 +54,18 @@ export function OrganizationMembers({
   const loadSeq = useRef(0);
 
   // A reload after a refused action keeps the refusal on screen.
-  const load = useCallback(async (keepError = false) => {
+  const load = useCallback(async (keepError = false, refresh = true) => {
     const current = ++loadSeq.current;
     const context = contextEpoch.current;
     const fresh = () => current === loadSeq.current && context === contextEpoch.current;
     setLoading(true);
+    const read = (freshRead: boolean) => profiles
+      ? readOrganizationRoster(organizationId, { active: true, contextRevision, fresh: freshRead })
+      : organizationMembers.list();
     try {
       let next: OrganizationRoster;
       try {
-        next = await organizationMembers.list();
+        next = await read(refresh);
       } catch (failure) {
         // The first read after Settings opens often races the account
         // session's own refresh. Ask once more, shortly after, before saying
@@ -58,10 +73,10 @@ export function OrganizationMembers({
         if (!isTransientMembersError(failure) || !fresh()) throw failure;
         await new Promise((resolve) => setTimeout(resolve, MEMBERS_RETRY_DELAY_MS));
         if (!fresh()) return;
-        next = await organizationMembers.list();
+        next = await read(true);
       }
       if (fresh()) {
-        setRoster(next);
+        if (!profiles) setLocalRoster(next);
         if (!keepError) setError(null);
       }
     } catch (failure) {
@@ -69,15 +84,15 @@ export function OrganizationMembers({
     } finally {
       if (fresh()) setLoading(false);
     }
-  }, []);
+  }, [organizationId, contextRevision, profiles]);
 
   useEffect(() => {
-    setRoster(null);
+    setLocalRoster(null);
     setIssued(null);
     setConfirmRemove(null);
     setBusy(null);
     setError(null);
-    void load();
+    void load(false, false);
     return () => {
       contextEpoch.current += 1;
     };
@@ -89,18 +104,20 @@ export function OrganizationMembers({
     setBusy(key);
     setError(null);
     try {
-      const next = await run(roster.contextRevision);
+      const next = await (profiles
+        ? mutateOrganizationRoster(organizationId, contextRevision, () => run(roster.contextRevision))
+        : run(roster.contextRevision));
       if (current !== contextEpoch.current) return null;
       // Newer than any list read still in flight; retire those reads.
       loadSeq.current += 1;
       setLoading(false);
-      setRoster(next);
+      if (!profiles) setLocalRoster(next);
       return next;
     } catch (failure) {
       if (current !== contextEpoch.current) return null;
       setError(membersErrorMessage(failure));
       // The server is authoritative; re-read so the list shows what it holds.
-      void load(true);
+      void load(true, !profiles);
       return null;
     } finally {
       if (current === contextEpoch.current) setBusy(null);
@@ -118,17 +135,18 @@ export function OrganizationMembers({
     }
   };
 
+  const shownError = error ?? (rosterError ? membersErrorMessage(rosterError) : null);
   if (!roster) {
     return (
       <div className="rounded-lg border border-hairline p-3">
         <div className="text-sm font-medium">Members</div>
-        {loading ? (
+        {loading || rosterLoading ? (
           <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" /> Loading members…
           </div>
         ) : (
           <div className="mt-2 flex items-center gap-2">
-            <p className="text-xs text-destructive">{error}</p>
+            <p className="text-xs text-destructive">{shownError}</p>
             <Button variant="ghost" size="xs" onClick={() => void load()}>
               Retry
             </Button>
@@ -149,7 +167,7 @@ export function OrganizationMembers({
     <div className="rounded-lg border border-hairline p-3">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Members</div>
-        <Button variant="ghost" size="icon-xs" aria-label="Refresh members" disabled={loading} onClick={() => void load()}>
+        <Button variant="ghost" size="icon-xs" aria-label="Refresh members" disabled={loading || rosterLoading} onClick={() => void load()}>
           <RefreshCw className={loading ? "animate-spin" : undefined} />
         </Button>
       </div>
@@ -162,6 +180,7 @@ export function OrganizationMembers({
           <MemberRow
             key={member.userId}
             member={member}
+            profiles={profiles}
             isSelf={member.email.toLowerCase() === self}
             manage={manage}
             busy={busy}
@@ -246,13 +265,14 @@ export function OrganizationMembers({
       )}
 
       {issued && <IssuedNotice invite={issued} copied={copied} onCopied={() => setCopied(true)} />}
-      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      {shownError && <p className="mt-2 text-xs text-destructive">{shownError}</p>}
     </div>
   );
 }
 
 function MemberRow({
   member,
+  profiles,
   isSelf,
   manage,
   busy,
@@ -263,6 +283,7 @@ function MemberRow({
   onConfirmRemove,
 }: {
   member: OrganizationMember;
+  profiles: boolean;
   isSelf: boolean;
   manage: boolean;
   busy: string | null;
@@ -274,6 +295,19 @@ function MemberRow({
   onConfirmRemove: () => void;
 }) {
   const name = member.displayName ?? member.email;
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!copyNotice) return;
+    const timer = setTimeout(() => setCopyNotice(null), 4000);
+    return () => clearTimeout(timer);
+  }, [copyNotice]);
+  const copyInfo = async () => {
+    try {
+      await navigator.clipboard.writeText(`Name: ${name}\nEmail: ${member.email}\nUser ID: ${member.userId}`);
+      setCopyNotice("User info copied.");
+    } catch { setCopyNotice("Could not copy user info. Try again."); }
+  };
   // The role being saved, shown while the request runs. Whatever the outcome
   // the select then shows the server's value again: a refused change (no
   // permission, a plan that does not allow it, an error) must not leave the
@@ -298,6 +332,7 @@ function MemberRow({
   return (
     <li className="py-2" aria-label={member.email}>
       <div className="flex items-center gap-2">
+        {profiles && <MemberProfile member={member} className="size-7" open={profileOpen} onOpenChange={setProfileOpen} />}
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium">
             {name}
@@ -326,7 +361,17 @@ function MemberRow({
         ) : (
           <span className="text-[11px] text-muted-foreground">{roleLabel(member.role)}</span>
         )}
+        {profiles && <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label={`Actions for ${name}`}><MoreHorizontal /></Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent onCloseAutoFocus={(event) => { if (profileOpen) event.preventDefault(); }}>
+            <DropdownMenuItem onSelect={() => setProfileOpen(true)}>View profile</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void copyInfo()}>Copy user info</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>}
       </div>
+      {copyNotice && <div role="status" className="fixed bottom-4 right-4 z-(--z-menu) rounded-lg bg-popover px-4 py-3 text-xs shadow-surface hairline">{copyNotice}</div>}
       {confirming && (
         <div className="mt-2 rounded-md border border-destructive/25 bg-destructive/5 p-2">
           <p className="text-[11px] leading-relaxed text-muted-foreground">

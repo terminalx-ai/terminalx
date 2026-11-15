@@ -2,7 +2,7 @@
 import { act, cloneElement, isValidElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TranscriptList } from "./TranscriptList";
+import { revealShift, TranscriptList } from "./TranscriptList";
 
 const flipped = (style: any): boolean => [style].flat(Infinity).some((part) => part?.transform?.some?.((step: any) => step.scaleY === -1));
 
@@ -52,5 +52,19 @@ describe("TranscriptList empty state", () => {
     const NotReadable = () => <Empty title="Not readable on this phone yet" />;
     act(() => root.render(<TranscriptList data={[]} renderItem={() => null} ListEmptyComponent={NotReadable} />));
     expect(upright("Not readable on this phone yet")).toBe(true);
+  });
+});
+
+// #979: a text field in a card at the latest edge, once the keyboard has shortened the list.
+describe("bringing a view inside the transcript into sight", () => {
+  it("moves the content only as far as the view needs", () => {
+    // What can be seen runs from 100 to 400.
+    expect(revealShift(180, 44, 100, 400)).toBe(0);
+    // Pushed off the top by the keyboard: down, until its top is in sight.
+    expect(revealShift(40, 44, 100, 400)).toBe(60);
+    // Behind the composer: up, until its foot is in sight.
+    expect(revealShift(380, 44, 100, 400)).toBe(-24);
+    // Taller than the room: its top.
+    expect(revealShift(150, 400, 100, 400)).toBe(-50);
   });
 });

@@ -2217,6 +2217,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.promoteToAgent",
         "session.send",
         "permission.respond",
+        // Answering an agent's question, as the desktop's question card does (#979).
+        "questions.respond",
         "sessions.create",
         "mac.setSettings",
         // The session controls a phone has as the desktop does (#706).
@@ -2272,6 +2274,9 @@ mod tests {
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
         assert!(!allowed_method(DeviceScope::Viewer, "permission.respond"));
+        // #979: a question is answered by whoever may answer a permission request.
+        assert!(allowed_method(DeviceScope::Driver, "questions.respond"));
+        assert!(!allowed_method(DeviceScope::Viewer, "questions.respond"));
         assert!(allowed_method(
             DeviceScope::Driver,
             "pairing.provisionRelay"

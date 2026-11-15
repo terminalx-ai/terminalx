@@ -344,11 +344,13 @@ export class CloudWorkspaceSession {
   }
 
   /**
-   * Answer a permission request. The right to approve is its own right
-   * (contract §21.4): a viewer who has it may answer, a driver who lacks it
-   * may not. One decision per request.
+   * Answer a permission request (`optionId`), or an agent's question
+   * (`answers`: each question's text to its answer, `{}` to skip it, as the
+   * desktop sends it; #979). The right to approve is its own right (contract
+   * §21.4): a viewer who has it may answer, a driver who lacks it may not.
+   * One decision per request.
    */
-  decide(tabId: string, decision: { requestId: string; optionId: string }): Promise<OutboxEntry> {
+  decide(tabId: string, decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> }): Promise<OutboxEntry> {
     if (!this.snapshot.canApprove) return Promise.reject(new CloudSendError("cannot-approve"));
     return this.command(tabId, "permission-decision", decision, {});
   }
