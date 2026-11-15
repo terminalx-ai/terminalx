@@ -96,6 +96,7 @@ User-facing webview choices are under `preferences`, for example:
     "reviewDiffLines": 400,
     "triesPerPiece": 3,
     "effortCeiling": "high",
+    "leadTakesOver": true,
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
@@ -112,7 +113,9 @@ blocked (`triesPerPiece`, 1 to 6) and the effort escalation raises it no higher 
 (`effortCeiling`: `low`, `medium`, `high`, `xhigh` or `max`). A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
 the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
-value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
+value. Each budget value, and the window level, may be `"none"` for No limit. `leadTakesOver`
+(app-wide only, on unless the person turned it off) lets a run's own lead take a blocked piece
+over itself, also in a run a person approved. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -940,17 +943,27 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
 
 #### A blocked piece
 
-- **Take over in lead.** `terminalx runs take-over <piece> --json` hands the piece to you:
+- **Take over in lead.** `terminalx runs take-over <piece> --json`, run from your own
+  conversation (no other session's), hands the piece to you, also in a run a person approved,
+  unless they turned off "Let the lead take over blocked pieces" in Settings → Orchestration
+  (then it is refused with `person_only`, and taking it over is theirs):
   you are sent its goal, what each try came to and where its work is, its worker's last
   report and the files it names outside the piece's own. The piece is `lead`. Finish it in
-  your own checkout (you are not held to its files), commit, then run
+  your own checkout, commit, then run
   `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
   your checkout, and when they pass the piece is `done` and what waits for it can start. It
   is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
   `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
   run's budget from the moment you are asked until the piece is settled. Nothing is merged
   while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
-  counts only what you committed.
+  counts only what you committed since you took the piece over. When that is nothing because
+  you brought the piece's branch in just before, it counts what that branch changed since its
+  try started, once your branch holds its tip. A piece the person asked you to take over is
+  not held to its files. One you took over yourself in a run they approved is: `finish`
+  refuses a change outside the files it owns (both sides of a rename count) with
+  `person_only`, naming them, and nothing is checked. Widening it is theirs, so tell them
+  which files it needs and why. Once a piece is with you, its earlier worker's reports no
+  longer move it.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
   (step `widened`), briefed with what went before. Without `--own` it takes the files the
@@ -959,8 +972,8 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   `failed`. A try after a widening that falls short blocks the piece again: there is no
   ladder after it. A person approved the files each piece owns, so in a run they approved
   only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
-  So are taking a piece over and skipping one in a run they approved: from the CLI those are
-  for a run that asked for no approval.
+  So is skipping one in a run they approved: from the CLI that is for a run that asked for no
+  approval.
 - **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
   piece's last worker the note in its own session and worktree, as yours (a person's note
   says it is theirs). The piece is `running`
@@ -970,8 +983,11 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   out with it (`skipped` lists them all). The run is done once every other piece is merged.
   It asks no model, so it works while the run is paused on its budget.
 
-The person's choice is told to you in your session. Do not act on a blocked piece yourself
-unless the person asks you to; a piece you took over is yours to finish or skip.
+The person's choice is told to you in your session. Taking a blocked piece over is yours to
+decide when it fits: its goal and done-checks stay as planned, you finish it in your checkout,
+and `runs finish` checks it. Widening its files or leaving it out changes what a person
+approved: in a run they approved, ask them. A piece you took over is yours to finish, or, in a
+run nobody approved, to skip.
 
 So after `wait` returns, read the run, not only the reports: `sessions report` still lists
 the worker that fell short with its `failed` report (or with a `done` report whose result

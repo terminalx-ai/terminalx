@@ -224,6 +224,10 @@
           ],
           "type": "string"
         },
+        "leadTakesOver": {
+          "description": "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
+          "type": "boolean"
+        },
         "pieceLimit": {
           "description": "A larger plan is refused, and the lead is told the limit.",
           "maximum": 50,
