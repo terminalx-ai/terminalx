@@ -976,9 +976,24 @@ fn file_line(run: &Run, file: &ConflictFile) -> String {
 /// merged: the conflict, or what the integration check printed. `None` for a
 /// piece whose merge did not fail.
 pub fn brief(run: &Run, piece: &Piece) -> Option<String> {
+    brief_with_base(run, piece, None)
+}
+
+/// A sent-back worker replays only its own commits onto the newly prepared
+/// baseline. Replaying dependency commits can resurrect already integrated work.
+pub(super) fn brief_with_base(run: &Run, piece: &Piece, base: Option<&str>) -> Option<String> {
     let merge = piece.current_merge()?;
     let into = run.merge.as_ref().map(|merge| merge.into.as_str()).filter(|into| !into.is_empty()).unwrap_or("the lead's branch");
-    let rebase = format!("Bring your branch up to date with it: run `git rebase {into}` in your worktree");
+    let rebase = match base {
+        Some(base) => {
+            let command = match piece.tries.last().and_then(|attempt| attempt.base_commit.as_deref()) {
+                Some(previous) => format!("git rebase --onto {base} {previous}"),
+                None => format!("git rebase {base}"),
+            };
+            format!("Your new verification baseline is `{base}`, prepared from the current lead and accepted dependencies. Replay only your own changes onto it: run `{command}` in your worktree")
+        }
+        None => format!("Bring your branch up to date with it: run `git rebase {into}` in your worktree"),
+    };
     let said = match merge.state {
         MergeState::Conflict => {
             let files: Vec<String> = merge.files.iter().map(|file| file_line(run, file)).collect();

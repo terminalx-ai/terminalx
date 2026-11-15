@@ -820,7 +820,10 @@ before starting the run. Conflicting or unavailable dependencies prevent launch 
 Each try records this starting commit as `baseCommit`: scope checks and verifier diffs count
 only the worker's changes after it, while conflict checks still use your current branch.
 Dependency preparation does not change the lead's checkout; `runs merge` integrates results
-there after verification. The worker is sent a brief built from its piece (goal, why, scope and out of
+there after verification. When a worker is sent back after a failed merge or integration check,
+TerminalX refreshes its baseline from the current lead and accepted dependencies. Its recovery
+brief gives the exact rebase command to replay only its own changes; trusted lead changes
+are excluded from its next ownership check, while edits to those files are still checked. The worker is sent a brief built from its piece (goal, why, scope and out of
 scope, known facts, files to read first, done-check, limits, report format) and is held to a
 `terminalx-report` block, as with `sessions create --report`.
 

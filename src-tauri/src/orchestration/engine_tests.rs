@@ -79,6 +79,8 @@ struct World {
     resets: Vec<String>,
     /// PRO-361: the lead's checkout, as a piece it took over reads it.
     lead_head: Option<String>,
+    recovery_base: Option<String>,
+    no_recovery_base: bool,
     lead_work: Option<engine::LeadWork>,
     lead_since: Vec<String>,
     /// Done-check commands that fail in the lead's checkout.
@@ -165,6 +167,12 @@ impl Host for Fake {
 
     fn limits(&self, project_path: &str) -> OrchestratorLimits {
         self.settings.lock().unwrap().for_project(project_path)
+    }
+
+    fn worker_base(&self, _run: &Run, _piece: &Piece) -> anyhow::Result<String> {
+        let world = self.world();
+        anyhow::ensure!(!world.no_recovery_base, "dependency conflict");
+        Ok(world.recovery_base.clone().unwrap_or_else(|| "recovery-base".into()))
     }
 
     fn create_worker(&self, _run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started> {
@@ -2379,6 +2387,109 @@ fn conflicts(id: &str, piece_id: &str) -> String {
 }
 
 #[test]
+fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trusted_lead_changes() {
+    use std::path::Path;
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        crate::git::run(cwd, args).unwrap_or_else(|error| panic!("git {args:?}: {error:#}")).trim().into()
+    }
+    fn commit(cwd: &Path, file: &str, text: &str) -> String {
+        std::fs::create_dir_all(cwd.join(file).parent().unwrap()).unwrap();
+        std::fs::write(cwd.join(file), text).unwrap();
+        git(cwd, &["add", file]);
+        git(cwd, &["commit", "-qm", file]);
+        git(cwd, &["rev-parse", "HEAD"])
+    }
+    for (integration_failure, by_hand) in [(false, false), (true, false), (true, true)] {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let cwd = repo.path();
+        git(cwd, &["init", "-q", "-b", "lead"]);
+        git(cwd, &["config", "user.name", "T"]);
+        git(cwd, &["config", "user.email", "t@example.com"]);
+        commit(cwd, "README", "initial\n");
+        let dependency = cwd.join("dependency");
+        git(cwd, &["worktree", "add", "-qb", "dependency", dependency.to_str().unwrap(), "lead"]);
+        let accepted_dependency = commit(&dependency, "contracts.ts", "export type Contract = string;\n");
+        commit(cwd, "config.ts", "initial lead config\n");
+        let old_base = super::host::dependency_base(cwd, &[("contracts", &accepted_dependency)]).unwrap();
+        assert_eq!(git(cwd, &["rev-list", "--parents", "-n1", &old_base]).split_whitespace().count(), 3, "the starting baseline is a synthetic merge");
+        let worker = cwd.join("worker");
+        git(cwd, &["worktree", "add", "-qb", "worker", worker.to_str().unwrap(), &old_base]);
+        commit(&worker, "src/cli.rs", "consumer of contracts\n");
+
+        let (host, id) = one_piece_for("lead");
+        store::update(&id, |run| {
+            let piece = &mut run.pieces[0];
+            piece.branch = Some("worker".into());
+            piece.tries[0].base_commit = Some(old_base.clone());
+            piece.done_checks = serde_json::from_value(json!([{ "type": "command", "run": "test -f contracts.ts && test -f src/cli.rs" }])).unwrap();
+            Ok(())
+        }).unwrap();
+        let checkout = verify::Checkout { cwd: worker.clone(), base: "lead".into(), branch: Some("worker".into()), commands: true, marks: None };
+        let checked = verify::gates(&checkout, &store::get(&id).unwrap().pieces[0], None, std::time::Duration::from_secs(10));
+        assert!(checked.passed(), "{:?}", checked.gates);
+        host.finds("cli", checked);
+        host.reports("cli", Status::Done, "done");
+        assert_eq!(engine::refreshed(&host, &id).unwrap().pieces[0].state, PieceState::Done);
+
+        // The lead integrates dependencies and unrelated trusted files after this worker starts.
+        git(cwd, &["merge", "--no-edit", "dependency"]);
+        commit(cwd, "trusted.ts", "another accepted piece\n");
+        if !integration_failure {
+            commit(cwd, "src/cli.rs", "lead implementation\n");
+        }
+        if by_hand {
+            git(cwd, &["merge", "--no-edit", "worker"]);
+        }
+        let base = super::host::dependency_base(cwd, &[("contracts", &accepted_dependency)]).unwrap();
+        host.world().recovery_base = Some(base.clone());
+        conflicts(&id, "cli");
+        if integration_failure {
+            store::update(&id, |run| {
+                let merge = run.pieces[0].merge.as_mut().unwrap();
+                merge.state = super::MergeState::IntegrationFailed;
+                merge.by_hand = by_hand;
+                merge.check = Some(verify::CommandRun { run: "integration check".into(), project: true, exit_code: Some(1), passed: false, millis: 1, output: Some("fix the integration".into()) });
+                Ok(())
+            }).unwrap();
+        }
+        let sent = engine::send_back(&host, &id, "cli").unwrap();
+        assert!(!sent.fresh_worker);
+        assert_eq!(store::get(&id).unwrap().pieces[0].tries[0].base_commit.as_deref(), Some(base.as_str()));
+        let session = host.session_of("cli");
+        let brief = host.world().briefs[&session].clone();
+        assert!(brief.contains(&format!("git rebase --onto {base} {old_base}")), "{brief}");
+        // Execute the actual recovery instruction, resolving only the owned file if needed.
+        let rebased = crate::git::raw(&worker, &["rebase", "--onto", &base, &old_base]).unwrap();
+        if integration_failure {
+            assert_eq!(rebased.0, 0, "{}", rebased.1);
+        } else {
+            assert_eq!(rebased.0, 1, "the owned file conflicts: {}", rebased.1);
+            std::fs::write(worker.join("src/cli.rs"), "lead implementation and consumer of contracts\n").unwrap();
+            git(&worker, &["add", "src/cli.rs"]);
+            git(&worker, &["-c", "core.editor=true", "rebase", "--continue"]);
+        }
+        if !by_hand {
+            assert_eq!(crate::git::raw(&worker, &["merge-base", "--is-ancestor", &old_base, "HEAD"]).unwrap().0, 1, "the old synthetic baseline was legitimately replaced");
+        }
+        if integration_failure {
+            commit(&worker, "src/cli.rs", "consumer adjusted to pass integration\n");
+        }
+        git(&worker, &["merge-base", "--is-ancestor", &accepted_dependency, "HEAD"]);
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        assert!(checked.passed(), "{:?}", checked.gates);
+        assert_eq!(checked.facts.files, ["src/cli.rs"]);
+        assert!(!checked.diff.contains("diff --git a/trusted.ts"));
+        assert_eq!(checked.base, base);
+        // Trusted inherited files remain protected against edits by this worker.
+        commit(&worker, "trusted.ts", "worker changed an unowned file\n");
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (Gate::Scope, false));
+        assert!(checked.gates[0].detail.as_ref().unwrap().contains("trusted.ts"));
+    }
+}
+
+#[test]
 fn a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_for_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -2433,6 +2544,15 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
     assert!(told.contains("- b (The second change):") && told.contains("- a (The first change):") && told.contains("from a\n=======\nfrom b") && told.contains(&format!("git merge {commit}")), "{told}");
 
     let worker = host.session_of("b");
+    let resets_before = host.world().resets.clone();
+    host.world().no_recovery_base = true;
+    assert_eq!(engine::send_back(&host, id, "b").unwrap_err().code, "recovery_base_unavailable");
+    let unchanged = store::get(id).unwrap();
+    assert_eq!(unchanged.piece("b").unwrap().state, PieceState::Done);
+    assert_eq!(unchanged.piece("b").unwrap().tries[0].base_commit.as_deref(), Some("fixture-base"));
+    assert!(unchanged.piece("b").unwrap().current_merge().is_some());
+    assert_eq!(host.world().resets, resets_before);
+    host.world().no_recovery_base = false;
     let sent = engine::send_back(&host, id, "b").unwrap();
     // The worker that made the result has it again, in its own worktree: no new session, no step of the ladder.
     assert!(!sent.fresh_worker && !sent.blocked && sent.failed.is_empty());
@@ -2440,8 +2560,9 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
     let piece = sent.run.piece("b").unwrap();
     assert_eq!((piece.state, piece.tries.len(), piece.merge.as_ref(), sent.run.state), (PieceState::Running, 1, None, RunState::Running));
     assert!(piece.tries[0].outcome.is_none() && piece.tries[0].verification.is_none(), "its try is open again, and what was checked is not what it will report");
+    assert_eq!(piece.tries[0].base_commit.as_deref(), Some("recovery-base"));
     let brief = host.world().briefs[&worker].clone();
-    assert!(brief.contains("it no longer merges into `lead`") && brief.contains("- src/shared.rs (1 place; also changed by a (The first change), already merged)") && brief.contains("git rebase lead") && brief.contains("from b"), "{brief}");
+    assert!(brief.contains("it no longer merges into `lead`") && brief.contains("- src/shared.rs (1 place; also changed by a (The first change), already merged)") && brief.contains("git rebase --onto recovery-base fixture-base") && brief.contains("from b"), "{brief}");
     assert!(host.world().resets.contains(&worker));
     // It reports again: the same gates check the result, and the run waits to be merged again.
     host.reports("b", Status::Done, "Rebased onto lead.");

@@ -527,8 +527,9 @@ pub struct Try {
     pub worker: Option<SessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    /// Immutable starting commit, including accepted dependencies. Scope and
-    /// verifier diffs count only changes made after this commit. Older tries
+    /// Trusted starting commit, including accepted dependencies; refreshed when
+    /// sent back onto the current lead. Scope and verifier diffs count only
+    /// changes made after this commit. Older tries
     /// without it retain their comparison against the lead's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,

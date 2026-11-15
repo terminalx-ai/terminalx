@@ -136,7 +136,7 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
 
 /// Assemble the exact accepted inputs without changing any checkout, index or
 /// branch. Merge commits retain dependency ancestry for the final run merge.
-fn dependency_base(cwd: &Path, dependencies: &[(&str, &str)]) -> anyhow::Result<String> {
+pub(super) fn dependency_base(cwd: &Path, dependencies: &[(&str, &str)]) -> anyhow::Result<String> {
     let mut base = crate::git::run(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
     for (id, accepted) in dependencies {
         let commit = crate::git::run(cwd, &["rev-parse", "--verify", &format!("{accepted}^{{commit}}")])
@@ -239,14 +239,19 @@ impl Host for ManagerHost {
         crate::store::settings::load().orchestrator.for_project(project_path)
     }
 
-    fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started> {
+    fn worker_base(&self, run: &Run, piece: &Piece) -> anyhow::Result<String> {
         let lead = index::get(&run.lead.session_id).context("the lead's session is gone")?;
         let dependencies = piece.depends_on.iter().map(|id| {
             let dependency = run.piece(id).with_context(|| format!("dependency {id} is missing"))?;
             let commit = dependency.accepted_commit().with_context(|| format!("dependency {id} has no accepted commit; verify its result before starting {}", piece.id))?;
             Ok((id.as_str(), commit))
         }).collect::<anyhow::Result<Vec<_>>>()?;
-        let base = dependency_base(Path::new(&lead.cwd), &dependencies)?;
+        dependency_base(Path::new(&lead.cwd), &dependencies)
+    }
+
+    fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started> {
+        let lead = index::get(&run.lead.session_id).context("the lead's session is gone")?;
+        let base = self.worker_base(run, piece)?;
         let entry = crate::session_ops::create_named_session_blocking(
             &*self.sink,
             NewSession {

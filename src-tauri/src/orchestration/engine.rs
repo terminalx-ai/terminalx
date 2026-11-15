@@ -192,6 +192,9 @@ pub trait Host: Send + Sync {
     /// own on a branch with the lead's code and accepted dependencies, with its agent, model and
     /// effort, in `mode`. Nothing is sent to it yet.
     fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started>;
+    /// Prepare a trusted baseline from the current lead and accepted dependencies,
+    /// without changing a checkout. Used for new workers and send-back recovery.
+    fn worker_base(&self, run: &Run, piece: &Piece) -> anyhow::Result<String>;
     /// Make a new worker safe to brief: its branch pushes nowhere by itself. Asked again
     /// for the same session when it failed, so it must be safe to repeat.
     fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()>;
@@ -1519,6 +1522,14 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
             error.details = json!({"piece": piece_id, "inTurn": run.in_turn(), "workers": run.limits.workers});
             return Err(error);
         }
+        // The lead may have integrated other pieces since this try started.
+        // Pin those trusted changes before reopening it, and replay only the
+        // worker's own commits from its previous baseline onto the new one.
+        let base = host.worker_base(&run, piece).map_err(|error| EngineError::new(
+            "recovery_base_unavailable", format!("Piece {piece_id} was not sent back: its recovery baseline could not be prepared: {error:#}"),
+            Some("Resolve the dependency or checkout problem, then send the piece back again."),
+        ))?;
+        let text = super::merge::brief_with_base(&run, piece, Some(&base)).expect("the piece has a failed merge");
         // Back at work: the try is open again, and what was checked is not what it will report.
         host.check_reset(&worker);
         let (after, ()) = store::update(id, |run| {
@@ -1528,6 +1539,7 @@ pub fn send_back(host: &dyn Host, id: &str, piece_id: &str) -> Result<SentBack, 
                 piece.merge = None;
                 if let Some(attempt) = piece.tries.last_mut() {
                     (attempt.outcome, attempt.ended, attempt.verification) = (None, None, None);
+                    attempt.base_commit = Some(base.clone());
                 }
             }
             settle(run);
