@@ -11,6 +11,7 @@ import { GlassIconButton } from "@mobile/ui/glass";
 import { MacIcon, StateMark } from "@mobile/ui/MacIcon";
 import { AgentMark } from "@mobile/ui/AgentMark";
 import { ChatListRow } from "@mobile/ui/ChatListRow";
+import { MutedMark, useSessionOverride } from "@mobile/ui/notifications/SessionNotifications";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -91,7 +92,7 @@ export default function SessionsScreen() {
     scrollIndicatorInsets={{ top: headerHeight, bottom: bar }}
     refreshControl={<RefreshControl refreshing={app.loadingSessions} onRefresh={() => void app.refreshSessions()} tintColor={palette.accent} progressViewOffset={headerHeight} />}
     renderSectionHeader={({ section }) => projects ? <ProjectHeader title={section.title} open={!collapsed.has(section.key)} onPress={() => toggle(section.key)} /> : null}
-    renderItem={({ item }) => projects ? <ProjectChat row={item} onOpen={(tabId) => open(item, tabId)} /> : <ChatListRow row={item} onPress={() => open(item)} />}
+    renderItem={({ item }) => projects ? <ProjectChat row={item} hostId={host.id} onOpen={(tabId) => open(item, tabId)} /> : <ChatListRow row={item} hostId={host.id} onPress={() => open(item)} />}
     ListEmptyComponent={app.loadingSessions ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." busy />
       : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
       : <EmptyState title="Sessions are offline" detail="Cached transcripts remain available after you reopen a session from recent history." />}
@@ -113,7 +114,7 @@ function ProjectHeader({ title, open, onPress }: { title: string; open: boolean;
  * title. A branch holding several chats (tabs on the Mac) says how many, and
  * opens to list them; one with a single chat opens it.
  */
-function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): void }) {
+function ProjectChat({ row, hostId, onOpen }: { row: ChatRow; hostId: string; onOpen(tabId: string): void }) {
   const { palette } = useTheme();
   const [open, setOpen] = useState(false);
   const chats = branchChats(row.session);
@@ -121,11 +122,13 @@ function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): voi
   const state = row.state === "needs" ? "needs you" : row.state === "working" ? "working" : "";
   const manualStatus = manualStatusLabel(row.session.manualStatus);
   const unread = row.unread ? "Unread" : "";
+  const muted = useSessionOverride(hostId, row.session.id) === "mute" ? "Muted" : "";
   return <View>
-    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, unread, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
+    <Pressable accessibilityRole="button" accessibilityState={many ? { expanded: open } : undefined} accessibilityLabel={[row.name, many ? `${chats.length} chats` : "", manualStatus, state, unread, muted, row.preview].filter(Boolean).join(", ")} onPress={() => many ? setOpen(!open) : onOpen(row.tabId)} style={({ pressed }) => [styles.channel, row.branched ? styles.branchRow : styles.titleRow, pressed && { backgroundColor: palette.raised }]}>
       {row.branched ? <MacIcon name="GitBranch" size={16} color={palette.muted} strokeWidth={1.35} /> : null}
       <Text numberOfLines={1} style={[row.branched ? styles.branchName : styles.chatTitle, { color: palette.ink }]}>{row.name}</Text>
       <Text style={[styles.time, { color: palette.muted }]}>{[manualStatus, unread].filter(Boolean).join(" · ")}</Text>
+      <MutedMark hostId={hostId} sessionId={row.session.id} />
       {row.state !== "done" ? <StateMark state={row.state} info={palette.info} warning={palette.warning} /> : many ? null : <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>}
       {many ? <View style={[styles.count, { backgroundColor: palette.raised }]}>
         <Text style={[styles.countText, { color: palette.muted }]}>{chats.length}</Text>
