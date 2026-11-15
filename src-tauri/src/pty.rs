@@ -1540,9 +1540,27 @@ impl Terminals {
     /// A remote queue may wait behind local input. Acquire its original
     /// authority only after that wait, and keep the lease through every partial
     /// write/flush. Activation can then acknowledge either no write or its end.
-    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket) -> Result<bool> {
-        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
-        let mut input = input.lock().unwrap();
+    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket,
+        policy: Option<&crate::remote::collab::v2::Permit>, pid: Option<u32>) -> Result<bool> {
+        let input_handle = {
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id).context("no such terminal")?;
+            anyhow::ensure!(pid.is_some() && pane.pid == pid && *pane.alive.lock().unwrap(), "terminal process changed before input");
+            pane.input.clone()
+        };
+        let mut input = input_handle.lock().unwrap();
+        // A queued raw write may wait behind local input. Only the final
+        // writer owns policy admission, after that wait and before bytes.
+        let _policy = policy.map(|permit| permit.collaboration.enter_admission());
+        if let Some(policy) = policy {
+            policy.check(None)?;
+            if policy.collaboration.runtime_policy.is_v2() {
+                let panes = self.panes.lock().unwrap();
+                let pane = panes.get(id).context("no such terminal")?;
+                anyhow::ensure!(pane.pid == pid && Arc::ptr_eq(&pane.input, &input_handle) && *pane.alive.lock().unwrap(),
+                    "terminal process changed while input waited");
+            }
+        }
         let Ok(_privacy) = ticket.enter() else { return Ok(false) };
         input.write(data).map(|()| true)
     }
@@ -1575,6 +1593,24 @@ impl Terminals {
         };
         let mut input = input.lock().unwrap();
         input.write(data)
+    }
+
+    /// One nonblocking physical attempt. A caller can hold its tab/mode
+    /// guard here without holding it while the PTY waits for input capacity.
+    pub(crate) fn try_write_for_process(&self, id: &str, pid: u32, data: &[u8]) -> Result<usize> {
+        // Keep pane identity stable through this nonblocking syscall.
+        let panes = self.panes.lock().unwrap();
+        let pane = panes.get(id).context("no such terminal")?;
+        anyhow::ensure!(pane.pid == Some(pid) && *pane.alive.lock().unwrap(), "terminal process changed before input");
+        let mut input = match pane.input.try_lock() {
+            Ok(input) => input,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock).into()),
+            Err(std::sync::TryLockError::Poisoned(_)) => anyhow::bail!("terminal input lock poisoned"),
+        };
+        if data.is_empty() { input.writer.flush()?; return Ok(0); }
+        let count = input.writer.write(data)?;
+        if count > 0 { input.stalled = false; }
+        Ok(count)
     }
 
     /// How many bytes written into the pane its program has yet to read.

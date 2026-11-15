@@ -42,9 +42,12 @@ use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::sink::{EventSink, SessionObserver};
 use crate::{git, pty, store};
+use crate::remote::collab::v2::{self as collaboration_v2, Permit as CollaborationPermit};
 
 #[cfg(test)]
 static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+#[cfg(test)]
+static COLLABORATION_PTY_CAPACITY: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
 
 #[path = "session_follow.rs"]
 pub mod follow;
@@ -275,6 +278,8 @@ type DeliveryReceipt = std::sync::mpsc::Sender<std::result::Result<(), String>>;
 /// published the archived images. Codex writes the labels with a space before
 /// the text; Claude Code writes them with nothing in between.
 struct ComposerEcho {
+    /// A v2 echo restored without its native permit must never be nudged.
+    collaboration_required: bool,
     text: String,
     image_count: usize,
     sent_at: Instant,
@@ -476,7 +481,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, typing: false, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
+        Self { collaboration_required: false, text, image_count, sent_at: Instant::now(), receipt: None, typing: false, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
     }
 
     fn echoed(&self) -> Echoed {
@@ -549,7 +554,7 @@ fn strip_image_labels(mut text: &str) -> (usize, &str) {
 fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, ComposerEcho) {
     // The CLI's record holds the paths of the attached files, which its
     // decoder takes off again (`attachments::split_block`), as here.
-    let echo = ComposerEcho { queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
+    let echo = ComposerEcho { collaboration_required: prompt.collaboration.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()), queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
     let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, files: prompt.files.clone(), baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
@@ -992,6 +997,7 @@ pub struct TabRuntime {
     /// The phone or share the prompt just sent came from, until its frame is
     /// queued with it: it is held to its permits when that frame is written.
     stdio_authority: Option<codex_stdio::Authority>,
+    stdio_launch_permit: Option<CollaborationPermit>,
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.
     stdio_receipt: Option<(u64, DeliveryReceipt)>,
@@ -1036,6 +1042,11 @@ pub struct TabRuntime {
     /// again (a status line repeats itself) costs nothing. Forgotten whenever
     /// the app asks for a change, since the answer to that must be heard.
     last_settings_report: Option<Signal>,
+    /// Raw provider report bound to this exact owned PTY launch.
+    collaboration_stance: Option<(Arc<tui::Tail>, settings::Stance)>,
+    collaboration_raw: Option<Arc<tui::Tail>>,
+    collaboration_prompts: HashMap<u64, CollaborationPermit>,
+    collaboration_settings: HashMap<String, CollaborationPermit>,
     /// A mode the provider reported that a shared session may not be in, not
     /// stored yet: whether the session is shared is asked under the sharing
     /// lock, which is taken before this tab's and so not from under it.
@@ -1317,6 +1328,7 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    collaboration: Option<CollaborationPermit>,
     /// A new desktop follow-up: decide again under the final send lock.
     /// Some(true) requests interrupt-and-send; Some(false) holds it.
     hold_if_busy: Option<bool>,
@@ -1380,6 +1392,7 @@ pub struct SendShown {
 
 #[derive(Default)]
 struct PromptDelivery {
+    collaboration: Option<CollaborationPermit>,
     mobile: Option<(crate::local_runtime::mobile::WritePermit, String, String, u64)>,
     ready: Option<Arc<tui::Ready>>,
     /// The composer's `user_message` this is the typing of. `None` for a
@@ -1878,7 +1891,27 @@ impl SessionManager {
             }
             return Nudged::Unread(unread);
         }
-        let written = self.terminals.write(pane, tui::SUBMIT).map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
+        let permit = rt.collaboration_prompts.get(&seq).cloned();
+        if permit.is_none() && matches!(&rt.engine, Engine::Cli(cli) if cli.echoed.iter().any(|echo| echo.seq == seq && echo.collaboration_required)) {
+            return Nudged::Written(false);
+        }
+        let _policy = match permit.as_ref() {
+            Some(permit) => match permit.collaboration.try_enter_admission() {
+                Some(guard) => Some(guard),
+                None => return Nudged::Typing,
+            },
+            None => None,
+        };
+        if permit.as_ref().is_some_and(|permit| Self::check_collaboration_permit(permit, rt).is_err()) {
+            return Nudged::Written(false);
+        }
+        let written = if permit.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+            self.terminals.pid(pane).context("terminal process missing")
+                .and_then(|pid| self.terminals.try_write_for_process(pane, pid, tui::SUBMIT))
+                .and_then(|written| { anyhow::ensure!(written == tui::SUBMIT.len(), "terminal submit incomplete"); Ok(()) })
+        } else {
+            self.terminals.write(pane, tui::SUBMIT)
+        }.map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
         if let (true, Engine::Cli(p)) = (written, &mut rt.engine) {
             p.entered_at = Some(now);
         }
@@ -2112,7 +2145,7 @@ impl SessionManager {
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_launch_permit: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
                 turn_usage: Default::default(),
@@ -2123,6 +2156,8 @@ impl SessionManager {
                 incidents: Default::default(),
                 stalled_at: None,
                 last_settings_report: None,
+                collaboration_stance: None, collaboration_raw: None,
+                collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
                 reported_mode_to_judge: None,
                 restart_claim: None,
                 stopping: false,
@@ -2910,7 +2945,7 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
@@ -2993,7 +3028,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3013,7 +3048,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3147,7 +3182,7 @@ impl SessionManager {
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
         session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3187,7 +3222,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3197,7 +3232,7 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -3283,6 +3318,11 @@ impl SessionManager {
         let mut entry = index::get(session_id)?;
         let mut tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         let mut rt = rt_arc.lock().unwrap();
+        if let Some(permit) = &prompt.collaboration { Self::check_collaboration_permit(permit, &rt)?; }
+        if prompt.collaboration.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(tab.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 final writer");
+        }
         // Shutdown may have fenced and cleared this runtime while the sender
         // was waiting for its lock. Do not refill a cleared follow-up queue.
         self.accepting_work()?;
@@ -3776,8 +3816,11 @@ impl SessionManager {
     /// - An ACP or OpenCode agent has no queue: the app's is kept, and its
     ///   next message starts when the interrupted turn has ended (`apply`).
     pub fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if let Some(permit) = &policy { Self::check_collaboration_permit(permit, &rt)?; }
         // A hard stop already under way is ending more than the turn.
         if rt.stopping {
             return Ok(false);
@@ -4084,6 +4127,9 @@ impl SessionManager {
     /// agent was stopped for sitting idle. Its transcript reads the same
     /// without one, and its next prompt (or its terminal view) starts it.
     pub fn start_on_open(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         if !tab.is_terminal() && !tab.by_hand() && !self.is_running(session_id, tab_id) {
@@ -4356,6 +4402,9 @@ impl SessionManager {
     }
 
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
@@ -4437,6 +4486,9 @@ impl SessionManager {
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
     pub fn answer_questions(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
@@ -4459,8 +4511,15 @@ impl SessionManager {
     /// moves when the provider is running it (`harness::settings`): at once
     /// when nothing is running, on the provider's word when something is.
     pub fn set_model(&self, session_id: &str, tab_id: &str, model: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if HarnessId::parse(&rt.harness).settings().model == Apply::Restart {
             if let Some(refusal) = Self::by_hand_refusal(&rt, "the model") {
                 bail!(refusal);
@@ -4469,6 +4528,7 @@ impl SessionManager {
         let turn_open = rt.turn_open;
         let waits = self.change_waits(&rt, Setting::Model);
         let (before, after) = self.update_settings(&mut rt, |s| s.request_model(model, waits))?;
+        Self::remember_configuration(&mut rt, &after, "model", policy.as_ref());
         let mut restart = false;
         match &mut rt.engine {
             // Claude's own `/model` takes the change live, and its status
@@ -4570,6 +4630,12 @@ impl SessionManager {
     /// its picker, Shift+Tab, a default it resolved at startup — reaches the
     /// tab.
     fn provider_settings(&self, rt: &mut TabRuntime, signal: Signal) {
+        // Identical reports from a replacement launch are still fresh
+        // witnesses. Deduplicating the settings update must not retain the
+        // previous launch's stance identity.
+        if let (Signal::Permissions { stance }, Engine::Cli(cli)) = (&signal, &rt.engine) {
+            rt.collaboration_stance = Some((cli.tail.clone(), stance.clone()));
+        }
         if rt.last_settings_report.as_ref() == Some(&signal) {
             return;
         }
@@ -4723,10 +4789,13 @@ impl SessionManager {
         true
     }
 
-    /// Add an agent tab to a session, from whichever surface asked. A shared
-    /// session takes no Bypass tab, and the share cannot start between the
-    /// check and the save because both hold the sharing lock.
+    /// Add an agent tab from whichever surface asked. Local sharing retains
+    /// the host's chosen modes; cloud v2 checks independent configuration
+    /// authority and admits Everyone input separately for each owned launch.
     pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let sharing = self.sharing.lock().unwrap();
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
@@ -4742,6 +4811,9 @@ impl SessionManager {
     /// turn it would interrupt is over. Until that restart the tab is in the
     /// mode it was in, and is shown in it (`harness::settings`).
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         self.mobile.invalidate_tab(session_id, tab_id);
         let sharing = self.sharing.lock().unwrap();
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(mode) {
@@ -4749,6 +4821,10 @@ impl SessionManager {
         }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if let Some(refusal) = Self::by_hand_refusal(&rt, "the permission mode") {
             bail!(refusal);
         }
@@ -4756,6 +4832,7 @@ impl SessionManager {
         let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
         let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready || a.writing.is_some());
         let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
+        Self::remember_configuration(&mut rt, &after, "mode", policy.as_ref());
         let mut restart = false;
         match &mut rt.engine {
             Engine::Cli(p) => {
@@ -4795,8 +4872,15 @@ impl SessionManager {
     /// headless peers have no effort setting at all, and say so rather than
     /// take a value that would change nothing.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if HarnessId::parse(&rt.harness).settings().effort == Apply::Unsupported && effort.is_some_and(|e| !e.is_empty()) {
             bail!("{} has no effort setting.", agent_name(&rt.harness));
         }
@@ -4809,6 +4893,7 @@ impl SessionManager {
         let waits = self.change_waits(&rt, Setting::Effort)
             && (HarnessId::parse(&rt.harness).settings().effort == Apply::Restart || effort.is_some_and(|e| !e.is_empty()));
         let (before, after) = self.update_settings(&mut rt, |s| s.request_effort(effort, waits))?;
+        Self::remember_configuration(&mut rt, &after, "effort", policy.as_ref());
         let mut respawn = false;
         let mut restart = false;
         match &mut rt.engine {
@@ -4964,6 +5049,9 @@ impl SessionManager {
     /// started — the app restarting into a session that was already running —
     /// never saw the event, and would show a terminal view with nothing in it.
     pub fn ensure_started(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let _admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
         self.accepting_work()?;
         // Nothing starts in a session that is being deleted or moved, or in a
@@ -5072,6 +5160,12 @@ impl SessionManager {
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
+        let permits = Self::pending_configuration_permits(rt)?;
+        // Runtime is already held: use try admission to avoid reversing the
+        // policy -> runtime order against a refresh or a direct operation.
+        let _policy: Vec<_> = permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("Collaboration policy is changing; retry the launch")).collect::<Result<_>>()?;
+        if let Some(permit) = collaboration_v2::current() { Self::check_collaboration_permit(&permit, rt)?; }
         let result = self.start_cli_inner(rt, rt_arc, entry, tab, prompting);
         if !rt.stopping && rt.restart_claim.is_none() { rt.setup_failed = result.is_err(); }
         result
@@ -5525,9 +5619,30 @@ impl SessionManager {
     /// Persist withdrawal before a launch can consume requested settings.
     /// The returned leases belong to the whole physical restart/launch.
     fn admit_pending_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        let permits = Self::pending_configuration_permits(rt)?;
+        let _policy: Vec<_> = permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("Collaboration policy is changing; retry the settings")).collect::<Result<_>>()?;
+        let authority = rt.collaboration_settings.clone();
         let mut privacy = Vec::new();
-        self.update_settings(rt, |s| privacy = s.admit_pending())?;
+        let (_, after) = self.update_settings(rt, |s| {
+            s.retain_collaboration_requests(|id| authority.get(id).is_some_and(|permit| permit.check_configuration().is_ok()));
+            privacy = s.admit_pending();
+        })?;
+        rt.collaboration_settings.retain(|id, _| after.collaboration_requests().values().any(|pending| pending == id));
         Ok(privacy)
+    }
+
+    fn remember_configuration(rt: &mut TabRuntime, settings: &Settings, key: &str, permit: Option<&CollaborationPermit>) {
+        rt.collaboration_settings.retain(|id, _| settings.collaboration_requests().values().any(|pending| pending == id));
+        if let (Some(id), Some(permit)) = (settings.collaboration_requests().get(key), permit) {
+            rt.collaboration_settings.insert(id.clone(), permit.clone());
+        }
+    }
+
+    fn pending_configuration_permits(rt: &TabRuntime) -> Result<Vec<CollaborationPermit>> {
+        let entry = index::get(&rt.session_id)?;
+        let settings = Settings::of(entry.tab(&rt.tab_id).context("tab not found")?);
+        Ok(settings.collaboration_requests().values().filter_map(|id| rt.collaboration_settings.get(id).cloned()).collect())
     }
 
     fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>, idle: bool) -> Option<CliRestart> {
@@ -6139,7 +6254,13 @@ impl SessionManager {
                 log::warn!("record the continuation prompt of {}: {error:#}", rt.key());
             }
         }
+        if let Engine::Cli(cli) = &rt.engine {
+            let pending: std::collections::HashSet<_> = cli.echoed.iter().map(|echo| echo.seq).collect();
+            rt.collaboration_prompts.retain(|seq, _| pending.contains(seq));
+        }
+        if let Some(permit) = &prompt.collaboration { rt.collaboration_prompts.insert(ev.seq, permit.clone()); }
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
+            collaboration: prompt.collaboration,
             ready: Some(ready),
             seq: Some(ev.seq),
             queued,
@@ -6215,7 +6336,7 @@ impl SessionManager {
     /// the CLI has not acknowledged it (`nudge_by`); the watcher tells the
     /// reader when it never does (`accept_by`).
     fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
-        let PromptDelivery { ready, seq, queued, receipt, shared, mobile, stops } = delivery;
+        let PromptDelivery { ready, seq, queued, receipt, shared, mobile, stops, collaboration } = delivery;
         let sent_at = Instant::now();
         // A slash command opens a palette or runs in the CLI itself: it is
         // held to acknowledging nothing. A continuation is held to it like any
@@ -6264,8 +6385,9 @@ impl SessionManager {
                 Some(left) => Err(anyhow::Error::new(follow::Refusal(left))),
                 None => Ok(()),
             };
+            let policy_revoked = || collaboration.as_ref().is_some_and(|permit| Self::check_collaboration_permit(permit, &rt_arc.lock().unwrap()).is_err());
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || stopped(&rt_arc.lock().unwrap()));
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || policy_revoked() || stopped(&rt_arc.lock().unwrap()));
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
@@ -6280,6 +6402,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6289,7 +6412,7 @@ impl SessionManager {
             }
             // Nothing is typed into an input box that holds something: the
             // Enter would send that and this prompt as one (#722).
-            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
+            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || policy_revoked() || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
             let input = match manager.wait_for_empty_input(&rt_arc, &pane, seq, stops, &ticket, &mut held, revoked, &stage) {
                 InputWait::Type(input) => input,
                 InputWait::Revoked => {
@@ -6298,6 +6421,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6358,7 +6482,7 @@ impl SessionManager {
                 admitted_to_writer = true;
                 still_there()?;
                 for path in &attachments {
-                    terminals.write(&pane, &tui::attachment_bytes(path))?;
+                    manager.write_collaboration_prompt(&rt_arc, collaboration.as_ref(), ready.as_ref(), &pane, &tui::attachment_bytes(path))?;
                 }
                 let unread = || terminals.unread_input(&pane);
                 if !attachments.is_empty() {
@@ -6367,7 +6491,7 @@ impl SessionManager {
                 }
                 let body = tui::body_bytes(&text);
                 still_there()?;
-                terminals.write(&pane, &body)?;
+                manager.write_collaboration_prompt(&rt_arc, collaboration.as_ref(), ready.as_ref(), &pane, &body)?;
                 stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len(), "input": input }));
                 let (read, read_after) = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                 if read == tui::PasteRead::Unread {
@@ -6383,7 +6507,7 @@ impl SessionManager {
                 }
                 std::thread::sleep(tui::submit_delay(body.len()).saturating_sub(read_after.elapsed()));
                 still_there()?;
-                if !Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, stopped, || terminals.write(&pane, tui::SUBMIT))? {
+                if !manager.submit_collaboration_prompt(&rt_arc, collaboration.as_ref(), &pane, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, |rt| stopped(rt) || ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(cli) if Arc::ptr_eq(ready, &cli.ready))))? {
                     return Ok(false);
                 }
                 stage("submit_written", serde_json::json!({ "paste": read.as_str(), "drawn": drawn }));
@@ -6407,6 +6531,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6793,7 +6918,9 @@ impl SessionManager {
     /// message nobody sent.
     fn type_command(&self, p: &mut CliTab, rt_arc: &Arc<Mutex<TabRuntime>>, command: String) {
         p.echoed.push_back(ComposerEcho { command: true, ..ComposerEcho::new(command.clone(), 0) });
-        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery { stops: p.input.stops, ..Default::default() });
+        let collaboration = collaboration_v2::current();
+        let ready = collaboration.as_ref().map(|_| p.ready.clone());
+        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery { collaboration, ready, stops: p.input.stops, ..Default::default() });
     }
 
     // ---- inbound from the CLI's hooks
@@ -7946,7 +8073,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -7966,7 +8093,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -8187,3 +8314,123 @@ mod tests {
 #[cfg(test)]
 #[path = "session_review_tests.rs"]
 mod review_tests;
+
+impl SessionManager {
+    pub(crate) fn collaboration_v2_witness(&self, session: &str, tab: &str) -> Option<collaboration_v2::TabWitness> {
+        let rt = self.runtime(session, tab).ok()?;
+        let rt = rt.lock().unwrap();
+        Self::collaboration_witness(&rt)
+    }
+
+    fn collaboration_witness(rt: &TabRuntime) -> Option<collaboration_v2::TabWitness> {
+        let entry = index::get(&rt.session_id).ok()?;
+        let tab = entry.tab(&rt.tab_id)?;
+        let (owned, actual) = match &rt.engine {
+            Engine::Cli(cli) => (cli.by_hand.is_none() && !rt.stopping && rt.restart_claim.is_none()
+                && rt.collaboration_raw.as_ref().is_none_or(|tail| !Arc::ptr_eq(tail, &cli.tail)),
+                rt.collaboration_stance.as_ref().filter(|(tail, _)| Arc::ptr_eq(tail, &cli.tail)).map(|(_, stance)| stance.clone())),
+            Engine::CodexStdio(engine) => (!engine.exited && !engine.blocked && !rt.stopping, engine.actual_stance.clone()),
+            _ => (false, None),
+        };
+        Some(collaboration_v2::TabWitness {
+            owned: owned && !tab.by_hand() && !tab.is_terminal(), harness: tab.harness.clone(),
+            stored_mode: tab.permission_mode.clone(), pending_mode: tab.requested_permission_mode.clone(), actual,
+        })
+    }
+
+    fn check_collaboration_permit(permit: &CollaborationPermit, rt: &TabRuntime) -> Result<()> {
+        permit.check(Self::collaboration_witness(rt).as_ref())
+    }
+
+    /// The legacy writer retries a full PTY as before. V2 retries also
+    /// recheck original authority and tab state before each physical Enter,
+    /// releasing both locks while waiting for capacity.
+    fn submit_collaboration_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, permit: Option<&CollaborationPermit>, pane: &str,
+        seq: Option<u64>, receipt_seq: Option<u64>, watched: bool, stopped: impl Fn(&TabRuntime) -> bool) -> Result<bool> {
+        let started = Instant::now();
+        let pid = self.terminals.pid(pane);
+        loop {
+            let result = {
+                let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+                let guarded = permit.is_some_and(|permit| permit.collaboration.runtime_policy.is_v2());
+                Self::submit_composer_prompt(runtime, seq, receipt_seq, watched,
+                    |rt| stopped(rt) || permit.is_some_and(|permit| Self::check_collaboration_permit(permit, rt).is_err()),
+                    || {
+                        if !guarded { return self.terminals.write(pane, tui::SUBMIT); }
+                        let pid = pid.context("terminal process missing")?;
+                        anyhow::ensure!(self.terminals.try_write_for_process(pane, pid, tui::SUBMIT)? == tui::SUBMIT.len(), "terminal submit incomplete");
+                        Ok(())
+                    })
+            };
+            match result {
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)) => {
+                    #[cfg(test)]
+                    if let Some(blocked) = COLLABORATION_PTY_CAPACITY.lock().unwrap().take() { let _ = blocked.send(()); }
+                    if started.elapsed() >= pty::INPUT_STALL {
+                        return Err(pty::InputStalled { written: 0, total: tui::SUBMIT.len() }.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn write_collaboration_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, permit: Option<&CollaborationPermit>, ready: Option<&Arc<tui::Ready>>, pane: &str, bytes: &[u8]) -> Result<()> {
+        // Preserve the legacy retrying writer (including flush and its stall
+        // budget). Only v2 needs to release the tab lock between attempts.
+        {
+            let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+            if permit.is_none_or(|permit| !permit.collaboration.runtime_policy.is_v2()) {
+                return self.terminals.write(pane, bytes);
+            }
+        }
+        let pid = self.terminals.pid(pane).context("terminal process missing")?;
+        let mut offset = 0;
+        let started = Instant::now();
+        let mut progress = started;
+        loop {
+            let attempted = {
+                let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+                let rt = runtime.lock().unwrap();
+                if let Some(permit) = permit { Self::check_collaboration_permit(permit, &rt)?; }
+                anyhow::ensure!(matches!(&rt.engine, Engine::Cli(cli) if cli.pane_id == pane && ready.is_none_or(|ready| Arc::ptr_eq(ready, &cli.ready))), "Terminal instance changed before input");
+                self.terminals.try_write_for_process(pane, pid, &bytes[offset..])
+            };
+            match attempted {
+                Ok(_) if offset == bytes.len() => return Ok(()), // guarded flush
+                Ok(0) => bail!("terminal input closed"),
+                Ok(written) => { offset += written; progress = Instant::now(); }
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)) => {
+                    #[cfg(test)]
+                    if let Some(blocked) = COLLABORATION_PTY_CAPACITY.lock().unwrap().take() { let _ = blocked.send(()); }
+                    if progress.elapsed() >= pty::INPUT_STALL || started.elapsed() >= pty::INPUT_DEADLINE {
+                        return Err(pty::InputStalled { written: offset, total: bytes.len() }.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl SessionManager {
+    /// Raw terminal input can change stance without a reliable report. Latch
+    /// this launch unknown for Everyone until a managed replacement; a delayed
+    /// provider report from before the raw write cannot make it safe again.
+    pub(crate) fn with_raw_terminal_input<T>(&self, pane: &str, write: impl FnOnce() -> Result<T>) -> Result<T> {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for runtime in runtimes {
+            let mut rt = runtime.lock().unwrap();
+            if let Engine::Cli(cli) = &rt.engine {
+                if cli.pane_id == pane {
+                    rt.collaboration_raw = Some(cli.tail.clone());
+                    drop(rt);
+                    return write();
+                }
+            }
+        }
+        write()
+    }
+}
