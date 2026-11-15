@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   uuids: 0,
   sheetChoice: "Choose File",
   pasted: new Set<(image: { data: string; width: number; height: number }) => void>(),
+  keyboardDismissed: vi.fn(),
 }));
 vi.mock("../modules/paste-image", () => ({ addPasteImageListener: (listener: any) => { mocks.pasted.add(listener); return () => { mocks.pasted.delete(listener); }; } }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
@@ -49,14 +50,14 @@ vi.mock("react-native", () => {
     ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
     AppState: { currentState: "active" },
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
-    Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false },
+    Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => mocks.keyboardDismissed() },
     PanResponder: { create: () => ({ panHandlers: {} }) },
     ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{children}</button>,
-    TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur }: any) => <input value={value} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
+    TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur, autoFocus }: any) => <input value={value} autoFocus={autoFocus} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
       useImperativeHandle(props.ref, () => ({ scrollToOffset: mocks.scrollToOffset }));
@@ -97,6 +98,7 @@ beforeEach(() => {
   mocks.terminalListeners.clear();
   mocks.featureListeners.clear();
   mocks.push.mockClear();
+  mocks.keyboardDismissed.mockClear();
   mocks.scrollToOffset.mockClear();
   mocks.initialBatchOnly = false;
   mocks.sheetChoice = "Choose File";
@@ -268,7 +270,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await render(); await type("Run the tests"); await click("Send");
     expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", [], expect.any(String));
     expect(mocks.app.api.postNote).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
     await publish("Run the tests");
     expect(shown("Run the tests")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
   });
@@ -313,7 +315,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await render(); mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await type("Deploying at 5"); await click("Send");
     expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5", expect.any(String));
     expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Note added.");
+    expect(container.textContent).not.toContain("Note added.");
     expect(shown("Deploying at 5")).toEqual([expect.objectContaining({ kind: "note" })]);
   });
 
@@ -329,7 +331,8 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(input().value).toBe("Retry me");
     expect(shown("Retry me")).toHaveLength(0);
     await click("Send");
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Message not sent");
     expect(input().value).toBe("");
     // Every try of one draft goes under one id, so a Mac that already has it does not take it again (#675).
     const [first] = mocks.app.api.sendSession.mock.calls[0].slice(3);
@@ -340,7 +343,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(shown("Retry me")).toHaveLength(1);
   });
 
-  it("says a send failed with the connection in plain words, keeps the draft, and offers Send again once connected (#670)", async () => {
+  it("says a send failed with the connection in plain words, keeps the draft, and offers Resend once connected (#670)", async () => {
     const lost = new RelayOuterError(1001, "Stream end encountered", false);
     mocks.app.api.sendSession.mockRejectedValueOnce(lost);
     await render(); await type("How is it going?"); await click("Send");
@@ -349,17 +352,17 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(input().value).toBe("How is it going?");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", lost);
     mocks.app = { ...mocks.app, connectionStage: "reconnecting" }; await render();
-    expect(button("Send again").disabled).toBe(true);
+    expect(button("Resend").disabled).toBe(true);
     mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 }; await render();
-    expect(button("Send again").disabled).toBe(false);
-    await click("Send again");
-    // Send again goes under the same id as the first try (#675).
+    expect(button("Resend").disabled).toBe(false);
+    await click("Resend");
+    // Resend goes under the same id as the first try (#675).
     const [sendId] = mocks.app.api.sendSession.mock.calls[0].slice(3);
     expect(sendId).toEqual(expect.any(String));
     expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "How is it going?", [], sendId], ["claude", "How is it going?", [], sendId]]);
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
     expect(input().value).toBe("");
-    expect(() => button("Send again")).toThrow();
+    expect(() => button("Resend")).toThrow();
   });
 
   it("does not call a send the Mac never answered 'not sent', nor offer to send it again", async () => {
@@ -369,7 +372,7 @@ describe("messages for the agent and worktree notes (#541)", () => {
     expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the message may have reached the agent. Check the conversation before sending it again.");
     expect(container.textContent).not.toContain("Not sent");
     expect(container.textContent).not.toContain("RPC timed out");
-    expect(() => button("Send again")).toThrow();
+    expect(() => button("Resend")).toThrow();
     expect(input().value).toBe("Run the migration");
     expect(mocks.app.connection.reportError).toHaveBeenCalledWith("Session message failed", timedOut);
   });
@@ -379,20 +382,20 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await render(); mocks.sheetChoice = "Worktree note"; await click("Add attachment"); await type("Deploying at 5"); await click("Send");
     expect(container.textContent).toContain("Not confirmed: your Mac didn't answer in time, so the note may have been added. Check the notes before adding it again.");
     expect(container.textContent).not.toContain("agent. Check");
-    expect(() => button("Send again")).toThrow();
+    expect(() => button("Resend")).toThrow();
     expect(input().value).toBe("Deploying at 5");
   });
 
-  it("does not offer Send again when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
+  it("does not offer Resend when the relay refuses the pairing, and keeps the Mac's own refusals as they are", async () => {
     mocks.app.api.sendSession
       .mockRejectedValueOnce(new RelayOuterError(4401, "", false))
       .mockResolvedValueOnce({ sent: false, message: "The agent is busy" });
     await render(); await type("Ship it"); await click("Send");
     expect(container.textContent).toContain("Not sent: this phone is no longer paired with your Mac; pair it again from Machines. Your message is still in the box.");
-    expect(() => button("Send again")).toThrow();
+    expect(() => button("Resend")).toThrow();
     await click("Send");
     expect(container.textContent).toContain("Message not sent: The agent is busy");
-    expect(() => button("Send again")).toThrow();
+    expect(() => button("Resend")).toThrow();
   });
 
   it("shows a promoted note and its user message as a single row, and the note in other tabs", async () => {
@@ -447,7 +450,7 @@ describe("sending a draft again after a lost reply (#675)", () => {
 
     await type("Ship it now"); await click("Send");
     expect(sendIds()[3]).not.toBe(sendIds()[0]);
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
     expect(input().value).toBe("");
     // The same text sent after that is meant as a second message.
     await type("Ship it now"); await click("Send");
@@ -475,7 +478,7 @@ describe("sending a draft again after a lost reply (#675)", () => {
     const [[, , first], [, , again]] = mocks.app.api.postNote.mock.calls;
     expect(again).toBe(first);
     expect(first).not.toBe(sendIds()[0]);
-    expect(container.textContent).toContain("Note added.");
+    expect(container.textContent).not.toContain("Note added.");
     expect(input().value).toBe("");
   });
 
@@ -492,7 +495,7 @@ describe("sending a draft again after a lost reply (#675)", () => {
     expect(input().value).toBe("Survive a restart");
     await click("Send");
     expect(sendIds()[1]).toBe(sendIds()[0]);
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
     // Sent: neither the draft nor its id waits for the next launch.
     expect([...mocks.storage.keys()].filter((key) => key.startsWith("terminalx:draft"))).toEqual([]);
   });
@@ -628,7 +631,7 @@ describe("mobile conversation navigation", () => {
     expect(button("Send").disabled).toBe(true);
     await act(async () => finish({ sent: true, queued: false }));
     expect(input().value).toBe("");
-    expect(container.textContent).toContain("Sent to the agent.");
+    expect(container.textContent).not.toContain("Sent to the agent.");
     await select("codex"); expect(input().value).toBe("Other draft");
   });
 
@@ -1238,5 +1241,111 @@ describe("an agent's question on the phone (#979)", () => {
     await select("claude");
     await click("Answer");
     expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", { "Which checks should run?": "Tests", "Which branch?": "next" });
+  });
+});
+
+describe("the session screen's status line, keyboard and send feedback (#985)", () => {
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const at = (seq: number, ts: string, payload: unknown) => ({ id: `claude-${seq}`, sessionId: "worktree", tabId: "claude", harness: "claude", seq, ts, payload });
+  const publish = async (...events: unknown[]) => { for (const next of events) await act(async () => mocks.sessionListeners.get("claude")!(next)); };
+  const text = () => container.textContent ?? "";
+  const question = (seq: number, ts: string) => at(seq, ts, { type: "questions_asked", requestId: "q1", toolUseId: "", questions: [{ question: "Merge now, or wait for the macOS job?", multiSelect: false, freeText: false, options: [{ label: "Merge now" }, { label: "Wait for it" }] }] });
+  const permission = (seq: number, ts: string) => at(seq, ts, { type: "permission_requested", requestId: "p1", toolUseId: "tool", toolName: "shell", input: {}, options: [{ id: "allow", label: "Allow", kind: "allow_once" }] });
+  const working = () => [at(1, ago(3), { type: "user_message", text: "What's the latest status?", queued: false }), at(2, ago(3), { type: "turn_started" })];
+  /** A Mac that takes session controls from the phone, with this tab running a turn. */
+  const takesControls = () => {
+    mocks.app.api.features = async () => ({ sessionControls: 1, questions: 1 });
+    mocks.app.api.tabControls = vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "default", status: "in_progress" }));
+    mocks.app.api.models = vi.fn(async () => []);
+    mocks.app.api.interrupt = vi.fn(async () => ({ done: true }));
+    mocks.app.api.stop = vi.fn(async () => ({ done: true }));
+  };
+
+  it("goes from Working to Needs your answer under the question card, then to Done when the turn ends", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    expect(text()).toContain("Working · 3 min");
+    await publish(question(3, ago(1)));
+    expect(text()).not.toContain("Working ·");
+    expect(text()).toContain("Needs your answer · 1 min");
+    // Drawn under the card it is about.
+    expect(text().indexOf("Needs your answer")).toBeGreaterThan(text().indexOf("Merge now, or wait for the macOS job?"));
+    await publish(at(4, ago(0), { type: "permission_decided", requestId: "q1", allowed: true, label: "Merge now", automatic: false }));
+    expect(text()).toContain("Working · 3 min");
+    const end = ago(0);
+    await publish(at(5, end, { type: "turn_completed", status: "ok", authFailed: false, finalText: "Merged." }));
+    expect(text()).not.toContain("Working ·");
+    expect(text()).toContain(`Done · ${new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(new Date(end))}`);
+  });
+
+  it("goes straight from Working to Done", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    expect(text()).toContain("Working · 3 min");
+    await publish(at(3, ago(0), { type: "turn_completed", status: "ok", authFailed: false }));
+    expect(text()).toContain("Done · ");
+    expect(text()).not.toContain("Working");
+  });
+
+  it("says Needs approval under a permission card, and Stopped or Failed with the reason when a turn ends that way", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [...working(), permission(3, ago(2))], hasMore: false });
+    await render();
+    expect(text()).toContain("Needs approval · 2 min");
+    expect(text().indexOf("Needs approval")).toBeGreaterThan(text().indexOf("shell"));
+    await publish(at(4, ago(0), { type: "permission_decided", requestId: "p1", allowed: false, label: "Deny", automatic: false }), at(5, ago(0), { type: "recovery", kind: "timeout" }), at(6, ago(0), { type: "turn_completed", status: "aborted", authFailed: false }));
+    expect(text()).toContain("Stopped · timed out");
+    await publish(at(7, ago(0), { type: "user_message", text: "Try again", queued: false }), at(8, ago(0), { type: "turn_completed", status: "error", authFailed: false, finalText: "API Error: 529 overloaded" }));
+    expect(text()).toContain("Failed · API Error: 529 overloaded");
+  });
+
+  it("stops the turn from the line's Stop with the composer's own interrupt", async () => {
+    takesControls();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Working · 3 min");
+    await click("Stop");
+    expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.app.api.stop).not.toHaveBeenCalled();
+  });
+
+  it("offers no Stop to a Mac that takes no controls from the phone", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    expect(text()).toContain("Working · 3 min");
+    expect(() => button("Stop")).toThrow();
+  });
+
+  it("never says a message was sent, and a failed send's line does not outlive the screen", async () => {
+    await render(); await type("Ship it"); await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(input().value).toBe("");
+    for (const said of ["Sent to the agent.", "Queued for the agent."]) expect(text()).not.toContain(said);
+    mocks.app.api.sendSession.mockRejectedValueOnce(new RelayOuterError(1001, "Stream end encountered", false));
+    await type("Ship it again"); await click("Send");
+    expect(text()).toContain("Not sent: the connection to your Mac dropped. Your message is still in the box.");
+    expect(button("Resend").disabled).toBe(false);
+
+    // Left and opened again, with the conversation state this app keeps between visits.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(input().value).toBe("Ship it again");
+    expect(text()).not.toContain("Not sent");
+    expect(() => button("Resend")).toThrow();
+    // Another tab and back is leaving the screen too.
+    await type("Ship it again"); mocks.app.api.sendSession.mockRejectedValueOnce(new Error("Connection closed")); await click("Send");
+    expect(text()).toContain("Message not sent: Connection closed");
+    await select("codex"); await select("claude");
+    expect(text()).not.toContain("Message not sent");
+  });
+
+  it("opens an existing session with the keyboard closed and the composer not focused, until it is tapped", async () => {
+    await render();
+    expect(mocks.keyboardDismissed).toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(input());
+    expect(input().autofocus).toBe(false);
+    await act(async () => { input().focus(); });
+    expect(document.activeElement).toBe(input());
   });
 });
