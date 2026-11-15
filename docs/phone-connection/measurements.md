@@ -233,8 +233,13 @@ What a later measurement should keep in mind:
 
 ## Does the connection survive each interval idle?
 
-Status: **in progress.** The 10-minute runs started at 17:02 and are not in
-this note yet. Only a short dry run is measured so far.
+Status: **partly measured.** The 10-minute run with no keep-alive is done. The
+20 s, 30 s and 45 s runs are not measured: at 17:13, right after the first
+run's file was pulled, the phone went "unavailable" in `devicectl list devices`
+and later commands failed with "CoreDeviceService was unable to locate a
+device" (error 1011). The script's logged exit codes were wrong at first (it
+read `$?` after `$(date)`), so the failure only showed when the 20 s file never
+arrived; the committed script captures the right code.
 
 Method: relay path (`-TXNoDirect 1`), home Wi-Fi, Release build, screen on,
 app on the Settings tab (no timer of its own), opened by launching with
@@ -244,6 +249,19 @@ for 3 s (Settings is launched) and comes back, so the app's resume probe
 (`pairing.getEndpoints`, 1.5 s limit, `mobile/src/transport/connection.ts:28`)
 tests the old connection end to end. Script: `measurement-patch/idle-test.sh`.
 Summary: `measurement-patch/analyze.py idle`.
+
+10-minute run, raw `data/idle/idle-relay-0s.jsonl`, summary
+`data/idle.summary.txt`:
+
+| keep-alive | span min | connects | drops (1001 / 4408) | connected before drop, median s | p90 s | max s | reconnect median ms | p90 ms | probe at the end |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| none | 10.4 | 14 | 13 (13 / 0) | 13 | 27 | 29 | 3455 | 4812 | answered in 1426 ms |
+
+- With no keep-alive, the relay connection did not stay up for longer than
+  29 s once in 10.4 minutes. It dropped 13 times, every time with 1001
+  "Stream end encountered", and came back in 3.5 s (median). So on this path
+  today the drops, not an idle timeout, decide how long a connection lives.
+- The end probe answered in 1426 ms, under the 1.5 s limit by 74 ms.
 
 Dry run, 20 s idle per interval (about 0.8 min per launch), raw
 `data/idle-dry/*.jsonl`, summary `data/idle-dry.summary.txt`:
