@@ -642,6 +642,8 @@ pub fn run() {
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
             commands::phase2_desktop_contracts_available,
+            commands::desktop_presence_put,
+            commands::desktop_presence_read,
             commands::desktop_inbox,
             commands::desktop_inbox_stream,
             commands::desktop_inbox_receipts,

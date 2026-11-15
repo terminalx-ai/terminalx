@@ -467,6 +467,9 @@ export const api = {
   cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeedDto>("cloud_catalog_feed", { cursor: cursor ?? null }).then(projectCloudCatalogFeed),
   /** Held until SaaS integration/live readiness is explicitly confirmed. */
   phase2DesktopContractsAvailable: () => invoke<boolean>("phase2_desktop_contracts_available"),
+  /** Internal PRO-133 transport; production refuses locally while phase 2 is held. */
+  desktopPresencePut: (orgId: string, input: PresencePutInput) => invoke<PresencePutResponse>("desktop_presence_put", { orgId, input }),
+  desktopPresenceRead: (orgId: string, input: PresenceReadInput) => invoke<PresenceReadResponse>("desktop_presence_read", { orgId, input }),
   desktopInbox: (after = "0", waitMs = 25000) => invoke<DesktopInboxPage>("desktop_inbox", { after, waitMs }),
   /** One SSE page through its checkpoint; apply/dedupe events before saving cursor. */
   desktopInboxStream: (after: string, lastEventId?: string | null) => invoke<DesktopInboxStreamPage>("desktop_inbox_stream", { after, lastEventId: lastEventId ?? null }),
@@ -1650,6 +1653,15 @@ export interface CloudSelectedRepositories {
   repositories: CloudSelectedRepository[];
 }
 
+export interface PresencePutInput { deviceId: string; sequence: number; workspaceId: string | null }
+export interface PresenceReadInput { workspaceIds: string[] }
+export interface PresencePerson { userId: string; displayName: string | null; photoUrl: string | null }
+/** Owner follows current created_by; identities never use an email fallback. */
+export interface PresenceWorkspace { workspaceId: string; owner: PresencePerson; activeMembers: PresencePerson[] }
+export interface PresencePutResponse { applied: boolean; ttlSeconds: 45 }
+/** Workspaces are a requested-visible subset; activeMembers spans all visible workspaces. */
+export interface PresenceReadResponse { ttlSeconds: 45; activeMembers: PresencePerson[]; workspaces: PresenceWorkspace[] }
+
 export interface CloudWorkspaceClientError {
   code: CloudWorkspaceSafeErrorCode;
   status: number | null;
@@ -1660,6 +1672,10 @@ export interface CloudWorkspaceClientError {
 }
 
 export type CloudWorkspaceSafeErrorCode =
+  | "presence_rate_limited"
+  | "presence_device_limit"
+  | "presence_capacity_exceeded"
+  | "presence_unavailable"
   | "inbox_unavailable"
   | "invalid_access_token"
   | "organization_admin_required"

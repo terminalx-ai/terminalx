@@ -1701,6 +1701,93 @@ fn valid_schedule_policies(missed: Option<&str>, completion: &str, minutes: u32)
     missed.is_none_or(|missed| matches!(missed, "skip" | "run-once")) && matches!(completion, "suspend" | "keep") && SCHEDULE_RUN_MINUTES.contains(&minutes)
 }
 
+// PRO-133 transport only. No device lifecycle or cached presence state lives here.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePutInput {
+    pub device_id: String,
+    #[serde(deserialize_with = "presence_sequence")]
+    pub sequence: u64,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub workspace_id: Option<String>,
+}
+
+fn required_nullable_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+fn presence_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    // JSON 1.0 is also a JS safe integer; strings and fractional values are not.
+    let number = serde_json::Number::deserialize(deserializer)?;
+    let value = number.as_f64().ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid sequence"))?;
+    if value < 1.0 || value > 9_007_199_254_740_991.0 || value.fract() != 0.0 {
+        return Err(serde::de::Error::custom("invalid sequence"));
+    }
+    Ok(value as u64)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceReadInput {
+    pub workspace_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePerson {
+    pub user_id: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub display_name: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub photo_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceWorkspace {
+    pub workspace_id: String,
+    /// Current server created_by projection; never inferred from active members.
+    pub owner: PresencePerson,
+    pub active_members: Vec<PresencePerson>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePutResponse {
+    pub applied: bool,
+    pub ttl_seconds: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceReadResponse {
+    pub ttl_seconds: u32,
+    pub active_members: Vec<PresencePerson>,
+    pub workspaces: Vec<PresenceWorkspace>,
+}
+
+fn valid_presence_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_presence_device(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36 && bytes.iter().enumerate().all(|(i, byte)| {
+        match i {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            14 => *byte == b'4',
+            19 => matches!(*byte, b'8' | b'9' | b'a' | b'b'),
+            _ => matches!(*byte, b'0'..=b'9' | b'a'..=b'f'),
+        }
+    })
+}
+
+fn valid_presence_people(people: &[PresencePerson]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    people.len() <= 500 && people.iter().all(|person| valid_presence_id(&person.user_id) && seen.insert(&person.user_id))
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceClientError {
@@ -2083,6 +2170,71 @@ impl CloudWorkspaceService {
         let marker = result?;
         if marker.session_id != session_id.unwrap_or_default() || chrono::DateTime::parse_from_rfc3339(&marker.read_at).is_err() { return Err(post_send_error(RequestRisk::Mutation)); }
         Ok(marker)
+    }
+
+    /// Both presence routes are held locally in production, before context or HTTP.
+    fn presence_in<T>(&self, org: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if !self.phase2_enabled { return Err(CloudWorkspaceClientError::local("presence_unavailable", true)); }
+        if !valid_presence_id(org) { return Err(inbox_invalid()); }
+        let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        if !self.account.is_current(&original) || original.generation != context.generation
+            || original.access_token != context.access_token {
+            return Err(context_changed_error(risk));
+        }
+        let result = operation(&self.client, &context);
+        // Generation fences A-B-A; active org, profile, session and membership are
+        // checked again even for errors. There is no successful cached fallback.
+        let current = self.account.context();
+        if !self.account.is_current(&original)
+            || !self.account.inbox_member_is_current(&context, org)
+            || !current.is_some_and(|now| now.access_token == original.access_token) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    pub fn presence_put(&self, org: &str, body: Value) -> Result<PresencePutResponse, CloudWorkspaceClientError> {
+        if !body.is_object() { return Err(inbox_invalid()); }
+        let input: PresencePutInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+        if !valid_presence_device(&input.device_id) || !(1..=9_007_199_254_740_991).contains(&input.sequence)
+            || input.workspace_id.as_deref().is_some_and(|id| !valid_presence_id(id)) { return Err(inbox_invalid()); }
+        self.presence_in(org, RequestRisk::Mutation, |client, context| {
+            let body: Value = client.request_as("PUT", context, &["presence"], None, Some(json!(input)), None, RequestRisk::Mutation)?;
+            if !body.is_object() { return Err(post_send_error(RequestRisk::Mutation)); }
+            let value: PresencePutResponse = serde_json::from_value(body).map_err(|_| post_send_error(RequestRisk::Mutation))?;
+            if value.ttl_seconds != 45 { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(value)
+        })
+    }
+
+    pub fn presence_read(&self, org: &str, body: Value) -> Result<PresenceReadResponse, CloudWorkspaceClientError> {
+        if !body.is_object() { return Err(inbox_invalid()); }
+        let input: PresenceReadInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+        let mut requested = std::collections::HashSet::new();
+        if input.workspace_ids.len() > 100 || !input.workspace_ids.iter().all(|id| valid_presence_id(id) && requested.insert(id.as_str())) { return Err(inbox_invalid()); }
+        self.presence_in(org, RequestRisk::Read, |client, context| {
+            let body: Value = client.request_as("POST", context, &["presence", "read"], None, Some(json!(input)), None, RequestRisk::Read)?;
+            // Serde's struct visitor also accepts positional arrays. Require JSON
+            // objects at every DTO boundary before decoding their exact fields.
+            let people_are_objects = |value: &Value| value.as_array().is_some_and(|people| people.iter().all(Value::is_object));
+            if !body.is_object() || !people_are_objects(&body["activeMembers"])
+                || !body["workspaces"].as_array().is_some_and(|workspaces| workspaces.iter().all(|workspace| {
+                    workspace.is_object() && workspace["owner"].is_object() && people_are_objects(&workspace["activeMembers"])
+                })) { return Err(invalid_response()); }
+            let value: PresenceReadResponse = serde_json::from_value(body).map_err(|_| invalid_response())?;
+            let mut seen = std::collections::HashSet::new();
+            if value.ttl_seconds != 45 || !valid_presence_people(&value.active_members)
+                || !value.workspaces.iter().all(|workspace| {
+                    requested.contains(workspace.workspace_id.as_str()) && seen.insert(workspace.workspace_id.as_str())
+                        && valid_presence_id(&workspace.owner.user_id) && valid_presence_people(&workspace.active_members)
+                        && workspace.active_members.iter().all(|person| value.active_members.iter().any(|aggregate| aggregate.user_id == person.user_id))
+                }) { return Err(invalid_response()); }
+            // Authorized omissions are intentional. The org aggregate also includes
+            // visible workspaces outside this batch; never restrict it to the batch.
+            Ok(value)
+        })
     }
 
     pub fn phase2_contracts_available(&self) -> bool { self.phase2_enabled }
@@ -3363,6 +3515,10 @@ fn known_error_code(code: &str) -> bool {
     matches!(
         code,
         "invalid_access_token"
+            | "presence_rate_limited"
+            | "presence_device_limit"
+            | "presence_capacity_exceeded"
+            | "presence_unavailable"
             | "inbox_unavailable"
             | "organization_admin_required"
             | "active_organization_required"
@@ -3878,6 +4034,311 @@ mod tests {
         let service =
             CloudWorkspaceService::for_test(account.clone(), base, Duration::from_secs(2));
         (account, service)
+    }
+
+    fn presence_put_body() -> Value {
+        json!({"deviceId":"01234567-89ab-4cde-8fab-0123456789ab", "sequence":1, "workspaceId":"workspace-1"})
+    }
+
+    fn presence_read_body() -> Value {
+        json!({"ttlSeconds":45, "activeMembers":[{"userId":"member-1","displayName":null,"photoUrl":"https://example.com/current.png"}],
+            "workspaces":[{"workspaceId":"workspace-1", "owner":{"userId":"current-owner","displayName":null,"photoUrl":null},
+                "activeMembers":[{"userId":"member-1","displayName":null,"photoUrl":"https://example.com/current.png"}]}]})
+    }
+
+    #[test]
+    fn phase2_presence_contract_exact_paths_auth_bodies_and_nonactive_target() {
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"applied":false,"ttlSeconds":45}"#, ""),
+            response("200 OK", r#"{"applied":true,"ttlSeconds":45}"#, ""),
+            response("200 OK", &presence_read_body().to_string(), ""),
+            response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""),
+        ]);
+        let (account, mut service) = test_service(&base);
+        service.phase2_enabled = true;
+        // Membership alone authorizes the inactive org, without CS-18 opt-in.
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        let mut body = presence_put_body();
+        body["sequence"] = json!(9_007_199_254_740_991_u64);
+        assert!(!service.presence_put("org-2", body.clone()).unwrap().applied);
+        let mut leave = body.clone();
+        leave["workspaceId"] = Value::Null;
+        // Number.isSafeInteger(1.0) is true; its normalized wire value is 1.
+        leave["sequence"] = json!(1.0);
+        assert!(service.presence_put("org-2", leave.clone()).unwrap().applied);
+        leave["sequence"] = json!(1);
+        let read = service.presence_read("org-2", json!({"workspaceIds":["workspace-1","omitted"]})).unwrap();
+        assert_eq!(read.workspaces.len(), 1);
+        assert_eq!(read.workspaces[0].owner.user_id, "current-owner");
+        assert!(read.workspaces[0].owner.display_name.is_none());
+        assert!(read.workspaces[0].owner.photo_url.is_none());
+        assert!(read.active_members[0].display_name.is_none());
+        service.presence_read("org-2", json!({"workspaceIds":[]})).unwrap();
+        let requests = requests.join().unwrap();
+        for (request, path, body) in [
+            (&requests[0], "PUT /v1/desktop/orgs/org-2/presence HTTP/1.1", body),
+            (&requests[1], "PUT /v1/desktop/orgs/org-2/presence HTTP/1.1", leave),
+            (&requests[2], "POST /v1/desktop/orgs/org-2/presence/read HTTP/1.1", json!({"workspaceIds":["workspace-1","omitted"]})),
+            (&requests[3], "POST /v1/desktop/orgs/org-2/presence/read HTTP/1.1", json!({"workspaceIds":[]})),
+        ] {
+            assert!(request.starts_with(path));
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer native-secret-token"));
+            assert!(!request.to_ascii_lowercase().contains("presence=1"));
+            assert!(!request.to_ascii_lowercase().contains("x-terminalx-presence"));
+            assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_invalid_inputs_and_production_hold_never_http() {
+        // A bound listener proves no connection was attempted (unlike a dead port).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (account, mut service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
+        let mut production = CloudWorkspaceService::new(account.clone());
+        assert!(!production.phase2_contracts_available());
+        // Route the actual production constructor to the listener, preserving
+        // its activation state, so a hold regression would be observable.
+        production.client = Client::for_test(&format!("http://{}", listener.local_addr().unwrap()), Duration::from_millis(30));
+        assert_eq!(production.presence_put("org-1", presence_put_body()).unwrap_err().code, "presence_unavailable");
+        assert_eq!(production.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().code, "presence_unavailable");
+        assert!(!service.phase2_contracts_available());
+        assert_eq!(service.presence_put("org-1", presence_put_body()).unwrap_err().code, "presence_unavailable");
+        assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().code, "presence_unavailable");
+        service.phase2_enabled = true;
+        let valid = presence_put_body();
+        let mut invalid = vec![Value::Null, json!([]), json!([valid["deviceId"], 1, null]), json!({}), json!({"deviceId":"x","sequence":1}), json!({"deviceId":1,"sequence":1,"workspaceId":null})];
+        for (key, value) in [
+            ("deviceId", json!("01234567-89ab-3cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567-89ab-4cde-7fab-0123456789ab")),
+            ("deviceId", json!("01234567-89AB-4cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567_89ab-4cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567-89ab-4cde-cfab-0123456789ab")),
+            ("sequence", json!(0)), ("sequence", json!(-1)), ("sequence", json!(1.5)),
+            ("sequence", json!(9_007_199_254_740_992_u64)), ("sequence", json!("1")),
+            ("sequence", Value::Null), ("sequence", json!(true)),
+            ("workspaceId", json!("../private")), ("workspaceId", json!("a.b")), ("workspaceId", json!("a:b")),
+            ("workspaceId", json!("")), ("workspaceId", json!("x".repeat(129))), ("workspaceId", json!(false)),
+            ("userId", json!("actor")), ("profileId", json!("actor")), ("sessionId", json!("actor")),
+        ] { let mut body = valid.clone(); body[key] = value; invalid.push(body); }
+        for key in ["deviceId", "sequence", "workspaceId"] {
+            let mut body = valid.clone(); body.as_object_mut().unwrap().remove(key); invalid.push(body);
+        }
+        for body in invalid { assert_eq!(service.presence_put("org-1", body).unwrap_err().code, "cloud_workspace_request_invalid"); }
+        let too_many: Vec<String> = (0..101).map(|i| format!("workspace-{i}")).collect();
+        for body in [Value::Null, json!([]), json!([["workspace-1"]]), json!({}), json!({"workspaceIds":null}), json!({"workspaceIds":[1]}),
+            json!({"workspaceIds":["a","a"]}), json!({"workspaceIds":["a/b"]}), json!({"workspaceIds":["x".repeat(129)]}),
+            json!({"workspaceIds":too_many}), json!({"workspaceIds":[""]}), json!({"workspaceIds":"a"}),
+            json!({"workspaceIds":[],"profileId":"actor"}), json!({"workspaceIds":[],"extra":null})] {
+            assert_eq!(service.presence_read("org-1", body).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        for org in ["", "../org", "a.b", "a:b", &"x".repeat(129)] {
+            assert_eq!(service.presence_put(org, presence_put_body()).unwrap_err().code, "cloud_workspace_request_invalid");
+            assert_eq!(service.presence_read(org, json!({"workspaceIds":[]})).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        account.set_memberships_for_test(&["org-1"], false);
+        assert!(service.presence_read("org-2", json!({"workspaceIds":[]})).is_err());
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        for variant in ['8', '9', 'a', 'b'] {
+            assert!(valid_presence_device(&format!("01234567-89ab-4cde-{variant}fab-0123456789ab")));
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_subset_omissions_and_invalid_outputs() {
+        let mut bodies = vec![presence_read_body()];
+        bodies[0]["workspaces"] = json!([]); // Aggregate need not be in requested batch.
+        let mut foreign = presence_read_body(); foreign["workspaces"][0]["workspaceId"] = json!("foreign");
+        let mut duplicate = presence_read_body(); let repeated = duplicate["workspaces"][0].clone(); duplicate["workspaces"].as_array_mut().unwrap().push(repeated);
+        let mut bad_person = presence_read_body(); bad_person["activeMembers"][0]["userId"] = json!("bad/id");
+        let mut missing_name = presence_read_body(); missing_name["workspaces"][0]["owner"].as_object_mut().unwrap().remove("displayName");
+        let mut email = presence_read_body(); email["workspaces"][0]["owner"]["email"] = json!("hidden@example.com");
+        let mut bad_ttl = presence_read_body(); bad_ttl["ttlSeconds"] = json!(44);
+        let mut missing_aggregate = presence_read_body(); missing_aggregate["activeMembers"] = json!([]);
+        let mut duplicate_people = presence_read_body(); duplicate_people["activeMembers"].as_array_mut().unwrap().push(json!({"userId":"member-1","displayName":null,"photoUrl":null}));
+        let mut duplicate_attached = presence_read_body(); let person = duplicate_attached["workspaces"][0]["activeMembers"][0].clone(); duplicate_attached["workspaces"][0]["activeMembers"].as_array_mut().unwrap().push(person);
+        let mut array_owner = presence_read_body(); array_owner["workspaces"][0]["owner"] = json!(["owner",null,null]);
+        let mut array_person = presence_read_body(); array_person["activeMembers"][0] = json!(["member-1",null,null]);
+        let mut array_attached = presence_read_body(); array_attached["workspaces"][0]["activeMembers"][0] = json!(["member-1",null,null]);
+        let mut array_workspace = presence_read_body(); let workspace = array_workspace["workspaces"][0].clone();
+        array_workspace["workspaces"][0] = json!([workspace["workspaceId"],workspace["owner"],workspace["activeMembers"]]);
+        let mut missing_photo = presence_read_body(); missing_photo["activeMembers"][0].as_object_mut().unwrap().remove("photoUrl");
+        let mut mistyped_name = presence_read_body(); mistyped_name["activeMembers"][0]["displayName"] = json!(false);
+        let mut mistyped_photo = presence_read_body(); mistyped_photo["workspaces"][0]["owner"]["photoUrl"] = json!(42);
+        let mut bad_owner = presence_read_body(); bad_owner["workspaces"][0]["owner"]["userId"] = json!("owner/private");
+        let mut extra_workspace = presence_read_body(); extra_workspace["workspaces"][0]["creator"] = json!({"userId":"stale-owner"});
+        let mut extra_top = presence_read_body(); extra_top["privateCount"] = json!(1);
+        let mut too_many_people = presence_read_body(); too_many_people["activeMembers"] = json!((0..501).map(|i| json!({"userId":format!("member-{i}"),"displayName":null,"photoUrl":null})).collect::<Vec<_>>());
+        bodies.extend([foreign, duplicate, bad_person, missing_name, email, bad_ttl, missing_aggregate,
+            duplicate_people, duplicate_attached, array_owner, array_person, array_attached, array_workspace,
+            missing_photo, mistyped_name, mistyped_photo, bad_owner, extra_workspace, extra_top, too_many_people,
+            json!([45, [], []]), Value::Null, json!({"ttlSeconds":45,"activeMembers":[]})]);
+        let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap().workspaces.is_empty());
+        for _ in 1..bodies.len() {
+            assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).is_err());
+        }
+        assert_eq!(requests.join().unwrap().len(), bodies.len());
+    }
+
+    #[test]
+    fn phase2_presence_contract_current_owner_and_no_cached_authorization() {
+        let mut first = presence_read_body();
+        first["workspaces"][0]["owner"] = json!({"userId":"previous-owner","displayName":"Previous name","photoUrl":"https://example.com/old.png"});
+        let mut current = presence_read_body();
+        current["workspaces"][0]["owner"] = json!({"userId":"reassigned-owner","displayName":"Current name","photoUrl":null});
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &first.to_string(), ""),
+            response("200 OK", &current.to_string(), ""),
+            response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""),
+            response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, ""),
+            response("403 Forbidden", r#"{"error":"active_organization_required"}"#, ""),
+            response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""),
+            response("503 Service Unavailable", r#"{"error":"presence_unavailable"}"#, ""),
+        ]);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let read = || service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]}));
+        assert_eq!(read().unwrap().workspaces[0].owner.user_id, "previous-owner");
+        let latest = read().unwrap();
+        let owner = &latest.workspaces[0].owner;
+        assert_eq!(owner.user_id, "reassigned-owner");
+        assert_eq!(owner.display_name.as_deref(), Some("Current name"));
+        assert!(owner.photo_url.is_none());
+        let hidden = read().unwrap();
+        assert!(hidden.workspaces.is_empty() && hidden.active_members.is_empty());
+        for code in ["invalid_access_token", "active_organization_required", "cloud_workspace_not_found", "presence_unavailable"] {
+            assert_eq!(read().unwrap_err().code, code);
+        }
+        assert_eq!(requests.join().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn phase2_presence_contract_error_codes_retry_after_and_no_retry() {
+        for (status, code, retry) in [
+            ("429 Too Many Requests", "presence_rate_limited", Some(7)),
+            ("429 Too Many Requests", "presence_device_limit", Some(7)),
+            ("503 Service Unavailable", "presence_capacity_exceeded", None),
+            ("503 Service Unavailable", "presence_unavailable", None),
+            ("401 Unauthorized", "invalid_access_token", None),
+            ("403 Forbidden", "active_organization_required", None),
+            ("404 Not Found", "cloud_workspace_not_found", None),
+            ("422 Unprocessable Entity", "cloud_workspace_request_invalid", None),
+        ] {
+            for put in [true, false] {
+                let (base, _, request) = serve_once(response(status, &json!({"error":code}).to_string(), if retry.is_some() { "Retry-After: 7\r\n" } else { "" }), Duration::ZERO);
+                let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+                let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
+                    else { service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err() };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, Some(status[..3].parse::<u16>().unwrap()));
+                assert_eq!(error.retry_after_seconds, retry);
+                assert_eq!(serde_json::to_value(&error).unwrap()["retryAfterSeconds"], json!(retry));
+                let uncertain = status.starts_with("429") || status.starts_with("503");
+                assert_eq!(error.retryable, !put && uncertain);
+                assert_eq!(error.requires_original_account_context, put && uncertain);
+                assert!(!error.retry_with_same_idempotency_key);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")), None);
+        assert_eq!(parse_retry_after(Some("1.5")), None);
+        let (base, _, request) = serve_once(response("413 Payload Too Large", "framework body limit", ""), Duration::ZERO);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().status, Some(413));
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_presence_contract_bounds_malformed_put_and_bounded_timeout() {
+        let ids: Vec<String> = (0..100).map(|i| format!("workspace_{i}-A")).collect();
+        let (base, _, request) = serve_once(response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""), Duration::ZERO);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        service.presence_read("org-1", json!({"workspaceIds":ids})).unwrap();
+        assert!(!request.join().unwrap().extra_request);
+        for body in [json!([true,45]), Value::Null, json!({"applied":true,"ttlSeconds":46}), json!({"applied":"true","ttlSeconds":45}),
+            json!({"ttlSeconds":45}), json!({"applied":true,"ttlSeconds":45,"extra":1})] {
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            assert!(service.presence_put("org-1", presence_put_body()).is_err());
+            assert!(!request.join().unwrap().extra_request);
+        }
+        let (base, _, request) = serve_once(response("200 OK", &presence_read_body().to_string(), ""), Duration::from_millis(150));
+        let (account, _) = test_service(&base);
+        let mut service = CloudWorkspaceService::for_test(account, &base, Duration::from_millis(30));
+        service.phase2_enabled = true;
+        // The delayed reply is valid for this request: only the transport
+        // deadline, not an unrequested workspace, may make this call fail.
+        let error = service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err();
+        assert_eq!(error.code, "cloud_workspace_unavailable");
+        assert!(error.retryable);
+        assert_eq!(error.status, None);
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_presence_contract_response_body_capture_is_bounded() {
+        for put in [true, false] {
+            // Valid JSON with trailing whitespace must still obey the byte cap.
+            let mut body = if put { json!({"applied":true,"ttlSeconds":45}).to_string() }
+                else { presence_read_body().to_string() };
+            body.push_str(&" ".repeat(RESPONSE_LIMIT_BYTES as usize + 1));
+            let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
+                else { service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err() };
+            assert_eq!(error.code, if put { "cloud_workspace_request_outcome_unknown" } else { "cloud_workspace_invalid_response" });
+            assert_eq!(error.requires_original_account_context, put);
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_late_account_profile_org_session_and_aba_fenced() {
+        for change in ["signout", "account", "profile", "org", "session", "aba", "membership"] {
+            for (put, rejected) in [(true, false), (false, false), (true, true), (false, true)] {
+                let body = if put { json!({"applied":true,"ttlSeconds":45}) } else { presence_read_body() };
+                let reply = if rejected { response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "") }
+                    else { response("200 OK", &body.to_string(), "") };
+                let (base, accepted, request) = serve_once(reply, Duration::from_millis(100));
+                let (account, mut service) = test_service(&base); service.phase2_enabled = true;
+                account.set_memberships_for_test(&["org-1", "org-2"], false);
+                let handle = thread::spawn(move || if put { service.presence_put("org-2", presence_put_body()).map(|_| ()) }
+                    else { service.presence_read("org-2", json!({"workspaceIds":["workspace-1"]})).map(|_| ()) });
+                accepted.recv_timeout(Duration::from_secs(1)).unwrap();
+                let mut replacement = context();
+                match change {
+                    "signout" => account.set_context_for_test(None),
+                    "membership" => { account.set_memberships_for_test(&["org-1"], false); },
+                    "aba" => {
+                        let mut other = context();
+                        other.user_id = "user-2".into();
+                        other.generation += 1;
+                        account.set_context_for_test(Some(other));
+                        replacement.generation += 2;
+                        account.set_context_for_test(Some(replacement));
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                    _ => {
+                        match change {
+                            "account" => replacement.user_id = "user-2".into(),
+                            "profile" => replacement.profile_id = "profile-2".into(),
+                            "org" => replacement.organization_id = "org-2".into(),
+                            "session" => replacement.access_token = "new-session-token".into(),
+                            _ => unreachable!(),
+                        }
+                        account.set_context_for_test(Some(replacement));
+                        // Keep target membership valid: each test must fail for
+                        // the changed context field, not fixture membership loss.
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                }
+                let error = handle.join().unwrap().unwrap_err();
+                assert_eq!(error.code, "account_context_changed", "{change}, put={put}, rejected={rejected}");
+                assert_eq!(error.requires_original_account_context, put);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
     }
 
     fn snapshot_body(error_code: Option<&str>) -> String {
