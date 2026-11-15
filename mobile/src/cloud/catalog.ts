@@ -25,6 +25,12 @@ import { CloudWorkspaceSession } from "./workspace";
  * so the screen goes live by itself. While a screen that shows workspaces is
  * in front (`watch`), the list is also read now and then: someone else may
  * start or stop one from elsewhere (#500). Reading the list starts nothing.
+ *
+ * The last list read is kept on the phone, so the Cloud tab shows it at once
+ * the next time while the list is read again (#988). It is only shown: what
+ * it says of access opens nothing until the list was read again. Each
+ * workspace's generated title (its agent tab's, learned when it was open) is
+ * kept beside the keys, since it comes from the encrypted conversation.
  */
 
 export interface CatalogOrganization {
@@ -33,6 +39,7 @@ export interface CatalogOrganization {
   workspaces: CloudWorkspaceItem[];
   /** Why this organization's list could not be read just now (a code); what was shown stays. */
   error: string | null;
+  /** Read in this run. False for what the phone kept from before (`saved`): it is shown, but decides nothing. */
   loaded: boolean;
 }
 
@@ -42,6 +49,18 @@ export interface CatalogSnapshot {
   /** Why the organizations themselves could not be read (a code). */
   error: string | null;
   refreshedAt: number | null;
+  /** The list shown is the one kept from before; it has not been read again yet. */
+  saved: boolean;
+  /** Generated titles this phone learned, by `titleKey`. */
+  titles: Readonly<Record<string, string>>;
+}
+
+/** Where a workspace's generated title is found in `CatalogSnapshot.titles`. */
+export const titleKey = (orgId: string, workspaceId: string) => `${orgId}/${workspaceId}`;
+
+/** What a workspace is called: its generated title when this phone learned one, else its name. */
+export function workspaceTitle(snapshot: Pick<CatalogSnapshot, "titles">, workspace: Pick<CloudWorkspace, "orgId" | "id" | "name">): string {
+  return snapshot.titles[titleKey(workspace.orgId, workspace.id)] ?? workspace.name;
 }
 
 /** Storage that can also name what it holds, to forget a workspace's items. */
@@ -62,6 +81,11 @@ export interface CloudCatalogOptions {
 
 /** Which workspaces have data on this phone. Kept beside the keys, so that it survives exactly what they survive (a reinstall). */
 const HELD = "terminalx.cloud.held.v1";
+/** The generated titles this phone learned (secure storage: they come from the encrypted conversation). */
+const TITLES = "terminalx.cloud.titles.v1";
+/** The last list read (plain storage: it is what the server says, nothing of a conversation). */
+export const SAVED_LIST = "terminalx:cloud-list:v1";
+const TITLE_MAX_CHARS = 200;
 /** How often the list is read while an open workspace is changing, and for how long at most. */
 export const CHANGING_POLL_MS = 3_000;
 export const CHANGING_POLL_LIMIT_MS = 10 * 60_000;
@@ -78,7 +102,9 @@ export class CloudCatalog {
   private loading = false;
   private error: string | null = null;
   private refreshedAt: number | null = null;
-  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null };
+  private saved = false;
+  private titles: Record<string, string> = {};
+  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
   private readonly retained = new Map<string, number>();
@@ -98,8 +124,12 @@ export class CloudCatalog {
   /** Names for the user ids a shared workspace reports. */
   readonly people: CloudPeople;
 
+  /** Done once what the phone kept from before is shown (or there was none). */
+  readonly restored: Promise<void>;
+
   constructor(private readonly options: CloudCatalogOptions) {
     this.people = new CloudPeople(options.api);
+    this.restored = this.restore();
   }
 
   get api(): CloudApi {
@@ -125,6 +155,8 @@ export class CloudCatalog {
   access(orgId: string, workspaceId: string): CloudAccess {
     const organization = this.organizations.find((entry) => entry.organization.orgId === orgId);
     const workspace = organization?.workspaces.find((item) => item.workspace.id === workspaceId)?.workspace;
+    // Kept from before: who may open it is known only once the list was read again.
+    if (workspace && !organization!.loaded) return "unknown";
     if (workspace) return notShared(workspace) ? "not-shared" : "ok";
     if (this.deleted.has(sessionKey(orgId, workspaceId))) return "deleted";
     if (organization ? organization.loaded : this.refreshedAt !== null) return "gone";
@@ -183,7 +215,12 @@ export class CloudCatalog {
       this.sessions.set(key, session);
       void this.remember(orgId, workspaceId);
       // A message sent, or a state learned, may mean the list should be followed for a while.
-      session.subscribe(() => this.followChanges());
+      // And the runtime may have named the agent tab: that is the workspace's title.
+      const opened = session;
+      session.subscribe(() => {
+        this.followChanges();
+        this.learnTitle(orgId, workspaceId, opened);
+      });
       // Opened while the app is in the background (a screen that mounts late): it connects when the app is back.
       if (this.paused) session.pause();
       void session.start();
@@ -243,6 +280,24 @@ export class CloudCatalog {
     this.sessions.delete(key);
   }
 
+  /**
+   * Start a stopped workspace, as the person asked (only its managers may).
+   * What the server answers is shown at once, and the list is followed until
+   * it runs; then the workspace's screen connects by itself.
+   */
+  async start(orgId: string, workspaceId: string): Promise<void> {
+    const answer = await this.options.api.resume(orgId, workspaceId);
+    if (this.closed) return;
+    this.organizations = this.organizations.map((entry) => entry.organization.orgId !== orgId ? entry : {
+      ...entry,
+      workspaces: entry.workspaces.map((item) => item.workspace.id === workspaceId ? { ...item, workspace: answer.workspace, latestOperation: answer.operation } : item),
+    });
+    this.publish();
+    this.sessions.get(sessionKey(orgId, workspaceId))?.listChanged();
+    this.followChanges();
+    void this.refresh();
+  }
+
   /** Signed out: close everything and remove every key, transcript and outbox from the phone. */
   async signOut(): Promise<void> {
     this.closed = true;
@@ -252,7 +307,11 @@ export class CloudCatalog {
     this.sessions.clear();
     for (const [orgId, workspaceId] of await this.held()) await this.forget(orgId, workspaceId);
     await this.options.secrets.delete(HELD).catch(() => undefined);
+    await this.options.secrets.delete(TITLES).catch(() => undefined);
+    await this.options.storage.removeItem(SAVED_LIST).catch(() => undefined);
     this.organizations = [];
+    this.titles = {};
+    this.saved = false;
     this.publish();
   }
 
@@ -297,8 +356,10 @@ export class CloudCatalog {
     this.organizations = results.map(({ gone: _gone, ...entry }) => entry);
     this.error = null;
     this.loading = false;
+    this.saved = false;
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
+    void this.saveList();
 
     // What this phone keeps for workspaces it may no longer open goes away:
     // deleted ones, ones no longer listed for this person, ones listed with
@@ -356,6 +417,48 @@ export class CloudCatalog {
     this.changingTimer = null;
   }
 
+  /** What the phone kept from the last run: shown until the list is read, if it is not read first. */
+  private async restore(): Promise<void> {
+    const [list, titles] = await Promise.all([
+      this.options.storage.getItem(SAVED_LIST).catch(() => null),
+      this.options.secrets.get(TITLES).catch(() => null),
+    ]);
+    if (this.closed) return;
+    this.titles = { ...parseTitles(titles), ...this.titles };
+    const organizations = parseSavedList(list);
+    if (organizations && this.refreshedAt === null && !this.organizations.length) {
+      this.organizations = organizations;
+      this.saved = true;
+    }
+    this.publish();
+  }
+
+  /** The list as it was read, for the next time the tab opens. An organization whose list could not be read is kept as it was shown. */
+  private async saveList(): Promise<void> {
+    const organizations = this.organizations.map((entry) => ({ organization: entry.organization, workspaces: entry.workspaces }));
+    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, organizations })).catch(() => undefined);
+  }
+
+  /** The runtime named the workspace's agent tab: that is its title, here and in the list. */
+  private learnTitle(orgId: string, workspaceId: string, session: CloudWorkspaceSession): void {
+    if (this.sessions.get(sessionKey(orgId, workspaceId)) !== session) return;
+    const tabs = session.getSnapshot().tabs;
+    const launchTab = this.workspace(orgId, workspaceId)?.launch?.tabId ?? null;
+    const raw = (tabs.find((tab) => tab.tabId === launchTab) ?? tabs.find((tab) => tab.title))?.title?.trim();
+    if (!raw) return;
+    const title = Array.from(raw).slice(0, TITLE_MAX_CHARS).join("");
+    const key = titleKey(orgId, workspaceId);
+    if (this.titles[key] === title) return;
+    this.titles = { ...this.titles, [key]: title };
+    this.publish();
+    void this.saveTitles();
+  }
+
+  private saveTitles(): Promise<void> {
+    const titles = this.titles;
+    return this.options.secrets.set(TITLES, JSON.stringify(titles)).catch(() => undefined);
+  }
+
   private async held(): Promise<[string, string][]> {
     try {
       const raw = await this.options.secrets.get(HELD);
@@ -386,10 +489,17 @@ export class CloudCatalog {
     const names = await this.options.storage.getAllKeys().catch(() => [] as readonly string[]);
     await Promise.all(names.filter((name) => prefixes.some((prefix) => name.startsWith(prefix))).map((name) => this.options.storage.removeItem(name).catch(() => undefined)));
     await this.changeHeld((held) => held.filter(([org, workspace]) => !(org === orgId && workspace === workspaceId)));
+    const key = titleKey(orgId, workspaceId);
+    if (key in this.titles) {
+      const { [key]: _gone, ...rest } = this.titles;
+      this.titles = rest;
+      this.publish();
+      await this.saveTitles();
+    }
   }
 
   private publish(): void {
-    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt };
+    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles };
     for (const listener of [...this.listeners]) listener();
   }
 }
@@ -398,4 +508,32 @@ export class CloudCatalog {
 function notShared(workspace: CloudWorkspace): boolean {
   const you = workspace.you as ({ role?: string; listed?: boolean } & Record<string, unknown>) | null | undefined;
   return you?.role === "none" && you.listed !== false;
+}
+
+function parseTitles(raw: string | null): Record<string, string> {
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0));
+  } catch {
+    return {};
+  }
+}
+
+/** The list kept from before, or null when there is none this app can read. */
+function parseSavedList(raw: string | null): CatalogOrganization[] | null {
+  try {
+    const parsed = raw ? (JSON.parse(raw) as { v?: unknown; organizations?: unknown }) : null;
+    if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.organizations)) return null;
+    const out: CatalogOrganization[] = [];
+    for (const entry of parsed.organizations as { organization?: CloudOrganization; workspaces?: CloudWorkspaceItem[] }[]) {
+      const organization = entry?.organization;
+      if (!organization || typeof organization.orgId !== "string" || typeof organization.name !== "string" || !Array.isArray(entry.workspaces)) return null;
+      const workspaces = entry.workspaces.filter((item) => item?.workspace && typeof item.workspace.id === "string" && item.workspace.orgId === organization.orgId && typeof item.workspace.name === "string" && typeof item.workspace.state === "string");
+      out.push({ organization, workspaces, error: null, loaded: false });
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
