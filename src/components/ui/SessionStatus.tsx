@@ -1,7 +1,7 @@
 import { Circle, CircleAlert, CircleDashed, CircleDot, CircleX, GitMerge, GitPullRequest, GitPullRequestDraft, LoaderCircle, ShieldAlert } from "@/icons";
 import { statusText, statusTooltip, type StatusDescription } from "@terminalx/portable/sessionStatus";
 import { useSessionRowStatus, type StatusSession } from "@/lib/sessionRowStatus";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { cn } from "@/lib/cn";
 
 /** The 17.07 status-mark catalogue: one glyph and colour per row label. */
@@ -19,12 +19,12 @@ export const STATUS_COLORS: Record<string, string> = {
  * merge queue, a setup step.
  */
 export function StatusMarkIcon({ status, className, decorative = false }: { status: StatusDescription; className?: string; decorative?: boolean }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const Icon = icons[status.icon] ?? Circle;
   // Inside a row's button the row names itself; the status is then the row's description, not part of its name.
   const label = decorative ? { "aria-hidden": true } : { role: "img", "aria-label": statusText(status) };
   return <span {...label} title={statusTooltip(status)} data-session-status={status.id} data-status-label={status.label} data-testid={`status-${status.label.toLowerCase().replaceAll(" ", "-")}`} className={cn("inline-flex shrink-0", STATUS_COLORS[status.color], className)}>
-    <Icon aria-hidden className={cn("size-3.5", status.icon === "working" && animations && "animate-spin")} />
+    <Icon aria-hidden className={cn("size-3.5", status.icon === "working" && !reduced && "animate-spin")} />
   </span>;
 }
 
@@ -34,10 +34,10 @@ export function StatusMarkIcon({ status, className, decorative = false }: { stat
  * ('Needs approval — Review plan', 'Ready to merge · PR #779 — In merge queue').
  */
 export function StatusBadge({ status, className, detail = false }: { status: StatusDescription; className?: string; detail?: boolean }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   const Icon = icons[status.icon] ?? Circle;
   return <span title={statusTooltip(status)} data-session-status={status.id} data-status-label={status.label} data-testid={`status-${status.label.toLowerCase().replaceAll(" ", "-")}`} className={cn("inline-flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground", className)}>
-    <Icon aria-hidden className={cn("size-3.5 shrink-0", STATUS_COLORS[status.color], status.icon === "working" && animations && "animate-spin")} />
+    <Icon aria-hidden className={cn("size-3.5 shrink-0", STATUS_COLORS[status.color], status.icon === "working" && !reduced && "animate-spin")} />
     <span className="truncate">{statusText(status)}{detail && status.detail !== status.label && <span data-status-detail className="text-faint"> — {status.detail}</span>}</span>
   </span>;
 }

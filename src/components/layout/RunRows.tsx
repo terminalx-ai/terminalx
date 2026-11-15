@@ -7,7 +7,7 @@ import { formatCost } from "@/components/session/SessionCost";
 import { cn } from "@/lib/cn";
 import { isUnread } from "@/lib/dashboard";
 import { PIECE_STATE_LABEL, numberList, pieceNumbers } from "@/lib/orchestration";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { useSessionStore } from "@/lib/sessions";
 import { familyNeeds, familyRows, modelTier, needsMark, orderWorkers, runningWorkers, runProgress, runSpend, tryOf, workerModel, workerTitle, type FamilyRow, type Need, type WorkerTry } from "@/lib/runFamily";
@@ -147,7 +147,7 @@ export function StarterMark() {
  * own and what the run has cost.
  */
 export function LeadTrailing({ family, folded, summary, fallback }: { family: LeadFamily; folded: boolean; summary: LeadSummary; fallback: ReactElement }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   if (!folded) {
     return <>
       <NeedsBadge needs={summary.ownNeeds} />
@@ -158,7 +158,7 @@ export function LeadTrailing({ family, folded, summary, fallback }: { family: Le
     <NeedsBadge needs={summary.needs} />
     {summary.running > 0 && (
       <span role="img" aria-label={`${summary.running} running`} data-testid="lead-running" className="inline-flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground">
-        <LoaderCircle aria-hidden className={cn("size-3 text-accent", animations && "animate-spin")} />{summary.running}
+        <LoaderCircle aria-hidden className={cn("size-3 text-accent", !reduced && "animate-spin")} />{summary.running}
       </span>
     )}
     {summary.progress
