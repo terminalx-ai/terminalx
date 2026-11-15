@@ -2209,7 +2209,7 @@ fn validate_control_session_target(use_worktree: bool, on_main: bool) -> Result<
 /// label, ignoring case. A label two accounts share names neither; an agent
 /// without accounts has none to choose. Only ids and labels are answered,
 /// never a token.
-fn resolve_account(agent: &str, selector: &str) -> Result<String, ControlError> {
+pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, ControlError> {
     let selector = selector.trim();
     if selector.is_empty() {
         return Err(ControlError::invalid("--account cannot be empty."));

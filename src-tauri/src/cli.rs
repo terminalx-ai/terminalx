@@ -1732,6 +1732,21 @@ mod tests {
     }
 
     #[test]
+    fn sessions_create_carries_an_account_only_when_one_is_named() {
+        // #980: by id or label; the app resolves it against the agent's accounts.
+        for base in [
+            &["sessions", "create", "--project", "/p", "--agent", "claude", "--prompt", "go"][..],
+            &["sessions", "create", "--project", "/p", "--agent", "codex", "--issue", "12"],
+            &["sessions", "create", "--quick", "--agent", "claude", "--prompt", "go"],
+        ] {
+            let (command, params, _) = rpc_of(&[base, &["--account", "Work"]].concat());
+            assert_eq!((command.as_str(), &params["account"]), ("sessions.create", &json!("Work")), "{base:?}");
+            assert!(rpc_of(base).1.get("account").is_none(), "a request without it is what it always was: {base:?}");
+        }
+        assert!(help_text().contains("--account ACCOUNT"));
+    }
+
+    #[test]
     fn sessions_usage_reads_one_session_or_a_lead_and_its_workers() {
         assert_eq!(rpc_of(&["sessions", "usage", "0198a", "--json"]), ("sessions.usage".into(), json!({"session": "0198a"}), Duration::from_secs(30)));
         assert_eq!(rpc_of(&["sessions", "usage", "--children-of", "0198c", "--json"]), ("sessions.usage".into(), json!({"childrenOf": "0198c"}), Duration::from_secs(30)));

@@ -1322,7 +1322,8 @@ pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>
     }
     let transcript = session.tabs.iter()
         .filter(|tab| tab.harness == "claude")
-        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
+        // Where the account the tab runs on wrote it (#980).
+        .filter_map(|tab| crate::agent_data::locate_claude(tab, &session.cwd, tab.provider_session_id.as_deref()?))
         .find(|path| path.is_file());
     // The app's own log holds the prompt as it was typed, for every agent.
     let first = store::conversation_titles::first_request(&session)

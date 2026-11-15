@@ -421,3 +421,56 @@ fn an_older_runtime_starts_the_tab_on_this_macs_login_and_the_desktop_says_so() 
     assert!(crate::session_ops::create_session_blocking_on(&crate::sink::BroadcastSink::new(8), new_session(&checkout), Some("../x")).is_err());
     rig.closing();
 }
+
+#[test]
+fn a_tabs_usage_and_conversation_are_found_where_its_account_wrote_them() {
+    let _home = store::temp_home();
+    let account = added_account(Agent::Claude, "ada@example.com");
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("checkout");
+    std::fs::create_dir(&cwd).unwrap();
+    let cwd = cwd.canonicalize().unwrap();
+    let conversation = "33333333-3333-4333-8333-333333333333";
+    // Written in the account's own `projects`, which is not the person's.
+    let folder = account_dir(Agent::Claude, &account).join("projects").join(claude::transcript::encoded_cwd(&cwd.to_string_lossy()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let transcript = folder.join(format!("{conversation}.jsonl"));
+    std::fs::write(&transcript, include_str!("harness/claude/fixtures/interactive_session.jsonl")).unwrap();
+    let entry = json!({
+        "id": "account-usage", "projectPath": cwd, "cwd": cwd, "title": "Usage",
+        "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now(), "providerSessionId": conversation }],
+    });
+    index::save(&[serde_json::from_value(entry).unwrap()]).unwrap();
+
+    // On This Mac's login the person's folder holds nothing of it.
+    let local = crate::session_usage::read_tab(&cwd.to_string_lossy(), &index::get("account-usage").unwrap().tabs[0], &crate::session_usage::AgentHomes(&index::get("account-usage").unwrap().tabs[0]));
+    assert!(local.as_ref().is_none_or(|usage| usage.models.is_empty()), "{local:?}");
+
+    index::update_tab("account-usage", TAB, |t| {
+        crate::session_ops::set_tab_account(t, Some(&account));
+        Ok(())
+    }).unwrap();
+    let tab = index::get("account-usage").unwrap().tabs[0].clone();
+    assert_eq!(crate::agent_data::locate_claude(&tab, &cwd.to_string_lossy(), conversation), Some(transcript.clone()));
+    let updated = crate::session_usage::refresh_tab("account-usage", TAB).unwrap().expect("the account's transcript is read");
+    let usage = updated.tabs[0].usage.as_ref().expect("usage kept on the tab");
+    assert!(!usage.models.is_empty(), "{usage:?}");
+}
+
+#[test]
+fn the_cli_names_an_account_by_id_or_label_and_never_guesses() {
+    let _home = store::temp_home();
+    let ada = added_account(Agent::Claude, "ada@example.com");
+    let grace = added_account(Agent::Claude, "grace@example.com");
+    let resolve = |selector: &str| crate::control::resolve_account("claude", selector);
+    assert_eq!(resolve(&ada).unwrap(), ada);
+    // The default label is "email · plan"; case does not matter.
+    assert_eq!(resolve("GRACE@example.com · Max").unwrap(), grace);
+    assert_eq!(resolve("local").unwrap(), crate::agent_accounts::LOCAL);
+    assert_eq!(resolve("this mac's login").unwrap(), crate::agent_accounts::LOCAL);
+    let unknown = resolve("nobody").unwrap_err();
+    assert!(unknown.message.contains(&ada) && unknown.message.contains(&grace), "the accounts are listed by id and label: {}", unknown.message);
+    assert!(resolve("  ").is_err());
+    assert!(crate::control::resolve_account("opencode", "local").is_err(), "an agent without accounts has none to choose");
+}

@@ -231,7 +231,7 @@ impl SessionManager {
         let result = (|| {
             self.accepting_work()?;
             let rt_arc = self.runtime(session_id, tab_id)?;
-            let (running, resume, _switching) = {
+            let (running, resume, account_home, _switching) = {
                 // Inspect before fencing, under the same admission as sends and
                 // protocol writes. Fencing an active connection can reject its
                 // next approval/interrupt/start frame and falsely fail its turn.
@@ -248,7 +248,9 @@ impl SessionManager {
                     record(&rt, tab.transport, &report(Stage::WaitingForTurn, None));
                     return Ok(false);
                 }
-                (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
+                // The managed home of the added account it runs on (#980).
+                let account_home = crate::agent_data::codex_account_home_of(tab);
+                (running, tab.provider_session_id.clone(), account_home, fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
             };
             #[cfg(test)]
             tests::handoff_fenced();
@@ -258,9 +260,14 @@ impl SessionManager {
             category = ErrorCategory::ConversationUnavailable;
             let saved = if let Some(id) = resume {
                 let managed = codex::home::managed_root()?;
-                let source = [codex::home::native_root_if_made(), codex::home::user_root()]
-                    .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
-                    .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?;
+                // On an added account Codex wrote it in that account's home,
+                // whose `sessions` is the managed home's: nothing to copy.
+                let shared = account_home.as_deref().is_some_and(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()));
+                let source = if shared { managed.clone() } else {
+                    [codex::home::native_root_if_made(), codex::home::user_root()]
+                        .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
+                        .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?
+                };
                 Some((id, managed, source))
             } else { None };
             if running {

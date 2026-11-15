@@ -2502,6 +2502,11 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
         new_tab.provider_session_id = None;
         for key in ["resetLogId", "resetBackupId", "resetSeq"] { new_tab.unknown.remove(key); }
+        // On the agent account the source tab ran on (#980), asked for, so
+        // the fork goes on as the conversation did; it has not run yet.
+        let account = crate::session_ops::tab_running_account(&tab).map(str::to_owned);
+        crate::session_ops::set_tab_account(&mut new_tab, account.as_deref());
+        new_tab.unknown.remove(crate::session_ops::TAB_LAUNCHED_ACCOUNT);
         // A quick chat's fork is a quick chat with a scratch directory of its
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
@@ -3682,12 +3687,12 @@ pub async fn pane_agents(state: State<'_, AppState>) -> CmdResult<Vec<crate::ses
 
 /// Start a tab's agent again on one of the tab's conversations (#437): the
 /// one it holds, or one it held before another agent was run in its terminal.
-#[tauri::command]
 ///
 /// `account` (#980): on that agent account instead — "Switch account" on a
 /// tab, "Continue with …" at a usage limit. A running agent is restarted on
 /// it and resumes the conversation it holds; one that is not running starts
 /// on it with `provider_session_id`. The account stays the tab's.
+#[tauri::command]
 pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String, account: Option<String>) -> CmdResult<()> {
     let manager = app.state::<AppState>().sessions().map_err(err)?;
     let account = crate::session_ops::requested_account(account.as_deref())?;
