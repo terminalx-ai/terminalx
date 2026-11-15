@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState, type ComponentRef } from "react";
 import { Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { Check, Terminal as TerminalIcon } from "lucide-react-native";
+import { Check, CheckCheck } from "lucide-react-native";
 import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime, questionAnswers, questionsLabel, toggleQuestionChoice } from "@terminalx/portable/transcript";
 import type { PendingAsk, QuestionChoices, Turn, WorkItem } from "@terminalx/portable/transcript";
 import { useConversationState } from "../state/conversation-state";
@@ -9,7 +9,8 @@ import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
 import { Markdown, MarkdownBlock } from "./Markdown";
 import { LinkedText, linkedText } from "./LinkedText";
-import { deliveryNote, type TurnRow } from "./transcript-rows";
+import { deliveryNote, messageDelivery, turnRows, type MessageDelivery, type TurnRow } from "./transcript-rows";
+import { WorkGroup } from "./WorkGroup";
 import { PromptImages } from "./PromptImages";
 
 // How a conversation is drawn: the same cards for a session on a paired Mac
@@ -135,25 +136,40 @@ export function CompactingLine() {
   return <Text accessibilityLiveRegion="polite" style={[styles.compacting, { color: palette.muted }]}>{COMPACTING_LINE}</Text>;
 }
 
-/** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
-function ReaderBubble({ text, ts, note, images }: { text: string; ts?: string; note?: string; images?: { url: string; name?: string }[] }) {
+/**
+ * The reader's own words: a turn's prompt, a message the agent took while the
+ * turn ran, or one still queued for it. Under it, its time and where it is
+ * (design 22.03): a small tick once the Mac has it, "Queued" while it waits.
+ */
+function ReaderBubble({ text, ts, note, images, delivery }: { text: string; ts?: string; note?: string; images?: { url: string; name?: string }[]; delivery?: MessageDelivery }) {
   const { palette } = useTheme();
   return <View style={styles.reader}>
     {images?.length ? <PromptImages images={images} /> : null}
     {text.trim() || !images?.length ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{text}</LinkedText></View> : null}
     {note ? <Text style={[styles.deliveryNote, { color: palette.warning }]}>{note}</Text> : null}
-    <MessageTime ts={ts} align="right" />
+    <View style={styles.readerFoot}>
+      <MessageTime ts={ts} align="right" />
+      {delivery ? <DeliveryMark delivery={delivery} /> : null}
+    </View>
   </View>;
 }
 
+/** Where the reader's message is, in a word or a tick, beside its time. */
+function DeliveryMark({ delivery }: { delivery: MessageDelivery }) {
+  const { palette } = useTheme();
+  if (delivery === "queued") return <Text testID="message-queued" accessibilityLiveRegion="polite" style={[styles.deliveryMark, { color: palette.muted }]}>Queued</Text>;
+  return <View testID="message-delivered" accessible accessibilityLabel="Delivered to your Mac" style={styles.tick}><CheckCheck size={14} color={palette.muted} /></View>;
+}
+
+/** A whole turn, drawn row by row as the transcript list draws it: a cloud workspace's tab draws its turns this way. */
 export function TurnCard({ turn }: { turn: Turn }) {
-  return <View style={styles.turn}>{turn.prompt ? <ReaderBubble text={turn.prompt.text} ts={turn.prompt.messageTs} note={deliveryNote(turn.prompt)} images={turn.prompt.images} /> : null}<View style={styles.work}>{turn.work.map((item) => <WorkRow key={item.key} item={item} />)}{turn.finalText ? <Markdown text={turn.finalText} /> : null}</View></View>;
+  return <View>{turnRows(turn).map((row) => <TranscriptRow key={row.key} row={row} />)}</View>;
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ row }: { row: TurnRow }) {
   return <View style={row.startsTurn ? styles.turnStart : styles.row}>
-    {row.kind === "prompt" ? <ReaderBubble text={row.text} ts={row.ts} note={row.note} images={row.images} />
-      : <View style={styles.work}>{row.kind === "markdown" ? <View><MarkdownBlock token={row.token} /><MessageTime ts={row.ts} /></View> : <WorkRow item={row.item} />}</View>}
+    {row.kind === "prompt" ? <ReaderBubble text={row.text} ts={row.ts} note={row.note} images={row.images} delivery={row.delivery} />
+      : <View style={styles.work}>{row.kind === "markdown" ? <View><MarkdownBlock token={row.token} /><MessageTime ts={row.ts} /></View> : row.kind === "calls" ? <WorkGroup calls={row.calls} /> : <WorkRow item={row.item} />}</View>}
   </View>;
 });
 
@@ -161,11 +177,13 @@ function WorkRow({ item }: { item: WorkItem }) {
   const { palette } = useTheme();
   if (item.kind === "text") return <View><Markdown text={item.text} /><MessageTime ts={item.messageTs} /></View>;
   if (item.kind === "reasoning") return <View style={[styles.thought, { borderLeftColor: palette.border }]}><LinkedText style={[styles.thoughtText, { color: palette.muted }]}>{item.text}</LinkedText></View>;
-  if (item.kind === "tool") return <View style={styles.tool}><TerminalIcon size={13} color={palette.faint} /><View style={styles.toolBody}><LinkedText numberOfLines={2} style={[styles.toolLine, { color: palette.muted }]}>{`${item.call.title ?? item.call.name}${item.call.abandoned ? " · stopped" : ""}`}</LinkedText>{item.call.result?.safetyCheck ? <Text testID="tool-safety-check" style={[styles.toolLine, { color: palette.warning }]}>{item.call.result.safetyCheck}</Text> : null}</View></View>;
-  if (item.kind === "tool_group") return <View style={styles.tool}><TerminalIcon size={13} color={palette.faint} /><Text style={[styles.toolText, { color: palette.muted }]}>{item.name} · {item.calls.length} calls</Text></View>;
+  // `turnRows` folds calls into runs before they get here; a call drawn on its own is a run of one.
+  if (item.kind === "tool") return <WorkGroup calls={[item.call]} />;
+  if (item.kind === "tool_group") return <WorkGroup calls={item.calls} />;
   if (item.kind === "error") return <LinkedText style={[styles.body, { color: palette.danger }]}>{item.text}</LinkedText>;
-  if (item.kind === "queued") return <View><LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`Queued · ${item.text}`}</LinkedText><MessageTime ts={item.messageTs} />{item.inputOccupied || item.withdrawn ? <Text style={[styles.reasoning, { color: palette.warning }]}>{deliveryNote(item)}</Text> : null}</View>;
-  if (item.kind === "message") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} images={item.images} />;
+  // `turnRows` draws these as the reader's rows; here for a work item drawn on its own.
+  if (item.kind === "queued") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} images={item.images} delivery={messageDelivery(item, true)} />;
+  if (item.kind === "message") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} images={item.images} delivery={messageDelivery(item, false)} />;
   if (item.kind === "decision") return <LinkedText style={[styles.reasoning, { color: item.allowed ? palette.success : palette.danger }]}>{item.label}</LinkedText>;
   if (item.kind === "subagent") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`${item.label ?? "Background agent"} · ${item.done ? "done" : "working"}`}</LinkedText>;
   // Running, it has no row: the conversation's `CompactingLine` says so (#644).
@@ -193,20 +211,18 @@ function safeJson(value: unknown) { try { return JSON.stringify(value, null, 2).
 const styles = StyleSheet.create({
   row: { paddingTop: 8 },
   turnStart: { paddingTop: 22 },
-  turn: { gap: 11 },
   reader: { alignSelf: "flex-end", maxWidth: "85%", alignItems: "flex-end", gap: 4 },
   promptBubble: { borderRadius: 22, borderBottomRightRadius: 6, paddingHorizontal: 16, paddingVertical: 11 },
-  deliveryNote: { fontSize: 12, lineHeight: 17, textAlign: "right" },
+  deliveryNote: { fontSize: 13, lineHeight: 18, textAlign: "right" },
+  readerFoot: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 5 },
+  deliveryMark: { fontSize: 13, lineHeight: 17, paddingTop: 2 },
+  tick: { paddingTop: 2 },
   work: { gap: 8, paddingHorizontal: 2 },
   body: { fontSize: 16, lineHeight: 23 },
   reasoning: { fontSize: 13, lineHeight: 19 },
   thought: { borderLeftWidth: 2, paddingLeft: 10 },
   thoughtText: { fontSize: 13, lineHeight: 19 },
   compacting: { fontSize: 13, lineHeight: 19, paddingHorizontal: 3, paddingTop: 12 },
-  tool: { flexDirection: "row", alignItems: "center", gap: 7, paddingVertical: 2 },
-  toolText: { flex: 1, fontSize: 13 },
-  toolBody: { flex: 1, gap: 2 },
-  toolLine: { fontSize: 13 },
   time: { paddingTop: 2 },
   timeText: { fontSize: 11 },
   agentLabel: { fontWeight: "600" },

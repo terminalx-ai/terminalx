@@ -213,6 +213,22 @@ describe("conditional lists", () => {
     expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(3);
   });
 
+  it("reads a tab's generated title, and summaries from older Macs without one", async () => {
+    const tab = { id: "t", harness: "claude", status: "idle", title: "You are a worker in a run led" };
+    const sessions = [
+      { id: "new", title: "Tabs show the generated title", project: "TerminalX", worktree: "w", modified: "x", tabs: [{ ...tab, generatedTitle: "Tabs show the generated title" }] },
+      { id: "old", title: "Older Mac", project: "TerminalX", worktree: "w", modified: "x", tabs: [tab] },
+      { id: "none", title: "Nothing made yet", project: "TerminalX", worktree: "w", modified: "x", tabs: [{ ...tab, generatedTitle: null }] },
+    ];
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: false, refusal: { code: "forbidden", message: "unsupported" } }
+      : { ok: true, value: { sessions } });
+    const summaries = await hostApi(request).summaries();
+    expect(summaries?.map((summary) => [summary.id, summary.tabs[0].generatedTitle])).toEqual([
+      ["new", "Tabs show the generated title"], ["old", undefined], ["none", null],
+    ]);
+  });
+
   it("never sends conditional fields to an older host", async () => {
     const request = vi.fn(async (method: string) => method === "sync.capabilities"
       ? { ok: false, refusal: { code: "forbidden", message: "unsupported" } }

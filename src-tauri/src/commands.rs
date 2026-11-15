@@ -2149,10 +2149,14 @@ pub async fn project_overview(project_path: String) -> CmdResult<crate::project_
         .map_err(err)
 }
 
-/// Take the agent's title for a conversation that still has a made-up one.
+/// Take the agent's title for a conversation that still has a made-up one,
+/// and give its tabs the names made for them.
 #[tauri::command]
 pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
-    if let Some(session) = crate::session_ops::adopt_agent_title(&session_id)? {
+    let named = crate::session_ops::adopt_agent_title(&session_id)?;
+    // Then its tabs, so a lone tab takes the session's new name.
+    let tabs = crate::session_ops::adopt_tab_titles(&session_id)?;
+    if let Some(session) = tabs.or(named) {
         let _ = app.emit("session_updated", &session);
     }
     Ok(())
@@ -5340,7 +5344,13 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>, local_vm_tasks: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(
+    native_codex: Option<bool>,
+    session_cost: Option<bool>,
+    orchestrator_runs: Option<bool>,
+    local_vm_tasks: Option<bool>,
+    machines: Option<bool>,
+) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
@@ -5353,6 +5363,9 @@ pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Optio
     }
     if let Some(on) = local_vm_tasks {
         settings.experimental.local_vm_tasks = on;
+    }
+    if let Some(on) = machines {
+        settings.experimental.machines = on;
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
@@ -5413,6 +5426,9 @@ pub struct OrchestratorPatch {
     lead_when_ladder_ends: Option<bool>,
     #[serde(default)]
     resume_after_reset: Option<bool>,
+    /// Whether the run's own lead may take a blocked piece over; app-wide only.
+    #[serde(default)]
+    lead_takes_over: Option<bool>,
     /// Cells of the routing table, by kind and then by agent. A cell given
     /// as `null` loses its override: it follows the app again (for a
     /// project) or the built-in table (for the app).
@@ -5507,8 +5523,8 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if patch.workers_per_run.is_some() || patch.workers_at_once.is_some() || patch.stall_minutes.is_some() {
                 return Err("Worker limits and the stall time are set for the whole app, not for one project.".into());
             }
-            if patch.reask_verifier.is_some() || patch.accept_base_failures.is_some() || patch.lead_when_ladder_ends.is_some() || patch.resume_after_reset.is_some() {
-                return Err("What a run decides on its own is set for the whole app, not for one project.".into());
+            if patch.reask_verifier.is_some() || patch.accept_base_failures.is_some() || patch.lead_when_ladder_ends.is_some() || patch.resume_after_reset.is_some() || patch.lead_takes_over.is_some() {
+                return Err("What a run decides on its own, and whether the lead takes blocked pieces over, are set for the whole app, not for one project.".into());
             }
             if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
             if let Some(value) = patch.tries_per_piece { project.tries_per_piece = value; }
@@ -5537,6 +5553,7 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.accept_base_failures { orchestrator.accept_base_failures = value; }
             if let Some(value) = patch.lead_when_ladder_ends { orchestrator.lead_when_ladder_ends = value; }
             if let Some(value) = patch.resume_after_reset { orchestrator.resume_after_reset = value; }
+            if let Some(value) = patch.lead_takes_over { orchestrator.lead_takes_over = value; }
         }
     }
     store::settings::save(&settings).map_err(err)?;

@@ -13,6 +13,9 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.";
 
+export const MACHINES_DESCRIPTION =
+  "Settings → Machines: let other computers that run TerminalX operate this Mac, and add machines this Mac can operate. Each computer pairs with a one-time code and a fingerprint you compare on both screens before choosing Allow.";
+
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
 
@@ -22,6 +25,7 @@ export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 export const SETTINGS_SECTIONS = {
   account: { title: "Account", group: "Personal", entry: "account.identity" },
   devices: { title: "Devices", group: "Personal", entry: "devices.pairing" },
+  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating" },
   general: { title: "General", group: "Personal", entry: "general.websiteLinks" },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme" },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
@@ -303,6 +307,30 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.usageRefreshMinutes" },
   }),
   defineSetting({
+    id: "machines.allowOperating", section: "machines", title: "Let other computers operate this Mac",
+    description: "Computers you approve can start sessions, open terminals and change files here. Connections are end-to-end encrypted; the relay only passes sealed messages.",
+    searchTerms: ["machines", "operate", "remote", "allow", "computers", "host"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.allowOperating" },
+  }),
+  defineSetting({
+    id: "machines.pairingCode", section: "machines", title: "Create pairing code",
+    description: "A one-time code another computer pastes in Add a machine. It works once and lasts five minutes.",
+    searchTerms: ["machines", "pairing", "code", "pair", "create", "one-time"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime (in memory; never saved)" }, layout: "content",
+  }),
+  defineSetting({
+    id: "machines.yours", section: "machines", title: "Your machines",
+    description: "Computers this Mac can operate, and Add a machine.",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
+  }),
+  defineSetting({
+    id: "machines.computers", section: "machines", title: "Computers that can operate this Mac",
+    description: "Each has its own credential. Revoke ends it and closes its connection.",
+    searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
+  }),
+  defineSetting({
     id: "devices.pairing", section: "devices", title: "Pair a phone",
     description: "Choose Relay or LAN and create a one-time pairing code.",
     searchTerms: ["devices", "pair", "a", "phone"], scope: "user",
@@ -345,6 +373,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
   }),
   defineSetting({
+    id: "experimental.machines", section: "experimental", title: "Machines",
+    description: MACHINES_DESCRIPTION,
+    searchTerms: ["experimental", "machines", "operate", "remote", "computer", "pair", "pairing code", "mac mini", "server"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.machines" },
+  }),
+  defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
     description: "Show the plan and wait for Approve. Off, the workers start at once.",
     searchTerms: ["orchestrator", "run", "approve", "approval", "plan", "ask", "lead", "workers"], scope: "user",
@@ -379,6 +413,12 @@ export const SETTINGS_ROWS = [
     description: "Retry, raise effort, then move up a model. From 1 to 6.",
     searchTerms: ["orchestrator", "tries", "attempts", "retry", "retries", "escalate", "ladder", "piece", "effort", "model"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.triesPerPiece" },
+  }),
+  defineSetting({
+    id: "orchestrator.leadTakesOver", section: "orchestrator", title: "Let the lead take over blocked pieces",
+    description: "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
+    searchTerms: ["orchestrator", "lead", "take over", "takeover", "blocked", "piece", "finish", "approval", "approved", "person", "ask"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.leadTakesOver" },
   }),
   defineSetting({
     id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",

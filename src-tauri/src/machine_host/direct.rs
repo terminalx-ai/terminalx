@@ -19,12 +19,14 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 use tokio_tungstenite::tungstenite::Message;
 
+use super::pairing::{Asking, Decision, Outcome};
+use super::registry::token_hash;
 use super::MachineHost;
-use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH};
+use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
 use crate::relay_e2ee::{begin_e2ee_session, E2eeHello, PayloadKind};
 use crate::remote::protocol::Authority;
 use crate::remote::server::{Peer, WorkspaceRpc};
@@ -170,9 +172,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
 }
 
-/// E2EE v2 with the machine's host key, the computer's device token proved
-/// inside it, then workspace RPC with full operating rights (decision 5).
-async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S) -> Result<()> {
+/// E2EE v2 with the machine's host key, then the computer's `e2ee_auth`,
+/// answered in the order docs/MACHINES.md "As built (PRO-342)" gives: a
+/// paired computer with the key it paired with is served workspace RPC with
+/// full operating rights (decision 5); the live code's token waits for Allow;
+/// anything else is refused. Nothing is granted before Allow: no
+/// `e2ee_authenticated`, no record, no RPC.
+pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S) -> Result<()> {
     let mut socket = tokio_tungstenite::accept_async_with_config(stream, Some(crate::remote::host::websocket_config())).await?;
     let keypair = host.keypair().context("the machine host key is not loaded")?;
     let hello = match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.next()).await.context("no E2EE hello")? {
@@ -191,11 +197,34 @@ async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost
         bail!("E2EE authentication was not bound to the handshake");
     }
     let token = auth["deviceToken"].as_str().map(str::to_string).ok_or_else(|| anyhow!("E2EE authentication lacks a device token"))?;
-    let lookup = host.clone();
-    let computer = tokio::task::spawn_blocking(move || lookup.registry.find_by_token(&token)).await??;
-    let Some(computer) = computer else {
+    let client_key = session.client_public_key_b64.clone();
+    let computer = match find(&host, &token).await? {
+        Some(computer) => computer,
+        None => {
+            let asking = Asking {
+                token_hash: token_hash(&token),
+                client_key_b64: &client_key,
+                label: computer_label(auth["label"].as_str()),
+                platform: computer_platform(auth["platform"].as_str()),
+                fingerprint: computer_fingerprint(keypair.public(), &client_key, &token)?,
+                transport: "direct",
+            };
+            let (request_id, outcome) = match host.ask(asking) {
+                Decision::Wait { request_id, outcome } => (request_id, outcome),
+                Decision::Refuse(reason) => return refuse_pairing(&mut socket, &mut session, reason).await,
+            };
+            match await_allow(&host, &mut socket, &request_id, outcome).await {
+                Some(Outcome::Approved) => {}
+                Some(Outcome::Refused(reason)) => return refuse_pairing(&mut socket, &mut session, reason).await,
+                Some(Outcome::Waiting) | None => bail!("the asking computer closed before an answer"),
+            }
+            // Allow wrote its record: admitted as any paired computer is.
+            find(&host, &token).await?.ok_or_else(|| anyhow!("the computer allowed a moment ago was removed"))?
+        }
+    };
+    let Some(computer) = host.paired_with_key(computer, &client_key) else {
         refuse(&mut socket).await;
-        bail!("a device credential this machine does not know");
+        bail!("a paired computer's credential with another key");
     };
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
     // Admitted before it is told it is in, so turning the switch off or a
@@ -222,6 +251,86 @@ async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost
     .await;
     host.untrack(&computer.id, tracked);
     result
+}
+
+/// The paired computer whose token this is. Blocking, so off this task.
+async fn find(host: &Arc<MachineHost>, token: &str) -> Result<Option<crate::machine_host::registry::PairedComputer>> {
+    let (lookup, token) = (host.clone(), token.to_string());
+    tokio::task::spawn_blocking(move || lookup.registry.find_by_token(&token)).await?
+}
+
+/// Wait for Allow, two minutes at most. A frame from the computer, or its
+/// connection closing, means it gave up: `None`, and the last such
+/// connection declines the request.
+async fn await_allow<S: AsyncRead + AsyncWrite + Unpin>(
+    host: &MachineHost,
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    request_id: &str,
+    mut outcome: watch::Receiver<Outcome>,
+) -> Option<Outcome> {
+    let deadline = tokio::time::Instant::now() + host.approval_ttl();
+    let answered = tokio::select! {
+        answered = outcome.wait_for(|outcome| *outcome != Outcome::Waiting) => answered.map(|outcome| *outcome).ok(),
+        _ = tokio::time::sleep_until(deadline) => {
+            host.decline(request_id);
+            Some(Outcome::Refused(REFUSED_NOT_APPROVED))
+        }
+        _ = gave_up(socket) => None,
+    };
+    match answered {
+        Some(answered) => Some(answered),
+        None => {
+            // Closed, or the request ended with its sender: never Allow.
+            host.leave(request_id);
+            let ended = *outcome.borrow();
+            (ended != Outcome::Waiting).then_some(ended)
+        }
+    }
+}
+
+/// Resolves when the waiting computer sends anything but a ping or pong, or
+/// its connection ends. Nothing it sends before Allow is answered.
+async fn gave_up<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenite::WebSocketStream<S>) {
+    while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = socket.next().await {}
+}
+
+/// `pairing_refused`, sealed, then the socket closes. A token this machine
+/// does not know (`code-inactive`) may be a revoked computer's as well as a
+/// spent code's, so that close is `4401`, "Access removed", as a refused
+/// credential's always was: a computer that was connecting stops retrying,
+/// and one that was pairing has read the reason first.
+async fn refuse_pairing<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    session: &mut crate::relay_e2ee::E2eeSession,
+    reason: &'static str,
+) -> Result<()> {
+    let refused = json!({ "type": "pairing_refused", "v": 1, "reason": reason });
+    let _ = crate::remote::host::send_sealed(socket, session, &refused).await;
+    if reason == REFUSED_CODE_INACTIVE {
+        refuse(socket).await;
+    } else {
+        let _ = socket.close(None).await;
+    }
+    bail!("pairing refused ({reason})")
+}
+
+/// The name the computer gave, as the approval dialog may show it: control
+/// characters stripped, 1 to 64 characters.
+pub(crate) fn computer_label(label: Option<&str>) -> String {
+    let label: String = label.unwrap_or_default().chars().filter(|char| !char.is_control()).collect();
+    let label: String = label.trim().chars().take(64).collect();
+    let label = label.trim();
+    if label.is_empty() { "Unnamed computer".into() } else { label.into() }
+}
+
+pub(crate) fn computer_platform(platform: Option<&str>) -> Option<String> {
+    platform.filter(|platform| matches!(*platform, "macos" | "linux")).map(str::to_string)
+}
+
+/// The pairing fingerprint both screens show (decision 5).
+pub(crate) fn computer_fingerprint(host_pk: &[u8; 32], client_key_b64: &str, token: &str) -> Result<String> {
+    let client: [u8; 32] = STANDARD.decode(client_key_b64)?.try_into().map_err(|_| anyhow!("client key is not 32 bytes"))?;
+    Ok(crate::pairing_fingerprint::fingerprint(host_pk, &client, &token_hash(token)))
 }
 
 async fn refuse<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenite::WebSocketStream<S>) {

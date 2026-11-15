@@ -203,6 +203,9 @@ export function OrchestratorTab() {
           <CardRow><RegisteredSetting setting="orchestrator.triesPerPiece"
             control={<NumberField label="Tries per piece" value={settings?.triesPerPiece} min={1} max={MAX_TRIES} disabled={!ready} onSave={(value) => value !== null && void save({ triesPerPiece: value })} />}
           /></CardRow>
+          <CardRow><RegisteredSetting setting="orchestrator.leadTakesOver"
+            control={<Switch aria-label="Let the lead take over blocked pieces" checked={settings?.leadTakesOver ?? true} disabled={!ready} onCheckedChange={(on) => void save({ leadTakesOver: on })} />}
+          /></CardRow>
         </Card>
         <Card title="Budget and stalls">
           <CardRow><RegisteredSetting setting="orchestrator.budgetDollars"

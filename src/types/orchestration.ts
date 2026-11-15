@@ -509,6 +509,8 @@ export interface OrchestratorSettings {
   effortCeiling: string;
   /** Over how many changed lines a result is read by a verifier though its commands pass. */
   reviewDiffLines: number;
+  /** The run's own lead may take a blocked piece over itself, in a run a person approved too. App-wide; on unless turned off. */
+  leadTakesOver: boolean;
   /** The rows of the routing table changed for the app; absent when none is. */
   routing?: RoutingRows;
   /** What a run decides on its own, where a stop needs no person's judgment (#1004). App-wide only; each is on unless turned off. */
@@ -541,6 +543,7 @@ export interface OrchestratorLimits {
   triesPerPiece: number;
   effortCeiling: string;
   reviewDiffLines: number;
+  leadTakesOver: boolean;
   routing: RoutingTable;
   auto: AutoDecide;
 }
@@ -569,6 +572,7 @@ export interface OrchestratorPatch {
   workersPerRun?: number;
   workersAtOnce?: number;
   stallMinutes?: number;
+  leadTakesOver?: boolean;
   /** `"none"` is No limit (the window level off). */
   budgetDollars?: Cap | null;
   budgetPoints?: Cap | null;
