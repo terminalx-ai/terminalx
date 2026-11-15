@@ -550,6 +550,33 @@ The runtime sends a `machine.changed` notification when the name or the project
 set changes, so the sidebar and the new-session form update without a reload.
 A session in the session list and its notifications names its `projectId`.
 
+As built (PRO-340):
+
+- `machine.changed` carries `{ machine, projects }`: the same values as
+  `machine.describe` and `machine.projects`, so a client need not ask again.
+  It is sent to connections granted `machine/1` only. The runtime checks on
+  `projects_changed` and `settings_file_changed` and every five seconds,
+  since the desktop writes `projects.json` itself.
+- `name` is "This Mac's name" as Settings → Account shows it: the chosen
+  name, else one an earlier version saved in `account.json`, else the
+  computer's own (`src-tauri/src/machine_name.rs`, shared with pairing).
+- `hasWindow` is true when the desktop app started the runtime
+  (`TERMINALX_LOCAL_DESKTOP=1`).
+- `os.version` is `sw_vers -productVersion` on macOS and `VERSION_ID` from
+  `/etc/os-release` on Linux, or null.
+- Besides sessions, these name their project too: each `pipeline.list` entry
+  and `pipeline.changed`, each terminal in `pty.list` and `pty.create`
+  (whose `cwd` is relative to that project), and each `cleanup.scan` row.
+- Archived projects are listed (with `archived: true`) and served.
+- A runtime serves its machine when it is built with
+  `WorkspaceRpc::machine(identity, …)` (`src-tauri/src/remote/server.rs`).
+  `terminalx-serve --runtime-kind local --relay-link <file>` with no
+  `--project-root` does so through the relay (`serve_machine`,
+  `src-tauri/src/remote/host.rs`), and keeps the local runtime's own
+  pipelines, automations and worktree retention. A cloud workspace still
+  requires `--project-root`. PRO-341's direct listener serves the same
+  `WorkspaceRpc` (`RelayHost::rpc`), so every route sees one set of terminals.
+
 ### Project scoping
 
 When `machine/1` is granted:
@@ -570,6 +597,32 @@ When `machine/1` is granted:
   (`src-tauri/src/remote/git.rs`).
 - A runtime serving several projects refuses a project call without `projectId`
   with `capability_not_granted`, naming `machine/1`.
+
+As built (PRO-340):
+
+- With `machine/1` granted, a project call with no `projectId` is
+  `invalid_params`, and one naming a project the machine does not have (or
+  no longer has) is `not_found`. The store is read on every call, so a
+  project removed on the machine stops being served at once.
+- A mismatched `projectId` is checked against a call's `sessionId`, its
+  `pipeline`, its `ptyId` (an agent's terminal by its tab's session) and an
+  `fs.unwatch` subscription. `fs.cancel` with a `projectId` cancels only in
+  that project.
+- `session.create` refuses `repository` with `invalid_params`, and ignores
+  `pipelineSettings`: a machine keeps its own project settings, and a caller
+  does not replace them. Its pipelines run on the machine's own host
+  (`LocalHost::new`), so they merge with its `gh`.
+- A project's worktrees outside its folder (an absolute `worktreeDir`) are
+  named by absolute path, in `fs/1` and as `repo` in `git/1`, as
+  `git.repositories` lists them. Only the project's own `git worktree list`
+  entries in that folder are reachable, never the folder itself, which holds
+  every project's worktrees. A worktree inside the project is a relative path
+  as before. Any other absolute path is `path_forbidden`.
+- A machine project's `git.repositories` is its checkout (`.`) and its
+  worktrees, at most 100, not clones found below its folder.
+- `cleanup/1` and `workspace/2` on a machine use the local runtime's own
+  clean-up host: every open project, archived ones protected, as Settings →
+  Storage does (`local_runtime::workspaces::host`).
 
 ### Method table
 
@@ -694,6 +747,8 @@ the pull request that adds it.
 | `ports.write` | `ports/1` | Served | |
 | `ports.ack` | `ports/1` | Served | |
 | `ports.close` | `ports/1` | Served | |
+| `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
+| `machine.projects` | `machine/1` | Served | As `machine.describe` |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`

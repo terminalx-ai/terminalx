@@ -42,6 +42,8 @@ struct World {
     no_worker: BTreeSet<String>,
     no_brief: BTreeSet<String>,
     no_stop: BTreeSet<String>,
+    no_preserve: BTreeSet<String>,
+    archived: BTreeSet<String>,
     /// Pieces whose new session cannot be made safe to brief, and how often that was tried.
     no_secure: BTreeSet<String>,
     secured: Vec<String>,
@@ -77,6 +79,8 @@ struct World {
     resets: Vec<String>,
     /// PRO-361: the lead's checkout, as a piece it took over reads it.
     lead_head: Option<String>,
+    recovery_base: Option<String>,
+    no_recovery_base: bool,
     lead_work: Option<engine::LeadWork>,
     lead_since: Vec<String>,
     /// Done-check commands that fail in the lead's checkout.
@@ -132,6 +136,10 @@ impl Fake {
 }
 
 impl Host for Fake {
+    fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        self.stop_worker(worker)
+    }
+
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         if session_id == "nobody" {
             return Err(EngineError::new("lead_not_found", "No session nobody to lead the run.", None));
@@ -161,6 +169,12 @@ impl Host for Fake {
         self.settings.lock().unwrap().for_project(project_path)
     }
 
+    fn worker_base(&self, _run: &Run, _piece: &Piece) -> anyhow::Result<String> {
+        let world = self.world();
+        anyhow::ensure!(!world.no_recovery_base, "dependency conflict");
+        Ok(world.recovery_base.clone().unwrap_or_else(|| "recovery-base".into()))
+    }
+
     fn create_worker(&self, _run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started> {
         let mut world = self.world();
         if world.no_worker.contains(&piece.id) {
@@ -168,7 +182,7 @@ impl Host for Fake {
         }
         let session = format!("w{}-{}", world.made.len() + 1, piece.id);
         world.made.push(Made { piece: piece.id.clone(), agent: piece.agent.clone(), model: piece.model.clone(), effort: piece.effort.clone(), mode: mode.into(), session: session.clone() });
-        Ok(Started { session_id: session.clone(), tab_id: format!("{session}-tab"), branch: Some(format!("raccoon/{}", piece.id)) })
+        Ok(Started { session_id: session.clone(), tab_id: format!("{session}-tab"), branch: Some(format!("raccoon/{}", piece.id)), base_commit: Some("fixture-base".into()) })
     }
 
     fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()> {
@@ -193,6 +207,18 @@ impl Host for Fake {
 
     fn worker(&self, worker: &SessionRef) -> WorkerNow {
         self.world().now.get(&worker.session_id).cloned().unwrap_or(WorkerNow::Gone)
+    }
+
+    fn preserve_worker(&self, _run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.world().no_preserve.contains(&worker.session_id), "preservation failed");
+        Ok(())
+    }
+
+    fn archive_worker(&self, _run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        let mut world = self.world();
+        assert!(!world.running.contains(&worker.session_id));
+        world.archived.insert(worker.session_id.clone());
+        Ok(())
     }
 
     fn stop_worker(&self, worker: &SessionRef) -> anyhow::Result<bool> {
@@ -594,6 +620,7 @@ fn start_starts_only_the_pieces_whose_dependencies_are_done() {
 
     let first = engine::start(&host, id).unwrap();
     assert_eq!(first.started, vec!["map"]);
+    assert_eq!(store::get(id).unwrap().piece("map").unwrap().tries[0].base_commit.as_deref(), Some("fixture-base"), "the exact worker baseline is persisted with its try");
     assert_eq!(first.waiting.iter().map(|waiting| (waiting.piece.as_str(), waiting.on.join(","))).collect::<Vec<_>>(), vec![("store", "map".to_string()), ("session", "store".into()), ("pipeline", "store".into()), ("cli", "store".into()), ("docs", "session,pipeline,cli".into())]);
     assert_eq!(states(&first.run)[..2], [("map", PieceState::Running), ("store", PieceState::Queued)]);
     // Called again while `map` is still working, it starts nothing.
@@ -982,22 +1009,23 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     assert_eq!(engine::check_failed(&host, id, "ghost", "exit 101").unwrap_err().code, "piece_not_found");
 
     host.reports("cli", Status::Done, "CLI reads moved.");
-    engine::worker_turn_ended(&host, "w1-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     assert_eq!(store::get(id).unwrap().piece("cli").unwrap().state, PieceState::Done);
     let output = "test control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")";
     let failed = engine::check_failed(&host, id, "cli", output).unwrap();
     // The next try is started at once: nobody has to ask.
     assert_eq!((failed.retried, failed.blocked, failed.piece.as_str()), (true, false, "cli"));
     assert_eq!(tried(&failed.run, "cli"), vec![(Step::First, "sonnet".to_string(), Some("medium".to_string()), Some(Outcome::CheckFailed)), (Step::Effort, "sonnet".into(), Some("high".into()), None)]);
-    let brief = host.world().briefs["w2-cli"].clone();
+    let retry = host.session_of("cli");
+    let brief = host.world().briefs[&retry].clone();
     assert!(brief.contains("> The done-check did not hold: cargo t control") && brief.contains("> test control::tests::create_reads_default_mode ... FAILED"), "{brief}");
 
     // Twice more, and the piece is blocked: its worker's `done` does not stand over the check.
     host.reports("cli", Status::Done, "Fixed.");
-    engine::worker_turn_ended(&host, "w2-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     assert!(engine::check_failed(&host, id, "cli", output).unwrap().retried);
     host.reports("cli", Status::Done, "Fixed again.");
-    engine::worker_turn_ended(&host, "w3-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     let last = engine::check_failed(&host, id, "cli", output).unwrap();
     assert_eq!((last.retried, last.blocked), (false, true));
     let piece = last.run.piece("cli").unwrap();
@@ -1006,12 +1034,12 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     let again = engine::refreshed(&host, id).unwrap();
     assert_eq!(again.piece("cli").unwrap().state, PieceState::Blocked, "the worker still says done; the check said otherwise");
     assert_eq!(engine::check_failed(&host, id, "cli", output).unwrap_err().code, "piece_not_done");
-    assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
+    assert_eq!(host.made(), vec!["cli", "docs", "cli", "cli"]);
 
     // A long output keeps its end: that is where a test run says what failed.
     let (host, id) = one_piece_for("other-lead");
     host.reports("cli", Status::Done, "Done.");
-    engine::worker_turn_ended(&host, "w1-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     let long = format!("{}\nFAILED at the very end", "noise ".repeat(4000));
     let failed = engine::check_failed(&host, &id, "cli", &long).unwrap();
     let detail = failed.run.piece("cli").unwrap().tries[0].detail.clone().unwrap();
@@ -1395,18 +1423,95 @@ fn with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more() {
 }
 
 #[test]
-fn a_piece_that_becomes_ready_by_a_dependency_still_waits_for_the_lead() {
+fn a_piece_that_becomes_ready_by_a_dependency_starts_without_the_lead() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 1);
     let run = engine::create(&host, &plan(), "lead", None).unwrap();
     assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["map"]);
     host.reports("map", Status::Done, "41 call sites");
     engine::worker_turn_ended(&host, &host.session_of("map"));
-    // `store` is ready now, but the lead may have to collect `map`'s branch first.
     let run = store::get(&run.id).unwrap();
-    assert_eq!((run.piece("store").unwrap().state, run.piece("store").unwrap().queued_for), (PieceState::Queued, None));
-    assert_eq!(host.made(), vec!["map"]);
-    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["store"]);
+    assert_eq!((run.piece("store").unwrap().state, run.piece("store").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(host.made(), vec!["map", "store"]);
+}
+
+#[test]
+fn delayed_dependency_checks_queue_for_global_capacity_then_another_run_wakes_them() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.workers_at_once = 3;
+    });
+    let dependent = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::start(&host, &dependent.id).unwrap();
+    host.world().hold_checks = true;
+    host.reports("map", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("map"));
+    assert_eq!(store::get(&dependent.id).unwrap().piece("store").unwrap().state, PieceState::Queued);
+
+    let other = engine::create(&host, &flat_plan(3, "claude"), "lead-2", None).unwrap();
+    engine::start(&host, &other.id).unwrap();
+    let third = engine::create(&host, &flat_plan(1, "codex"), "lead-3", None).unwrap();
+    engine::start(&host, &third.id).unwrap();
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 3);
+
+    engine::verify(&host, &dependent.id).unwrap();
+    // The watch recovers a newly ready piece with no queuedFor marker.
+    assert!(engine::watch(&host));
+    let current = store::get(&dependent.id).unwrap();
+    assert_eq!(current.piece("store").unwrap().queued_for, Some(Hold::AppLimit));
+    assert_eq!(current.piece("store").unwrap().state, PieceState::Queued);
+
+    host.world().hold_checks = false;
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let current = store::get(&dependent.id).unwrap();
+    assert_eq!((current.piece("store").unwrap().state, current.piece("store").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 3);
+    assert!(store::list().unwrap().iter().all(|run| run.in_turn() <= 2));
+}
+
+#[test]
+fn watch_recovers_a_missed_dependency_turn_end() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    host.reports("map", Status::Done, "done");
+    assert!(engine::watch(&host));
+    assert_eq!(store::get(&run.id).unwrap().piece("store").unwrap().state, PieceState::Running);
+}
+
+#[test]
+fn watch_recovers_an_idle_run_with_unmarked_ready_pieces() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 2);
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    store::update(&run.id, |run| {
+        run.state = RunState::Running;
+        Ok(())
+    }).unwrap();
+    assert!(engine::watch(&host));
+    let current = store::get(&run.id).unwrap();
+    assert_eq!(current.in_turn(), 2);
+    assert_eq!(queued_for(&current), vec![("p3", Some(Hold::RunLimit))]);
+    engine::fill_slots(&host);
+    assert_eq!(host.made(), vec!["p1", "p2"], "repeated scheduling never duplicates workers");
+}
+
+#[test]
+fn filling_slots_refreshes_workers_even_in_runs_without_queued_pieces() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_at_once = 1);
+    let first = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
+    engine::start(&host, &first.id).unwrap();
+    let second = engine::create(&host, &plan(), "lead-2", None).unwrap();
+    engine::start(&host, &second.id).unwrap();
+    // No turn-end event arrived for the first run.
+    host.reports("p1", Status::Done, "done");
+    engine::fill_slots(&host);
+    assert_eq!(store::get(&second.id).unwrap().piece("map").unwrap().state, PieceState::Running);
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 1);
 }
 
 #[test]
@@ -2066,6 +2171,12 @@ fn a_vote_of_three_with_a_threshold_of_two_passes_on_two_agreeing_verdicts() {
     host.verifier_replies("migrate", 2, &verdict_block(r#"{"verdict": "fail", "evidence": ["src/store/migrate.rs:31: drops keys it does not know"]}"#), 4_000);
     engine::worker_turn_ended(&host, "w1-migrate");
     assert_eq!(store::get(id).unwrap().piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Waiting("Question.".into()));
+    let waiting = engine::refreshed(&host, id).unwrap();
+    assert!(waiting.piece("migrate").unwrap().tries[0].verification.as_ref().unwrap().review_open());
+    assert_eq!(waiting.piece("migrate").unwrap().state, PieceState::Verifying);
+    host.world().verifier_now.insert("w1-migrate-verifier-3".into(), VerifierNow::Working);
+    engine::refreshed(&host, id).unwrap();
     // The second pass makes two of three.
     host.verifier_replies("migrate", 3, &verdict_block(PASS), 3_500);
     engine::worker_turn_ended(&host, "w1-migrate");
@@ -2276,6 +2387,109 @@ fn conflicts(id: &str, piece_id: &str) -> String {
 }
 
 #[test]
+fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trusted_lead_changes() {
+    use std::path::Path;
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        crate::git::run(cwd, args).unwrap_or_else(|error| panic!("git {args:?}: {error:#}")).trim().into()
+    }
+    fn commit(cwd: &Path, file: &str, text: &str) -> String {
+        std::fs::create_dir_all(cwd.join(file).parent().unwrap()).unwrap();
+        std::fs::write(cwd.join(file), text).unwrap();
+        git(cwd, &["add", file]);
+        git(cwd, &["commit", "-qm", file]);
+        git(cwd, &["rev-parse", "HEAD"])
+    }
+    for (integration_failure, by_hand) in [(false, false), (true, false), (true, true)] {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let cwd = repo.path();
+        git(cwd, &["init", "-q", "-b", "lead"]);
+        git(cwd, &["config", "user.name", "T"]);
+        git(cwd, &["config", "user.email", "t@example.com"]);
+        commit(cwd, "README", "initial\n");
+        let dependency = cwd.join("dependency");
+        git(cwd, &["worktree", "add", "-qb", "dependency", dependency.to_str().unwrap(), "lead"]);
+        let accepted_dependency = commit(&dependency, "contracts.ts", "export type Contract = string;\n");
+        commit(cwd, "config.ts", "initial lead config\n");
+        let old_base = super::host::dependency_base(cwd, &[("contracts", &accepted_dependency)]).unwrap();
+        assert_eq!(git(cwd, &["rev-list", "--parents", "-n1", &old_base]).split_whitespace().count(), 3, "the starting baseline is a synthetic merge");
+        let worker = cwd.join("worker");
+        git(cwd, &["worktree", "add", "-qb", "worker", worker.to_str().unwrap(), &old_base]);
+        commit(&worker, "src/cli.rs", "consumer of contracts\n");
+
+        let (host, id) = one_piece_for("lead");
+        store::update(&id, |run| {
+            let piece = &mut run.pieces[0];
+            piece.branch = Some("worker".into());
+            piece.tries[0].base_commit = Some(old_base.clone());
+            piece.done_checks = serde_json::from_value(json!([{ "type": "command", "run": "test -f contracts.ts && test -f src/cli.rs" }])).unwrap();
+            Ok(())
+        }).unwrap();
+        let checkout = verify::Checkout { cwd: worker.clone(), base: "lead".into(), branch: Some("worker".into()), commands: true, marks: None };
+        let checked = verify::gates(&checkout, &store::get(&id).unwrap().pieces[0], None, std::time::Duration::from_secs(10));
+        assert!(checked.passed(), "{:?}", checked.gates);
+        host.finds("cli", checked);
+        host.reports("cli", Status::Done, "done");
+        assert_eq!(engine::refreshed(&host, &id).unwrap().pieces[0].state, PieceState::Done);
+
+        // The lead integrates dependencies and unrelated trusted files after this worker starts.
+        git(cwd, &["merge", "--no-edit", "dependency"]);
+        commit(cwd, "trusted.ts", "another accepted piece\n");
+        if !integration_failure {
+            commit(cwd, "src/cli.rs", "lead implementation\n");
+        }
+        if by_hand {
+            git(cwd, &["merge", "--no-edit", "worker"]);
+        }
+        let base = super::host::dependency_base(cwd, &[("contracts", &accepted_dependency)]).unwrap();
+        host.world().recovery_base = Some(base.clone());
+        conflicts(&id, "cli");
+        if integration_failure {
+            store::update(&id, |run| {
+                let merge = run.pieces[0].merge.as_mut().unwrap();
+                merge.state = super::MergeState::IntegrationFailed;
+                merge.by_hand = by_hand;
+                merge.check = Some(verify::CommandRun { run: "integration check".into(), project: true, exit_code: Some(1), passed: false, millis: 1, output: Some("fix the integration".into()) });
+                Ok(())
+            }).unwrap();
+        }
+        let sent = engine::send_back(&host, &id, "cli").unwrap();
+        assert!(!sent.fresh_worker);
+        assert_eq!(store::get(&id).unwrap().pieces[0].tries[0].base_commit.as_deref(), Some(base.as_str()));
+        let session = host.session_of("cli");
+        let brief = host.world().briefs[&session].clone();
+        assert!(brief.contains(&format!("git rebase --onto {base} {old_base}")), "{brief}");
+        // Execute the actual recovery instruction, resolving only the owned file if needed.
+        let rebased = crate::git::raw(&worker, &["rebase", "--onto", &base, &old_base]).unwrap();
+        if integration_failure {
+            assert_eq!(rebased.0, 0, "{}", rebased.1);
+        } else {
+            assert_eq!(rebased.0, 1, "the owned file conflicts: {}", rebased.1);
+            std::fs::write(worker.join("src/cli.rs"), "lead implementation and consumer of contracts\n").unwrap();
+            git(&worker, &["add", "src/cli.rs"]);
+            git(&worker, &["-c", "core.editor=true", "rebase", "--continue"]);
+        }
+        if !by_hand {
+            assert_eq!(crate::git::raw(&worker, &["merge-base", "--is-ancestor", &old_base, "HEAD"]).unwrap().0, 1, "the old synthetic baseline was legitimately replaced");
+        }
+        if integration_failure {
+            commit(&worker, "src/cli.rs", "consumer adjusted to pass integration\n");
+        }
+        git(&worker, &["merge-base", "--is-ancestor", &accepted_dependency, "HEAD"]);
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        assert!(checked.passed(), "{:?}", checked.gates);
+        assert_eq!(checked.facts.files, ["src/cli.rs"]);
+        assert!(!checked.diff.contains("diff --git a/trusted.ts"));
+        assert_eq!(checked.base, base);
+        // Trusted inherited files remain protected against edits by this worker.
+        commit(&worker, "trusted.ts", "worker changed an unowned file\n");
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (Gate::Scope, false));
+        assert!(checked.gates[0].detail.as_ref().unwrap().contains("trusted.ts"));
+    }
+}
+
+#[test]
 fn a_run_whose_results_are_all_accepted_waits_to_be_merged_and_wakes_its_lead_for_it() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
@@ -2330,6 +2544,15 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
     assert!(told.contains("- b (The second change):") && told.contains("- a (The first change):") && told.contains("from a\n=======\nfrom b") && told.contains(&format!("git merge {commit}")), "{told}");
 
     let worker = host.session_of("b");
+    let resets_before = host.world().resets.clone();
+    host.world().no_recovery_base = true;
+    assert_eq!(engine::send_back(&host, id, "b").unwrap_err().code, "recovery_base_unavailable");
+    let unchanged = store::get(id).unwrap();
+    assert_eq!(unchanged.piece("b").unwrap().state, PieceState::Done);
+    assert_eq!(unchanged.piece("b").unwrap().tries[0].base_commit.as_deref(), Some("fixture-base"));
+    assert!(unchanged.piece("b").unwrap().current_merge().is_some());
+    assert_eq!(host.world().resets, resets_before);
+    host.world().no_recovery_base = false;
     let sent = engine::send_back(&host, id, "b").unwrap();
     // The worker that made the result has it again, in its own worktree: no new session, no step of the ladder.
     assert!(!sent.fresh_worker && !sent.blocked && sent.failed.is_empty());
@@ -2337,8 +2560,9 @@ fn a_piece_whose_merge_conflicts_goes_back_to_its_worker_with_the_conflict_as_it
     let piece = sent.run.piece("b").unwrap();
     assert_eq!((piece.state, piece.tries.len(), piece.merge.as_ref(), sent.run.state), (PieceState::Running, 1, None, RunState::Running));
     assert!(piece.tries[0].outcome.is_none() && piece.tries[0].verification.is_none(), "its try is open again, and what was checked is not what it will report");
+    assert_eq!(piece.tries[0].base_commit.as_deref(), Some("recovery-base"));
     let brief = host.world().briefs[&worker].clone();
-    assert!(brief.contains("it no longer merges into `lead`") && brief.contains("- src/shared.rs (1 place; also changed by a (The first change), already merged)") && brief.contains("git rebase lead") && brief.contains("from b"), "{brief}");
+    assert!(brief.contains("it no longer merges into `lead`") && brief.contains("- src/shared.rs (1 place; also changed by a (The first change), already merged)") && brief.contains("git rebase --onto recovery-base fixture-base") && brief.contains("from b"), "{brief}");
     assert!(host.world().resets.contains(&worker));
     // It reports again: the same gates check the result, and the run waits to be merged again.
     host.reports("b", Status::Done, "Rebased onto lead.");
@@ -2846,7 +3070,7 @@ fn a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session() {
     engine::worker_turn_ended(&host, "w3-cli");
     let run = store::get(&id).unwrap();
     assert_eq!((run.piece("cli").unwrap().state, run.piece("cli").unwrap().tries[2].outcome), (PieceState::Done, Some(Outcome::Done)));
-    assert_eq!(run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+    assert_eq!(run.piece("docs").unwrap().state, PieceState::Running);
 
     // A worker whose session is gone gets no note: a fresh one is what widening is for. (A lead leads one run at a time.)
     engine::stop(&host, &id, engine::By::Cli).unwrap();
@@ -3063,4 +3287,188 @@ fn stopping_a_run_also_stops_the_idle_agent_of_a_try_that_ended_before() {
     host.world().running.insert("w1-cli".into());
     engine::stop(&host, &id, By::Cli).unwrap();
     assert_eq!(host.world().stopped, ["w1-cli", "w1-cli"]);
+}
+
+
+#[test]
+fn superseded_classification_includes_all_earlier_tries_without_outcomes_and_protects_final_sessions() {
+    let _home = crate::store::temp_home();
+    let run = stored_run("done", json!([
+        {"id": "three", "state": "done", "worker": {"sessionId": "final"}, "tries": [
+            attempt("first", "interrupted", None), attempt("effort", "failed", Some("failed")), attempt("tier", "final", Some("done"))
+        ]},
+        {"id": "reused", "state": "done", "tries": [attempt("first", "final", None), attempt("effort", "other-final", Some("done"))]},
+        {"id": "lead", "state": "done", "tries": [attempt("first", "lead", None), attempt("effort", "last", Some("done"))]},
+        {"id": "duplicate", "state": "done", "tries": [attempt("first", "interrupted", None), attempt("effort", "last", Some("done"))]},
+        {"id": "legacy", "state": "done", "worker": {"sessionId": "legacy-final"}},
+        {"id": "reused-legacy", "state": "done", "tries": [attempt("first", "legacy-final", None), attempt("effort", "last", Some("done"))]}
+    ]));
+    assert_eq!(run.superseded_workers().iter().map(|worker| worker.session_id.as_str()).collect::<Vec<_>>(), ["interrupted", "failed"]);
+    assert!(run.finished_workers().iter().any(|worker| worker.session_id == "interrupted"));
+    assert_eq!(run.archival_workers(), run.superseded_workers());
+}
+
+#[test]
+fn ended_worker_archival_requires_stop_and_preservation_and_is_retryable() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let run = stored_run("done", json!([
+        {"id": "three", "state": "done", "tries": [attempt("first", "one", None), attempt("effort", "two", Some("failed")), attempt("tier", "final", Some("done"))]}
+    ]));
+    host.world().running.extend(["one".into(), "two".into(), "final".into(), "lead".into()]);
+    host.world().no_stop.insert("one".into());
+    host.world().no_preserve.insert("two".into());
+    let end = || super::end_workers(&run, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker));
+    let failures = end();
+    assert_eq!(failures.keys().map(String::as_str).collect::<Vec<_>>(), ["one", "two"]);
+    assert!(failures["one"].contains("stopped"));
+    assert!(failures["two"].contains("preserved"));
+    assert!(host.world().archived.is_empty());
+    assert_eq!(host.world().stopped, ["two", "final"]);
+    host.world().no_stop.clear();
+    host.world().no_preserve.clear();
+    assert!(end().is_empty());
+    assert!(end().is_empty());
+    assert_eq!(host.world().archived.iter().map(String::as_str).collect::<Vec<_>>(), ["one", "two"]);
+    assert!(host.world().running.contains("lead"));
+}
+
+#[test]
+fn unsuccessful_runs_archive_finished_tries_including_interrupted_final_tries() {
+    let _home = crate::store::temp_home();
+    let host = Fake::new();
+    let mut run = stored_run("failed", json!([
+        {"id": "interrupted", "state": "failed", "tries": [attempt("first", "one", None)]},
+        {"id": "still-working", "state": "running", "tries": [attempt("first", "working", None)]}
+    ]));
+    host.world().running.extend(["one".into(), "working".into(), "lead".into()]);
+    for state in [RunState::Failed, RunState::Stopped] {
+        run.state = state;
+        super::end_workers(&run, &|worker| host.stop_worker_for_cleanup(worker), &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker));
+    }
+    assert_eq!(host.world().archived.iter().map(String::as_str).collect::<Vec<_>>(), ["one"]);
+    assert!(host.world().running.contains("working"));
+    assert!(host.world().running.contains("lead"));
+}
+
+#[test]
+fn cleanup_stop_runs_normal_handling_for_idle_tabs_and_keeps_manual_tabs() {
+    use std::cell::RefCell;
+    use crate::store::index::{Front, TabEntry};
+
+    let mut tabs: Vec<TabEntry> = ["running", "idle-stale", "terminal", "manual"].iter().map(|id| {
+        serde_json::from_value(json!({"id": id, "harness": "codex", "created": "now"})).unwrap()
+    }).collect();
+    tabs[2].follow.front = Front::Terminal;
+    tabs[3].follow.front = Front::ByHand;
+    let in_turn = RefCell::new(BTreeSet::from(["running".to_string(), "idle-stale".to_string()]));
+    let calls = RefCell::new(Vec::new());
+    let normal_stop = |tab: &str| {
+        calls.borrow_mut().push(tab.to_string());
+        in_turn.borrow_mut().remove(tab);
+        Ok(())
+    };
+    assert!(engine::stop_worker_agents(&tabs, &|tab| tab == "running", &normal_stop).unwrap());
+    assert!(in_turn.borrow().is_empty(), "idle stale state receives normal stop handling too");
+    assert_eq!(*calls.borrow(), ["running", "idle-stale"]);
+    calls.borrow_mut().clear();
+    assert!(!engine::stop_worker_agents(&tabs, &|_| false, &normal_stop).unwrap());
+    assert_eq!(*calls.borrow(), ["running", "idle-stale"], "retries still clear idle state");
+    assert!(engine::stop_worker_agents(&tabs, &|_| false, &|_| anyhow::bail!("transport stop failed")).is_err());
+}
+
+#[test]
+fn verifier_permission_waits_resume_in_the_same_session_and_later_verdicts_are_consumed() {
+    let _home = crate::store::temp_home();
+    for pass in [true, false] {
+        let (host, id) = run_of(&format!("lead-{pass}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        let began = engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Permission needed.".into()));
+        assert!(engine::watch(&host), "a waiting verifier remains watched");
+        let waiting = store::get(&id).unwrap();
+        let piece = waiting.piece("guide").unwrap();
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert_eq!(piece.state, PieceState::Verifying);
+        assert!(check.review_open() && !verifier.settled() && verifier.problem.is_none());
+        assert_eq!(verifier.waiting.as_deref(), Some("Permission needed."));
+        assert!(piece.note.as_deref().unwrap().contains("verifier needs you"));
+        assert!(engine::wake(&began, &waiting, false).unwrap()["why"][0].as_str().unwrap().contains("verifier that needs you"));
+        assert!(engine::wake(&waiting, &waiting, false).is_none(), "an existing verifier prompt must not wake each new wait");
+        assert!(engine::wake(&began, &waiting, true).is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), waiting, "repeated reads preserve the resumable wait");
+        let restored: Run = serde_json::from_value(serde_json::to_value(&waiting).unwrap()).unwrap();
+        assert_eq!(restored, waiting);
+        host.world().verifier_now.insert(session, VerifierNow::Working);
+        let working = engine::refreshed(&host, &id).unwrap();
+        assert_eq!(working.piece("guide").unwrap().note.as_deref(), Some("Written."));
+        assert!(working.piece("guide").unwrap().tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0].waiting.is_none());
+        assert!(engine::wake(&waiting, &working, false).is_none());
+        let reply = if pass { PASS } else { r#"{"verdict":"fail","evidence":["docs/guide.md:1: missing settings"]}"# };
+        host.verifier_replies("guide", 1, &verdict_block(reply), 42);
+        engine::watch(&host);
+        let ended = store::get(&id).unwrap();
+        let check = ended.piece("guide").unwrap().tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(if pass { verify::Outcome::Passed } else { verify::Outcome::Failed }));
+        assert_eq!(check.review.as_ref().unwrap().verifiers[0].tokens.unwrap().total(), 42);
+        engine::refreshed(&host, &id).unwrap();
+        assert_eq!(host.world().verifiers.len(), 1, "no duplicate verifier launch");
+    }
+}
+
+#[test]
+fn capacity_queues_are_not_actionable_ready_work_or_wait_wakeups() {
+    let _home = crate::store::temp_home();
+    let (_, id) = one_piece();
+    let began = store::get(&id).unwrap();
+    for hold in [Hold::RunLimit, Hold::AppLimit] {
+        let mut now = began.clone();
+        let queued = &mut now.pieces[1];
+        queued.depends_on.clear();
+        queued.queued_for = Some(hold);
+        assert_eq!(engine::shown(&now)["ready"], json!([]));
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        // An app limit can be held by another run, with no local worker.
+        now.pieces.remove(0);
+        assert!(engine::wake(&now, &now, false).is_none());
+        assert!(engine::wake(&now, &now, true).is_none());
+        now.pieces[0].queued_for = None;
+        assert_eq!(engine::shown(&now)["ready"], json!(["docs"]));
+        assert_eq!(engine::wake(&now, &now, false).unwrap()["ready"], json!(["docs"]));
+        // An accepted result or failure still wakes even with a capacity queue.
+        let mut finished = began.clone();
+        finished.pieces[1].queued_for = Some(hold);
+        for state in [PieceState::Done, PieceState::Blocked, PieceState::Failed] {
+            finished.pieces[0].state = state;
+            let woken = engine::wake(&began, &finished, false).unwrap();
+            assert_eq!(woken["ready"], json!([]));
+            assert!(woken["why"][0].as_str().unwrap().starts_with("cli is"));
+        }
+    }
+}
+
+#[test]
+fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invalidly() {
+    let _home = crate::store::temp_home();
+    for (number, terminal) in [VerifierNow::Gone, VerifierNow::Stuck("The agent terminated.".into()), VerifierNow::Replied("No verdict.".into())].into_iter().enumerate() {
+        let (host, id) = run_of(&format!("lead-terminal-{number}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        host.reports("guide", Status::Done, "Written.");
+        engine::refreshed(&host, &id).unwrap();
+        let session = host.world().verifiers[0].session.clone();
+        host.world().verifier_now.insert(session.clone(), VerifierNow::Waiting("Question.".into()));
+        engine::refreshed(&host, &id).unwrap();
+        host.world().verifier_now.insert(session, terminal);
+        let ended = engine::refreshed(&host, &id).unwrap();
+        let piece = ended.piece("guide").unwrap();
+        assert_eq!(piece.state, PieceState::Blocked);
+        let check = piece.tries[0].verification.as_ref().unwrap();
+        assert_eq!(check.outcome, Some(verify::Outcome::Inconclusive));
+        let verifier = &check.review.as_ref().unwrap().verifiers[0];
+        assert!(verifier.settled() && verifier.problem.is_some() && verifier.waiting.is_none());
+        assert_eq!(engine::refreshed(&host, &id).unwrap(), ended);
+        assert_eq!(host.world().verifiers.len(), 1);
+    }
 }

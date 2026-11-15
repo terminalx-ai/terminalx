@@ -49,7 +49,7 @@ vi.mock("react-native", () => {
     ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
     AppState: { currentState: "active" },
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
-    Keyboard: { addListener: () => ({ remove: () => undefined }) },
+    Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false },
     PanResponder: { create: () => ({ panHandlers: {} }) },
     ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
@@ -123,6 +123,7 @@ beforeEach(() => {
       subscribeTerminal: vi.fn((_session, tab, listener) => { mocks.terminalListeners.set(tab, listener); return () => { mocks.terminalListeners.delete(tab); }; }),
       readTerminal: vi.fn(async (_session, tab) => `${tab} output`),
       respondPermission: vi.fn(async () => ({ answered: true })),
+      answerQuestions: vi.fn(async () => ({ answered: true })),
       queueInput: vi.fn(async () => true), releaseInput: vi.fn(async () => {}),
       postNote: vi.fn(async (_session, text) => ({ sent: true, note: { id: "note", body: text, createdAt: 0, author: { userId: "me" } } })),
       sendSession: vi.fn(async () => ({ sent: true, queued: false })),
@@ -1130,5 +1131,112 @@ describe("a compaction on the paired Mac, as the desktop shows it (#644)", () =>
     await render();
     await vi.waitFor(() => expect(container.textContent).toContain("Context compacted"));
     expect(container.textContent).not.toContain("Compacting context…");
+  });
+});
+
+// #979: an agent's question is answered from the phone, as on the desktop.
+describe("an agent's question on the phone (#979)", () => {
+  const questions = [
+    { question: "Which checks should run?", multiSelect: true, freeText: false, options: [{ label: "Lint, format", description: "Both" }, { label: "Tests", description: "Unit tests only" }] },
+    { question: "Which branch?", multiSelect: false, freeText: true, options: [{ label: "main" }, { label: "next" }] },
+  ];
+  const question = { ...event("claude", "", 2), payload: { type: "questions_asked", requestId: "q1", toolUseId: "", questions } };
+  const permission = { ...event("claude", "", 3), payload: { type: "permission_requested", requestId: "p1", toolUseId: "tool", toolName: "shell", input: {}, options: [{ id: "allow", label: "Allow", kind: "allow_once" }] } };
+  const decided = (requestId: string, seq: number) => ({ ...event("claude", "", seq), payload: { type: "permission_decided", requestId, allowed: true, label: "Answered", automatic: false } });
+  const asks = (...events: unknown[]) => mocks.app.api.tail.mockImplementation(async (_session: string, tab: string) => ({ events: tab === "claude" ? [event(tab, "Ship it"), ...events] : [event(tab, `${tab} transcript`)], hasMore: false }));
+  const text = () => container.textContent ?? "";
+  const takesAnswers = () => { mocks.app.api.features = async () => ({ questions: 1 }); };
+
+  it("shows the question with every option, and sends the answer the desktop's card would send", async () => {
+    takesAnswers();
+    asks(question);
+    await render();
+    for (const shown of ["2 questions", "Which checks should run?", "Lint, format", "Both", "Tests", "Unit tests only", "Choose any that apply", "Which branch?", "main", "next"]) expect(text()).toContain(shown);
+    expect(text()).not.toContain("Permission");
+    expect(text()).not.toContain("from your Mac");
+
+    await click("Tests. Unit tests only"); await click("Lint, format. Both"); await click("main"); await click("next");
+    await click("Answer");
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", { "Which checks should run?": "Tests, Lint, format", "Which branch?": "next" });
+    // The card stays until the Mac says the question is answered, then goes without a refresh.
+    expect(text()).toContain("Which branch?");
+    await act(async () => mocks.sessionListeners.get("claude")!(decided("q1", 3)));
+    expect(text()).not.toContain("Which branch?");
+    expect(() => button("Answer")).toThrow();
+  });
+
+  it("skips with an empty answer set, and goes away when the Mac answers first", async () => {
+    takesAnswers();
+    asks(question);
+    await render();
+    await click("Skip");
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", {});
+
+    // Answered on the Mac: the decision event alone removes the card.
+    await act(async () => mocks.sessionListeners.get("claude")!(decided("q1", 3)));
+    expect(text()).not.toContain("Which checks should run?");
+  });
+
+  it("sends one answer for a double tap, and says the Mac's message when the answer came too late", async () => {
+    takesAnswers();
+    asks(question);
+    let settle!: (result: { answered: false; message: string }) => void;
+    mocks.app.api.answerQuestions.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    await render();
+    await click("main");
+    await act(async () => { button("Answer").click(); button("Answer").click(); button("Skip").click(); });
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledTimes(1);
+    expect([button("Answer").disabled, button("Skip").disabled]).toEqual([true, true]);
+
+    await act(async () => settle({ answered: false, message: "internal: that question is no longer open" }));
+    expect(text()).toContain("That question is no longer open.");
+    expect(button("Answer").disabled).toBe(false);
+  });
+
+  it("gives a question and a permission request a card each, answered separately", async () => {
+    takesAnswers();
+    asks(question, permission);
+    await render();
+    expect(text()).toContain("Which branch?");
+    await click("Allow");
+    expect(mocks.app.api.respondPermission).toHaveBeenCalledWith("worktree", "claude", "p1", "allow");
+    expect(mocks.app.api.answerQuestions).not.toHaveBeenCalled();
+    await click("next"); await click("Answer");
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", { "Which branch?": "next" });
+  });
+
+  it("shows the question read-only with a Mac that takes no answer from a phone", async () => {
+    // An older Mac: `sync.capabilities` does not name `questions`.
+    asks(question);
+    await render();
+    for (const shown of ["2 questions", "Which checks should run?", "Lint, format", "Unit tests only", "Which branch?", "next"]) expect(text()).toContain(shown);
+    expect(text()).toContain("Answer this question from your Mac.");
+    expect(text()).not.toContain("Permission");
+    // No button that would fail.
+    expect(() => button("Answer")).toThrow();
+    expect(() => button("Skip")).toThrow();
+    expect(button("Tests. Unit tests only").disabled).toBe(true);
+    expect(mocks.app.api.answerQuestions).not.toHaveBeenCalled();
+  });
+
+  it("keeps the options readable and selectable while disconnected, and what was chosen across tabs", async () => {
+    takesAnswers();
+    asks(question);
+    await render();
+    await click("Tests. Unit tests only");
+    mocks.app.connectionStage = "reconnecting";
+    await render();
+    expect(text()).toContain("Reconnect before answering.");
+    expect([button("Answer").disabled, button("Skip").disabled]).toEqual([true, true]);
+    await click("next");
+
+    // Another tab and back, then connected again: the choices are still there.
+    await select("codex");
+    expect(text()).not.toContain("Which branch?");
+    mocks.app.connectionStage = "connected";
+    await select("claude");
+    await click("Answer");
+    expect(mocks.app.api.answerQuestions).toHaveBeenCalledWith("worktree", "claude", "q1", { "Which checks should run?": "Tests", "Which branch?": "next" });
   });
 });

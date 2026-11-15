@@ -56,7 +56,13 @@ pub struct WorkspaceGit {
     root: PathBuf,
     files: Arc<WorkspaceFiles>,
     gh: Option<PathBuf>,
+    /// A machine's project (`machine/1`): its repositories are its checkout
+    /// and its own worktrees, not clones found below a workspace root.
+    project: bool,
 }
+
+/// At most this many of a machine project's checkout and worktrees are listed.
+pub const MAX_PROJECT_REPOSITORIES: usize = 100;
 
 /// One repository a call was routed to.
 struct Repo {
@@ -343,7 +349,14 @@ fn truncate_text(text: &mut String, max: usize) -> bool {
 impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
-        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from) }
+        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false }
+    }
+
+    /// The Git of one of a machine's projects (`machine/1`). `repo` names its
+    /// checkout (`.`) or one of its worktrees: relative to the project's
+    /// folder, or absolute for one outside it (docs/MACHINES.md, Project scoping).
+    pub fn for_project(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
+        Self { project: true, ..Self::new(root, files) }
     }
 
     #[cfg(test)]
@@ -389,6 +402,9 @@ impl WorkspaceGit {
     /// Workspace-relative repository directories, including nested checkouts
     /// beside an older blank root. Symlinks, hidden and build directories are skipped.
     pub fn repositories(&self) -> (Vec<String>, bool) {
+        if self.project {
+            return self.project_repositories();
+        }
         // The root itself, or a directory inside a checkout (a package of a
         // monorepo as the target directory, development runtimes).
         let mut found = if self.root.join(".git").exists() || crate::git::is_repo(&self.root) { vec![".".into()] } else { Vec::new() };
@@ -423,6 +439,22 @@ impl WorkspaceGit {
         (found, truncated)
     }
 
+    /// A machine project: its checkout, then each of its worktrees. The ones
+    /// outside its folder are also the only absolute paths `fs/1` takes for it.
+    fn project_repositories(&self) -> (Vec<String>, bool) {
+        if !(self.root.join(".git").exists() || crate::git::is_repo(&self.root)) {
+            self.files.set_worktrees(Vec::new());
+            return (Vec::new(), false);
+        }
+        let worktrees = super::machine::worktrees(&self.root);
+        self.files.set_worktrees(worktrees.iter().filter(|worktree| !worktree.starts_with(&self.root)).cloned().collect());
+        let mut found = vec![".".to_string()];
+        found.extend(worktrees.iter().map(|worktree| self.files.relative(worktree)));
+        let truncated = found.len() > MAX_PROJECT_REPOSITORIES;
+        found.truncate(MAX_PROJECT_REPOSITORIES);
+        (found, truncated)
+    }
+
     fn list(&self) -> Value {
         let (names, truncated) = self.repositories();
         let repositories: Vec<Value> = names
@@ -445,6 +477,8 @@ impl WorkspaceGit {
         if name == "." {
             self.root.clone()
         } else {
+            // Absolute only for a machine project's worktree outside its
+            // folder, which `repositories` listed so.
             self.root.join(name)
         }
     }

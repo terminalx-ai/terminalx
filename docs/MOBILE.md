@@ -375,6 +375,19 @@ written, and a lapsed request remains visible as a terminal fallback. The
 resulting `permission_decided` event is the local activity record and removes
 the card on every subscribed surface.
 
+An agent's question (Claude Code's `AskUserQuestion`) is answered the same way
+(#979). The phone draws the pending `questions_asked` event as a question card
+with every option, and a driver device calls `questions.respond` with the public
+session id, tab id, request id and `answers`: each question's text mapped to its
+answer, a multi-select answer being the chosen labels joined with ", " in the
+order picked. That is what the desktop card sends (`questionAnswers` in
+`packages/portable/src/transcript.ts` builds it for both), and an empty map
+skips the question. The host ends in the desktop's own `answer_questions`; a
+question the Mac or another device answered first is refused with "that question
+is no longer open", which the card says. A Mac names `questions: 1` in
+`sync.capabilities` when its runtime serves this; with one that does not, the
+phone shows the question and its options read-only, to be answered on the Mac.
+
 ## Persistence, sign-out, and privacy
 
 **Contract:** `docs/reference/cloud-endpoints.md` § “User-scoped

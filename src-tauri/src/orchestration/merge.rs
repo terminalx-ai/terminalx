@@ -73,6 +73,44 @@ pub struct Worktree {
 /// workers' worktrees. The app's sessions give it ([`super::host::ManagerHost`]);
 /// the tests give it temporary repositories.
 pub trait Checkouts: Send + Sync {
+    fn retire_workers_later(&self, run: &Run) {
+        super::end_workers(run, &|w| self.stop_agents_for_cleanup(w), &|w| self.preserve_worker(run, w), &|w| self.archive_worker(run, w));
+    }
+
+    /// Recovered conversations belong to the person again, not bulk run cleanup.
+    fn worker_recovered(&self, _worker: &SessionRef) -> bool { false }
+
+    /// Normal stop handling for ended-run cleanup, including idle tabs' stale
+    /// turn state. Wire to the same implementation as Host::stop_worker_for_cleanup.
+    /// Legacy process stopping alone cannot authorize archival or deletion.
+    fn stop_agents_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        self.stop_agents(worker)?;
+        anyhow::bail!("Worker cleanup stop handling is not configured")
+    }
+
+    /// True only after the run's own pull request has been verified merged.
+    /// RunState::Done alone says only that integration into the lead succeeded.
+    fn run_pr_merged(&self, _run: &Run) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// Preserve this exact current tip before deleting a superseded worktree.
+    /// Called again inside the removal guard; must verify durable preservation
+    /// of `tip`, not merely an earlier backup of the same branch.
+    fn preserve_worker_tip(&self, _run: &Run, _worker: &SessionRef, _worktree: &Worktree, _tip: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Exact-tip worker preservation is not configured")
+    }
+
+    /// Preserve all recoverable worker state before hiding its conversation. Must
+    /// be idempotent; failure keeps it visible and will be retried on cleanup.
+    fn preserve_worker(&self, _run: &Run, _worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::bail!("Worker preservation is not configured")
+    }
+    /// Archive the conversation only, retaining its worktree and branch. Called
+    /// only after a successful preservation; must be safe to repeat.
+    fn archive_worker(&self, _run: &Run, _worker: &SessionRef) -> anyhow::Result<()> {
+        anyhow::bail!("Worker archival is not configured")
+    }
+
     /// The lead's checkout: where the pieces are merged.
     fn lead_checkout(&self, run: &Run) -> anyhow::Result<PathBuf>;
     /// The permission mode of the lead's conversation, when it can be read.
@@ -93,7 +131,7 @@ pub trait Checkouts: Send + Sync {
     /// `still_safe` is asked again once the session is stopped, immediately before the folder goes.
     fn remove(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()>;
     /// Stop every agent of a worker's session that is running, as `sessions stop --children-of`
-    /// does; `Ok(false)` when none was, or the session is gone.
+    /// does; `Ok(false)` when none was running, or the session is gone.
     fn stop_agents(&self, worker: &SessionRef) -> anyhow::Result<bool>;
     /// The stored run changed.
     fn changed(&self, run: &Run);
@@ -839,7 +877,7 @@ fn finish(host: &dyn Checkouts, id: &str, cwd: &Path, check: Option<&(String, bo
     .map_err(EngineError::internal)?;
     host.changed(&after);
     // Done: the agents of its finished workers are stopped, so none holds its worktree from `cleanup`.
-    super::stop_finished(&after, &|worker| host.stop_agents(worker));
+    host.retire_workers_later(&after);
     Ok(after)
 }
 
@@ -938,9 +976,24 @@ fn file_line(run: &Run, file: &ConflictFile) -> String {
 /// merged: the conflict, or what the integration check printed. `None` for a
 /// piece whose merge did not fail.
 pub fn brief(run: &Run, piece: &Piece) -> Option<String> {
+    brief_with_base(run, piece, None)
+}
+
+/// A sent-back worker replays only its own commits onto the newly prepared
+/// baseline. Replaying dependency commits can resurrect already integrated work.
+pub(super) fn brief_with_base(run: &Run, piece: &Piece, base: Option<&str>) -> Option<String> {
     let merge = piece.current_merge()?;
     let into = run.merge.as_ref().map(|merge| merge.into.as_str()).filter(|into| !into.is_empty()).unwrap_or("the lead's branch");
-    let rebase = format!("Bring your branch up to date with it: run `git rebase {into}` in your worktree");
+    let rebase = match base {
+        Some(base) => {
+            let command = match piece.tries.last().and_then(|attempt| attempt.base_commit.as_deref()) {
+                Some(previous) => format!("git rebase --onto {base} {previous}"),
+                None => format!("git rebase {base}"),
+            };
+            format!("Your new verification baseline is `{base}`, prepared from the current lead and accepted dependencies. Replay only your own changes onto it: run `{command}` in your worktree")
+        }
+        None => format!("Bring your branch up to date with it: run `git rebase {into}` in your worktree"),
+    };
     let said = match merge.state {
         MergeState::Conflict => {
             let files: Vec<String> = merge.files.iter().map(|file| file_line(run, file)).collect();
@@ -1118,26 +1171,116 @@ fn not_on_base(worktree: &Worktree, project: &Path, fetched: &Cell<bool>) -> Opt
     None
 }
 
+/// Superseded commits need not be integrated, so ancestry cannot establish safety.
+/// A verified run PR merge and durable preservation of the current exact tip can.
+fn superseded_keeps(host: &dyn Checkouts, run: &Run, worker: &SessionRef, worktree: &Worktree, preserve: bool) -> Option<String> {
+    if host.worker_recovered(worker) {
+        return Some("Recovered worker is excluded from bulk cleanup; remove its workspace explicitly.".into());
+    }
+    if run.state != RunState::Done {
+        return Some("Its run has not completed successfully.".into());
+    }
+    match host.run_pr_merged(run) {
+        Ok(true) => {}
+        Ok(false) => return Some("The run's pull request has not been verified merged.".into()),
+        Err(error) => return Some(format!("The run's pull request merge could not be verified: {error:#}")),
+    }
+    if let Some(reason) = superseded_unsettled(worktree) {
+        return Some(reason);
+    }
+    let tip = match head(&worktree.path) {
+        Ok(tip) => tip,
+        Err(error) => return Some(format!("Its commit could not be read: {error:#}")),
+    };
+    if preserve {
+        if let Err(error) = host.preserve_worker_tip(run, worker, worktree, &tip) {
+            return Some(format!("Its exact tip could not be preserved: {error:#}"));
+        }
+        // Preservation can take time: reject concurrent writes or new agents,
+        // including changes to stashes and index flags, before removal.
+        let Some(current) = host.worktree(worker) else { return Some("Its worktree is no longer available.".into()) };
+        if current.path != worktree.path {
+            return Some("Its worktree changed during preservation.".into());
+        }
+        if let Some(reason) = superseded_unsettled(&current) {
+            return Some(reason);
+        }
+        if head(&worktree.path).ok().as_deref() != Some(tip.as_str()) {
+            return Some("Its tip changed during preservation; retry cleanup.".into());
+        }
+    }
+    None
+}
+
+/// A commit backup covers neither uncommitted work nor stashes, hidden files or
+/// nested repositories. These checks run on both sides of exact-tip preservation.
+fn superseded_unsettled(worktree: &Worktree) -> Option<String> {
+    if let Some(reason) = unsettled(worktree) {
+        return Some(reason);
+    }
+    match crate::landed::hidden_from_status(&worktree.path) {
+        Some(0) => {}
+        Some(_) => return Some("It has files hidden from git status; cleanup cannot rule out uncommitted work.".into()),
+        None => return Some("Its tracked file flags could not be read.".into()),
+    }
+    match crate::landed::submodules_in(&worktree.path) {
+        Some(0) => {}
+        Some(_) => return Some("It has submodules whose work cannot be preserved by a commit backup.".into()),
+        None => return Some("Its index could not be read.".into()),
+    }
+    // Branch stashes must never be orphaned, even with a durable commit backup.
+    match crate::git::run(&worktree.path, &["stash", "list"]) {
+        Ok(stashes) if stashes.trim().is_empty() => {}
+        Ok(_) => return Some("Its repository has stashes; they must be recovered before cleanup.".into()),
+        Err(error) => return Some(format!("Its stashes could not be read: {error:#}")),
+    }
+    None
+}
+
 /// Remove the worktrees of a run's workers, each with its session. One with
 /// uncommitted work, or with commits that are not in the lead's branch, is
 /// refused and named with the reason; so is one whose piece is still being
 /// worked on. When the lead's session or checkout is gone, what is merged is
 /// read from the project's base branch instead: a worktree goes only when its
 /// HEAD is in that branch and it is clean, as `worktrees delete` checks.
+/// Superseded worktrees additionally require a verified run PR merge and exact-tip
+/// preservation. Successful runs keep final workers visible, including their
+/// worktrees: `remove` deletes the session too. Failed and stopped runs retain
+/// worktrees for recovery. With `yes`,
+/// ended runs retry normal agent stop, preservation and conversation archival first.
 /// Branches are kept. Without `yes` nothing is removed: the refusal lists what
 /// would go and what would stay.
 pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
+    cleanup_workers(host, id, yes, false)
+}
+
+/// Removing the lead explicitly also cleans its final workers, preserving the
+/// existing orphan-prevention behavior of worktrees delete (PRO-364).
+pub fn cleanup_before_lead_removal(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, EngineError> {
+    cleanup_workers(host, id, yes, true)
+}
+
+fn cleanup_workers(host: &dyn Checkouts, id: &str, yes: bool, include_final: bool) -> Result<Cleanup, EngineError> {
     // Held to the end: no pass may begin, make a merge this counts as in the lead's branch, and
     // then undo it once the worktree is gone.
     let _no_merge = Hold::take(id, Holder::Cleanup).map_err(|error| EngineError::new("merge_in_progress", format!("{} Worktrees are cleaned up once that has ended.", error.message), None))?;
     let run = stored(id)?;
+    let failures = if yes {
+        super::end_workers(&run, &|worker| { anyhow::ensure!(!host.worker_recovered(worker), "Recovered worker is excluded from bulk cleanup; remove its workspace explicitly"); host.stop_agents_for_cleanup(worker) }, &|worker| host.preserve_worker(&run, worker), &|worker| host.archive_worker(&run, worker))
+    } else {
+        Default::default()
+    };
+    let superseded = run.superseded_workers();
+    let finished = run.finished_workers();
     // The lead's session, or the folder it was in, is gone (its worktree removed once its pull
     // request merged): the project's base branch says what is merged.
     let measure = match host.lead_checkout(&run).ok().filter(|cwd| cwd.is_dir()) {
-        Some(cwd) => {
-            let lead_head = head(&cwd).map_err(EngineError::internal)?;
-            let into = crate::git::current_branch(&cwd).unwrap_or_else(|| short(&lead_head).to_string());
-            Measure::Lead { head: lead_head, into }
+        Some(cwd) => match head(&cwd) {
+            Ok(lead_head) => {
+                let into = crate::git::current_branch(&cwd).unwrap_or_else(|| short(&lead_head).to_string());
+                Measure::Lead { head: lead_head, into }
+            }
+            Err(_) => Measure::Base { project: PathBuf::from(&run.project_path) },
         }
         None => Measure::Base { project: PathBuf::from(&run.project_path) },
     };
@@ -1146,15 +1289,37 @@ pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, Eng
     let (mut going, mut refused): (Vec<(Fate, SessionRef, Worktree)>, Vec<Fate>) = (Vec::new(), Vec::new());
     let mut seen: Vec<&str> = Vec::new();
     for piece in &run.pieces {
-        for (index, attempt) in piece.tries.iter().enumerate() {
-            let Some(worker) = attempt.worker.as_ref().filter(|worker| !seen.contains(&worker.session_id.as_str())) else { continue };
+        let mut attempts: Vec<_> = piece.tries.iter().enumerate().filter_map(|(index, attempt)| attempt.worker.as_ref().map(|worker| (index, worker, attempt.branch.clone()))).collect();
+        if piece.tries.is_empty() {
+            if let Some(worker) = &piece.worker {
+                attempts.push((0, worker, piece.branch.clone()));
+            }
+        }
+        for (index, worker, branch) in attempts {
+            if worker.session_id == run.lead.session_id || seen.contains(&worker.session_id.as_str()) {
+                continue;
+            }
             seen.push(&worker.session_id);
             // Gone already, or never in a worktree of its own: nothing to remove.
             let Some(worktree) = host.worktree(worker) else { continue };
-            let current = index + 1 == piece.tries.len();
-            let at_work = attempt.outcome.is_none() || (current && matches!(piece.state, PieceState::Running | PieceState::Verifying));
-            let reason = if at_work { Some("Its piece is still being worked on or checked.".to_string()) } else { keeps(&worktree, &measure, &fetched) };
-            let fate = Fate { piece: piece.id.clone(), attempt: index + 1, session: worker.session_id.clone(), worktree: worktree.path.to_string_lossy().into_owned(), branch: attempt.branch.clone(), reason };
+            let at_work = !finished.iter().any(|candidate| candidate.session_id == worker.session_id);
+            let replaced = superseded.iter().any(|candidate| candidate.session_id == worker.session_id);
+            let reason = if host.worker_recovered(worker) {
+                Some("Recovered worker is excluded from bulk cleanup; remove its workspace explicitly.".into())
+            } else if let Some(reason) = failures.get(&worker.session_id) {
+                Some(format!("Worker lifecycle cleanup failed: {reason}. Retry cleanup."))
+            } else if matches!(run.state, RunState::Failed | RunState::Stopped) {
+                Some("The run did not succeed; its worktrees are kept for recovery.".to_string())
+            } else if run.state == RunState::Done && !replaced && !include_final {
+                Some("Its final worker is kept visible with its worktree.".to_string())
+            } else if at_work {
+                Some("Its piece is still being worked on or checked.".to_string())
+            } else if replaced {
+                superseded_keeps(host, &run, worker, &worktree, yes)
+            } else {
+                keeps(&worktree, &measure, &fetched)
+            };
+            let fate = Fate { piece: piece.id.clone(), attempt: index + 1, session: worker.session_id.clone(), worktree: worktree.path.to_string_lossy().into_owned(), branch, reason };
             match fate.reason {
                 Some(_) => refused.push(fate),
                 None => going.push((fate, worker.clone(), worktree)),
@@ -1176,9 +1341,17 @@ pub fn cleanup(host: &dyn Checkouts, id: &str, yes: bool) -> Result<Cleanup, Eng
     let mut removed = Vec::new();
     for (mut fate, worker, worktree) in going {
         // Looked at again behind the stop: what an agent wrote in its last moment is not removed unseen.
-        let still_safe = || match keeps(&Worktree { busy: false, ..worktree.clone() }, &measure, &fetched) {
-            Some(reason) => Err(reason),
-            None => Ok(()),
+        let still_safe = || {
+            let current = host.worktree(&worker).ok_or_else(|| "Its worktree is no longer available.".to_string())?;
+            if current.path != worktree.path {
+                return Err("Its worktree changed during cleanup.".into());
+            }
+            let reason = if superseded.iter().any(|candidate| candidate.session_id == worker.session_id) {
+                superseded_keeps(host, &run, &worker, &current, true)
+            } else {
+                keeps(&current, &measure, &fetched)
+            };
+            reason.map_or(Ok(()), Err)
         };
         match host.remove(&run, &worker, &worktree, &still_safe) {
             Ok(()) => removed.push(fate),

@@ -621,10 +621,11 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `sessionCreate`: `create`. `macSettings`: `settings` and `setSettings`.
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
+/// - `questions`: `questions`, answering an agent's question as the desktop's card does (#979).
 /// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
 ///   resolves setup and archive scripts and the archive timeout from them.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -763,7 +764,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         }
         "unobserve" => Ok(serde_json::json!({"removed":grant.observations.unsubscribe(string("subscriptionId")?)})),
         "output" => grant.observations.poll(),
-        "reconcile" | "permission" | "terminalRead" => {
+        "reconcile" | "permission" | "questions" | "terminalRead" => {
             let session = string("sessionId")?;
             let tab = string("tabId")?;
             let entry = crate::store::index::get(session)?;
@@ -772,6 +773,14 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
                 "permission" => {
                     grant.driver()?;
                     manager.respond_permission(session, tab, string("requestId")?, string("optionId")?)?;
+                    Ok(serde_json::json!({"status":"answered"}))
+                }
+                // The desktop's own answer (`answer_questions`): the same
+                // format, the same refusal once the question is closed.
+                "questions" => {
+                    grant.driver()?;
+                    let answers = serde_json::from_value(params["answers"].clone()).context("answers must map each question to its answer")?;
+                    manager.answer_questions(session, tab, string("requestId")?, answers)?;
                     Ok(serde_json::json!({"status":"answered"}))
                 }
                 "reconcile" => {

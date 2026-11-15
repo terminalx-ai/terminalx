@@ -168,6 +168,7 @@ describe("checking a result (PRO-278)", () => {
     expect(verifyingText(piece("a", { state: "verifying" }))).toBe("Running its checks");
     expect(verifyingText(tried({ gates: [{ gate: "report", passed: true }] }))).toBe("Running its checks");
     expect(verifyingText(tried({ gates: [], review: review([verifier()]) }))).toBe("Waiting on the verifier");
+    expect(verifyingText(tried({ gates: [], review: review([verifier({ waiting: "Permission needed." })]) }))).toBe("Verifier needs you: open its conversation");
     expect(verifyingText(tried({ gates: [], review: review([verifier({ verdict: "pass" }), verifier({ problem: "No block." }), verifier()]) }))).toBe("Waiting on verifiers, 2 of 3 answered");
     // The check is the current try's: an earlier try's is that try's.
     const retried = piece("a", { tries: [{ step: "first", model: "sonnet", outcome: "checkFailed", verification: { gates: [], outcome: "failed" } }, { step: "effort", model: "sonnet" }] });

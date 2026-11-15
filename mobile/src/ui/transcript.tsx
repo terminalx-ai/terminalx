@@ -1,8 +1,10 @@
-import { memo, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import { Terminal as TerminalIcon } from "lucide-react-native";
-import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime } from "@terminalx/portable/transcript";
-import type { PendingAsk, Turn, WorkItem } from "@terminalx/portable/transcript";
+import { memo, useEffect, useRef, useState, type ComponentRef } from "react";
+import { Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Check, Terminal as TerminalIcon } from "lucide-react-native";
+import { askAgentNote, COMPACTING_LINE, compactionStatus, messageTime, questionAnswers, questionsLabel, toggleQuestionChoice } from "@terminalx/portable/transcript";
+import type { PendingAsk, QuestionChoices, Turn, WorkItem } from "@terminalx/portable/transcript";
+import { useConversationState } from "../state/conversation-state";
+import { useTranscriptReveal } from "./TranscriptList";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
 import { Markdown, MarkdownBlock } from "./Markdown";
@@ -29,6 +31,102 @@ export function PermissionCard({ ask, connected, answering, error, onRespond }: 
     {!connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
     {error ? <LinkedText style={[styles.permissionHint, { color: palette.danger }]}>{`${error} The request may have lapsed; check your Mac.`}</LinkedText> : null}
   </Card>;
+}
+
+/** What a reader has chosen and typed on a question card, before answering. */
+interface QuestionDraft { chosen: QuestionChoices; typed: Readonly<Record<number, string>> }
+const NO_ANSWERS: QuestionDraft = { chosen: {}, typed: {} };
+
+/**
+ * A refusal as a sentence for the card: the Mac's own words ("that question
+ * is no longer open") without the code the runtime puts in front of them.
+ */
+export function refusalSentence(message: string): string {
+  const said = message.replace(/^[a-z][a-z_-]*:\s+/, "").trim();
+  if (!said) return "The answer was not sent.";
+  const sentence = said[0].toUpperCase() + said.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+/**
+ * An agent's question (`AskUserQuestion`) as a form, as the desktop's
+ * `QuestionCard` draws it (#979): radio rows where one may be chosen, checkbox
+ * rows where several may, a field for a typed answer, then Answer and Skip.
+ * What Answer sends is `questionAnswers`, the desktop's own format; Skip
+ * sends `{}`.
+ *
+ * - `stateKey` names the conversation. What is chosen and typed is kept under
+ *   it per ask, as the composer's draft is, so it is still there after another
+ *   tab was opened or the app went to the background.
+ * - `readOnly` says why this reader may not answer at all (a viewer, or a Mac
+ *   too old to take an answer): the question and its options are shown, with
+ *   that reason and nothing to press.
+ * - Not `connected`, the options can still be chosen, and Answer and Skip wait
+ *   for the connection.
+ */
+export function QuestionCard({ ask, stateKey, connected, answering, readOnly = null, error, onAnswer }: { ask: PendingAsk; stateKey: string; connected: boolean; answering: boolean; readOnly?: string | null; error?: string; onAnswer(answers: Record<string, string>): void }) {
+  const { palette } = useTheme();
+  const [draft, setDraft] = useConversationState<QuestionDraft>(`${stateKey}:question:${ask.requestId}`, NO_ANSWERS);
+  const questions = ask.questions ?? [];
+  const blocked = !connected || answering;
+  return <Card testID="question-card" style={[styles.permission, { borderColor: `${palette.info}66` }]}>
+    <Text style={[styles.permissionLabel, { color: palette.info }]}>{questionsLabel(questions.length)}</Text>
+    {questions.map((question, qi) => {
+      const picked = draft.chosen[qi] ?? [];
+      return <View key={qi} style={styles.question}>
+        <Text style={[styles.cardTitle, { color: palette.ink }]}>{linkedText(question.question)}</Text>
+        {question.multiSelect && question.options.length ? <Text style={[styles.permissionHint, { color: palette.faint }]}>Choose any that apply</Text> : null}
+        {question.options.map((option, oi) => {
+          const on = picked.includes(oi);
+          // The row is the choice. A link in its text takes its own tap, so opening one chooses nothing.
+          return <Pressable key={oi} testID={`question-${qi}-option-${oi}`} accessibilityRole={question.multiSelect ? "checkbox" : "radio"} accessibilityLabel={option.description ? `${option.label}. ${option.description}` : option.label} accessibilityState={{ checked: on, disabled: !!readOnly }} disabled={!!readOnly}
+            onPress={() => setDraft((current) => ({ ...current, chosen: toggleQuestionChoice(current.chosen, qi, oi, question.multiSelect) }))}
+            style={[styles.choice, { borderColor: on ? palette.accent : palette.border, backgroundColor: on ? `${palette.accent}1c` : "transparent" }]}>
+            <View style={[styles.choiceMark, question.multiSelect ? styles.choiceBox : styles.choiceRound, { borderColor: on ? palette.accent : palette.muted, backgroundColor: on ? palette.accent : "transparent" }]}>
+              {on ? question.multiSelect ? <Check size={13} color={palette.accentInk} strokeWidth={3} /> : <View style={[styles.choiceDot, { backgroundColor: palette.accentInk }]} /> : null}
+            </View>
+            <View style={styles.choiceText}>
+              <Text style={[styles.choiceLabel, { color: palette.ink }]}>{linkedText(option.label)}</Text>
+              {option.description ? <Text style={[styles.choiceDescription, { color: palette.muted }]}>{linkedText(option.description)}</Text> : null}
+            </View>
+          </Pressable>;
+        })}
+        {/* A question with nothing to choose from can only be answered in words. */}
+        {!readOnly && (question.freeText || !question.options.length) ? <AnswerField question={question.question} only={!question.options.length} value={draft.typed[qi] ?? ""} editable={!answering}
+          onChangeText={(text) => setDraft((current) => ({ ...current, typed: { ...current.typed, [qi]: text } }))} /> : null}
+      </View>;
+    })}
+    {readOnly ? <Text testID="question-read-only" style={[styles.body, { color: palette.muted }]}>{readOnly}</Text> : <View style={styles.permissionActions}>
+      <Button label="Skip" kind="secondary" disabled={blocked} accessibilityHint="Lets the agent go on without an answer." onPress={() => onAnswer({})} style={styles.questionAction} />
+      <Button label="Answer" disabled={blocked} accessibilityState={{ disabled: blocked, busy: answering }} onPress={() => onAnswer(questionAnswers(questions, draft.chosen, draft.typed))} style={styles.questionAction} />
+    </View>}
+    {!readOnly && !connected ? <Text style={[styles.permissionHint, { color: palette.warning }]}>Reconnect before answering.</Text> : null}
+    {error ? <Text testID="question-error" accessibilityLiveRegion="polite" style={[styles.permissionHint, { color: palette.danger }]}>{linkedText(refusalSentence(error))}</Text> : null}
+  </Card>;
+}
+
+/**
+ * The typed answer. Focused, it asks the transcript to bring it into view
+ * once the keyboard has taken its room: the keyboard shortens the list from
+ * its latest edge, which can push a field higher in a tall card off the top.
+ */
+function AnswerField({ question, only, value, editable, onChangeText }: { question: string; only: boolean; value: string; editable: boolean; onChangeText(text: string): void }) {
+  const { palette } = useTheme();
+  const input = useRef<ComponentRef<typeof TextInput>>(null);
+  const reveal = useTranscriptReveal();
+  const waiting = useRef<{ remove(): void } | null>(null);
+  useEffect(() => () => waiting.current?.remove(), []);
+  const bringIntoView = () => {
+    waiting.current?.remove();
+    waiting.current = null;
+    const show = () => requestAnimationFrame(() => { if (input.current) reveal(input.current); });
+    if (Keyboard.isVisible()) return void show();
+    const shown = Keyboard.addListener("keyboardDidShow", () => { shown.remove(); waiting.current = null; show(); });
+    waiting.current = shown;
+  };
+  return <TextInput ref={input} accessibilityLabel={`Your own answer to: ${question}`} value={value} onChangeText={onChangeText} onFocus={bringIntoView} editable={editable}
+    placeholder={only ? "Type your answer" : "Or type your own answer"} placeholderTextColor={palette.faint} returnKeyType="done" autoCapitalize="sentences"
+    style={[styles.answerField, { color: palette.ink, borderColor: palette.border, backgroundColor: palette.raised }]} />;
 }
 
 /** A compaction is running (`Transcript.compacting`): said at the newest edge of the conversation, as the desktop's chat does. */
@@ -118,5 +216,17 @@ const styles = StyleSheet.create({
   permissionAction: { minHeight: 40, flexGrow: 1 },
   permissionHint: { fontSize: 12, lineHeight: 17 },
   cardTitle: { fontSize: 16, fontWeight: "700" },
+  question: { gap: 8, marginTop: 4 },
+  // A row is the whole touch target: 44 pt at least, taller with a description.
+  choice: { minHeight: 44, flexDirection: "row", alignItems: "flex-start", gap: 11, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 11 },
+  choiceMark: { width: 20, height: 20, borderWidth: 1.5, alignItems: "center", justifyContent: "center", marginTop: 1 },
+  choiceRound: { borderRadius: 10 },
+  choiceBox: { borderRadius: 5 },
+  choiceDot: { width: 8, height: 8, borderRadius: 4 },
+  choiceText: { flex: 1, gap: 2 },
+  choiceLabel: { fontSize: 15, lineHeight: 21, fontWeight: "600" },
+  choiceDescription: { fontSize: 13, lineHeight: 18 },
+  answerField: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
+  questionAction: { minHeight: 44, flexGrow: 1 },
   monoSmall: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
 });
