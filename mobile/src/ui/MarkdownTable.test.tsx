@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Markdown } from "./Markdown";
-import { scrollEdges } from "./MarkdownTable";
+import { growColumns, scrollEdges } from "./MarkdownTable";
 
 vi.mock("react-native", () => vi.importActual("react-native-web"));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
@@ -50,6 +50,24 @@ it("tells which sides of a scroller still hide content", () => {
   expect(scrollEdges(740, 340, 1080)).toEqual({ start: true, end: false });
   expect(scrollEdges(0, 340, 340)).toEqual({ start: false, end: false });
   expect(scrollEdges(0, 0, 0)).toEqual({ start: false, end: false });
+});
+
+it("grows each column to its widest cell, up to a cap, and never shrinks it", () => {
+  let widths: readonly number[] = [];
+  widths = growColumns(widths, 0, 61.2);
+  widths = growColumns(widths, 2, 118);
+  expect(widths).toEqual([62, undefined, 118]);
+  expect(growColumns(widths, 0, 40)).toBe(widths); // a narrower cell changes nothing, not even the array
+  expect(growColumns(widths, 0, 95)).toEqual([95, undefined, 118]);
+  expect(growColumns(widths, 2, 900)).toEqual([62, undefined, 220]);
+});
+
+it("keeps each cell in the card on one line, no wider than the cap, so no cut characters show", async () => {
+  await render(SIX_COLUMNS);
+  const notes = [...scroller().querySelectorAll("div")].filter((node) => node.textContent === ROWS[0][5]).at(-1)!;
+  expect(getComputedStyle(notes).whiteSpace).toBe("nowrap");
+  expect(getComputedStyle(notes).textOverflow).toBe("ellipsis");
+  expect(getComputedStyle(notes.parentElement!).maxWidth).toBe("220px");
 });
 
 it("starts a six-column table at its first column and fades only where more content exists", async () => {
