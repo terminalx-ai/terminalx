@@ -275,6 +275,12 @@ deleting the VM (review 2 of #672). Now:
 - **A helper that has gone ends its session.** While the owner waits for the
   host it checks the stream each second, so the helper can resume when it
   returns and not when the wait ends.
+- **Resumed in the same launch.** launchd starts the helper again only at the
+  next boot. So when a session ends early (a wait ran out, the stream was
+  lost, the owner ended it), the helper resumes at once, within the same
+  bounds, and stops when the owner cannot be reached. A person who answers
+  after six hours is still heard without restarting the guest. A session
+  that ran to its end, whatever it reached, is not resumed.
 - **Not resumed.** A retirement that started is never resumed. An owner that
   exits takes its VM with it and is never replaced (`replacementAllowed` is
   always false), so an owner crash or a host restart still ends the

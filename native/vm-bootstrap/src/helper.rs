@@ -24,8 +24,10 @@
 //! twice by that: the owner keeps each report it has only if the new one is
 //! identical, and the key install returns its own journaled receipt.
 //! Resumptions are journaled before they start and bounded across launches,
-//! as attempts are. (Before this, a session that ended early left the VM
-//! unreachable for good; review 2 of #672.)
+//! as attempts are. A session that ends early is resumed in the same launch,
+//! since launchd starts the helper again only at the next boot, and the
+//! person may still answer. (Before this, a session that ended early left
+//! the VM unreachable for good; review 2 of #672.)
 //!
 //! After the host-key report, only the owner's acknowledgement under the same
 //! session, bound to the enrollment's challenge and that exact report, starts
@@ -399,6 +401,9 @@ pub fn run(
         Err(error) => return Outcome::Refused(error.to_string()),
     };
     let mut last_error = None;
+    // The last session this launch ran, when it ended early and is being
+    // resumed: what the launch reports if no later session runs.
+    let mut ended_early: Option<Value> = None;
     loop {
         match settled(&state) {
             Ok(None) => {}
@@ -428,7 +433,12 @@ pub fn run(
                     resumption_name(resumption),
                     json!({"resumption": resumption, "version": 1}),
                 ),
-                Ok(None) => return Outcome::ResumptionsSpent(last_error),
+                Ok(None) => {
+                    return match ended_early {
+                        Some(result) => Outcome::Finished(result),
+                        None => Outcome::ResumptionsSpent(last_error),
+                    }
+                }
                 Err(error) => return Outcome::Refused(error.to_string()),
             },
         };
@@ -438,7 +448,12 @@ pub fn run(
         }
         let mut stream = match connect(guest, schedule) {
             Ok(stream) => stream,
-            Err(failure) => return Outcome::Unreachable(failure),
+            Err(failure) => {
+                return match ended_early {
+                    Some(result) => Outcome::Finished(result),
+                    None => Outcome::Unreachable(failure),
+                }
+            }
         };
         if let Err(error) = state.publish_new(&journal, &record(&started)) {
             return Outcome::Refused(error.to_string());
@@ -508,10 +523,20 @@ pub fn run(
                 result_name(number)
             }
         };
-        return match state.publish_new(&name, &record(&result)) {
-            Ok(()) => Outcome::Finished(result),
-            Err(error) => Outcome::Refused(error.to_string()),
+        if let Err(error) = state.publish_new(&name, &record(&result)) {
+            return Outcome::Refused(error.to_string());
+        }
+        // The conversation ran to its end, whatever it reached: nothing more
+        // to do in this launch.
+        let Some(error) = result["reached"]["error"].as_str().map(str::to_owned) else {
+            return Outcome::Finished(result);
         };
+        // It stopped early: a wait ran out, the stream was lost, or the owner
+        // ended it. The enrollment stands and nothing was retired, so resume
+        // it now. The loop bounds that, and gives up when the owner is gone.
+        last_error = Some(error);
+        ended_early = Some(result);
+        guest.sleep(schedule.interval);
     }
 }
 
@@ -1325,6 +1350,66 @@ mod tests {
                 "{name} names the key"
             );
         }
+    }
+
+    #[test]
+    fn a_session_that_ends_early_is_resumed_in_the_same_launch_while_the_owner_is_there() {
+        let temp = guest_root();
+        let layout = layout(&temp);
+        with_host_key(&layout);
+        // The session ends after the account report, as when a wait runs out.
+        // launchd starts the helper again only at the next boot, so this
+        // launch itself resumes: the owner is still there to answer.
+        let (first_end, first_owner_end) = UnixStream::pair().unwrap();
+        let first = thread::spawn(move || {
+            owner_answering(
+                first_owner_end,
+                SEEDED,
+                mine(),
+                Ack::HangUp,
+                enroll::Reply::Accept,
+            )
+        });
+        let (second_end, second_owner_end) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        let second = thread::spawn(move || {
+            let enrollment = receiver.recv().unwrap();
+            owner_answering(
+                second_owner_end,
+                SEEDED,
+                mine(),
+                Ack::Exact,
+                enroll::Reply::Resume(enrollment),
+            )
+        });
+        let claimed = thread::spawn(move || {
+            let (enrollment, frames) = first.join().unwrap().unwrap();
+            sender.send(enrollment.clone()).unwrap();
+            (enrollment, frames)
+        });
+        let mut installer = Stage("publicKeyInstalled", vec![]);
+        let mut guest = Fake::new(vec![second_end, first_end], vec![mine()]);
+        let outcome = run(&layout, euid(), &SCHEDULE, &mut guest, &mut installer);
+        let (enrollment, first_frames) = claimed.join().unwrap();
+        let (_, frames) = second.join().unwrap().unwrap();
+        assert_eq!(first_frames, vec![json!({"accounts": [mine()]})]);
+        assert_eq!(guest.connects, 2);
+        let Outcome::Finished(result) = outcome else {
+            panic!("{outcome:?}")
+        };
+        // The launch reports the resumed session, which ran to retirement.
+        assert_eq!(result["challengeSha256"], enrollment.as_str());
+        assert_eq!(result["resumption"], 1);
+        assert_eq!(result["retirement"]["stage"], "retired");
+        assert_eq!(frames.last().unwrap()["retirement"]["stage"], "retired");
+        assert_eq!(installer.1.len(), 1);
+        // Both sessions are journaled, the first with why it stopped.
+        assert!(journal(&layout, RESULT)["reached"]["error"].is_string());
+        assert_eq!(journal(&layout, "session-result-1.json"), result);
+        assert_eq!(
+            journal(&layout, ENROLLED),
+            json!({"attempt": 1, "challengeSha256": enrollment, "version": 1})
+        );
     }
 
     #[test]
