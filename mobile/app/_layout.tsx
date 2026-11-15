@@ -29,7 +29,7 @@ function Navigation() {
   // and checks on a simulator. iOS keeps a launch argument for that launch only.
   useEffect(() => {
     const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;
-    if (typeof route === "string" && route.startsWith("/")) router.navigate(route as Href);
+    if (typeof route === "string" && route.startsWith("/")) router.push(route as Href);
   }, [router]);
   return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /></Stack></>;
 }

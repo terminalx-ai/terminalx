@@ -38,7 +38,7 @@ vi.mock("react-native", () => {
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, ...rest }: any) => (mocks.listProps = { data, ...rest }) && <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
-    SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
+    SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
@@ -198,7 +198,9 @@ describe("the Cloud tab", () => {
     expect(text().startsWith("Cloud")).toBe(true);
     const placeholders = container.querySelector('[data-testid="cloud-placeholders"]')!;
     expect(placeholders.getAttribute("aria-label")).toBe("Loading cloud workspaces");
-    expect(placeholders.children).toHaveLength(4);
+    // A heading bar, then a card of three rows in the list's shape.
+    expect(placeholders.children).toHaveLength(2);
+    expect(placeholders.children[1].children).toHaveLength(3);
     // The title is placed under the status bar by the list itself, not by a later inset adjustment.
     expect(mocks.listProps.contentContainerStyle).toContainEqual(expect.objectContaining({ paddingTop: 47 + 6 }));
 
