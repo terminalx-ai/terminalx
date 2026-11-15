@@ -291,6 +291,7 @@ mod tests {
             host_key: HostKeyState::Ready,
             machine_id: None,
             listening: None,
+            takes_port: enabled,
             phone_route: false,
             computers: vec![],
             error: None,
@@ -299,5 +300,7 @@ mod tests {
         assert!(!side.runtime_owns_direct());
         side.status = Some(status(true));
         assert!(side.runtime_owns_direct(), "on, even before its listener is bound");
+        side.status = Some(Status { takes_port: false, host_key: HostKeyState::Error, ..status(true) });
+        assert!(!side.runtime_owns_direct(), "on, but it cannot listen: the window keeps the port");
     }
 }

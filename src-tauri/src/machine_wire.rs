@@ -79,9 +79,15 @@ pub struct Status {
     pub host_key: HostKeyState,
     /// The relay host id of the host key (docs/MACHINES.md, machineId).
     pub machine_id: Option<String>,
-    /// The bound direct listener, as `0.0.0.0:6768`, while it is open. Only
-    /// then does the window stay off the port and register a [`PhoneRoute`].
+    /// The bound direct listener, as `0.0.0.0:6768`, while it is open.
     pub listening: Option<String>,
+    /// The runtime holds the direct port, or takes it as soon as it is free:
+    /// it is on, its host key is not in error, and nothing but the port being
+    /// in use (by the window, or connections still closing) keeps it from
+    /// listening. Only then does the window give the port up and register a
+    /// [`PhoneRoute`]; otherwise the window keeps serving phones on it.
+    #[serde(default)]
+    pub takes_port: bool,
     /// Whether a window's phone route is registered and current.
     pub phone_route: bool,
     pub computers: Vec<ComputerSummary>,
@@ -91,9 +97,9 @@ pub struct Status {
 
 impl Status {
     /// The window must neither bind 6768 nor open its own listener: the
-    /// runtime has it, or is about to take it.
+    /// runtime has it, or is about to take it ([`Status::takes_port`]).
     pub fn runtime_owns_direct(&self) -> bool {
-        self.enabled
+        self.enabled && self.takes_port
     }
 }
 
@@ -228,6 +234,7 @@ mod tests {
             host_key: HostKeyState::Needed,
             machine_id: None,
             listening: None,
+            takes_port: true,
             phone_route: false,
             computers: vec![],
             error: None,
@@ -235,6 +242,11 @@ mod tests {
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["hostKey"], "needed");
         assert_eq!(value["phoneRoute"], false);
-        assert!(status.runtime_owns_direct());
+        assert_eq!(value["takesPort"], true);
+        assert!(status.runtime_owns_direct(), "waiting for the window's key, it is about to take the port");
+        let cannot = Status { host_key: HostKeyState::Error, takes_port: false, error: Some("no key".into()), ..status.clone() };
+        assert!(!cannot.runtime_owns_direct(), "a runtime that cannot listen leaves the port to the window");
+        let older: Status = serde_json::from_value(serde_json::json!({ "enabled": true, "hostKey": "ready", "machineId": null, "listening": null, "phoneRoute": false, "computers": [], "error": null })).unwrap();
+        assert!(!older.runtime_owns_direct(), "a status without takesPort never takes the window's port");
     }
 }

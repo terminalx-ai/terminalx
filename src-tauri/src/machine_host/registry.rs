@@ -4,11 +4,13 @@
 //! an older build drop every phone pairing on one unknown value.
 //!
 //! The file is read again for every admission, so a computer removed by
-//! another process is refused on its next connection. Fields this build does
-//! not know are kept when it rewrites the file.
+//! another process is refused on its next connection. Every rewrite reads and
+//! writes it under one cross-process lock (`paired-computers.lock`), so no
+//! process undoes another's change. Fields this build does not know are kept
+//! when it rewrites the file.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -17,6 +19,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 const FILE: &str = "paired-computers.json";
+const LOCK: &str = "paired-computers.lock";
+/// How long a rewrite waits for another process's.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// One paired computer. Its device token is never stored, only its SHA-256.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,8 +89,6 @@ impl Default for File {
 
 pub struct Registry {
     path: PathBuf,
-    /// Serializes this process's read-modify-write cycles.
-    writing: Mutex<()>,
 }
 
 impl Registry {
@@ -94,7 +97,7 @@ impl Registry {
     }
 
     pub fn at(path: PathBuf) -> Self {
-        Self { path, writing: Mutex::new(()) }
+        Self { path }
     }
 
     pub fn path(&self) -> &Path {
@@ -126,6 +129,20 @@ impl Registry {
         Ok(())
     }
 
+    /// Read, change and write the file under the cross-process lock.
+    fn rewrite<T>(&self, change: impl FnOnce(&mut File) -> Result<Option<T>>) -> Result<Option<T>> {
+        let dir = self.path.parent().context("registry path has no parent")?;
+        super::private_dir(dir)?;
+        crate::store::transaction::run(&dir.join(LOCK), LOCK_WAIT, || {
+            let mut file = self.read()?;
+            let changed = change(&mut file)?;
+            if changed.is_some() {
+                self.write(&file)?;
+            }
+            Ok(changed)
+        })
+    }
+
     pub fn list(&self) -> Result<Vec<PairedComputer>> {
         Ok(self.read()?.computers)
     }
@@ -154,33 +171,33 @@ impl Registry {
 
     /// Add or replace a computer by id (PRO-342 pairs them).
     pub fn put(&self, computer: PairedComputer) -> Result<()> {
-        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut file = self.read()?;
-        file.computers.retain(|existing| existing.id != computer.id);
-        file.computers.push(computer);
-        self.write(&file)
+        self.rewrite(|file| {
+            file.computers.retain(|existing| existing.id != computer.id);
+            file.computers.push(computer);
+            Ok(Some(()))
+        })?;
+        Ok(())
     }
 
     /// Remove a computer. Whether it was there.
     pub fn remove(&self, id: &str) -> Result<bool> {
-        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut file = self.read()?;
-        let before = file.computers.len();
-        file.computers.retain(|computer| computer.id != id);
-        if file.computers.len() == before {
-            return Ok(false);
-        }
-        self.write(&file)?;
-        Ok(true)
+        let removed = self.rewrite(|file| {
+            let before = file.computers.len();
+            file.computers.retain(|computer| computer.id != id);
+            Ok((file.computers.len() != before).then_some(()))
+        })?;
+        Ok(removed.is_some())
     }
 
     /// Note when a computer last connected.
+    /// A computer removed meanwhile, by any process, stays removed.
     pub fn touch(&self, id: &str, at: i64) -> Result<()> {
-        let _writing = self.writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut file = self.read()?;
-        let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(()) };
-        computer.last_seen_at = Some(at);
-        self.write(&file)
+        self.rewrite(|file| {
+            let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(None) };
+            computer.last_seen_at = Some(at);
+            Ok(Some(()))
+        })?;
+        Ok(())
     }
 }
 
@@ -226,6 +243,38 @@ mod tests {
         assert!(registry.remove("a").unwrap());
         assert!(!registry.remove("a").unwrap());
         assert!(registry.find_by_token("token-a-token-a-token-a").unwrap().is_none(), "a removed computer is refused");
+    }
+
+    #[test]
+    fn a_removal_by_another_process_is_never_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let here = Registry::in_data_dir(dir.path());
+        let there = Registry::in_data_dir(dir.path());
+        here.put(computer("a", "token-a-token-a-token-a")).unwrap();
+        here.put(computer("b", "token-b-token-b-token-b")).unwrap();
+        // Another process removes "a" while this one holds the lock: its
+        // rewrite waits, then reads the file this one wrote.
+        let lock = dir.path().join(super::super::DIR).join(LOCK);
+        let path = there.path().to_path_buf();
+        let (started, wait) = std::sync::mpsc::channel();
+        let remover = crate::store::transaction::run(&lock, LOCK_WAIT, || {
+            let remover = std::thread::spawn(move || {
+                started.send(()).unwrap();
+                Registry::at(path).remove("a").unwrap()
+            });
+            wait.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let mut file = here.read()?;
+            file.computers.iter_mut().for_each(|computer| computer.last_seen_at = Some(9));
+            here.write(&file)?;
+            Ok(remover)
+        })
+        .unwrap();
+        assert!(remover.join().unwrap(), "removed after the other rewrite finished");
+        here.touch("a", 10).unwrap();
+        let ids: Vec<String> = there.list().unwrap().into_iter().map(|computer| computer.id).collect();
+        assert_eq!(ids, ["b"], "a touch of a removed computer does not bring it back");
+        assert_eq!(there.list().unwrap()[0].last_seen_at, Some(9));
     }
 
     #[test]

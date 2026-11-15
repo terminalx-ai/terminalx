@@ -95,6 +95,8 @@ struct State {
     key_error: Option<String>,
     listening: Option<direct::Listening>,
     bind_error: Option<String>,
+    /// The bind error is only the port being in use, which frees up.
+    port_busy: bool,
     phone_route: Option<PhoneRoute>,
     /// Open connections per paired computer, closed on revocation or when
     /// the switch goes off. The sender's id tells them apart.
@@ -264,11 +266,15 @@ impl MachineHost {
         } else {
             state.key_error.clone().or_else(|| state.bind_error.clone())
         };
+        // A key in error or a port it cannot bind leaves the window serving
+        // phones on the port; a port still in use is the window's to give up.
+        let takes_port = state.enabled && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
         Status {
             enabled: state.enabled,
             host_key,
             machine_id: state.keypair.as_ref().map(HostKeypair::host_id),
             listening: state.listening.as_ref().map(|listening| listening.address.to_string()),
+            takes_port,
             phone_route: state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()),
             computers,
             error,
@@ -333,7 +339,10 @@ impl MachineHost {
         }
         if enabled {
             if let Err(error) = self.clone().serve().await {
-                self.state.lock().unwrap().bind_error = Some(format!("{error:#}"));
+                let busy = error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse));
+                let mut state = self.state.lock().unwrap();
+                state.bind_error = Some(format!("{error:#}"));
+                state.port_busy = busy;
             }
         }
         self.hold_awake();

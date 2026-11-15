@@ -324,8 +324,20 @@ PRO-341 settled these points while building decision 4.
   once a second until it is free, as the window already did after an app
   restart. On Linux, where only the runtime listens, it sets SO_REUSEADDR:
   Linux still refuses a second listener with it, and TIME_WAIT is 60 s there.
+- **The window gives the port up only to a runtime that can take it.** The
+  status says `takesPort` while the runtime is on, its host key is not in
+  error, and nothing but the port being in use keeps it from listening. With
+  a key it cannot read, or a port it cannot bind for another reason, the
+  window keeps serving phones on 6768; the runtime retries every second and
+  says `takesPort` again once it can.
 - The relay host is given the machine's routes before it registers, so no
-  connection is answered without them.
+  connection is answered without them. A paired computer's relay connection
+  is closed with every other one when the runtime loses its credential, is
+  fenced by a newer generation or loses the control connection. The relay
+  host reads the registry off its async tasks.
+- **Paired computers' file is rewritten under a cross-process lock**
+  (`paired-computers.lock`, the store's transaction lock), so one process
+  never undoes another's removal.
 - `TERMINALX_MACHINE_HOST_PORT` moves the listener off 6768 for tests.
 - The contract between the runtime and the window is
   `src-tauri/src/machine_wire.rs`.

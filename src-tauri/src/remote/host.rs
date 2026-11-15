@@ -371,6 +371,8 @@ pub struct RelayHost {
 /// builds it"): the computers it paired are admitted by their relay device id
 /// and token, and a connection for any other device is a phone, which goes
 /// to the window.
+/// Each method may read the registry file, so the relay host calls them off
+/// its async tasks.
 pub trait MachineRoutes: Send + Sync + 'static {
     /// Whether the relay device id is a paired computer's.
     fn is_computer(&self, relay_device_id: &str) -> bool;
@@ -701,32 +703,22 @@ impl RelayHost {
                         }
                         "conn-open" => {
                             let connection: ConnectionOpen = serde_json::from_value(message).context("invalid relay connection request")?;
-                            // On a machine, a device that is neither attached
-                            // through the link nor a paired computer is a phone.
-                            if let Some(routes) = self.routes() {
-                                let attached = self.state.lock().unwrap().devices.contains_key(&connection.relay_device_id);
-                                if !attached && !routes.is_computer(&connection.relay_device_id) {
-                                    let forwarded = crate::machine_wire::Forwarded::Relay {
-                                        cell_url: live.cell_url.clone(),
-                                        relay_host_id: self.keypair.host_id(),
-                                        generation: live.relay_generation,
-                                        connection: crate::machine_wire::RelayConnection {
-                                            conn_id: connection.conn_id.clone(),
-                                            conn_ticket: connection.conn_ticket.clone(),
-                                            kind: connection.kind.clone(),
-                                            relay_device_id: connection.relay_device_id.clone(),
-                                            attach_deadline_ms: connection.attach_deadline_ms,
-                                        },
-                                    };
-                                    if !routes.forward_phone(forwarded) {
-                                        log::debug!("relay host: no window takes phones; a phone connection is dropped");
-                                    }
-                                    continue;
-                                }
-                            }
                             let host = self.clone();
                             let live = live.clone();
                             tokio::spawn(async move {
+                                // On a machine, a device that is neither attached
+                                // through the link nor a paired computer is a
+                                // phone. The registry is a file: read off this loop.
+                                if let Some(routes) = host.routes() {
+                                    let attached = host.state.lock().unwrap().devices.contains_key(&connection.relay_device_id);
+                                    let device = connection.relay_device_id.clone();
+                                    let lookup = routes.clone();
+                                    let computer = attached || tokio::task::spawn_blocking(move || lookup.is_computer(&device)).await.unwrap_or(true);
+                                    if !computer {
+                                        host.forward_phone(&routes, &live, &connection);
+                                        return;
+                                    }
+                                }
                                 if let Err(error) = host.serve_connection(live, connection).await {
                                     log::debug!("relay host: client connection ended: {error:#}");
                                 }
@@ -879,6 +871,25 @@ impl RelayHost {
         Ok(())
     }
 
+    /// Pass a phone's relay connection to the window: it opens the data leg.
+    fn forward_phone(&self, routes: &Arc<dyn MachineRoutes>, live: &Live, connection: &ConnectionOpen) {
+        let forwarded = crate::machine_wire::Forwarded::Relay {
+            cell_url: live.cell_url.clone(),
+            relay_host_id: self.keypair.host_id(),
+            generation: live.relay_generation,
+            connection: crate::machine_wire::RelayConnection {
+                conn_id: connection.conn_id.clone(),
+                conn_ticket: connection.conn_ticket.clone(),
+                kind: connection.kind.clone(),
+                relay_device_id: connection.relay_device_id.clone(),
+                attach_deadline_ms: connection.attach_deadline_ms,
+            },
+        };
+        if !routes.forward_phone(forwarded) {
+            log::debug!("relay host: no window takes phones; a phone connection is dropped");
+        }
+    }
+
     fn close_all_connections(&self) {
         for (_, cancels) in self.state.lock().unwrap().connections.drain() {
             for cancel in cancels {
@@ -924,7 +935,7 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let (device, computer) = self.admit(&connection.relay_device_id, token, cancel_tx)?;
+        let (device, computer) = self.admit(&connection.relay_device_id, token, cancel_tx).await?;
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
@@ -952,12 +963,24 @@ impl RelayHost {
     }
 
     /// The device, and the paired computer's tracked connection when it is one.
-    fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
+    async fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let attached = self.state.lock().unwrap().devices.contains_key(relay_device_id);
         if let (false, Some(routes)) = (attached, self.routes()) {
-            // A paired computer: full operating rights (decision 5).
-            let (computer_id, tracked) = routes.admit_computer(relay_device_id, token, cancel)?.ok_or_else(|| anyhow!("device token refused"))?;
+            // A paired computer: full operating rights (decision 5). Its
+            // connection closes with every other one when the runtime loses
+            // its credential, is fenced or loses the control connection, and
+            // with its record when the machine revokes it.
+            {
+                let mut state = self.state.lock().unwrap();
+                let senders = state.connections.entry(relay_device_id.to_string()).or_default();
+                senders.retain(|sender| !sender.is_closed());
+                senders.push(cancel.clone());
+            }
+            let (device_id, token) = (relay_device_id.to_string(), token.to_string());
+            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, cancel))
+                .await??
+                .ok_or_else(|| anyhow!("device token refused"))?;
             let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
             return Ok((device, Some((computer_id, tracked))));
         }
@@ -1364,6 +1387,53 @@ mod tests {
         assert!(token_identity(&jwt(json!({ "sub": "x" }))).is_err());
         let legacy = token_identity(&jwt(json!({ "sub": "a", "cloudProfileId": "b", "organizationId": "c" }))).unwrap();
         assert_eq!(legacy.runtime_generation, 0);
+    }
+
+    /// PRO-341: a paired computer's relay connection closes with every
+    /// other one when the runtime loses its credential, is fenced or loses
+    /// the control connection (`close_all_connections`).
+    #[tokio::test]
+    async fn a_paired_computers_connection_closes_with_every_other() {
+        struct Link;
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] {
+                [3; 32]
+            }
+            fn session(&self) -> Result<RelaySession> {
+                bail!("not in this test")
+            }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct Routes;
+        impl MachineRoutes for Routes {
+            fn is_computer(&self, relay_device_id: &str) -> bool {
+                relay_device_id == "relay-desk"
+            }
+            fn admit_computer(&self, relay_device_id: &str, token: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token").then(|| ("desk".to_string(), 1)))
+            }
+            fn release_computer(&self, _: &str, _: u64) {}
+            fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
+                false
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(Link), rpc, None);
+        host.set_routes(Arc::new(Routes));
+        let (cancel, mut cancelled) = mpsc::unbounded_channel();
+        let (device, computer) = host.admit("relay-desk", "desk-token", cancel).await.unwrap();
+        assert_eq!(device.authority, Authority::Manage);
+        assert_eq!(computer, Some(("desk".to_string(), 1)));
+        let (refused, _) = mpsc::unbounded_channel();
+        assert!(host.admit("relay-desk", "another-token", refused).await.is_err(), "another device's token");
+        host.close_all_connections();
+        assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
     }
 
     #[test]

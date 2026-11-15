@@ -29,6 +29,7 @@ async fn a_paired_computer_operates_a_local_runtime_directly_and_only_while_allo
     std::thread::sleep(Duration::from_secs(2));
     let off = status(&serve);
     assert_eq!(off["enabled"], false);
+    assert_eq!(off["takesPort"], false, "the window keeps the port");
     assert!(off["listening"].is_null());
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "no port is open while the switch is off");
     assert!(!world.data.join("machine-host/host-key.json").exists());
@@ -39,6 +40,7 @@ async fn a_paired_computer_operates_a_local_runtime_directly_and_only_while_allo
     assert!(address.ends_with(&format!(":{port}")), "{address}");
     let keypair = host_key(&world.data);
     assert_eq!(status(&serve)["machineId"], keypair.host_id().as_str());
+    assert_eq!(status(&serve)["takesPort"], true);
 
     // The paired computer works the machine's workspace RPC.
     let mut macbook = computer(connect(port, &keypair.public_key_b64(), TOKEN).await);

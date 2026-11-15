@@ -64,7 +64,9 @@ fn bind(port: u16) -> std::io::Result<TcpListener> {
 
 pub(crate) fn listen(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, port: u16) -> Result<Listening> {
     let listener = bind(port).map_err(|error| match error.kind() {
-        std::io::ErrorKind::AddrInUse => anyhow!("port {port} is in use; another program, or the window, still holds it"),
+        // Kept as the cause, so the host can tell a port still in use (which
+        // frees up) from a failure that does not.
+        std::io::ErrorKind::AddrInUse => anyhow!(error).context(format!("port {port} is in use; another program, or the window, still holds it")),
         _ => anyhow!(error).context(format!("listen on port {port}")),
     })?;
     let address = listener.local_addr()?;

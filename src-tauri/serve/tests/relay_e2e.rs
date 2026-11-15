@@ -2033,6 +2033,14 @@ async fn a_paired_computer_operates_a_machine_through_the_relay() {
     assert_eq!(connected["machineId"], json!(relay_host_id));
     assert_eq!(connected["computers"][0]["id"], "desk");
 
+    // Losing the relay control connection closes the computer's data leg too,
+    // as it does every attached device's; it resumes once the host is back.
+    harness.post("/restart-cell", json!({}));
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.connected().await;
+    let again = desk.ok("rpc.hello", want.clone()).await;
+    assert!(again["capabilities"].as_array().is_some_and(|granted| granted.iter().any(|name| name == "machine/1")), "{again}");
+
     // The direct listener answers with the same key and the same credential.
     let listening = listening(&serve);
     assert!(listening.ends_with(&format!(":{port}")), "{listening}");
@@ -2054,7 +2062,8 @@ async fn a_paired_computer_operates_a_machine_through_the_relay() {
     serve.control("runtime.machineHost.revoke", json!({ "epoch": attachment["epoch"], "lease": attachment["lease"], "id": "desk" }));
     desk.state(|state| !matches!(state, ClientState::Connected { .. })).await;
     let (stream, _) = listener.accept().unwrap();
-    stream.set_read_timeout(Some(WAIT)).unwrap();
+    // The runtime wrote its one line and closed; macOS then refuses a timeout.
+    let _ = stream.set_read_timeout(Some(WAIT));
     let mut header = String::new();
     std::io::BufReader::new(stream).read_line(&mut header).unwrap();
     match raccoon_lib::machine_wire::decode_header(header.as_bytes()).unwrap() {
