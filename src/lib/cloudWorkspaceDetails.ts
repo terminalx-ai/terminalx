@@ -52,7 +52,7 @@ function requireContracts() {
   return contracts;
 }
 
-/** Scope includes active profile: these APIs require the active organization. */
+/** Fence account/profile transitions; target routes authorize by membership. */
 function accountScope(): string {
   const { status } = getAccount();
   return JSON.stringify([status?.state, status?.context, status?.identity?.email, status?.identity?.organizationId]);
@@ -119,7 +119,7 @@ export function workspaceInfo({ workspace: w, details: d }: CloudWorkspaceDetail
 export function canRestartWorkspace(item: CloudWorkspaceListItem): boolean {
   const w = item.workspace;
   const status = getAccount().status;
-  if (status.state !== "signed-in" || status.identity?.organizationId !== w.orgId) return false;
+  if (status.state !== "signed-in" || !status.organizations?.some((org) => org.id === w.orgId)) return false;
   const role = status.organizations?.find((org) => org.id === w.orgId)?.role;
   const preparationAllowed = !w.preparation || role === "owner" || role === "admin";
   return workspaceAuthority(w).lifecycle && !isArchived(w) && !w.deletedAt && preparationAllowed

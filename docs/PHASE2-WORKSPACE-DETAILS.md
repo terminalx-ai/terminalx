@@ -48,7 +48,7 @@ if a subsequent runtime request stalls indefinitely. Closing the card cancels
 its interval/subscription. The existing
 agent low-memory sampling and streak logic is separate and unchanged.
 
-Restart requires the active target organization and existing lifecycle management
+Restart requires target organization membership and existing lifecycle management
 authority; preparation workspaces
 additionally require an organization owner/admin. Stopped, archived, deleted and
 pending-operation workspaces are excluded. Confirmation explains interrupted

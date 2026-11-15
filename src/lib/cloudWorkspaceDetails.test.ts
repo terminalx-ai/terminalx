@@ -163,7 +163,10 @@ it("keeps active-org and preparation management restrictions while allowing ordi
   m.status.organizations[0].role = "admin";
   expect(canRestartWorkspace(preparation)).toBe(true);
   m.status.identity.organizationId = "other";
+  expect(canRestartWorkspace(item)).toBe(true);
+  m.status.organizations[0].id = "other";
   expect(canRestartWorkspace(item)).toBe(false);
+  m.status.organizations[0].id = "org";
 });
 
 it("surfaces permanent polling refusal and releases the local pending guard", async () => {

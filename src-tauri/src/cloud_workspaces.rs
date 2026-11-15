@@ -2093,10 +2093,10 @@ impl CloudWorkspaceService {
         }
     }
 
-    /// PRO-212 retains active-organization authorization, independent of CS-18.
+    /// PRO-212 integrated routes authorize by target membership, independent of CS-18.
     pub fn restart(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
         self.phase2_gate(false)?;
-        self.active_phase2_workspace(org, workspace_id, RequestRisk::Mutation, |client, context| {
+        self.member_phase2_workspace(org, workspace_id, RequestRisk::Mutation, |client, context| {
             let snapshot = client.request(context, &["cloud-workspaces", workspace_id, "restart"], None, Some(json!({})), None, RequestRisk::Mutation)?;
             ensure_snapshot(snapshot, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
         })
@@ -2104,7 +2104,7 @@ impl CloudWorkspaceService {
 
     pub fn details(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDetailsResponse, CloudWorkspaceClientError> {
         self.phase2_gate(false)?;
-        self.active_phase2_workspace(org, workspace_id, RequestRisk::Read, |client, context| {
+        self.member_phase2_workspace(org, workspace_id, RequestRisk::Read, |client, context| {
             let value: CloudWorkspaceDetailsResponse = client.request(context, &["cloud-workspaces", workspace_id, "details"], None, None, None, RequestRisk::Read)?;
             if value.workspace.id != workspace_id || value.workspace.org_id != context.organization_id
                 || value.details.workspace_id != workspace_id || value.details.organization_id != context.organization_id
@@ -2115,15 +2115,15 @@ impl CloudWorkspaceService {
         })
     }
 
-    fn active_phase2_workspace<T>(&self, org: Option<&str>, workspace: &str, risk: RequestRisk,
+    fn member_phase2_workspace<T>(&self, org: Option<&str>, workspace: &str, risk: RequestRisk,
         operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace) { return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)); }
-        let context = self.context()?;
-        if org.is_some_and(|org| org != context.organization_id) {
-            return Err(CloudWorkspaceClientError::local("active_organization_required", false));
-        }
+        let target = match org { Some(org) => org.to_owned(), None => self.context()?.organization_id };
+        if !valid_resource_id(&target) { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(&target)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
         let result = operation(&self.client, &context);
-        if !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
+        if !self.account.inbox_member_is_current(&context, &target) { return Err(context_changed_error(risk)); }
         result
     }
 
@@ -3243,7 +3243,7 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
-        self.run_in(org, risk, |client, context| {
+        let request = |client: &Client, context: &AccountContext| {
             let tail = [
                 "cloud-workspace-operations",
                 operation_id,
@@ -3268,7 +3268,14 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(risk));
             }
             ensure_snapshot(result, &context.organization_id, None, risk)
-        })
+        };
+        // Once the accepted Phase 2 routes are activated, their existing poll
+        // endpoint also accepts a member target without requiring it active.
+        if self.phase2_enabled && matches!(risk, RequestRisk::Read) {
+            self.member_phase2_workspace(org, operation_id, risk, request)
+        } else {
+            self.run_in(org, risk, request)
+        }
     }
 }
 
@@ -3993,20 +4000,41 @@ mod tests {
     }
 
     #[test]
-    fn phase2_desktop_contract_restart_details_keep_active_org_and_existing_errors() {
+    fn phase2_desktop_contract_restart_details_keep_membership_and_existing_errors() {
         for code in ["cloud_workspace_manager_required", "cloud_workspace_runtime_unsupported", "cloud_workspace_runtime_not_ready", "cloud_workspace_member_concurrency_exceeded", "cloud_preparation_workspace_expired"] {
             assert!(known_error_code(code));
         }
 
         let (account, service) = phase2_service("http://127.0.0.1:9");
         account.set_memberships_for_test(&["org-1", "org-2"], true);
-        assert_eq!(service.restart(Some("org-2"), "workspace-1").unwrap_err().code, "active_organization_required");
-        assert_eq!(service.details(Some("org-2"), "workspace-1").unwrap_err().code, "active_organization_required");
+        assert_eq!(service.restart(Some("org-3"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.details(Some("org-3"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
         for (status, code) in [("401 Unauthorized", "invalid_access_token"), ("403 Forbidden", "cloud_workspace_manager_required"), ("404 Not Found", "cloud_workspace_not_found"), ("409 Conflict", "cloud_workspace_operation_in_progress"), ("422 Unprocessable Entity", "cloud_workspace_request_invalid"), ("503 Service Unavailable", "cloud_provider_unavailable")] {
             let (base, requests) = serve_each(vec![response(status, &json!({"error": code}).to_string(), "")]);
             let (_, service) = phase2_service(&base);
             assert_eq!(service.restart(None, "workspace-1").unwrap_err().code, code);
             requests.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_details_allow_inactive_member_org() {
+        let mut details = phase2_details_body();
+        details["workspace"]["orgId"] = json!("org-2");
+        details["details"]["organizationId"] = json!("org-2");
+        let mut snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        snapshot["workspace"]["orgId"] = json!("org-2");
+        snapshot["operation"]["action"] = json!("restart");
+        snapshot["operation"]["cancelable"] = json!(false);
+        let (base, requests) = serve_each(vec![response("200 OK", &details.to_string(), ""), response("202 Accepted", &snapshot.to_string(), ""), response("200 OK", &snapshot.to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.details(Some("org-2"), "workspace-1").unwrap().workspace.org_id, "org-2");
+        assert_eq!(service.restart(Some("org-2"), "workspace-1").unwrap().workspace.org_id, "org-2");
+        assert_eq!(service.operation(Some("org-2"), "operation-1").unwrap().workspace.org_id, "org-2");
+        for request in requests.join().unwrap() {
+            assert!(request.contains("/v1/desktop/orgs/org-2/"));
+            phase2_headers(&request);
         }
     }
 
@@ -4150,6 +4178,7 @@ mod tests {
                 account.set_memberships_for_test(&["org-1"], true);
             } else {
                 account.set_active_org_for_test("org-2");
+                account.set_memberships_for_test(&["org-2"], true);
             }
             assert!(pending.join().unwrap().is_err(), "discard late {route} response");
             phase2_headers(&request.join().unwrap().text);

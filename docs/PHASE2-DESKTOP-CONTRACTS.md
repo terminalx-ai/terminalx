@@ -103,7 +103,11 @@ Restart always sends exact JSON `{}` with no force/options. The 202 response is
 when the caller needs the exact transport action. It uses the existing operation
 command and HTTP endpoint. There is no alternate status route, new operation
 type, new error code or restart inbox event. Existing resume is failed-restart recovery against the same machine.
-Both new APIs retain active-org authorization even with multi-org negotiation.
+Both new APIs authorize the explicit target organization by membership, as integrated
+in SaaS commit `c517cf71aef847e7b51cb83152ad37cbe8ce73e2` (PR #250). The target
+need not be active; `active_organization_required` can still reject an invalid token
+profile. Membership/privacy/manager checks remain server-authoritative. Restart
+body limit is 1 KiB, with oversize requests returning domain 422 rather than 413.
 The server enforces ordinary details visibility and owner/admin or own-creator
 restart authority; driver/viewer shares do not grant management, and preparation
 restart additionally requires owner/admin. A private workspace stays creator-only.
