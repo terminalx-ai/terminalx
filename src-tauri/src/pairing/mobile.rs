@@ -191,6 +191,15 @@ fn admitted(filter: Option<&NotificationFilter>, notification: &MobileNotificati
     filter.is_none_or(|filter| filter.admits(notification))
 }
 
+/// What a tab's open turn has met that its end is told by (#990).
+#[derive(Debug, Default)]
+struct TurnNotes {
+    /// Its usage limit was noticed: reported again, it is not news again.
+    limited: bool,
+    /// A failure met before the turn ended, which an aborted end is down to.
+    failure: Option<crate::recovery::RecoveryKind>,
+}
+
 /// The filter a connection's latest `notifications.subscribe` named, and that
 /// subscription's id: `notifications.event`, sent to every connection, is
 /// held to it too. Unsubscribing that subscription clears it.
@@ -211,9 +220,8 @@ pub(super) struct MobileRuntime {
     /// Questions and permission requests already noticed, by request id: an
     /// ask published again (a reconciliation) is not news again.
     asked: Mutex<VecDeque<String>>,
-    /// Tabs whose usage limit was noticed since their last turn began, so a
-    /// limit reported again, or the turn it ends, is not noticed again.
-    limited: Mutex<HashSet<String>>,
+    /// What each tab's turn has met since it began, by `session/tab`.
+    turns: Mutex<HashMap<String, TurnNotes>>,
     /// Pipeline news already sent, by `engine::PhoneNotice::key`.
     pipeline_notices: Mutex<VecDeque<String>>,
     notes: Mutex<()>,
@@ -234,7 +242,7 @@ impl MobileRuntime {
             notification_epoch: Uuid::new_v4().to_string(),
             notification_seq: std::sync::atomic::AtomicU64::new(0),
             asked: Mutex::new(VecDeque::new()),
-            limited: Mutex::new(HashSet::new()),
+            turns: Mutex::new(HashMap::new()),
             pipeline_notices: Mutex::new(VecDeque::new()),
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
@@ -259,6 +267,9 @@ impl MobileRuntime {
         sink.listen(crate::issue_pipeline::host::CHANGED, Box::new(move |payload| {
             let Some(runtime) = runtime.upgrade() else { return };
             let Ok(pipeline) = serde_json::from_str::<crate::issue_pipeline::Pipeline>(payload) else { return };
+            // Only a merge or a stop can be news: every other write reads no session.
+            use crate::issue_pipeline::State;
+            if pipeline.pr.is_none() || !matches!(pipeline.state, State::Merged | State::NeedsYou) { return; }
             let author = index::get(&pipeline.author.session_id).ok().map(|session| session.title);
             let Some(notice) = crate::issue_pipeline::engine::phone_notice(&pipeline, author.as_deref(), Utc::now()) else { return };
             if let Some(notification) = runtime.pipeline_notification(notice, author) {
@@ -353,7 +364,7 @@ impl MobileRuntime {
         let tab_key = format!("{}/{}", event.session_id, event.tab_id);
         let (kind, body, question, approval) = match &event.payload {
             Payload::TurnStarted { .. } => {
-                self.limited.lock().unwrap().remove(&tab_key);
+                self.turns.lock().unwrap().remove(&tab_key);
                 return None;
             }
             Payload::QuestionsAsked { request_id, questions, .. } => {
@@ -381,30 +392,46 @@ impl MobileRuntime {
                 let approval = (!options.is_empty()).then(|| ApprovalNotice { request_id: request_id.clone() });
                 (NoticeKind::Approval, body, None, approval)
             }
-            Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => {
-                if !self.limited.lock().unwrap().insert(tab_key) { return None; }
-                (NoticeKind::UsageLimit, crate::recovery::RecoveryKind::UsageLimit.message().to_string(), None, None)
-            }
             Payload::GoalUpdated { goal } if goal.status != crate::events::GoalStatus::UsageLimited => {
-                self.limited.lock().unwrap().remove(&tab_key);
+                if let Some(notes) = self.turns.lock().unwrap().get_mut(&tab_key) { notes.limited = false; }
                 return None;
             }
-            Payload::GoalUpdated { .. } => {
-                if !self.limited.lock().unwrap().insert(tab_key) { return None; }
+            // A goal's snapshot is published again as the chat reopens: the
+            // limit is news once until the tab's next turn, or a goal that
+            // moved on, as is a provider's rejection reported again.
+            Payload::GoalUpdated { .. } | Payload::RateLimited { .. } => {
+                let rejected = matches!(&event.payload, Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected"));
+                if matches!(&event.payload, Payload::RateLimited { .. }) && !rejected { return None; }
+                let mut turns = self.turns.lock().unwrap();
+                let notes = turns.entry(tab_key).or_default();
+                if rejected { notes.failure = Some(crate::recovery::RecoveryKind::UsageLimit); }
+                if std::mem::replace(&mut notes.limited, true) { return None; }
                 (NoticeKind::UsageLimit, crate::recovery::RecoveryKind::UsageLimit.message().to_string(), None, None)
             }
-            Payload::TurnCompleted { final_text, .. } => {
-                let failure = crate::recovery::failure(&event.payload);
-                let limited = self.limited.lock().unwrap().contains(&tab_key);
+            Payload::TurnCompleted { status, final_text, .. } => {
+                let met = {
+                    let mut turns = self.turns.lock().unwrap();
+                    let met = turns.get_mut(&tab_key).and_then(|notes| notes.failure.take());
+                    // A noticed limit is kept until the next turn; nothing else outlives this one.
+                    if turns.get(&tab_key).is_some_and(|notes| !notes.limited) { turns.remove(&tab_key); }
+                    met
+                };
+                // An abort after an error, a lapsed retry or a refused request
+                // is that failure's; one with none was a person stopping it.
+                let failure = crate::recovery::failure(&event.payload)
+                    .or(met.filter(|_| *status == crate::events::TurnStatus::Aborted));
                 let text = final_text.as_deref().map(collapse_notification_text).filter(|text| !text.is_empty());
                 match failure {
-                    // The limit was the notice: the turn it ended says nothing more.
-                    Some(_) if limited => return None,
                     Some(failure) => (NoticeKind::Failed, text.unwrap_or_else(|| failure.message().to_string()), None, None),
                     // Ended well, or stopped by a person: finished, as every
                     // turn's end was before notices had kinds.
                     None => (NoticeKind::Finished, text.unwrap_or_else(|| "An agent turn finished on your Mac.".into()), None, None),
                 }
+            }
+            // An error mid-turn is no notice of its own: the turn it ends says so.
+            payload if crate::recovery::failure(payload).is_some() => {
+                self.turns.lock().unwrap().entry(tab_key).or_default().failure = crate::recovery::failure(payload);
+                return None;
             }
             _ => return None,
         };
@@ -3211,6 +3238,15 @@ mod tests {
         assert_eq!(aborted_signed_out.kind, NoticeKind::Failed, "aborted by an error");
         let stopped = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
         assert_eq!((stopped.kind, stopped.body.as_str()), (NoticeKind::Finished, "An agent turn finished on your Mac."), "stopped by the person: a turn's end, as an old phone was always told");
+        // An error mid-turn is told by the turn it ends, which an abort is down to.
+        assert!(notice(&runtime, Payload::Error { message: "Connection write failed: broken pipe".into(), fatal: false, detail: None }).is_none());
+        let errored = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
+        assert_eq!((errored.kind, errored.body.as_str()), (NoticeKind::Failed, crate::recovery::RecoveryKind::Disconnected.message()), "aborted by an error, not by the person: told in the error's allowlisted words");
+        assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Finished, "the error was that turn's, not the next one's");
+        assert!(notice(&runtime, Payload::ApiRetry { attempt: 3, max_retries: 3, reason: Some("overloaded".into()) }).is_none());
+        assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Failed, "retries ran out");
+        assert!(notice(&runtime, Payload::ApiRetry { attempt: 1, max_retries: 3, reason: None }).is_none());
+        assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Finished, "a retry that may still succeed is no failure");
 
         let answerable = notice(&runtime, asked("q1", vec![question("Which database?", &["Postgres", "SQLite"], false)])).unwrap();
         assert_eq!((answerable.kind, answerable.title.as_str(), answerable.body.as_str()), (NoticeKind::Question, "Fix login needs your answer", "Which database?"));
@@ -3236,7 +3272,10 @@ mod tests {
         let limit = notice(&runtime, limited("rejected")).unwrap();
         assert_eq!((limit.kind, limit.title.as_str()), (NoticeKind::UsageLimit, "Fix login reached a usage limit"));
         assert!(notice(&runtime, limited("rejected")).is_none(), "the same limit is noticed once");
-        assert!(notice(&runtime, ended(TurnStatus::Error, Some("limit"), false)).is_none(), "nor the turn it ended");
+        // An old phone was told of every turn's end, and still is: this one stopped on the limit.
+        let after_limit = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
+        assert_eq!((after_limit.kind, after_limit.body.as_str()), (NoticeKind::Failed, crate::recovery::RecoveryKind::UsageLimit.message()));
+        assert!(notice(&runtime, limited("rejected")).is_none(), "reported again before the next turn: noticed already");
         assert!(notice(&runtime, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: None, initiating_prompt: None }).is_none());
         assert_eq!(notice(&runtime, goal(crate::events::GoalStatus::UsageLimited)).unwrap().kind, NoticeKind::UsageLimit, "a new turn may reach it again");
         assert!(notice(&runtime, goal(crate::events::GoalStatus::UsageLimited)).is_none());

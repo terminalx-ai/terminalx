@@ -323,7 +323,6 @@ pub fn waits_on_pull_request(pipeline: &Pipeline) -> bool {
     }
 }
 
-/// When a conversation's turn ended, for the record: "after the merge".
 /// How long after a pipeline stopped on failed checks, or merged, a phone is
 /// still told so (#990). A pipeline announced again later, by a step that
 /// changed something else or by an app that just started, is old news.
@@ -385,6 +384,7 @@ pub fn phone_notice(pipeline: &Pipeline, author_title: Option<&str>, now: DateTi
     })
 }
 
+/// When a conversation's turn ended, for the record: "after the merge".
 fn after(ending: Ending) -> &'static str {
     match ending {
         Ending::Merged => "after the merge",
