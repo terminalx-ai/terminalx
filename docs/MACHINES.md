@@ -828,6 +828,7 @@ the pull request that adds it.
 | `ports.close` | `ports/1` | Served | |
 | `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
 | `machine.projects` | `machine/1` | Served | As `machine.describe` |
+| `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1050,6 +1051,119 @@ pairing code").
 - When a direct route comes back while on the relay, the client opens it, takes
   the same subscriptions on it, then closes the relay connection. Nothing in the
   session view reloads.
+
+### As built (PRO-345)
+
+PRO-345 settled these points while building Connect and Reconnect.
+
+**`machine/2`** adds to `machine/1`, as namespaces do:
+
+- `machine.describe` and `machine.changed` name `directEndpoints`: the
+  machine's current `ws://…:6768/machine/1` addresses, computed as for a
+  pairing code. The operating computer keeps the latest list, so a machine
+  whose address changed is still found.
+- `machine.relayAccess` (`Manage`, paired computers only), no params. A
+  runtime with a live relay registration gives the computer a relay device id
+  once (kept as `relayDeviceId` on its record in `paired-computers.json`),
+  asks the relay for a fresh single-use invite for it (`invite-create`), and
+  answers
+  `{ "relay": { "v": 1, "directorUrl", "cellUrl", "assignmentEpoch", "relayHostId", "relayDeviceId", "inviteToken", "inviteExpiresAt", "e2eeFraming": 2 } }`.
+  With no registration it answers `{ "relay": null }`. Revoking the computer
+  also sends `device-revoke` for its relay device id, so its relay credential
+  ends with it.
+- A runtime registers with the relay only through `--relay-link` today. A
+  signed-in desktop or headless machine registering itself with
+  `POST /v1/desktop/machine-host/relay-session` (terminalx-saas
+  `machine-relay-access.md`) is a separate ticket, because the window's phone
+  registration uses the same host id and the relay fences one of them. Until
+  it lands, `machine.relayAccess` answers `{ "relay": null }` on a production
+  machine and the relay route is skipped.
+
+**Routes.** A route is `lan` (a direct endpoint that is not Tailscale),
+`tailscale` (a host in `100.64.0.0/10` or under `.ts.net`), or `relay`. One
+round tries, in order: the route that last worked, every `lan` endpoint, every
+`tailscale` endpoint, then the relay. A direct endpoint gets 3 s to connect and
+finish the handshake, the relay 15 s. The relay is tried only when the record's
+route is `relayAndNearby`, this computer holds a relay credential for the
+machine, and the account that obtained it is signed in. "Only this network"
+(`thisNetwork`) never uses the relay.
+
+**Relay credential.** After a direct connection is established, while signed
+in, with `relayAndNearby` and no credential, the operating computer calls
+`machine.relayAccess`. With an invite it connects through the relay at once
+(`relay-auth` v1, `credential` the invite), runs the same E2EE and `e2ee_auth`,
+calls `pairing.provisionRelay` with a fresh resume token's hash, and closes
+that connection. The resume token goes in the Keychain (service
+`<app identifier>.machines`, account `relay:<machineId>`); the record keeps
+`relay: { directorUrl, cellUrl, assignmentEpoch, relayHostId, relayDeviceId, userId }`.
+A later relay connection first asks the director for the cell
+(`POST <directorUrl>/v1/resolve` `{ v: 1, relayHostId, resumeToken }`, as the
+phone does), falls back to the saved cell, and connects with `credential` the
+resume token. A relay that refuses the credential (`4401`, `4404`) deletes it;
+the next direct connection asks again.
+
+**One owner per machine.** The desktop holds at most one supervisor per
+`machineId`; `machine_remote_attach` returns the existing connection id when
+there is one. Sleep, wake, a network change, a route probe and "Try again"
+only nudge that owner. Wake is a wall-clock jump of more than 3 s against the
+monotonic clock (checked every second); a network change is a change in the
+set of interface addresses (checked every 2 s). A nudge while connected checks
+the link with `machine.describe` (3 s); no answer drops it. A nudge while
+waiting retries at once with the backoff reset to 250 ms. Backoff is
+`protocol::backoff`: 250 ms doubling to 10 s, with jitter.
+
+**Each connection** runs E2EE v2 pinned to the stored key with this
+installation's client key, proves the device token (Keychain
+`machine:<machineId>`) in `e2ee_auth` with `label` and `platform`, calls
+`rpc.hello` wanting every capability in `CAPABILITIES`, then
+`machine.describe`. It refuses a runtime that does not grant `machine/1`
+("needs update") and a `machineId` that is not the stored one. Close `4401`, or
+`pairing_refused` before `e2ee_authenticated`, means "access removed": the
+owner stops retrying until "Try again". A successful `machine.describe` updates
+the record's name, os, version, `directEndpoints`, `lastSeenAt` and
+`lastRoute`; while connected, the owner repeats it every 30 s, which also
+measures `rttMs` end to end.
+
+**Moving to a direct route.** While on the relay, the owner tries the direct
+routes every 30 s and on every nudge. When one is established it becomes the
+link: frames from the web view go to it from then on, and the web view is told
+`connected` again with a new `link` number. The relay connection stays open
+for 10 s more so answers to requests already sent on it still arrive; its
+notifications are dropped. The portable client takes a new `link` while
+connected as a new connection: it resubscribes from its cursors, so chat and
+terminals pick up where they were without a reload. Losing a direct link while
+the relay works goes through `reconnecting` the same way.
+
+**macOS Local Network.** The desktop's `Info.plist` has
+`NSLocalNetworkUsageDescription`. When a `lan` endpoint fails with
+`EHOSTUNREACH` while Local Network access is refused, the state carries
+`localNetworkDenied: true` and the other routes are still tried.
+
+**Signing out** of the account closes relay connections and stops trying the
+relay. Machines paired by code, their tokens and their relay credentials stay;
+the credential is used again only when the same account signs in, and is
+deleted when another one does.
+
+**States** (`MachineConnectionState` in `src/types/machines.ts`): `idle` (not
+attached), `connecting`, `direct` (with `lan` or `tailscale`), `relay`,
+`reconnecting` (a link was lost less than 30 s ago), `offline` (no route
+answered for 30 s; still retrying), `needsUpdate`, `accessRemoved`. The web
+view's transport sees the cloud states it knows: `connecting`, `connected`,
+`reconnecting` (for reconnecting and offline), `updateRequired` and `stopped`
+(access removed).
+
+**Tauri commands** on the operating computer:
+
+| Command | Params | Result |
+| --- | --- | --- |
+| `machine_remote_attach` | `machineId` | The connection id for `cloud_remote_send`, `cloud_remote_detach` and `cloud_port_*`; its states and messages come as `cloud_remote_event`. Refused with `machine_unknown` or `machine_token_missing` |
+| `machines_connections` | none | `MachineConnectionView[]`, one per paired machine (`idle` when not attached) |
+| `machines_reconnect` | `machineId` | "Try again": nudges the owner; after `accessRemoved` or `needsUpdate` it tries once more |
+
+The event `machines_connection_changed` carries one `MachineConnectionView`
+whenever a machine's state changes. `machines_list` answers each record with
+`lastRoute` and `relay` (no secret). `cloud_remote_attach_dev` and the debug
+Development section are gone; their tests use `machine_remote_attach`.
 
 ## Trust model
 
