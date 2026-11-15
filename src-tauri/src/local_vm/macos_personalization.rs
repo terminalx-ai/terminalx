@@ -319,7 +319,15 @@ pub(super) fn retain_confirmed_trust(
 pub struct SshPlan {
     pub args: Vec<String>,
     pub known_hosts: String,
-    pub request: Vec<u8>,
+    /// Carries the installing host's key (`guest_key.rs`); zeroed when dropped.
+    pub request: zeroize::Zeroizing<Vec<u8>>,
+}
+/// The pinned route alone. It names no guest request and so holds no host
+/// key: the first connection and the loader upload use it before a runtime,
+/// and with it a key, exists.
+pub(super) struct SshRoute {
+    pub args: Vec<String>,
+    pub known_hosts: String,
 }
 pub(super) struct Retained {
     pub plan: AccountPlan,
@@ -360,6 +368,10 @@ pub(super) fn retained(root: &Path, key: &str, target: &Target) -> Result<Retain
 }
 /// Builds, but never executes, the proposed account-bound transport. Private
 /// key creation and VM-bound trust capture are separate unimplemented gates.
+///
+/// The request carries the installing host's key, as every guest request
+/// must (#672). It is read from `root`, the journal root this route's own
+/// records live under, so a caller's root and its key cannot differ.
 pub fn ssh_plan(
     root: &Path,
     key: &str,
@@ -369,10 +381,52 @@ pub fn ssh_plan(
     method: &str,
     params: Value,
 ) -> Result<SshPlan> {
-    current_target.validate()?;
     super::transport::validate_runtime_sha(runtime_sha)?;
-    if !current_ip.is_private() || current_ip.is_loopback() || method.is_empty() {
-        bail!("Exact VM endpoint and guest RPC method required");
+    if method.is_empty() {
+        bail!("Guest RPC method required");
+    }
+    let (SshRoute { args, known_hosts }, account) = route(root, key, current_target, current_ip)?;
+    let mut params = params;
+    let object = params
+        .as_object_mut()
+        .context("Guest request object required")?;
+    object.insert("environmentId".into(), json!(current_target.environment_id));
+    object.insert("generation".into(), json!(current_target.generation));
+    // Only on stdin, with the request: never in argv, a record or a log.
+    let host_key = super::guest_key::read(root, &current_target.environment_id)?;
+    let request = zeroize::Zeroizing::new(serde_json::to_vec(
+        &json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha,"expectedMacosAccount":account,"hostKey":host_key.as_str()}),
+    )?);
+    if request.len() > super::guest::MAX_RPC_BYTES {
+        bail!("Guest request exceeds its bound");
+    }
+    Ok(SshPlan {
+        args,
+        known_hosts,
+        request,
+    })
+}
+
+/// The route `ssh_plan` sends its request over, for a caller that supplies
+/// its own remote command and no guest request.
+pub(super) fn ssh_route(
+    root: &Path,
+    key: &str,
+    current_target: &Target,
+    current_ip: Ipv4Addr,
+) -> Result<SshRoute> {
+    Ok(route(root, key, current_target, current_ip)?.0)
+}
+
+fn route(
+    root: &Path,
+    key: &str,
+    current_target: &Target,
+    current_ip: Ipv4Addr,
+) -> Result<(SshRoute, super::macos_account::Account)> {
+    current_target.validate()?;
+    if !current_ip.is_private() || current_ip.is_loopback() {
+        bail!("Exact VM endpoint required");
     }
     let Retained {
         plan: account,
@@ -451,23 +505,13 @@ pub fn ssh_plan(
             account.home()
         ),
     ]);
-    let mut params = params;
-    let object = params
-        .as_object_mut()
-        .context("Guest request object required")?;
-    object.insert("environmentId".into(), json!(current_target.environment_id));
-    object.insert("generation".into(), json!(current_target.generation));
-    let request = serde_json::to_vec(
-        &json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha,"expectedMacosAccount":observed.account}),
-    )?;
-    if request.len() > super::guest::MAX_RPC_BYTES {
-        bail!("Guest request exceeds its bound");
-    }
-    Ok(SshPlan {
-        args,
-        known_hosts: format!("{alias} {}\n", trust.host_key),
-        request,
-    })
+    Ok((
+        SshRoute {
+            args,
+            known_hosts: format!("{alias} {}\n", trust.host_key),
+        },
+        observed.account,
+    ))
 }
 
 #[cfg(test)]
@@ -583,16 +627,30 @@ mod tests {
         receipt.host_key_fingerprint =
             format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(&bytes)));
         retain_trust(root.path(), &key, &receipt).unwrap();
-        let plan = ssh_plan(
-            root.path(),
-            &key,
-            &target,
-            Ipv4Addr::new(192, 168, 64, 2),
-            &"e".repeat(64),
-            "describe",
-            json!({}),
-        )
-        .unwrap();
+        let plan = |target: &Target| {
+            ssh_plan(
+                root.path(),
+                &key,
+                target,
+                Ipv4Addr::new(192, 168, 64, 2),
+                &"e".repeat(64),
+                "describe",
+                json!({}),
+            )
+        };
+        // No runtime was installed from this root, so it holds no host key:
+        // a request cannot be built, though the pinned route alone still can.
+        let refused = plan(&target).err().unwrap();
+        assert!(format!("{refused:#}").contains("installed without a host key"), "{refused:#}");
+        ssh_route(root.path(), &key, &target, Ipv4Addr::new(192, 168, 64, 2)).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1); // Ledger only; no key/config creation or SSH execution.
+        // Another root's key is not this root's.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let foreign = super::super::guest_key::ensure(elsewhere.path(), &target.environment_id).unwrap();
+        assert!(plan(&target).is_err());
+        let host_key = super::super::guest_key::ensure(root.path(), &target.environment_id).unwrap();
+        assert_ne!(*host_key, *foreign);
+        let plan = plan(&target).unwrap();
         for flag in [
             "StrictHostKeyChecking=yes",
             "IdentityAgent=none",
@@ -613,6 +671,12 @@ mod tests {
             rpc.expected_macos_account,
             Some(observation(&target, &account).account)
         );
+        // The key this root holds, on stdin with the request and nowhere in argv;
+        // the guest keeps only its digest.
+        assert_eq!(rpc.host_key, *host_key);
+        assert!(super::super::guest_key::matches(&super::super::guest_key::verifier(&host_key), &rpc.host_key));
+        assert!(!plan.args.iter().any(|arg| arg.contains(host_key.as_str())));
+        assert!(!plan.known_hosts.contains(host_key.as_str()));
         assert!(plan.args.last().unwrap().starts_with("/Users/personal/"));
         assert!(!plan
             .args
@@ -630,6 +694,7 @@ mod tests {
             json!({})
         )
         .is_err());
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1); // Ledger only; no key/config creation or SSH execution.
+        // The ledger and the host's key; still no SSH key/config creation or execution.
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }
 }

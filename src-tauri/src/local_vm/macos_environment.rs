@@ -99,6 +99,7 @@ fn environment(root: &Path, key: &str, name: &str, runtime: &ApprovedRuntime) ->
         deleted_at: None,
         keep_awake: false,
         owned: true,
+        detached: false,
         provision: None,
         manual_control: false,
         setup: None,

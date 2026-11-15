@@ -96,6 +96,9 @@ impl Fixture {
                 Ok(())
             })
             .unwrap();
+        // As when this host installed the guest's runtime: the key lives under
+        // the fixture's own journal root, where the route reads it.
+        super::super::guest_key::ensure(root.path(), &env.id).unwrap();
         let keygen = root.path().join("fake-key-verifier");
         script(
             &keygen,
@@ -125,6 +128,9 @@ assert (p/'public-key').read_text() in pathlib.Path(known).read_text()
 request=json.load(sys.stdin)
 assert request['expectedRuntimeSha256']=='e'*64
 assert request['expectedMacosAccount']['shortName']=='personal'
+key=(p/'guest-keys'/(request['params']['environmentId']+'.key')).read_text()
+assert len(key)==64 and request['hostKey']==key
+assert not any(key in x for x in a) and not any(key in v for v in os.environ.values())
 with (p/'deliveries').open('a') as f:f.write(request['method']+'\n')
 (p/'request.json').write_text(json.dumps(request))
 if (p/'lose-next').exists():
@@ -147,6 +153,10 @@ print((p/'reply.json').read_text())
     }
     pub(crate) fn pinned(&self) -> &Binding {
         binding(&self.env).unwrap()
+    }
+    /// The installing host's key, as this fixture's own root holds it.
+    pub(crate) fn host_key(&self) -> zeroize::Zeroizing<String> {
+        super::super::guest_key::read(self.root.path(), &self.env.id).unwrap()
     }
     pub(in crate::local_vm) fn programs(&self) -> Programs<'_> {
         Programs {
@@ -260,6 +270,28 @@ fn missing_trust_and_changed_known_hosts_or_serving_receipt_are_not_accepted() {
 }
 
 #[test]
+fn a_root_without_the_installing_hosts_key_sends_no_guest_request() {
+    let f = Fixture::new();
+    f.reply(json!({"available":false}));
+    let key = f.root.path().join("guest-keys").join(format!("{}.key", f.env.id));
+    let original = std::fs::read(&key).unwrap();
+    std::fs::remove_file(&key).unwrap();
+    let error = f.call("describe", json!({})).unwrap_err();
+    assert!(format!("{error:#}").contains("installed without a host key"), "{error:#}");
+    // A key under the process's own home is not this root's, and is not used.
+    let _home = crate::store::temp_home();
+    super::super::guest_key::ensure(&super::super::host::root().unwrap(), &f.env.id).unwrap();
+    assert!(f.call("describe", json!({})).is_err());
+    // Nor is a damaged one sent.
+    journal::atomic_private_write(&key, b"not a key").unwrap();
+    assert!(f.call("describe", json!({})).is_err());
+    assert_eq!(f.deliveries(), 0);
+    journal::atomic_private_write(&key, &original).unwrap();
+    f.call("describe", json!({})).unwrap_err(); // The reply is not a description; the request was sent.
+    assert_eq!(f.deliveries(), 1);
+}
+
+#[test]
 fn actual_host_executor_carries_bound_task_and_never_replays_a_lost_receipt() {
     let f = Fixture::new();
     let task = f.task();
@@ -301,6 +333,8 @@ fn actual_host_executor_carries_bound_task_and_never_replays_a_lost_receipt() {
         request.expected_macos_account.as_ref(),
         Some(&f.pinned().account)
     );
+    // The fixture's own root holds the key the executor was handed on stdin.
+    assert_eq!(request.host_key, *f.host_key());
     assert_eq!(request.params["environmentId"], f.env.id);
     assert_eq!(request.params["generation"], f.env.generation);
     let mut wrong = task.clone();
@@ -442,13 +476,38 @@ fn key_reference_unknown_retired_and_missing_history_never_generate_again() {
 #[test]
 fn personalized_setup_installer_supervisor_and_desktop_preserve_binding_and_gates() {
     let f = Fixture::new();
-    let plan = install_plan(&f.env, &f.pinned().runtime_sha256).unwrap();
+    let plan = host_install_plan(f.root.path(), &f.env, &f.pinned().runtime_sha256).unwrap();
     assert_eq!(plan.identity["macosAccount"], json!(f.pinned().account));
+    // The guest is given the digest of this root's key and never the key.
+    let host_key = f.host_key();
+    assert_eq!(plan.identity["hostKeySha256"], super::super::guest_key::verifier(&host_key));
+    assert!(!json!(plan).to_string().contains(host_key.as_str()));
+    plan.check_host_key(f.root.path(), &f.env).unwrap();
+    // The identity the guest would keep is one its runtime accepts, and it
+    // answers this root's key alone.
+    let identity: super::super::guest::Identity = serde_json::from_value(plan.identity.clone()).unwrap();
+    assert!(super::super::guest_key::matches(&identity.host_key_sha256, &host_key));
+    assert_eq!(identity.macos_account.as_ref(), Some(&f.pinned().account));
+    // The same plan, rebuilt as the guest's loader does from the digest alone.
+    assert_eq!(
+        json!(install_plan(&f.env, &f.pinned().runtime_sha256, plan.host_key_sha256().unwrap()).unwrap()),
+        json!(plan)
+    );
+    assert!(install_plan(&f.env, &f.pinned().runtime_sha256, "").is_err());
+    assert!(install_plan(&f.env, &f.pinned().runtime_sha256, &"F".repeat(64)).is_err());
+    // A plan made for another host's key, or carrying the key where its
+    // digest belongs, is refused against this root.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let foreign = host_install_plan(elsewhere.path(), &f.env, &f.pinned().runtime_sha256).unwrap();
+    assert_ne!(foreign.identity["hostKeySha256"], plan.identity["hostKeySha256"]);
+    assert!(foreign.check_host_key(f.root.path(), &f.env).is_err());
+    let leaked = install_plan(&f.env, &f.pinned().runtime_sha256, &host_key).unwrap();
+    assert!(leaked.check_host_key(f.root.path(), &f.env).is_err());
     assert!(plan
         .plist
         .contains("/Users/personal/.terminalx-local/runtime"));
     assert!(!plan.plist.contains("/Users/lume"));
-    assert!(install_plan(&f.env, &"f".repeat(64)).is_err());
+    assert!(host_install_plan(f.root.path(), &f.env, &"f".repeat(64)).is_err());
     let report = super::super::setup::initial(&f.env, "codex", "guided").unwrap();
     assert_eq!(report["transportBinding"], json!(f.env.transport));
     assert_ne!(report["status"], "complete");
@@ -497,7 +556,7 @@ fn personalized_setup_installer_supervisor_and_desktop_preserve_binding_and_gate
         })
         .unwrap();
     assert!(adapter.tools(&mut rpc).is_err());
-    assert!(super::super::admission::has_reservations(f.root.path()).unwrap());
+    assert!(super::super::admission::has_guest_reservations(f.root.path()).unwrap());
     assert_eq!(f.deliveries(), 0);
     let mut legacy = f.env.clone();
     legacy.transport = Transport::MacosLume;

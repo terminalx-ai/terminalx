@@ -34,7 +34,8 @@ impl Delivery {
             version: 1,
             request_id: f.pinned().bootstrap_id.clone(),
             environment: f.env.clone(),
-            plan: macos_transport::install_plan(&f.env, &sha).unwrap(),
+            // As `deliver` builds it: the key is made under the fixture's root.
+            plan: macos_transport::host_install_plan(f.root.path(), &f.env, &sha).unwrap(),
             runtime_bytes: 64,
         };
         Self {
@@ -114,6 +115,68 @@ fn the_first_upload_waits_for_the_recorded_first_strict_connection() {
         })
         .unwrap();
     assert_eq!(uploaded["status"], "loaderOutcomeUnknown");
+}
+
+#[test]
+fn a_plan_for_another_hosts_key_delivers_nothing_and_the_guest_keeps_only_the_digest() {
+    let d = Delivery::new();
+    let key = super::super::guest_key::read(d.f.root.path(), &d.f.env.id).unwrap();
+    let digest = super::super::guest_key::verifier(&key);
+    assert_eq!(d.intent.plan.identity["hostKeySha256"], digest);
+    // The guest's loader checks the intent from the digest alone.
+    d.intent.validate().unwrap();
+    // An intent whose identity names another host's key, the key itself, or
+    // no key is refused before a record exists or anything is sent.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let foreign = macos_transport::host_install_plan(
+        elsewhere.path(),
+        &d.f.env,
+        &d.intent.plan.runtime_sha256,
+    )
+    .unwrap();
+    let mut keyed = d.intent.plan.clone();
+    keyed.identity["hostKeySha256"] = json!(key.as_str());
+    let mut bare = d.intent.plan.clone();
+    bare.identity.as_object_mut().unwrap().remove("hostKeySha256");
+    for (name, plan) in [("another host", foreign), ("the key itself", keyed), ("no digest", bare)] {
+        let mut intent = d.intent.clone();
+        intent.plan = plan;
+        assert!(
+            change_using(d.f.root.path(), &d.f.journal, &intent, &d.artifact, "upload", |_| {
+                panic!("delivered an identity for {name}")
+            })
+            .is_err(),
+            "{name}"
+        );
+        assert!(!record_path(d.f.root.path(), &d.intent.request_id).exists(), "{name}");
+    }
+    // Nor is anything sent once this root has lost its key.
+    let path = d.f.root.path().join("guest-keys").join(format!("{}.key", d.f.env.id));
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(d.change("upload", |_| panic!("delivered without the host key")).is_err());
+    journal::atomic_private_write(&path, &bytes).unwrap();
+    // Installed, the guest holds the digest and never the key.
+    d.change("upload", |_| Ok(d.uploaded())).unwrap();
+    let done = d.change("install", |action| d.guest(action)).unwrap();
+    assert_eq!(done["status"], "installed");
+    let installed = std::fs::read(d.home.path().join(".terminalx-local/identity.json")).unwrap();
+    let identity: Value = serde_json::from_slice(&installed).unwrap();
+    assert_eq!(identity["hostKeySha256"], digest);
+    assert_eq!(identity["macosAccount"], json!(d.f.pinned().account));
+    let mut found = Vec::new();
+    let mut pending = vec![d.home.path().to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap()).contains(key.as_str()) {
+                found.push(entry.path());
+            }
+        }
+    }
+    assert!(found.is_empty(), "the host key reached the guest's files: {found:?}");
 }
 
 #[test]

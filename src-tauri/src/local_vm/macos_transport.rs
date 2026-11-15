@@ -146,11 +146,17 @@ pub(super) fn rpc_using(
     )?;
     // A separate, fresh check catches changed journal/parent inputs before the
     // effect. The guest also checks the full account/runtime/env/generation.
-    let request: Value = serde_json::from_slice(&plan.request)?;
-    validate_route(root, journal, env, method, &request["params"])?;
+    // Only the parameters are read back: the host's key stays in the request's
+    // own zeroed bytes and is not copied into a second value.
+    #[derive(Deserialize)]
+    struct Sent {
+        params: Value,
+    }
+    let Sent { params } = serde_json::from_slice(&plan.request)?;
+    validate_route(root, journal, env, method, &params)?;
     let response = super::transport::decode(&process::run(&mut command, &plan.request, budget)?)?;
-    validate_route(root, journal, env, method, &request["params"])?;
-    validate_response(journal, env, method, &request["params"], &response)?;
+    validate_route(root, journal, env, method, &params)?;
+    validate_response(journal, env, method, &params, &response)?;
     Ok(response)
 }
 
@@ -184,14 +190,14 @@ pub(super) fn command_for(
     {
         bail!("Original VM endpoint missing or replaced")
     }
-    let mut plan = macos_personalization::ssh_plan(
+    // The route only. The caller's remote command replaces the runtime's, and
+    // the first connection and the loader upload run before a runtime (and so
+    // a host key for one) exists, so no guest request is built here.
+    let mut plan = macos_personalization::ssh_route(
         root,
         &pinned.bootstrap_id,
         &pinned.target,
         endpoint.ip,
-        &pinned.runtime_sha256,
-        "bootstrap",
-        json!({}),
     )?;
     let (_keys, public) = super::macos_keys::resolve_with_public(root, pinned, programs.keygen, budget)?;
     let directory = root
@@ -365,14 +371,46 @@ pub(super) struct InstallPlan {
     pub plist_path: PathBuf,
     pub plist: String,
 }
-pub(super) fn install_plan(env: &Environment, runtime_sha256: &str) -> Result<InstallPlan> {
+impl InstallPlan {
+    /// The digest of the installing host's key that this plan writes into the
+    /// guest's identity (`guest_key.rs`).
+    pub(super) fn host_key_sha256(&self) -> Result<&str> {
+        self.identity["hostKeySha256"]
+            .as_str()
+            .context("Bootstrap plan carries no host key digest")
+    }
+    /// Host side only: the plan names the key this root holds and no other,
+    /// so the runtime it installs answers this host alone.
+    pub(super) fn check_host_key(&self, root: &Path, env: &Environment) -> Result<()> {
+        let key = super::guest_key::read(root, &env.id)?;
+        if !super::guest_key::matches(self.host_key_sha256()?, &key) {
+            bail!("Bootstrap plan names another host's key; nothing was delivered")
+        }
+        Ok(())
+    }
+}
+/// The plan for a runtime this host installs. Its identity names the key
+/// under `root`, which is made here the first time a runtime is installed.
+pub(super) fn host_install_plan(root: &Path, env: &Environment, runtime_sha256: &str) -> Result<InstallPlan> {
+    let key = super::guest_key::ensure(root, &env.id)?;
+    install_plan(env, runtime_sha256, &super::guest_key::verifier(&key))
+}
+/// The plan for a given key digest. The guest's own loader rebuilds it from
+/// the digest the plan carries, since the guest never holds the key itself;
+/// the host builds it through `host_install_plan`.
+pub(super) fn install_plan(env: &Environment, runtime_sha256: &str, host_key_sha256: &str) -> Result<InstallPlan> {
     let pinned = binding(env)?;
     if pinned.runtime_sha256 != runtime_sha256 {
         bail!("Personalized installer runtime differs from sealed binding");
     }
+    if host_key_sha256.len() != 64
+        || !host_key_sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!("Personalized installer requires the installing host's key digest");
+    }
     let base = pinned.account.installation()?;
     Ok(InstallPlan {
-        identity: json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL,"macosAccount":pinned.account}),
+        identity: json!({"environmentId":env.id,"generation":env.generation,"protocol":journal::PROTOCOL,"macosAccount":pinned.account,"hostKeySha256":host_key_sha256}),
         runtime_sha256: runtime_sha256.into(),
         runtime_path: base.join("bin/terminalx-serve"),
         plist_path: Path::new(&pinned.account.home)

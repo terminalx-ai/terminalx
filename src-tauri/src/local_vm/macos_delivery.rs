@@ -40,10 +40,14 @@ impl Intent {
             || self.request_id != pinned.bootstrap_id
             || self.runtime_bytes < 32
             || self.runtime_bytes > LIMIT
+            // Rebuilt from the digest the plan itself carries: this also runs in
+            // the guest's loader, which never holds the host's key. The host
+            // proves the digest is its own key's in `change_using`.
             || json!(self.plan)
                 != json!(macos_transport::install_plan(
                     &self.environment,
-                    &pinned.runtime_sha256
+                    &pinned.runtime_sha256,
+                    self.plan.host_key_sha256()?
                 )?)
         {
             bail!("Bootstrap intent/plan/account/runtime changed")
@@ -231,6 +235,9 @@ fn change_using(
     intent.validate()?;
     let pinned = macos_transport::binding(&intent.environment)?;
     pinned.check_retained(root)?;
+    // Before any effect: the identity to install names this root's key, so a
+    // record from another host, or one whose key was lost, delivers nothing.
+    intent.plan.check_host_key(root, &intent.environment)?;
     if action == "upload" {
         // Nothing is uploaded before the first strict connection proved this
         // exact account, home, installed key and host key.
@@ -386,7 +393,7 @@ pub(super) fn deliver(env: &Environment, runtime: &Path, action: &str) -> Result
             version: 1,
             request_id: pinned.bootstrap_id.clone(),
             environment: env.clone(),
-            plan: macos_transport::install_plan(env, &pinned.runtime_sha256)?,
+            plan: macos_transport::host_install_plan(&root, env, &pinned.runtime_sha256)?,
             runtime_bytes: artifact.bytes.len() as u64,
         }
     };
