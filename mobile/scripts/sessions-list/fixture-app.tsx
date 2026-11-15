@@ -48,7 +48,8 @@ const api = new Proxy({}, {
 });
 const value = {
   ready: true, session: null, hosts: [host], availableHosts: [], installationState: "ready", activeHost: host,
-  connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 1, sessions, loadingMachines: false, loadingSessions: false,
+  connectionStage: "connected", connectionAttempt: 0, connectionEpoch: 1, sessions, loadingMachines: false,
+  connectionSince: null, connectionWaiting: false, online: true, updating: false, beginUpdate: () => () => undefined, retryConnection: () => undefined,
   error: null, logs: [], pairingProgress: null,
   connection: { onEvent: listen, onConnected: listen, onStage: listen, onLog: listen, restart: () => undefined, reportError: () => undefined, retryNow: () => undefined },
   api,
