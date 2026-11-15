@@ -1,0 +1,33 @@
+# 22.05 Machines and Settings: the list, an offline machine's menu, rename, forget, and Settings.
+appId: com.terminalx.phone.fixture
+name: Machines and Settings (22.05)
+---
+- launchApp:
+    arguments: { fixtureScenario: connected }
+- tapOn:
+    id: machines-tab
+- assertVisible: "Office iMac.*"
+- takeScreenshot: 22.05-1-machines
+- tapOn: "Device options for Office iMac"
+- waitForAnimationToEnd
+- takeScreenshot: 22.05-2-menu-on-an-offline-machine
+- tapOn: "Rename"
+- waitForAnimationToEnd
+- takeScreenshot: 22.05-3-rename
+- tapOn: "Cancel"
+- waitForAnimationToEnd
+- tapOn: "Device options for Office iMac"
+- tapOn: "Forget this machine"
+- waitForAnimationToEnd
+- takeScreenshot: 22.05-4-forget
+- tapOn: "Cancel"
+- waitForAnimationToEnd
+- tapOn: "Settings"
+- waitForAnimationToEnd
+- takeScreenshot: 22.05-5-settings
+- swipe:
+    start: 50%, 80%
+    end: 50%, 20%
+    duration: 800
+- waitForAnimationToEnd
+- takeScreenshot: 22.05-5b-settings-end

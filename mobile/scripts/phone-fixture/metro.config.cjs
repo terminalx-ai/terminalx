@@ -1,5 +1,5 @@
-// The Sessions list fixture (#986): the real app, its shell and its screens,
-// with only the app state replaced by `fixture-app.tsx`. Bundle it with
+// The phone fixture: the real app, its shell and its screens, with only the
+// app state replaced by `fixture-app.tsx`. Bundle it with
 // EXPO_OVERRIDE_METRO_CONFIG pointing here; see README.md.
 /* global __dirname */
 const path = require("node:path");

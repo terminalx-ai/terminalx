@@ -1,0 +1,59 @@
+# Phone fixture (22.01–22.05)
+
+The production app (its root layout, native tab bar and every screen) with
+only `src/state/AppProvider.tsx` swapped for `fixture-app.tsx`. The real
+`HostApi` runs over a fake connection that answers the Mac's requests with
+placeholder data:
+
+- five machines: two paired Macs online, two offline, and one on the account only;
+- nine sessions: two waiting on the person, three working, one merged, one with failing checks, and so on;
+- a conversation with earlier turns, a reply, and two commands.
+
+There is no pairing, account, network or private data. Each `flow-22.0N.yaml`
+drives the app with Maestro and saves a screenshot for each state that design
+22.0N draws. `flow-22.00-setup.yaml` picks the Ember theme the boards use.
+
+The scenario is passed as a launch argument (`arguments: { fixtureScenario: … }`
+in a flow), and it reaches the app through `Settings.get("fixtureScenario")`.
+
+| Scenario | What the phone sees |
+| --- | --- |
+| `connected` (default) | Connected to Studio MacBook |
+| `connecting` | Still connecting, before the wait counts as long |
+| `waiting` | Connecting for longer than `WAITING_AFTER_MS`: "Waiting for Mac…" |
+| `updating` | Connected, and the conversation's first sync never ends |
+| `offline` | No internet |
+| `held` | The Mac holds the phone off ("Disconnected on your Mac") |
+| `slow-refresh` | Connected, and a pull to refresh takes 6 s |
+
+`fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
+the session screen (working, a question, a table, done).
+
+1. Build the simulator app once, as `pnpm ios:simulator` does, but without installing it:
+
+   ```sh
+   cd mobile && export APP_VARIANT=production
+   pnpm exec expo prebuild --platform ios --no-clean
+   xcodebuild -workspace ios/TerminalX.xcworkspace -scheme TerminalX -configuration Release \
+     -destination id=$SIMULATOR_UDID -derivedDataPath dist/simulator-build \
+     ARCHS=$(uname -m) ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build
+   ```
+
+2. Bundle the fixture and put it into a copy of that app under its own bundle
+   id, so an installed TerminalX app and its pairing are left alone. Then capture:
+
+   ```sh
+   scripts/phone-fixture/capture.sh <output directory> [flow …]
+   ```
+
+   With no flows it runs every `flow-*.yaml`. `SKIP_BUNDLE=1` reuses the last
+   bundle when only a flow changed.
+
+   `capture.sh` needs:
+   - Maestro (`MAESTRO=/path/to/maestro/bin/maestro`);
+   - a Java runtime (`JAVA_HOME`);
+   - the simulator to use (`SIMULATOR_UDID`, which defaults to the booted one).
+
+   Each screenshot is saved under `<output directory>/<run>/<flow name>/takeScreenshot/`.
+   For the boards' look, set the simulator to dark appearance and the status bar to 10:25:
+   `xcrun simctl status_bar $SIMULATOR_UDID override --time 10:25`.
