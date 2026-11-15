@@ -70,12 +70,10 @@ impl Snapshot {
         let mut users = HashSet::new();
         for member in &self.members {
             ensure!(!member.user_id.is_empty() && users.insert(&member.user_id), "invalid or duplicate collaboration member");
-            let valid = match (member.role, member.write_source) {
-                (Role::None | Role::Viewer, None) => true,
-                (Role::Driver, Some(_)) => true,
-                (Role::Manager, Some(WriteSource::Explicit | WriteSource::Implicit)) => true,
-                _ => false,
-            };
+            let valid = matches!((member.role, member.write_source),
+                (Role::None | Role::Viewer, None)
+                | (Role::Driver, Some(_))
+                | (Role::Manager, Some(WriteSource::Explicit | WriteSource::Implicit)));
             ensure!(valid, "invalid collaboration drive provenance");
         }
         self.members.sort_by(|a, b| a.user_id.cmp(&b.user_id));

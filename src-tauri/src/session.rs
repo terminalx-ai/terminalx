@@ -6507,7 +6507,7 @@ impl SessionManager {
                 }
                 std::thread::sleep(tui::submit_delay(body.len()).saturating_sub(read_after.elapsed()));
                 still_there()?;
-                if !manager.submit_collaboration_prompt(&rt_arc, collaboration.as_ref(), &pane, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, |rt| stopped(rt) || ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(cli) if Arc::ptr_eq(ready, &cli.ready))))? {
+                if !manager.submit_collaboration_prompt(&rt_arc, collaboration.as_ref(), &pane, (seq, receipt.as_ref().map(|(seq, _)| *seq)), watched, |rt| stopped(rt) || ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(cli) if Arc::ptr_eq(ready, &cli.ready))))? {
                     return Ok(false);
                 }
                 stage("submit_written", serde_json::json!({ "paste": read.as_str(), "drawn": drawn }));
@@ -8346,7 +8346,8 @@ impl SessionManager {
     /// recheck original authority and tab state before each physical Enter,
     /// releasing both locks while waiting for capacity.
     fn submit_collaboration_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, permit: Option<&CollaborationPermit>, pane: &str,
-        seq: Option<u64>, receipt_seq: Option<u64>, watched: bool, stopped: impl Fn(&TabRuntime) -> bool) -> Result<bool> {
+        sequences: (Option<u64>, Option<u64>), watched: bool, stopped: impl Fn(&TabRuntime) -> bool) -> Result<bool> {
+        let (seq, receipt_seq) = sequences;
         let started = Instant::now();
         let pid = self.terminals.pid(pane);
         loop {

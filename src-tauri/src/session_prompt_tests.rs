@@ -3082,7 +3082,7 @@ fn phase2_collaboration_v2_legacy_submit_retries_a_full_pty_buffer() {
         let pane = rig.pane.clone();
         let (done, completed) = std::sync::mpsc::channel();
         let submit = std::thread::spawn(move || {
-            let result = manager.submit_collaboration_prompt(&runtime, permit.as_ref(), &pane, Some(seq), None, true, |_| false);
+            let result = manager.submit_collaboration_prompt(&runtime, permit.as_ref(), &pane, (Some(seq), None), true, |_| false);
             done.send(result).unwrap();
         });
         // A one-attempt writer returns WouldBlock before the reader resumes.
