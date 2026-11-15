@@ -295,6 +295,9 @@ mod tests {
             phone_route: false,
             computers: vec![],
             error: None,
+            pending: None,
+            code: None,
+            paused_until: None,
         };
         side.status = Some(status(false));
         assert!(!side.runtime_owns_direct());
