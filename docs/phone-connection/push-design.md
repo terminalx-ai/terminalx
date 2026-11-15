@@ -111,7 +111,8 @@ given group can share keychain items with all the other apps in the same
 group", set with the `keychain-access-groups` entitlement and prefixed with the
 team id
 ([Sharing access to keychain items](https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps)).
-The item never leaves the device and is not in backups.
+With a `ThisDeviceOnly` class the item stays on this device and does not move to a new one
+([kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly](https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly)).
 
 A small local Expo module (like `mobile/modules/paste-image`) creates and
 writes the key from Swift, so the app and the extension use the same keychain
@@ -194,7 +195,8 @@ Sealed: 32 bytes encapsulated key + 2048 + 16 byte tag = 2096 bytes, 2795
 characters in base64url. With the placeholder `aps` block the payload is about
 2.95 KB.
 
-**The payload the relay sends to Apple:**
+**The payload the relay sends to Apple**, as an HTTP/2 `POST /3/device/<token>`
+([Sending notification requests to APNs](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)):
 
 ```json
 {
@@ -203,11 +205,12 @@ characters in base64url. With the placeholder `aps` block the payload is about
     "mutable-content": 1,
     "sound": "default"
   },
-  "tx": { "v": 1, "h": "relayHostId", "e": "base64url sealed envelope" }
+  "tx": { "v": 1, "e": "base64url sealed envelope" }
 }
 ```
 
-No `category`, `thread-id` or `interruption-level` in `aps`: each would tell
+The payload does not name the Mac. Apple sees only the token, so it cannot tell
+which of the person's Macs sent a push. No `category`, `thread-id` or `interruption-level` in `aps`: each would tell
 Apple and the relay the event kind or the session. The extension sets
 `categoryIdentifier`, `threadIdentifier` and `interruptionLevel` on the
 content it returns.
@@ -217,11 +220,11 @@ the relay and Apple the kind. So every push has exactly the same outside:
 
 | Part | Value for every push |
 | --- | --- |
-| `apns-push-type` | `alert` |
+| `apns-push-type` | `alert`, the type for a push that shows an alert ([Sending notification requests to APNs](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)). |
 | `apns-priority` | `10`. Apple: "Specify 10 to send the notification immediately" ([Sending notification requests to APNs](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)). |
-| `apns-expiration` | Now plus 24 hours, set by the relay. The Mac cannot choose it. |
+| `apns-expiration` | Now plus 24 hours, set by the relay. The Mac cannot choose it. Apple: "If the value is nonzero, APNs stores the notification and tries to deliver it at least once" ([Sending notification requests to APNs](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)). |
 | `apns-collapse-id` | Never set. A collapse id on some pushes only, or one reused by a later push, would mark those pushes as questions or approvals. |
-| `apns-topic` | The bundle id. |
+| `apns-topic` | The bundle id ([Sending notification requests to APNs](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)). |
 | `aps` | The placeholder block above. |
 | `tx.e` | Exactly 2795 base64url characters. |
 
@@ -233,13 +236,16 @@ leak.
 include the `mutable-content` key with a value of `1`" and "The payload must
 include an `alert` dictionary with title, subtitle, or body information"
 ([Modifying content in newly delivered notifications](https://developer.apple.com/documentation/usernotifications/modifying-content-in-newly-delivered-notifications)).
-It does not run if alerts are off for the app.
+Apple also says the extension can "only operate on remote notifications configured in the system to display an alert to the user" (same page), so it does not run if alerts are off for the app.
 
 Steps in `didReceive(_:withContentHandler:)`:
 
-1. Read the push private key from the shared keychain group, and that Mac's
-   push sender public key (by `h`) from the app group.
-2. Open the envelope with HPKE Auth. Check `hostId` matches.
+1. Read the push private key from the shared keychain group, and the push
+   sender public key of each paired Mac from the app group.
+2. Open the envelope with HPKE Auth, trying each Mac's sender key in turn
+   (with that Mac's `info`). A phone has few Macs, and a wrong key fails the
+   AEAD check at once. Check `hostId` in the plaintext matches the key that
+   opened it.
 3. Check `(epoch, seq)` is newer than the watermark for that host in the app
    group. A replay or an older one shows the placeholder.
 4. Remove any shown notification whose request id is in `closed` (see "Stale
@@ -249,7 +255,7 @@ Steps in `didReceive(_:withContentHandler:)`:
    *Session name only* shows the session name, no body, no category;
    *Nothing* keeps the placeholder text and no category.
 6. Set `threadIdentifier` to the session id, `interruptionLevel` to
-   `time-sensitive` for question and approval and `active` otherwise, and put
+   `.timeSensitive` for question and approval and `.active` otherwise, and put
    `sessionId`, `tabId`, `requestId` in `userInfo` so a tap opens the tab.
 7. Write the new watermark and call the content handler.
 
@@ -276,7 +282,7 @@ notifications after your extension receives them" by returning empty content
 ([Filtering entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.usernotifications.filtering)).
 Apple also says "you must set the apns-push-type header field to alert" for
 such pushes, which every push here already does. Recommendation: ask Apple for
-it, to drop replays and to send silent `closed` pushes. The design works
+it, to drop replays and to hold pushes in quiet hours on the phone. The design works
 without it: a replay shows the placeholder, and stale notifications are
 cleared on the next push or when the app opens.
 
@@ -299,10 +305,9 @@ notifications from inside the encryption instead:
   on a device.
 - When the app comes to the foreground it asks each Mac which pushed requests
   are still open and removes the rest.
-- With the filtering entitlement (below), the Mac can also send a push that
-  only carries `closed` and that the extension silences. It is the same shape
-  as every other push. It is sent only when the request was closed somewhere
-  other than this phone, so it does not follow this phone's own answer.
+- There is no separate push that only clears stale notifications, even with
+  the filtering entitlement. Such a push would follow the moment another phone
+  or the Mac answered, and the relay could tell it apart by that timing.
 - An action on a stale notification reaches the Mac, which refuses it as no
   longer open, as today. The app then removes the notification and posts
   nothing.
@@ -333,7 +338,6 @@ same `(epoch, seq)` is shown once.
 | `failed` | new in #990 (failed or stopped on an error) | No |
 | `usage_limit` | new in #990 | No |
 | `pr_checks_failed`, `pr_merged` | new in #990 | No |
-| `closed` | Mac, only with the filtering entitlement: clears stale questions and approvals, shows nothing | No |
 
 Every kind is sent with the same outside shape. The kind is only inside the
 sealed plaintext.
@@ -525,7 +529,6 @@ Terms used in the table:
 | `pr_checks_failed` | Session name, pull request and failed check, as the lock screen level allows | All of it | Sealed push | Sealed push |
 | `pr_merged` | Session name and pull request, as the lock screen level allows | All of it | Sealed push | Sealed push |
 | `closed` ids carried on a later push | Which earlier requests were closed; removes those notifications | All of it | Nothing beyond that push, which is a sealed push | Nothing beyond that push, which is a sealed push |
-| `closed` push (filtering entitlement only) | Which requests were closed; shows nothing | All of it | Sealed push | Sealed push |
 | Answer from notification (button or text) | The answer | The answer, checked as today | Encrypted E2EE frames and connection metadata, as for any phone connection; not the answer or which request | Nothing; the answer does not pass through Apple |
 | Tap to open | Opens the session and tab | The app's usual requests | Encrypted E2EE frames, as for any phone connection | Nothing |
 | Push key rotation | New push key pair | New phone push public key (inside E2EE) | Nothing | Nothing |
@@ -567,11 +570,11 @@ sequenceDiagram
 
     rect rgb(235, 250, 240)
     note over P,A: Send
-    M->>M: Agent asks a question; filter by choices
+    M->>M: Agent asks a question, filter by choices
     M->>M: HPKE Auth seal with push sender key, pad to 2048 bytes
     M->>R: push-send on host control socket (relayDeviceId, envelope only)
     R->>R: Check device belongs to this host, envelope length, rate limit
-    R->>A: POST /3/device/token, fixed headers, placeholder alert, mutable-content 1
+    R->>A: POST /3/device/(token), fixed headers, placeholder alert, mutable-content 1
     A-->>R: 200, or 410 Unregistered
     R-->>M: push-sent (status)
     A->>X: Deliver
@@ -582,12 +585,12 @@ sequenceDiagram
 
     rect rgb(250, 240, 235)
     note over P,A: Answer
-    P->>P: Person taps an option; iOS asks to unlock
+    P->>P: Person taps an option, iOS asks to unlock
     P->>M: E2EE connect (direct or via relay), questions.respond
     M->>M: Check driver scope and request still open
     M-->>P: ok
     P->>P: Remove the notification
-    M->>M: Mark request closed for the phone's other pushes
+    M->>M: Mark request closed for the Mac's other phones
     note over M,A: Closed ids ride on the next sealed push to each other phone
     end
 ```
@@ -695,7 +698,7 @@ Sizes: S is a day or two, M up to a week, L more.
    runtime start for a background action response, and how long it may run.
    Measure connect and answer time on Wi-Fi and mobile data.
 8. **Request the filtering entitlement from Apple** (S, owner): then drop
-   replays, send silent `closed` pushes, and move quiet hours back to the
+   replays, and move quiet hours back to the
    phone.
 9. **App Store submission notes** (S): reviewer notes above, demo video,
    check the export compliance answer now that an extension does encryption.
