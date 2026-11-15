@@ -980,8 +980,8 @@ expiresAt }` or null), `code` (`{ expiresAt }` or null; never the code) and
 for a refusal, with the reasons of `pairing_refused` plus `unreachable`,
 `invalid-code` and `cancelled`.
 
-**The operating computer's store.** `machines.json` in the app's data
-directory, one record per `machineId` (name, os, version, pinned
+**The operating computer's store.** `~/.raccoon/machines.json` (the store's
+root), one record per `machineId` (name, os, version, pinned
 `publicKeyB64`, `directEndpoints`, `route` of `relayAndNearby` or
 `thisNetwork`, `pairedAt`, `lastSeenAt`), and the device token in the Keychain
 (service `<app identifier>.machines`, account `machine:<machineId>`).
