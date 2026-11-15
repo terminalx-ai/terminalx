@@ -36,7 +36,7 @@ import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuIte
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
-import { DevelopmentSection } from "@/components/cloud/DevRuntime";
+import { MachinesSection } from "@/components/machines/MachinesSection";
 import { CloudOrganizations } from "./CloudOrganizations";
 
 import { conversationTime } from "@/lib/messageActivity";
@@ -174,8 +174,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
           </ul>
         )}
         </SidebarDragScope>
+        <MachinesSection />
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
-        <DevelopmentSection />
       </nav>
 
       <SidebarBulkBar sessions={store.sessions} />

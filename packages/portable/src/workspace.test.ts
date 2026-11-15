@@ -70,6 +70,11 @@ class FakeRuntime implements WorkspaceTransport {
     this.loseAnswers = false;
     for (const listener of this.states) listener(connected(this.generation, capabilities, this.epoch));
   }
+  /** The same connection moved to another link (a machine's relay → direct handover); answers in flight still arrive. */
+  relink(link: number, capabilities?: string[]) {
+    this.up = true;
+    for (const listener of this.states) listener({ ...connected(this.generation, capabilities, this.epoch), link } as WorkspaceConnectionState);
+  }
   drop() {
     this.up = false;
     for (const listener of this.states) listener({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 });
@@ -599,6 +604,53 @@ describe("workspace RPC client", () => {
     await expect(client.call("fs.list", {})).rejects.toMatchObject({ message: "the runtime's own words" });
     client.close();
   });
+  it("resumes every subscription from its cursor when a connected state carries a new link, without failing requests in flight", async () => {
+    const runtime = new FakeRuntime();
+    runtime.agentEvents = [1, 2].map((seq) => ({ seq, id: `e${seq}` }));
+    const client = new WorkspaceRpcClient(runtime, ids);
+    const capabilities = ["pty/1", "session/1", "session/2", "machine/1"];
+    runtime.relink(1, capabilities);
+    runtime.output = "hello ";
+    let seen = "";
+    await client.attachPty("p1", { onData: (bytes) => (seen += new TextDecoder().decode(bytes)) });
+    runtime.typeOutput("world");
+    const events: number[] = [];
+    await client.subscribeSession("s1", "t1", (event) => events.push((event as { seq: number }).seq));
+    expect(events).toEqual([1, 2]);
+
+    // A rename goes out on link 1; its answer is still on the way when link 2 takes over.
+    runtime.loseAnswers = true;
+    let renamed: unknown = null;
+    const rename = client.mutate("session.update", { sessionId: "s1", title: "Renamed" }).then((value) => (renamed = value));
+    await settle();
+    const pending = runtime.sent.at(-1)!;
+    expect(pending.method).toBe("session.update");
+    runtime.loseAnswers = false;
+    runtime.output += "!";
+    runtime.agentEvents.push({ seq: 3, id: "e3" });
+    const before = runtime.sent.length;
+    runtime.relink(2, capabilities);
+    await settle();
+    await settle();
+    const resumed = runtime.sent.slice(before);
+    expect(resumed.find((frame) => frame.method === "pty.attach")!.params).toEqual({ ptyId: "p1", sinceOffset: 11, runtimeGeneration: 7, epoch: "e1" });
+    expect(resumed.find((frame) => frame.method === "session.subscribe")!.params).toMatchObject({ sessionId: "s1", tabId: "t1", sinceCursor: "7:2" });
+    expect(seen).toBe("hello world!");
+    expect(events).toEqual([1, 2, 3]);
+    // The old link answers the rename: it was neither rejected nor resent.
+    runtime.deliver({ id: pending.id, ok: true, result: { session: { id: "s1", title: "Renamed" } } });
+    await rename;
+    expect(renamed).toMatchObject({ session: { title: "Renamed" } });
+    expect(runtime.sent.filter((frame) => frame.method === "session.update")).toHaveLength(1);
+
+    // The same link announced again is not a new session: nothing resubscribes.
+    const settled = runtime.sent.length;
+    runtime.relink(2, capabilities);
+    await settle();
+    expect(runtime.sent.length).toBe(settled);
+    client.close();
+  });
+
   it("keeps a subscription made while disconnected and starts it on connect", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);

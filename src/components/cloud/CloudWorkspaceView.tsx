@@ -42,7 +42,7 @@ export interface OpenedWorkspace {
   connection: CloudWorkspaceConnection;
   name: string;
   provider: string | null;
-  /** The API state when it was opened (ready, suspended, provisioning); null for a development runtime. */
+  /** The API state when it was opened (ready, suspended, provisioning); null for a paired machine. */
   workspaceState: string | null;
   /** A resume of it is under way (asked for, or running by the list): its stopped state is on its way out. */
   waking?: boolean;
