@@ -93,7 +93,7 @@ fn reserve(monitor: &Arc<Monitor>, pane: &str, pipeline: &str, recorder: &str) -
         if state.active().is_some() { return Err(ValidationHeld("A local startup incident still holds new validation.".into()).into()); }
         let id = uuid::Uuid::new_v4().to_string();
         let at = super::now();
-        state.launches.push(Launch { id: id.clone(), pane: pane.into(), generation: recorder.into(), pid: None,
+        state.launches.push(Launch { startup_proven: false, id: id.clone(), pane: pane.into(), generation: recorder.into(), pid: None,
             category: Category::Validation, evidence: Evidence::Readiness, phase: Phase::Spawning,
             started_at: at, last_progress_at: at, exit_code: None, cpu_time: None, resident_bytes: None,
             pid_birth: None, recorder: Some(recorder.into()), pipeline_id: Some(pipeline.into()), recorder_owner: None, recorder_exit: None });
@@ -120,6 +120,17 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot) -> Result<()> {
         let path = directory.join(id.to_string());
         super::recorder::refresh(&path, &mut launch.recorder_owner, &mut launch.recorder_exit)?;
         if let Some(owner) = &launch.recorder_owner {
+            if launch.pid != Some(owner.pid) || launch.pid_birth != owner.birth {
+                // The supervisor and worker are different process births.
+                // Supervisor readiness cannot prove the worker reached main.
+                launch.startup_proven = false;
+                launch.cpu_time = None;
+                launch.resident_bytes = None;
+                if launch.phase != Phase::Exited {
+                    launch.phase = Phase::AwaitingReady;
+                    launch.last_progress_at = super::now();
+                }
+            }
             launch.pid = Some(owner.pid);
             launch.pid_birth.clone_from(&owner.birth);
         }
@@ -142,6 +153,27 @@ pub(super) fn refresh(directory: &Path, state: &mut Snapshot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adopting_worker_identity_does_not_inherit_supervisor_startup_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut launch = super::super::tests::launch("validation", Phase::Running);
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = crate::store::ensure_dir(directory.path().join(&id)).unwrap();
+        launch.recorder = Some(id);
+        launch.startup_proven = true;
+        launch.pid_birth = Some("supervisor-birth".into());
+        let owner = super::super::RecorderIdentity { pid: 43, birth: Some("worker-birth".into()) };
+        crate::store::write_json(&path.join("owner.json"), &owner).unwrap();
+        let mut state = Snapshot { launches: vec![launch], ..Snapshot::default() };
+        refresh(directory.path(), &mut state).unwrap();
+        assert_eq!(state.launches[0].pid, Some(43));
+        assert!(!state.launches[0].startup_proven);
+        assert_eq!(state.launches[0].phase, Phase::AwaitingReady);
+        let progress = state.launches[0].last_progress_at;
+        refresh(directory.path(), &mut state).unwrap();
+        assert_eq!(state.launches[0].last_progress_at, progress);
+    }
 
     #[test]
     fn failed_ownership_commit_never_starts_a_recorder() {
