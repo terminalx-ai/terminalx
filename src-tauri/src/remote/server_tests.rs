@@ -3838,3 +3838,6 @@ async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
         }
     }
 }
+
+#[path = "agent_commands_server_tests.rs"]
+mod agent_commands;
