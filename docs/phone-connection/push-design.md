@@ -167,6 +167,7 @@ swap it.
   "hostId": "derived-host-id",
   "epoch": "notification-epoch",
   "seq": 42,
+  "pushSeq": 1077,
   "kind": "question",
   "title": "Session title",
   "body": "Question text",
@@ -181,7 +182,7 @@ swap it.
 ```
 
 `seq`, `epoch`, `title`, `body`, `sessionId` and `tabId` are today's
-`HostNotification` fields. `kind` is #990's kind. `requestId` and `options`
+`HostNotification` fields. `pushSeq` is new: see "Freshness" below. `kind` is #990's kind. `requestId` and `options`
 are only for answerable kinds. `closed` lists up to eight earlier question or
 approval request ids for this phone that were answered or withdrawn since the
 last push (see "Stale questions"). `pad` fills the plaintext to exactly 2048
@@ -246,8 +247,10 @@ Steps in `didReceive(_:withContentHandler:)`:
    (with that Mac's `info`). A phone has few Macs, and a wrong key fails the
    AEAD check at once. Check `hostId` in the plaintext matches the key that
    opened it.
-3. Check `(epoch, seq)` is newer than the watermark for that host in the app
-   group. A replay or an older one shows the placeholder.
+3. Check freshness (below): `pushSeq` must be new for this Mac's sender key,
+   and `sentAt` must be within the last 24 hours. A replay, or a push too old
+   to trust, shows the placeholder with no buttons and changes no stored
+   state.
 4. Remove any shown notification whose request id is in `closed` (see "Stale
    questions").
 5. Apply the lock screen level from #990, read from the app group:
@@ -257,7 +260,41 @@ Steps in `didReceive(_:withContentHandler:)`:
 6. Set `threadIdentifier` to the session id, `interruptionLevel` to
    `.timeSensitive` for question and approval and `.active` otherwise, and put
    `sessionId`, `tabId`, `requestId` in `userInfo` so a tap opens the tab.
-7. Write the new watermark and call the content handler.
+7. Record `pushSeq` in the replay window, write the `(epoch, seq)`
+   watermark used to show each event once, and call the content handler.
+
+**Freshness.** Today's `(epoch, seq)` watermark cannot stop a replay. The
+epoch is a new random id at every Mac process start
+(`src-tauri/src/pairing/mobile.rs:99`), and the phone rejects only a `seq` at
+or below the last one *in the same epoch*
+(`mobile/src/notifications/local.ts:45`). The push sender key outlives the
+process, so after a Mac restart the relay could resend any old sealed push: it
+would open, show the real old question with live buttons, and set the
+watermark back to the old epoch. So pushes carry an ordered counter of their
+own:
+
+- **On the Mac.** `pushSeq` counts per phone and per push sender key, starts at
+  1, and never goes back while that key lives. It is stored in the push record
+  next to the sender key and survives restarts. To avoid a disk write per push,
+  the Mac reserves blocks of 32: it writes "next block starts at n + 32" before
+  it uses n. After a crash it starts at the stored block, which leaves a gap
+  but never reuses a value. A new sender key (rotation, re-registration)
+  starts again at 1; the extension then holds only the new public key, so
+  pushes sealed with the old key no longer open.
+- **On the phone.** The extension keeps, per Mac, the highest `pushSeq`
+  accepted and a 64-bit bitmap of which of the 64 values below it were
+  accepted, in the app group. APNs does not promise order, so a push up to 64
+  behind the highest is still accepted once. A value already in the bitmap, or
+  more than 64 behind, is a replay. Only an accepted push updates this state,
+  so a replay cannot move it back.
+- **Time bound.** `sentAt` must be no older than 24 hours (the relay's
+  `apns-expiration`) and no more than 5 minutes ahead of the phone's clock.
+  This limits a replay to one day when the phone's state is gone. That state
+  is lost only with the app group, on uninstall; a reinstall then registers a
+  new push key pair, so envelopes sealed for the old key do not open anyway.
+- **Showing once.** `(epoch, seq)` stays, only to stop an event shown on the
+  live subscription from being shown again by its push. It is no longer a
+  security check.
 
 **Limits.** "Your `didReceive(_:withContentHandler:)` method has only about 30
 seconds to modify the payload and call the provided completion handler. If
@@ -323,8 +360,9 @@ for every push. When the app opens it catches up with
 **Double alerts.** The phone tells the Mac when it goes to the background or
 comes back (`device.appState`, below). The Mac sends over the live
 subscription while the app is in the foreground, and pushes otherwise. Both
-paths share the watermark in the app group (moved from AsyncStorage), so the
-same `(epoch, seq)` is shown once.
+paths share the `(epoch, seq)` watermark in the app group (moved from
+AsyncStorage), so the same event is shown once. Replays are stopped by
+`pushSeq`, not by this watermark (see "Freshness").
 
 ### 3. Which events, and how the choices are kept
 
@@ -427,7 +465,8 @@ What authenticates the answer: the E2EE channel bound to the pinned host key
 and the phone's transport key, and the device token inside `e2ee_auth`. The
 relay holds none of these. It cannot forge a push either: it does not hold the
 Mac's push sender private key, so HPKE Auth fails and the extension shows the
-placeholder with no buttons. A replayed push fails the watermark check. An
+placeholder with no buttons. A replayed push fails the `pushSeq` check (see "Freshness"), including after
+a Mac restart. An
 answer to an old request hits "no longer open" on the Mac. Neither push key
 can answer anything: the phone's push key only opens notifications, and the
 Mac's push sender key only seals them. Apple sees the notification response
@@ -578,7 +617,7 @@ sequenceDiagram
     A-->>R: 200, or 410 Unregistered
     R-->>M: push-sent (status)
     A->>X: Deliver
-    X->>X: Open envelope, check sender and watermark, clear closed ids
+    X->>X: Open envelope, check sender, pushSeq window and sentAt, clear closed ids
     X->>X: Apply lock screen level, set category, thread, interruption level
     X-->>P: Show question with option buttons
     end
@@ -677,11 +716,13 @@ Sizes: S is a day or two, M up to a week, L more.
    secret store, 410 and expiry cleanup, rate limits.
 2. **Mac push sender** (M): `push.register` and `push.unregister` RPCs, choices
    on `DeviceEntry`, filter, HPKE Auth seal with padding, `push-send` on the
-   control socket, push sender key per phone in the Keychain, privacy mode
+   control socket, push sender key per phone in the Keychain with its persisted `pushSeq`
+   counter, privacy mode
    gate, `closed` ids, `push.openRequests`, Devices list status.
 3. **Notification Service Extension and config plugin** (M): Swift target,
    CryptoKit HPKE Auth opener with Rust test vectors, shared keychain group and
-   app group, lock screen levels, watermark, EAS `appExtensions`.
+   app group, lock screen levels, `pushSeq` replay window and `sentAt` bound,
+   watermark, EAS `appExtensions`.
 4. **Phone push registration** (M): push key module, `getDevicePushTokenAsync`,
    relay register on launch, `push.register` per Mac, `device.appState`,
    watermark moved to the app group, "needs TerminalX Relay" state on the

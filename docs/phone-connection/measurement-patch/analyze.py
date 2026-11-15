@@ -4,6 +4,7 @@
 Usage: python3 -I analyze.py cold <dir-of-jsonl>   # cold-start step table
        python3 -I analyze.py warm <dir-of-jsonl>   # return-from-background table
        python3 -I analyze.py keepalive <dir-of-jsonl>  # keep-alive sends, answers, losses
+       python3 -I analyze.py idle <dir-of-jsonl>   # idle survival runs (drops, keep-alives, reconnects)
 
 Each JSONL file is one launch, written by mobile/src/measure/marks.ts. Every
 number this prints is computed from those files, nothing else. Percentiles use

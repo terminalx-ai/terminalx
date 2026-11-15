@@ -51,7 +51,8 @@ Timeouts it has to beat, shortest first:
 | Carrier NAT | 255 s at worst |
 | nginx | 3600 s |
 
-Measured, 10 minutes idle per run on the relay path, sessions list on screen:
+Measured, 10 minutes idle per run on the relay path, app on the Settings tab,
+which has no timer of its own, so the keep-alive was the only planned traffic:
 
 | Keep-alive | Drops | 1001 / 4408 | Longest connection | Timer keep-alives answered | Reconnect, median (p90) |
 | --- | --- | --- | --- | --- | --- |
@@ -161,6 +162,12 @@ The full design, sequence and relay API are in
   New activity on your Mac", no `apns-collapse-id`, no category, no thread id.
 - **Relay state.** Per registration: APNs token, environment, `relayHostId`,
   `relayDeviceId`. No keys, text, names or account.
+- **Replays.** Each push carries a `pushSeq` counter that the Mac keeps per
+  phone and stores across restarts. The extension accepts each value once,
+  within a 64-value window for out-of-order delivery, and only with a `sentAt`
+  in the last 24 hours. Today's `(epoch, seq)` watermark is not enough: the
+  epoch changes at every Mac restart, so the relay could replay an old question
+  with live buttons after one.
 - **Choices.** The #990 choices are kept on the Mac per device while push is on;
   the Mac filters before sending, the phone applies the lock screen level.
 - **Answers.** Approve, Deny and question options ask iOS to unlock first, then
@@ -203,7 +210,7 @@ it.
 | Battery cost at any interval | `xctrace` cannot record the phone over Wi-Fi ("Timed out waiting for device to boot"; the phone has no cable link). The first on-phone Performance Trace run recorded nothing, and the person then chose to skip battery runs. With the drops above, a battery run would mostly measure reconnects. |
 | Mobile data | All runs were on home Wi-Fi. |
 | Warm return over the relay | Only the direct path was measured for warm return. |
-| Transcript and terminal screens | Runs used the sessions list, which polls every 10 s on its own (`mobile/app/(tabs)/sessions.tsx:36-38`). |
+| Transcript and terminal screens | Cold and warm runs ended on the sessions list, which polls every 10 s on its own (`mobile/app/(tabs)/sessions.tsx:36-38`); idle runs used the Settings tab. The transcript (15 s re-read) and the terminal were not run. |
 | Home router NAT idle timeout | No relay connection lived past 189 s, so no NAT cut could show. |
 | Cause of the 1001 drops | Found and counted, not explained. |
 
@@ -217,7 +224,7 @@ Sizes: S is a day or two, M up to a week, L more.
 
 | # | Issue | Size | Source |
 | --- | --- | --- | --- |
-| 1 | Find and fix the 1001 "Stream end encountered" closes seconds after connecting, on both paths and in the background | M | measurements |
+| 1 | Find and fix the 1001 "Stream end encountered" closes seconds after connecting, on both paths and in the background. iOS reports this close when it ends the stream itself, and it happens with both far ends (Mac and cell), so start on the phone | M | measurements |
 | 2 | Replace the keep-alive's `pairing.getEndpoints` with a no-op request; refresh addresses less often | S | connection path |
 | 3 | Cache `sync.capabilities` and the session list per Mac; show the cached list at once and refresh with its `version` in one request | M | both |
 | 4 | Relay cold start: dial the saved cell while the director answers, mark the connection usable before the resume confirmation, and drop the awaited storage writes and the second `getEndpoints` | S | both |
@@ -227,8 +234,8 @@ Sizes: S is a day or two, M up to a week, L more.
 | 8 | Measure the home router NAT idle timeout once 1 is fixed: relay idle runs with no keep-alive and 2, 4 and 8 min of quiet | S | measurements |
 | 9 | Measure the keep-alive's battery cost once 1 is fixed: cable link or on-phone Performance Trace, Settings tab, none against 30 s | M | measurements |
 | 10 | Relay push endpoints: register, unregister, `push-send`, `push-status`, APNs HTTP/2 client with token auth, 410 cleanup, rate limits (relay server) | L | push |
-| 11 | Mac push sender: `push.register`, choices per device, filter, HPKE Auth seal with padding, sender key per phone, privacy gate, closed ids | M | push |
-| 12 | Notification Service Extension and Expo config plugin: CryptoKit HPKE Auth opener with Rust test vectors, shared keychain and app group, lock screen levels | M | push |
+| 11 | Mac push sender: `push.register`, choices per device, filter, HPKE Auth seal with padding, sender key per phone with a persisted `pushSeq` counter, privacy gate, closed ids | M | push |
+| 12 | Notification Service Extension and Expo config plugin: CryptoKit HPKE Auth opener with Rust test vectors, `pushSeq` replay window and `sentAt` bound, shared keychain and app group, lock screen levels | M | push |
 | 13 | Phone push registration: push key, device token, relay register, `push.register` per Mac, "needs TerminalX Relay" state | M | push |
 | 14 | Answer from the notification: categories, actions that need unlock, background connect and answer (after #979 and #990) | M | push |
 | 15 | Resumption ticket for 0-RTT reads, only if E2EE round trips still matter after 3 to 5 | M | connection path |

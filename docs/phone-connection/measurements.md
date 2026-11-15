@@ -185,8 +185,11 @@ Raw: `data/smoke/smoke-1.jsonl`, `data/cold-direct/*.jsonl`,
   2.5 s and 7.6 s, and `relay-cold-17` after 15.1 s. So the drop is not
   specific to the direct path.
 - In the warm run, one drop happened in the foreground after 161 s connected.
-- The cause is not measured here. A 1001 close is "going away" from the far
-  end, so the Mac is the first place to look. It is listed as a follow-up.
+- The cause is not measured here. 1001 "Stream end encountered" is the code
+  iOS reports when it ends the stream itself (`mobile/src/transport/relay-client.ts:24-31`);
+  a relay close would carry 4408 instead. The far end differs between the two
+  paths (the Mac on the direct path, the relay cell on the relay path), so the
+  phone is the first place to look. It is listed as a follow-up.
 
 ## Battery cost of the keep-alive
 
@@ -252,7 +255,7 @@ Method:
   the app goes to the background for 3 s (the Settings app is launched) and
   comes back, so the app's resume probe (`pairing.getEndpoints`, 1.5 s limit,
   `mobile/src/transport/connection.ts:28`) tests the connection end to end.
-- Script: `measurement-patch/idle-test.sh`. Table: `measurement-patch/analyze.py idle data/idle`.
+- Script: `DEVICE=<id> measurement-patch/idle-test.sh` (writes to `data/idle/`). Table: `measurement-patch/analyze.py idle data/idle`.
   Raw: `data/idle/idle-relay-{0s,20s,30s,45s}.jsonl`. Summary:
   `data/idle.summary.txt`.
 - The run with no keep-alive was taken at 17:02 to 17:13. The other three were
@@ -364,8 +367,10 @@ not in the table above. Raw: `data/idle-cut-short/`. Summary:
    launches in the cold runs. In the idle runs on the relay it dropped 13 to
    34 times in 10 minutes (median connection 6 to 13 s), at every keep-alive
    interval, and some periods had no drops at all. The direct socket also
-   closed in the background on 4 of 12 returns. Find which side closes it and
-   why. Until this is fixed, the keep-alive interval cannot be tuned by
+   closed in the background on 4 of 12 returns. iOS reports this close when it
+   ends the stream itself, and the far end differs between the two paths, so
+   start on the phone: log the network path state at each drop, then check
+   whether the Mac or the cell saw the socket end first. Until this is fixed, the keep-alive interval cannot be tuned by
    measurement.
 2. `sessions.summaries` is the largest cold-start step (748 ms direct, 2252 ms
    relay, 87 sessions). Cache the list per Mac and send the cached version,

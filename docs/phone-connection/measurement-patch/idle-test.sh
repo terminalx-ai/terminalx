@@ -1,9 +1,9 @@
 #!/bin/zsh
 # Idle survival test for issue #989: relay path, Settings tab, 10 min idle per keep-alive interval,
 # then a 3 s trip to the background so the app's resume probe checks the old connection.
-D=<device identifier>
+D=${DEVICE:?set DEVICE to the phone identifier from xcrun devicectl list devices}
 APP=com.terminalx.next.mobile
-OUT=${0:h}/idle
+OUT=${0:A:h}/../data/idle
 IDLE=${IDLE:-600}
 mkdir -p $OUT
 for K in ${=KS:-0 20000 30000 45000}; do
