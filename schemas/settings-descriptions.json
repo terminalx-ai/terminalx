@@ -18,7 +18,7 @@
   "mergedCleanup.enabled": "For workspaces TerminalX created. Once a workspace's pull request is merged, its worktree and local branch are deleted, and its branch on the remote too while that still points at the merged commit. Nothing is forced: a workspace with uncommitted or unmerged work, ignored local files, a turn running or a terminal open stays, and its row says why.",
   "mergedCleanup.graceMinutes": "Counted from when the merge is first seen, and from the last thing done in the workspace's sessions if that is later. A notice offers to keep the workspace, and a removal can be undone while its commit is still in the repository.",
   "mergedCleanup.projects": "Override automatic merged-workspace cleanup for this repository.",
-  "orchestrator.acceptBaseFailures": "A failing check is run again on the commit the piece started from. If it fails there the same way, the piece is accepted with a note, and no try is used. Off, it counts against the piece's tries.",
+  "orchestrator.acceptBaseFailures": "A failing check is run again on the commit the piece started from. If it fails there the same way, it is not the piece's: no try is used, and a verifier reads the result for what the check did not get to run. Off, it counts against the piece's tries.",
   "orchestrator.budgetDollars": "Dollars spent on an API key; then the run pauses and asks you.",
   "orchestrator.budgetPoints": "Points of a usage window one run may use.",
   "orchestrator.effortCeiling": "Past this, the next model up is tried.",

@@ -879,12 +879,14 @@ in this order and stop at the first that fails; the first four use no model:
    same way (the same failing tests, or for a run that names none the same exit code and last
    lines), the failure was already on the base and is not the piece's. The gate passes over it
    (`onBase` on the command says how it came out there), the commands after it run, and no try
-   is used; a failure the base does not have stands, and the next try is told so. They are run unasked only where a
+   is used. A command stops at its first failure (a test binary, the part after `&&`), so the
+   result then always goes to a verifier (step 5) for what it did not get to run. A failure the
+   base does not have stands, and the next try is told so. They are run unasked only where a
    person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
    that starts runs without approval and asks its workers before a command, they are left
    unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
 5. **Review**, only when one of these holds: the piece has no `command` check, or its
-   commands were not run; the diff
+   commands were not run, or a failure the base has too was passed over; the diff
    touches a security area (the ones an issue pipeline runs its security pass for); the diff
    is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
    or the plan asks for one with a `review` or `vote` check.

@@ -464,7 +464,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "orchestrator.acceptBaseFailures", section: "orchestrator", title: "Accept a piece whose only failing check also fails on the base",
-    description: "A failing check is run again on the commit the piece started from. If it fails there the same way, the piece is accepted with a note, and no try is used. Off, it counts against the piece's tries.",
+    description: "A failing check is run again on the commit the piece started from. If it fails there the same way, it is not the piece's: no try is used, and a verifier reads the result for what the check did not get to run. Off, it counts against the piece's tries.",
     searchTerms: ["orchestrator", "base", "flaky", "failing", "test", "check", "done check", "main", "accept", "automatic", "decide"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.acceptBaseFailures" },
   }),

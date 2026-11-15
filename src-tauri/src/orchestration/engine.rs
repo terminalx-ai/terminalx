@@ -1325,45 +1325,42 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
         let auto = limits.auto;
         let checked = checked_on_base(host, &run, piece, &worker, &auto);
         let failed = checked.gates.iter().find(|gate| !gate.passed).map(gate_failure);
-        let reasons = if checked.passed() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
         // The done-checks that fail here as they fail on the base: passed over, and said (#1004).
         let on_base: Vec<checks::CommandRun> = checked.gates.iter().filter(|gate| gate.passed).flat_map(|gate| &gate.commands).filter(|ran| ran.base_failure()).cloned().collect();
-        let passed_over = |run: &mut Run, accepted: bool| -> Option<RunEvent> {
+        let mut reasons = if checked.passed() { checks::review_reasons(piece, &checked.facts, limits.review_diff_lines) } else { Vec::new() };
+        // A command that fails stops early (`cargo test` at its first failing binary, `a && b`
+        // before `b`): what it did not get to on the result was not checked. A reader judges
+        // that from the diff, so a failure passed over never accepts a piece on its own.
+        if checked.passed() && !on_base.is_empty() {
+            let named = on_base.iter().map(|ran| format!("`{}`", ran.run)).collect::<Vec<_>>().join(", ");
+            reasons.push(format!("{named} failed here as on the commit the result started from, so that failure was passed over. A command stops at its first failure (a test binary, the part after `&&`): judge from the diff that what it did not get to run would pass."));
+        }
+        let passed_over = |run: &mut Run| -> Option<RunEvent> {
             let first = on_base.first()?;
             let named = on_base.iter().map(|ran| format!("`{}`", ran.run)).collect::<Vec<_>>().join(", ");
             let (checks_word, also) = if on_base.len() == 1 { ("check", "also fails") } else { ("checks", "also fail") };
             let tests: Vec<String> = checks::failures(first.output.as_deref().unwrap_or_default()).into_iter().take(5).collect();
             let stuck = Some(format!("{named} failed on its result{}.", if tests.is_empty() { String::new() } else { format!(" ({})", tests.join(", ")) }));
-            let message = match accepted {
-                true => format!("Accepted {piece_id}: its failing {checks_word}, {named}, {also} on the base."),
-                false => format!("Passed over {piece_id}'s failing {checks_word}, {named}: {} {also} on the base. A verifier reads the result next.", if on_base.len() == 1 { "it" } else { "they" }),
-            };
+            let message = format!("Passed over {piece_id}'s failing {checks_word}, {named}: {} {also} on the base. A verifier reads the result next.", if on_base.len() == 1 { "it" } else { "they" });
             Some(run.record(AutoStep::AcceptedBaseFailure, Some(&piece_id), message, stuck))
         };
         // Gates 1 to 4 passed and nothing calls for a reader, or a gate failed: settled with no session.
         if reasons.is_empty() {
             let models = if failed.is_some() { host.models() } else { Vec::new() };
-            let (after, events) = store::update(id, |run| {
+            let (after, ()) = store::update(id, |run| {
                 let rules = run.ladder();
-                let mut events = Vec::new();
                 if let Some(piece) = checked_try(run, &piece_id, &worker, &started) {
                     if let Some(check) = piece.tries.last_mut().and_then(|attempt| attempt.verification.as_mut()) {
                         check.gates.extend(checked.gates.iter().cloned());
                         check.facts = Some(checked.facts.clone());
                     }
                     conclude(piece, if failed.is_some() { checks::Outcome::Failed } else { checks::Outcome::Passed }, failed.clone(), &models, &rules, &auto);
-                    if failed.is_none() && !on_base.is_empty() {
-                        let named = on_base.iter().map(|ran| format!("`{}`", ran.run)).collect::<Vec<_>>().join(", ");
-                        piece.note = Some(format!("Accepted: {named} {} on the commit it started from as well, so that failure was already there and is not this piece's.", if on_base.len() == 1 { "fails" } else { "fail" }));
-                        events.extend(passed_over(run, true));
-                    }
                 }
                 settle(run);
-                Ok(events)
+                Ok(())
             })
             .map_err(EngineError::internal)?;
             announce(host, &run, &after);
-            tell_events(host, &after, &events);
             hand_off(host, id)?;
             continue;
         }
@@ -1390,7 +1387,7 @@ pub fn verify(host: &dyn Host, id: &str) -> Result<Run, EngineError> {
                 check.facts = Some(checked.facts.clone());
                 check.review = Some(review);
             }
-            Ok((true, passed_over(run, false).into_iter().collect::<Vec<_>>()))
+            Ok((true, passed_over(run).into_iter().collect::<Vec<_>>()))
         })
         .map_err(EngineError::internal)?;
         announce(host, &run, &after);

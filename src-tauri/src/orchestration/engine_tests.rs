@@ -3802,7 +3802,7 @@ fn on_base(output: Option<&str>) -> verify::CommandRun {
 }
 
 #[test]
-fn a_done_check_that_fails_on_the_base_as_well_is_accepted_without_using_a_try() {
+fn a_done_check_that_fails_on_the_base_as_well_uses_no_try_and_a_reader_judges_what_it_did_not_run() {
     let _home = crate::store::temp_home();
     let (host, id) = run_of("lead", mac_piece());
     host.finds("mac", mac_fails(MAC_FAILURE, 30));
@@ -3811,19 +3811,30 @@ fn a_done_check_that_fails_on_the_base_as_well_is_accepted_without_using_a_try()
     host.reports("mac", Status::Done, "Permissions are read once.");
     let run = engine::refreshed(&host, &id).unwrap();
     let piece = run.piece("mac").unwrap();
-    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].outcome), (PieceState::Done, 1, Some(Outcome::Done)));
+    // Not the piece's failure: no try is used and nothing is retried. But the command stopped at
+    // that failure, so what it did not get to is read by a verifier: a small diff that needed none.
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].outcome), (PieceState::Verifying, 1, Some(Outcome::Done)));
     assert_eq!(host.world().base_runs, vec![("fixture-base".to_string(), "c0ffee1".to_string(), "cargo t computer".to_string())]);
-    assert!(host.world().retries.is_empty() && host.world().verifiers.is_empty() && host.made() == vec!["mac"], "no retry, no try used, no reader");
+    assert!(host.world().retries.is_empty() && host.made() == vec!["mac"], "no retry, no try used");
+    assert_eq!(host.world().verifiers.len(), 1);
     // The checks were run once more on the same commit, told what is known of it: the command is not run a third time.
     let known = host.world().known.clone();
     assert_eq!((known.len(), known[0].commit.as_str(), known[0].runs.len()), (1, "c0ffee1", 1));
-    let gates = &piece.tries[0].verification.as_ref().unwrap().gates;
-    let commands = gates.iter().find(|gate| gate.gate == Gate::Commands).unwrap();
+    let check = piece.tries[0].verification.as_ref().unwrap();
+    let commands = check.gates.iter().find(|gate| gate.gate == Gate::Commands).unwrap();
     assert!(commands.passed && commands.commands[0].base_failure() && commands.commands[0].on_base.as_ref().unwrap().exit_code == Some(101));
-    assert_eq!(piece.note.as_deref(), Some("Accepted: `cargo t computer` fails on the commit it started from as well, so that failure was already there and is not this piece's."));
-    assert_eq!(events(&run), vec![(super::AutoStep::AcceptedBaseFailure, Some("mac".into()), "Accepted mac: its failing check, `cargo t computer`, also fails on the base.".to_string())]);
+    let reasons = &check.review.as_ref().unwrap().reasons;
+    assert_eq!(reasons, &vec!["`cargo t computer` failed here as on the commit the result started from, so that failure was passed over. A command stops at its first failure (a test binary, the part after `&&`): judge from the diff that what it did not get to run would pass.".to_string()]);
+    let tab = host.world().verifiers[0].session.clone();
+    assert!(host.world().prompts[&tab].contains("judge from the diff that what it did not get to run would pass"), "the reader is told why it reads");
+    assert_eq!(events(&run), vec![(super::AutoStep::AcceptedBaseFailure, Some("mac".into()), "Passed over mac's failing check, `cargo t computer`: it also fails on the base. A verifier reads the result next.".to_string())]);
     assert_eq!(run.events[0].stuck.as_deref(), Some("`cargo t computer` failed on its result (computer::permissions::tests::probe_reports_screen_recording)."));
-    assert!(host.world().told.iter().any(|told| told.contains("Accepted mac: its failing check, `cargo t computer`, also fails on the base.") && told.contains("nothing is asked of you or the person")));
+    assert!(host.world().told.iter().any(|told| told.contains("Passed over mac's failing check") && told.contains("nothing is asked of you or the person")));
+    // Its verdict settles the piece, still on its one try.
+    host.verifier_replies("mac", 1, &verdict_block(PASS), 2_000);
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("mac").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].verification.as_ref().unwrap().outcome), (PieceState::Done, 1, Some(verify::Outcome::Passed)));
 }
 
 #[test]
