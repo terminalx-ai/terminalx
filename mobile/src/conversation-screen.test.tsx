@@ -7,7 +7,7 @@ import * as ImagePicker from "expo-image-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
-import { forgetConversationState } from "@mobile/state/conversation-state";
+import { forgetConversationState, sendHeldMessages } from "@mobile/state/conversation-state";
 import { RelayOuterError } from "./transport/relay-client";
 
 const mocks = vi.hoisted(() => ({
@@ -1353,6 +1353,39 @@ describe("one quiet connection state in a session (#983)", () => {
     expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Send this when you can", [], expect.any(String));
     expect(input().value).toBe("");
     expect(container.textContent).toContain("Sent to the agent.");
+  });
+
+  it("sends a held message on connect after the chat was left, once, and not again on the next open", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await type("Send this after I leave"); await click("Send");
+    expect(container.textContent).toContain("Sends when connected.");
+    // Left before the phone connects.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    // The app connects (the provider sends what is held for this Mac).
+    mocks.app = { ...mocks.app, connectionStage: "connected", connectionEpoch: 1 };
+    await act(async () => { sendHeldMessages(mocks.params.hostId); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Send this after I leave", [], expect.any(String));
+    // Opened again: it was sent, and is not sent a second time.
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(input().value).toBe("");
+    expect(container.textContent).toContain("Sent to the agent.");
+  });
+
+  it("forgets a held message with the Mac or the person signing out: never sent later", async () => {
+    mocks.app = { ...mocks.app, connectionStage: "connecting" };
+    await render();
+    await type("Not for later"); await click("Send");
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    forgetConversationState("");
+    await act(async () => { sendHeldMessages(mocks.params.hostId); await Promise.resolve(); });
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
   });
 
   it("takes a held message back when it is edited", async () => {

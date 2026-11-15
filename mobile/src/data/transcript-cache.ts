@@ -90,7 +90,11 @@ export async function readSaved<T>(host: string, name: string, valid: (value: un
   } catch { return null; }
 }
 
-export function writeSaved(host: string, name: string, value: unknown, epoch = cacheEpoch(host)): Promise<void> {
+/**
+ * Saves a value for a Mac. `epoch` is `cacheEpoch(host)` taken before the request that read the value,
+ * so a Mac forgotten (or a sign-out) while that request was under way is not written back (#983).
+ */
+export function writeSaved(host: string, name: string, value: unknown, epoch: number): Promise<void> {
   const data = JSON.stringify(value);
   const operation = writes.catch(() => undefined).then(async () => {
     if (epoch !== cacheEpoch(host)) return;

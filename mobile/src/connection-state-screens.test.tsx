@@ -143,7 +143,7 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
     expect(mocks.app.connection.restart).toHaveBeenCalledWith("reconnect was chosen", true);
     await show(<MachinesScreen />);
     // The machine row keeps its own words for it (#994).
-    expect(container.textContent).toContain("Disconnected on that machine · tap to reconnect");
+    expect(container.textContent).toContain("Disconnected on your Mac · tap to reconnect");
   });
 
   it("never shows what the connection log holds: paths, addresses, raw failures", async () => {

@@ -5,7 +5,7 @@ import type { ContextMode } from "@terminalx/portable/continuation";
 import type { AgentEvent } from "@terminalx/portable/events";
 import type { NewTabSettings, TabControls } from "../data/host-api";
 import { continueHere, continueInNewTab, recoveryState, retrySafely, settingsView } from "../data/session-controls";
-import { readSaved, writeSaved } from "../data/transcript-cache";
+import { cacheEpoch, readSaved, writeSaved } from "../data/transcript-cache";
 import { useApp } from "../state/AppProvider";
 import { useHostFeatures } from "../state/host-features";
 import { Button, Card } from "./primitives";
@@ -70,10 +70,12 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   const [continuing, setContinuing] = useState(false);
 
   const refresh = useCallback(async () => {
+    // Taken before the request: a Mac forgotten while it is under way is not saved again.
+    const epoch = host ? cacheEpoch(host) : 0;
     try {
       const next = await app.api.tabControls(sessionId, tabId);
       setTab(next);
-      if (next && host) void writeSaved(host, tabKey, next);
+      if (next && host) void writeSaved(host, tabKey, next, epoch);
     } catch {
       // The connection failed: what is shown stays, dimmed, until it is back.
     }
@@ -83,10 +85,11 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   useEffect(() => {
     if (!supported || !connected) return;
     let active = true;
+    const epoch = host ? cacheEpoch(host) : 0;
     void app.api.models().then((list) => {
       if (!active || !list.length) return;
       setModels(list);
-      if (host) void writeSaved(host, "models", list);
+      if (host) void writeSaved(host, "models", list, epoch);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [app.api, connected, host, supported]);

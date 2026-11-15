@@ -32,7 +32,7 @@ import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mo
 import { SessionControls } from "@mobile/ui/SessionControls";
 import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
-import { useConversationState } from "@mobile/state/conversation-state";
+import { holdSend, releaseSend, showConversation, takeHeldSend, useConversationState } from "@mobile/state/conversation-state";
 import { addPasteImageListener } from "../../modules/paste-image";
 import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
@@ -274,15 +274,17 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     }
   };
 
-  const send = async () => {
+  /** `released`: the held message, now that the phone is connected (from this screen or from the app, if it was left). */
+  const send = async (released = false) => {
     const text = draft.trim();
     if (!text && !attachments.length) return;
     // What was heard is in the draft already: a result still on its way would come after the send.
     if (dictation.listening) dictation.cancel();
-    if (!connected) {
-      // Held, and sent once the phone connects: the box keeps it meanwhile, and editing it takes it back.
+    if (!connected && !released) {
+      // Held, and sent once the phone connects, even if this chat is left: the box keeps it meanwhile, and editing it takes it back.
       draftEdited.current = true;
       setHeld(true);
+      holdSend(stateKey, hostId, () => sendLatest.current(true));
       setSendFeedback({ kind: "success", message: "Sends when connected." });
       return;
     }
@@ -346,12 +348,16 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       setSending(false);
     }
   };
-  // A held message goes once, as soon as the phone is connected.
+  // A held message goes once, as soon as the phone is connected: from here while this chat is open
+  // (it knows the conversation is still on the Mac), else from the app (#983). The latest render's
+  // send is kept for that, with what is in the box.
   const sendLatest = useRef(send);
   sendLatest.current = send;
+  useEffect(() => showConversation(stateKey), [stateKey]);
   useEffect(() => {
-    if (connected && held) void sendLatest.current();
-  }, [connected, held]);
+    if (!held) releaseSend(stateKey);
+    else if (connected) void takeHeldSend(stateKey)?.();
+  }, [connected, held, stateKey]);
 
   /** Adds picked files within the limits: at most eight, 5 MB together. */
   const addPicked = async (assets: { uri: string; name: string; mimeType?: string | null; size?: number | null; base64?: string | null; id: string }[]) => {

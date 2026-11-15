@@ -416,6 +416,28 @@ describe("the connection state's facts (#983)", () => {
     expect(fake.retryNow).toHaveBeenCalledTimes(1);
   });
 
+  it("sends the messages held for the Mac in use when it connects, once, and not those for another Mac (#983)", async () => {
+    const { holdSend, showConversation } = await import("./conversation-state");
+    const host = app.activeHost!.id;
+    const left = vi.fn(async () => undefined);
+    const open = vi.fn(async () => undefined);
+    const other = vi.fn(async () => undefined);
+    await act(async () => fake.stage!("reconnecting", 1));
+    holdSend(JSON.stringify([host, "left"]), host, left);
+    // A chat on screen sends its own: it knows whether the conversation is still on the Mac.
+    const hide = showConversation(JSON.stringify([host, "open"]));
+    holdSend(JSON.stringify([host, "open"]), host, open);
+    holdSend(JSON.stringify(["another-mac", "x"]), "another-mac", other);
+    expect(left).not.toHaveBeenCalled();
+    await connected();
+    expect(left).toHaveBeenCalledTimes(1);
+    expect([open, other].map((send) => send.mock.calls.length)).toEqual([0, 0]);
+    await act(async () => fake.stage!("reconnecting", 1));
+    await connected();
+    expect(left).toHaveBeenCalledTimes(1);
+    hide();
+  });
+
   it("knows when the phone itself is offline", async () => {
     expect(app.online).toBe(true);
     await act(async () => fake.network!({ type: "none", isConnected: false, details: null }));

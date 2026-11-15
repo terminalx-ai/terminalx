@@ -1,5 +1,5 @@
-import { forgetConversationState } from "./conversation-state";
-import { clearTranscriptCaches, readSaved, writeSaved } from "../data/transcript-cache";
+import { forgetConversationState, sendHeldMessages } from "./conversation-state";
+import { cacheEpoch, clearTranscriptCaches, readSaved, writeSaved } from "../data/transcript-cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
@@ -106,6 +106,11 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [connectionSince, setConnectionSince] = useState<number | null>(null);
   const connectionWaiting = useWaited(connectionSince);
+  // Messages held while not connected go as soon as the phone connects, from whatever screen is open (#983).
+  const activeHostId = activeHost?.id;
+  useEffect(() => {
+    if (connectionStage === "connected" && activeHostId) sendHeldMessages(activeHostId);
+  }, [activeHostId, connectionStage]);
   const [online, setOnline] = useState(true);
   const updates = useRef(0);
   const [updating, setUpdating] = useState(false);
@@ -137,9 +142,9 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, []);
 
   /** The list shown, and kept for the next open of the app (#983). */
-  const showSessions = useCallback((host: string, values: SessionSummary[]) => {
+  const showSessions = useCallback((host: string, values: SessionSummary[], epoch: number) => {
     setSessions(values);
-    void writeSaved(host, "summaries", values);
+    void writeSaved(host, "summaries", values, epoch);
   }, []);
 
   /** A stored host changed (a name): the list, and the active host when it is that one, follow. */
@@ -219,9 +224,10 @@ export function AppProvider({ children }: PropsWithChildren) {
           summariesDirty.current = false;
           const host: string = activeHostRef.current.id;
           const generation = selectionGeneration.current;
+          const epoch = cacheEpoch(host);
           try {
             const values = await api.summaries();
-            if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) showSessions(host, values);
+            if (values && selectionGeneration.current === generation && activeHostRef.current?.id === host) showSessions(host, values, epoch);
           } catch (cause) {
             // The connection's own failure is shown as the connection state, not as an error (#983).
             if (isTransportError(cause)) connection.reportError("Session list refresh failed", cause);

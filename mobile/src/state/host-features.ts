@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { HostApi, HostFeatures } from "../data/host-api";
-import { readSaved, writeSaved } from "../data/transcript-cache";
+import { cacheEpoch, readSaved, writeSaved } from "../data/transcript-cache";
 
 /**
  * What the connected Mac offers (`sync.capabilities`), read again whenever
@@ -26,11 +26,12 @@ export function useHostFeatures(api: HostApi, host: string | null | undefined): 
   useEffect(() => {
     if (!host) return;
     let active = true;
+    const epoch = cacheEpoch(host);
     // Disconnected: the next connection reads them again.
     api.features().then((features) => {
       if (!active) return;
       setRead({ host, features, live: true });
-      void writeSaved(host, "features", features);
+      void writeSaved(host, "features", features, epoch);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [api, host, revision]);

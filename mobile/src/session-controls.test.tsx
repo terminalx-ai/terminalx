@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { CONTINUE_PROMPT, RECOVERY_PROMPT } from "@terminalx/portable/recovery";
+import { clearTranscriptCaches } from "./data/transcript-cache";
 import { SessionControls } from "./ui/SessionControls";
 
 const mocks = vi.hoisted(() => ({ app: {} as any, alerts: [] as { title: string; buttons: { text: string; onPress?: () => void }[] }[], storage: new Map<string, string>() }));
@@ -228,6 +229,24 @@ describe("the controls while the phone is not connected (#983)", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(labels().every(Boolean)).toBe(true);
     expect(labels().every((item) => item!.disabled)).toBe(true);
+  });
+
+  it("saves nothing for a Mac forgotten while its controls and models were being read", async () => {
+    let answerTab!: (value: unknown) => void;
+    let answerModels!: (value: unknown) => void;
+    mocks.app.api.tabControls.mockImplementation(() => new Promise((done) => { answerTab = done; }));
+    mocks.app.api.models.mockImplementation(() => new Promise((done) => { answerModels = done; }));
+    await render();
+    // Forgotten (or signed out) with both requests under way: the caches are cleared first.
+    await act(async () => { await clearTranscriptCaches("mac"); });
+    await act(async () => {
+      answerTab({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" });
+      answerModels(models);
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+    // Let the write queue drain.
+    await act(async () => { await clearTranscriptCaches("other"); });
+    expect([...mocks.storage.keys()].filter((key) => key.includes("mac"))).toEqual([]);
   });
 
   it("does not claim the agent is working from what was saved", async () => {
