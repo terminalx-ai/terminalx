@@ -99,7 +99,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -131,7 +131,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -211,7 +211,7 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
     // No share survives: this is the delayed writer after the kill switch.
     let permit = crate::local_sharing::WritePermit { privacy:Default::default(), share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
-        mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)), stops: 0,
+        collaboration: None, mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)), stops: 0,
     });
     let deadline = Instant::now() + Duration::from_secs(2);
     while rig.delivery_pending() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
@@ -614,7 +614,7 @@ impl Rig {
             (cli.ready.clone(), cli.awaiting_delivery.unwrap(), cli.input.stops)
         };
         ready.mark();
-        self.manager.type_prompt(&self.rt, &self.pane, text.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None, stops });
+        self.manager.type_prompt(&self.rt, &self.pane, text.into(), vec![], PromptDelivery { collaboration: None, mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None, stops });
         seq
     }
 
@@ -930,7 +930,7 @@ fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
         let rig = Rig::of(kind, "");
         let files = vec![FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None }];
         let agent = crate::attachments::with_block("", &files);
-        let prompt = PromptText { files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
+        let prompt = PromptText { collaboration: collaboration_v2::current(), files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
         let image = vec![ImageRef { url: "attachments/s/0.png".into(), media_type: Some("image/png".into()), name: None }];
         let cwd = rig._dir.path().to_string_lossy().into_owned();
         assert!(!rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, image, &cwd, None).1);
@@ -2378,7 +2378,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
         }
         if replaced { assert_eq!(rig.events(), before); }
         if !replaced {
-            let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
             let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
             assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
             assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));
@@ -2522,7 +2522,7 @@ sleep 600
         _ => unreachable!(),
     };
     ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { collaboration: None, mobile: None, ready: Some(ready.clone()), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
 
     // The chat says the message is waiting, and why.
     rig.chat_says(&format!("waiting: {QUEUED}"));
@@ -2531,7 +2531,7 @@ sleep 600
     assert!(rig.compose(LATER, 0));
     assert!(rig.said().ends_with(&[format!("queued: {LATER}"), format!("waiting: {LATER}")]), "{:?}", rig.said());
     let later = rig.queued_seq(LATER);
-    rig.manager.type_prompt(&rig.rt, &rig.pane, LATER.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready.clone()), seq: Some(later), queued: true, receipt: None, shared: None, stops: 0 });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, LATER.into(), vec![], PromptDelivery { collaboration: None, mobile: None, ready: Some(ready.clone()), seq: Some(later), queued: true, receipt: None, shared: None, stops: 0 });
     std::fs::write(&told, b"").unwrap();
     assert_eq!(rig.pane_says(&["BOX-EMPTIED", "TYPED-INTO-RESTORED"]), "BOX-EMPTIED", "nothing is typed into a box that holds a prompt");
     assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "CLEARED-A-ROW"]), "PROMPT-SUBMITTED", "an empty box needs no Ctrl+U");
@@ -2731,7 +2731,7 @@ fn a_message_waiting_on_the_input_box_is_withdrawn_when_the_reader_stops() {
         _ => unreachable!(),
     };
     ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, QUEUED.into(), vec![], PromptDelivery { collaboration: None, mobile: None, ready: Some(ready), seq: Some(seq), queued: true, receipt: None, shared: None, stops: 0 });
     rig.chat_says(&format!("waiting: {QUEUED}"));
 
     assert!(rig.manager.interrupt(SESSION, TAB).unwrap(), "Escape went to the agent");
@@ -2905,4 +2905,147 @@ fn handover_busy_prompt_can_settle_and_the_same_tab_is_carried() {
     assert_eq!(held.tabs[0].tab_id, TAB);
     assert!(held.tabs[0].cli.is_some());
     assert_eq!(rig.events(), before, "no work was stopped or replayed");
+}
+
+
+#[test]
+fn phase2_collaboration_v2_pty_final_writer_fences_policy_modes_and_ownership_after_dispatch() {
+    use crate::remote::collab::{Collaboration, v2::{Action, Snapshot, Permit}};
+    for change in ["safe", "fresh-report", "source", "revision", "generation", "pending", "raw-report", "raw-terminal", "unknown", "ownership"] {
+        let rig = Rig::of(CliKind::Claude, "");
+        let received = rig._dir.path().join("received");
+        rig.run_in_pane(&format!("stty raw -echo; echo CLI-IS-UP; cat > '{}'", received.display()));
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id":SESSION,"projectPath":rig._dir.path(),"cwd":rig._dir.path(),"title":"policy fixture","created":index::now(),"modified":index::now(),
+            "tabs":[{"id":TAB,"harness":"claude","permissionMode":"plan","pane":rig.pane,"created":index::now()}]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        rig.manager.provider_settings(&mut rig.rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode: "plan".into() } });
+        let policy = Arc::new(Collaboration::new());
+        let dir = tempfile::tempdir().unwrap();
+        policy.runtime_policy.bind(dir.path(), 1).unwrap();
+        let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{
+            "userId":"guest","role":"driver","canApprove":false,"writeSource":source
+        }]})).unwrap() };
+        policy.install_v2(snapshot("1", "everyone")).unwrap();
+        let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Drive);
+        let writer = Arc::new(PaneWriter::default());
+        rig.manager.writers.lock().unwrap().insert(rig.pane.clone(), writer.clone());
+        let ticket = writer.ticket();
+        let blocked = ticket.take();
+        if let Engine::Cli(cli) = &rig.rt.lock().unwrap().engine { cli.ready.mark(); }
+        permit.with(|| rig.manager.send(SESSION, TAB, "policy guarded prompt".into(), vec![])).unwrap();
+        match change {
+            "source" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
+            "revision" => { policy.install_v2(snapshot("2", "everyone")).unwrap(); }
+            "generation" => policy.runtime_policy.set_generation(2),
+            "pending" => { rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap(); }
+            "raw-report" => rig.manager.provider_settings(&mut rig.rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode: "dontAsk".into() } }),
+            "raw-terminal" => {
+                rig.manager.with_raw_terminal_input(&rig.pane, || rig.manager.terminals.write(&rig.pane, b"/")).unwrap();
+                rig.manager.provider_settings(&mut rig.rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode: "plan".into() } });
+            }
+            "fresh-report" => {
+                rig.rt.lock().unwrap().collaboration_stance = None;
+                rig.manager.provider_settings(&mut rig.rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode: "plan".into() } });
+            }
+            "unknown" => { rig.rt.lock().unwrap().collaboration_stance = None; }
+            "ownership" => { rig.rt.lock().unwrap().engine = Engine::None; }
+            _ => {}
+        }
+        let after = writer.ticket();
+        drop(blocked);
+        drop(ticket);
+        drop(after.take());
+        let bytes = std::fs::read(&received).unwrap_or_default();
+        if matches!(change, "safe" | "fresh-report") { assert!(String::from_utf8_lossy(&bytes).contains("policy guarded prompt")); }
+        else { assert!(!String::from_utf8_lossy(&bytes).contains("policy guarded prompt"), "{change}: stale or unsafe input reached the real PTY: {bytes:?}"); }
+        rig.manager.terminals.kill_all();
+    }
+}
+
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_handover_retains_required_provenance_and_refuses_unstamped_enter_retry() {
+    use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+    let rig = Rig::with_live_pane();
+    let policy = Arc::new(Collaboration::new());
+    let dir = tempfile::tempdir().unwrap();
+    policy.runtime_policy.bind(dir.path(), 1).unwrap();
+    let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":"1","members":[{
+        "userId":"guest","role":"driver","canApprove":false,"writeSource":"explicit"
+    }]})).unwrap();
+    policy.install_v2(snapshot).unwrap();
+    let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Drive);
+    permit.with(|| rig.compose("unconfirmed remote prompt", 0));
+    let record = rig.manager.hold_tabs(Duration::from_secs(1), |mut held| held.tabs.remove(0)).unwrap();
+    assert!(record.cli.as_ref().unwrap().echoed[0].collaboration_required);
+    let record = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+    rig.manager.adopt_tab(record).unwrap();
+    let mut rt = rig.rt.lock().unwrap();
+    assert!(rt.collaboration_prompts.is_empty());
+    let seq = match &rt.engine { Engine::Cli(cli) => cli.echoed[0].seq, _ => unreachable!() };
+    assert!(matches!(rig.manager.enter_again(&mut rt, &rig.pane, seq, Instant::now(), "test"), Nudged::Written(false)));
+    assert!(rig.manager.terminals.is_running(&rig.pane), "no Enter reached the child blocked on read");
+}
+
+
+#[test]
+fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_at_pty_writer() {
+    use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+    let rig = Rig::of(CliKind::Claude, "");
+    let received = rig._dir.path().join("received");
+    rig.run_in_pane(&format!("stty raw -echo; echo CLI-IS-UP; cat > '{}'", received.display()));
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id":SESSION,"projectPath":rig._dir.path(),"cwd":rig._dir.path(),"title":"policy fixture","created":index::now(),"modified":index::now(),
+        "tabs":[{"id":TAB,"harness":"claude","permissionMode":"plan","pane":rig.pane,"created":index::now()}]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    let policy = Arc::new(Collaboration::new());
+    let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
+    let snapshot = |revision: &str, approve: bool| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{
+        "userId":"manager","role":"manager","canApprove":approve,"writeSource":"explicit"
+    }]})).unwrap() };
+    policy.install_v2(snapshot("1", true)).unwrap();
+    let permit = Permit::new(policy.clone(), "manager", policy.runtime_policy.stamp("manager"), Action::Configure);
+    let writer = Arc::new(PaneWriter::default()); rig.manager.writers.lock().unwrap().insert(rig.pane.clone(), writer.clone());
+    let ticket = writer.ticket(); let blocked = ticket.take();
+    if let Engine::Cli(cli) = &rig.rt.lock().unwrap().engine { cli.ready.mark(); }
+    permit.with(|| rig.manager.set_model(SESSION, TAB, "fixture-model")).unwrap();
+    policy.install_v2(snapshot("2", false)).unwrap();
+    let after = writer.ticket(); drop(blocked); drop(ticket); drop(after.take());
+    assert!(std::fs::read(&received).unwrap_or_default().is_empty(), "stale model slash command reached provider");
+    let current = Permit::new(policy.clone(), "manager", policy.runtime_policy.stamp("manager"), Action::Drive);
+    assert!(current.with(|| rig.manager.respond_permission(SESSION, TAB, "missing", "allow")).unwrap_err().to_string().contains("approval required"));
+}
+
+
+#[test]
+fn phase2_collaboration_v2_pty_capacity_wait_releases_runtime_and_rechecks_mode_before_more_bytes() {
+    use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+    let rig = Rig::of(CliKind::Claude, "");
+    rig.run_in_pane("stty raw -echo; echo CLI-IS-UP; sleep 600");
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id":SESSION,"projectPath":rig._dir.path(),"cwd":rig._dir.path(),"title":"policy fixture","created":index::now(),"modified":index::now(),
+        "tabs":[{"id":TAB,"harness":"claude","permissionMode":"plan","pane":rig.pane,"created":index::now()}]
+    })).unwrap(); index::save(&[entry]).unwrap();
+    rig.manager.provider_settings(&mut rig.rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode:"plan".into() } });
+    let policy = Arc::new(Collaboration::new()); let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(),1).unwrap();
+    let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":"1","members":[{
+        "userId":"guest","role":"driver","canApprove":false,"writeSource":"everyone"
+    }]})).unwrap(); policy.install_v2(snapshot).unwrap();
+    let permit = Permit::new(policy.clone(),"guest",policy.runtime_policy.stamp("guest"),Action::Drive);
+    if let Engine::Cli(cli) = &rig.rt.lock().unwrap().engine { cli.ready.mark(); }
+    let (blocked, waiting) = std::sync::mpsc::channel();
+    *COLLABORATION_PTY_CAPACITY.lock().unwrap() = Some(blocked);
+    permit.with(|| rig.manager.send(SESSION,TAB,"x".repeat(200_000),vec![])).unwrap();
+    waiting.recv_timeout(Duration::from_secs(5)).expect("writer never reached PTY backpressure");
+    let changed = Instant::now();
+    rig.manager.set_permission_mode(SESSION,TAB,"bypassPermissions").unwrap();
+    assert!(changed.elapsed() < Duration::from_secs(1), "capacity wait held runtime and blocked a local mode change");
+    let writer = rig.manager.writers.lock().unwrap().get(&rig.pane).unwrap().clone();
+    let after = writer.ticket(); drop(after.take());
+    let rt = rig.rt.lock().unwrap();
+    assert!(matches!(&rt.engine,Engine::Cli(cli) if cli.echoed.iter().all(|echo| !echo.submitted)), "unsafe pending mode must prevent Enter after a partial paste");
 }

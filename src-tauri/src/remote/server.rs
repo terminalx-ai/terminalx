@@ -240,9 +240,24 @@ impl Peer {
 
 /// Authority belongs to the keystroke, not the later writer thread.
 struct PtyInput {
+    collaboration: Option<collab::v2::Permit>,
+    pid: Option<u32>,
     data: Vec<u8>,
     privacy: crate::data_privacy::Ticket,
 }
+
+impl PtyInput {
+    fn write(&self, terminals: &crate::pty::Terminals, manager: Option<&SessionManager>, pane: &str) -> anyhow::Result<bool> {
+        let _policy = self.collaboration.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &self.collaboration { permit.check(None)?; }
+        let write = || terminals.write_remote(pane, &self.data, &self.privacy, self.collaboration.as_ref(), self.pid);
+        match manager {
+            Some(manager) => manager.with_raw_terminal_input(pane, write),
+            None => write(),
+        }
+    }
+}
+
 
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
 /// terminal output into a session transcript.
@@ -1041,6 +1056,8 @@ impl WorkspaceRpc {
 
     /// Follow the relay host when it registers a newer generation.
     pub fn set_generation(&self, generation: u64) {
+        let _admission = self.collab.enter_admission();
+        self.collab.runtime_policy.set_generation(generation);
         self.generation.store(generation, Ordering::SeqCst);
     }
 
@@ -1216,7 +1233,11 @@ impl WorkspaceRpc {
     fn may_use_ports(&self, peer: &Peer) -> bool {
         let spec = protocol::find_method("ports.open").expect("ports.open is a method");
         let authority = self.authority(peer);
-        authority >= spec.authority && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
+        let user = peer.user_id.as_deref().unwrap_or("");
+        let stamp = self.collab.runtime_policy.stamp(user);
+        authority >= spec.authority && self.access(peer).can_configure()
+            && self.collab.runtime_policy.admit(user, stamp.as_ref(), collab::v2::Action::Configure, None).is_ok()
+            && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
     }
 
     /// Answer `ports.open` in order with the connection's notifications, and
@@ -1233,6 +1254,9 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        // Native stamp, captured before handing work to the blocking pool.
+        // Never read a stamp or generation supplied in request params.
+        let policy_stamp = peer.user_id.as_deref().and_then(|user| self.collab.runtime_policy.stamp(user));
         if method == "environment.cancel" {
             return super::environment::cancel(peer.id(), &params);
         }
@@ -1246,7 +1270,12 @@ impl WorkspaceRpc {
         }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
+            if !self.may_use_ports(peer) {
+                self.ports.revoke(peer);
+                return Err(RpcError::forbidden("Ports require current explicit configuration authority"));
+            }
+            let permit = collab::v2::Permit::new(self.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp, collab::v2::Action::Configure);
+            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket, Some(permit)).await;
         }
         let rpc = self.clone();
         let peer = peer.clone();
@@ -1262,14 +1291,27 @@ impl WorkspaceRpc {
                 let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
                 if let Some(hook) = hook { hook(); }
             }
-            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+            let action = if matches!(method.as_str(), "session.decide") { collab::v2::Action::Approve }
+                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt") { collab::v2::Action::Drive }
+                else { collab::v2::Action::Configure };
+            let permit = collab::v2::Permit::new(rpc.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp.clone(), action);
+            permit.with(|| crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp)))
         })
             .await
             .map_err(RpcError::internal)?
     }
 
-    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         self.check_named_project(method, &params)?;
+        let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
+        let _configuration_admission = configuration.then(|| self.collab.enter_admission());
+        if configuration {
+            if !self.access(peer).can_configure() {
+                return Err(RpcError::forbidden("Agent settings and terminal input need independent approval rights"));
+            }
+            self.collab.runtime_policy.admit(peer.user_id.as_deref().unwrap_or(""), policy_stamp.as_ref(), collab::v2::Action::Configure, None)
+                .map_err(|_| RpcError::forbidden("Agent settings and terminal input require current explicit configuration authority"))?;
+        }
         // The project a call names, resolved once and checked before it runs.
         let project = || self.project(peer, &params);
         match method {
@@ -1349,11 +1391,18 @@ impl WorkspaceRpc {
             },
             "session.close" => self.session_close(params),
             "session.send" if self.durable_command(peer, protocol::find_method("session.send").expect("session.send is a method")) => {
-                self.agent_command(peer, "session.send", params)
+                self.agent_command(peer, "session.send", params, policy_stamp)
             }
             "session.send" => self.session_send(peer, params),
-            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params),
-            "session.interrupt" => self.session_interrupt(peer, params),
+            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params, policy_stamp),
+            "session.interrupt" => {
+                let _admission = self.collab.enter_admission();
+                if let Some(permit) = collab::v2::current().filter(|_| self.collab.runtime_policy.is_v2()) {
+                    let (session, tab) = self.known_tab(&params)?;
+                    permit.check(self.manager()?.collaboration_v2_witness(&session, &tab).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+                }
+                self.session_interrupt(peer, params)
+            },
             "session.toTerminal" => self.session_to_terminal(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
@@ -1637,13 +1686,14 @@ impl WorkspaceRpc {
             let terminals = self.terminals.clone();
             let pending = input_pending.clone();
             let pane = pty_id.to_string();
+            let manager = self.manager().ok().cloned();
             std::thread::Builder::new()
                 .name(format!("agent-pty-input-{tab_id}"))
                 .spawn(move || {
                     // Ends when the entry (the sender) is dropped with its tab.
                     for data in queue {
                         // Between two CLIs there is nothing to type into.
-                        let _ = terminals.write_remote(&pane, &data.data, &data.privacy);
+                        let _ = data.write(&terminals, manager.as_ref(), &pane);
                         pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                     }
                 })
@@ -1906,11 +1956,12 @@ impl WorkspaceRpc {
         }
         let terminals = self.terminals.clone();
         let writer_id = pty_id.clone();
+        let manager = self.manager().ok().cloned();
         let spawned = std::thread::Builder::new().name(format!("pty-input-{pty_id}")).spawn(move || {
             // Ends when the terminal's entry (the sender) is dropped, or the
             // program is gone; its exit is reported through `pty.exit`.
             for data in queue {
-                let written = terminals.write_remote(&writer_id, &data.data, &data.privacy);
+                let written = data.write(&terminals, manager.as_ref(), &writer_id);
                 input_pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                 // A program that stopped reading loses this input, not every
                 // later keystroke: it may read again.
@@ -2065,7 +2116,7 @@ impl WorkspaceRpc {
             return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
         }
         pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
-        if pty.input.send(PtyInput { data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
+        if pty.input.send(PtyInput { collaboration: collab::v2::current(), pid: self.terminals.pid(&pty_id), data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
             pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }
@@ -3492,9 +3543,17 @@ impl WorkspaceRpc {
     }
 
     fn session_send(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let _policy = self.collab.enter_admission();
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let tab_id = required_str(&params, "tabId")?;
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
+        if self.collab.runtime_policy.is_v2() {
+            let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
+            permit.check(self.manager()?.collaboration_v2_witness(&session.id, &tab.id).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+            if self.collab.runtime_policy.everyone(peer.user_id.as_deref().unwrap_or("")) && slash::is_command(params.get("text").and_then(Value::as_str).unwrap_or("")) {
+                permit.check_configuration().map_err(|_| RpcError::forbidden("Explicit configuration authority required"))?;
+            }
+        }
         // Images uploaded with `session.attach` ride with the text, or alone.
         let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
         let text = match params.get("text").and_then(Value::as_str) {
@@ -3585,7 +3644,7 @@ impl WorkspaceRpc {
     ///   twice. A steer goes into the running turn.
     /// - A decision names its `requestId`; one already answered, or gone,
     ///   is refused (`conflict`, `request-not-pending`).
-    fn agent_command(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn agent_command(&self, peer: &Peer, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         use super::agent_commands::{self as receipts, Known};
         let journal = self.agent_commands.get().ok_or_else(|| RpcError::new("method_not_found", format!("{method} is not a workspace method")))?;
         let agents = self.agents()?;
@@ -3629,6 +3688,7 @@ impl WorkspaceRpc {
             // in tab leases.
             leases: peer.user_id.is_some(),
             access: self.access(peer),
+            policy_stamp,
             plaintext: &params,
         };
         match crate::cloud_agents::mailbox::decide(agents, &command, || journal.applying(&key, &digest, now)) {

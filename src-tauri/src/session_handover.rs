@@ -207,6 +207,8 @@ pub(crate) struct TailRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EchoRecord {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collaboration_required: bool,
     pub text: String,
     pub image_count: usize,
     pub sent_ms: u64,
@@ -525,7 +527,7 @@ impl SessionManager {
             recorded: p.recorded,
             tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
-                text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
+                collaboration_required: echo.collaboration_required, text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
             held: p.held.clone(),
@@ -561,6 +563,9 @@ impl SessionManager {
     pub(crate) fn adopt_tab(&self, record: TabRecord) -> Result<Vec<Wait>> {
         let rt_arc = self.runtime(&record.session_id, &record.tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        rt.collaboration_prompts.clear();
+        rt.collaboration_stance = None;
+        rt.stdio_launch_permit = None;
         rt.seq = rt.seq.max(record.seq);
         rt.status = record.status;
         rt.pending = record.pending.iter().map(|ask| (ask.request_id.clone(), PendingAsk {
@@ -596,6 +601,9 @@ impl SessionManager {
         let pane = cli.pane_id.clone();
         let asks: HashMap<String, AskRecord> = record.pending.into_iter().map(|ask| (ask.request_id.clone(), ask)).collect();
         let decisions: Vec<(AskRecord, String)> = cli.decisions.iter().filter_map(|(id, gate)| Some((asks.get(id)?.clone(), gate.clone()))).collect();
+        // A transferred live launch has no fresh native stance witness and
+        // cannot clear a prior raw-terminal taint by producing a late report.
+        rt.collaboration_raw = Some(tail.clone());
         rt.engine = Engine::Cli(CliTab {
             usage_account: (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten(),
             harness: kind,
@@ -612,7 +620,7 @@ impl SessionManager {
             recorded: cli.recorded,
             tail: tail.clone(),
             echoed: cli.echoed.into_iter().map(|echo| ComposerEcho {
-                text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
+                collaboration_required: echo.collaboration_required, text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
             held: cli.held,

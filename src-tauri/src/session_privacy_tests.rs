@@ -135,7 +135,7 @@ fn writer_child() {
     };
     ready.mark();
     let (receipt, _received) = mpsc::channel();
-    let delivery = || PromptDelivery { mobile:mobile.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),
+    let delivery = || PromptDelivery { collaboration: None, mobile:mobile.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),
         shared:shared.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),ready:Some(ready.clone()),seq:Some(seq),receipt:Some((seq,receipt.clone())),..Default::default() };
     rig.manager.type_prompt(&rig.rt,&rig.pane,"remote".into(),vec![],delivery());
     wait_for("privacy activation and restoration", || coordination.join("restored").exists());

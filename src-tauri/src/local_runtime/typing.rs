@@ -40,6 +40,7 @@ impl std::error::Error for Backlogged {}
 /// goes to a process that replaced the one it was meant for.
 struct Waiting {
     pid: u32,
+    manager: Option<crate::session::SessionManager>,
     bytes: VecDeque<u8>,
 }
 
@@ -51,14 +52,22 @@ impl Typing {
     /// Refused at once for a pane a mobile device drives, one that is not
     /// running, or one whose program has left [`BACKLOG`] of typing unread.
     pub fn send(&self, mobile: &Arc<Registry>, terminals: &Arc<Terminals>, id: &str, bytes: &[u8]) -> Result<()> {
+        self.send_inner(mobile, terminals, id, bytes, None)
+    }
+
+    pub(crate) fn send_guarded(&self, manager: &crate::session::SessionManager, terminals: &Arc<Terminals>, id: &str, bytes: &[u8]) -> Result<()> {
+        self.send_inner(&manager.mobile, terminals, id, bytes, Some(manager.clone()))
+    }
+
+    fn send_inner(&self, mobile: &Arc<Registry>, terminals: &Arc<Terminals>, id: &str, bytes: &[u8], manager: Option<crate::session::SessionManager>) -> Result<()> {
         mobile.check_desktop_input(id)?;
         let pid = terminals.pid(id).filter(|_| terminals.is_running(id)).context("no such terminal")?;
         let mut panes = self.0.lock().unwrap();
         let deliver = !panes.contains_key(id);
-        let waiting = panes.entry(id.to_string()).or_insert_with(|| Waiting { pid, bytes: VecDeque::new() });
+        let waiting = panes.entry(id.to_string()).or_insert_with(|| Waiting { pid, manager: manager.clone(), bytes: VecDeque::new() });
         if waiting.pid != pid {
             // What was typed at the process before has nobody to read it.
-            *waiting = Waiting { pid, bytes: VecDeque::new() };
+            *waiting = Waiting { pid, manager: manager.clone(), bytes: VecDeque::new() };
         }
         if waiting.bytes.len() + bytes.len() > BACKLOG {
             let waiting = waiting.bytes.len();
@@ -85,17 +94,20 @@ impl Typing {
 /// waiting longer than that.
 fn deliver_all(queue: &Mutex<HashMap<String, Waiting>>, mobile: &Registry, terminals: &Terminals, id: &str) {
     loop {
-        let (pid, chunk) = {
+        let (pid, chunk, manager) = {
             let mut panes = queue.lock().unwrap();
             match panes.get(id) {
-                Some(waiting) if !waiting.bytes.is_empty() => (waiting.pid, waiting.bytes.iter().take(CHUNK).copied().collect::<Vec<_>>()),
+                Some(waiting) if !waiting.bytes.is_empty() => (waiting.pid, waiting.bytes.iter().take(CHUNK).copied().collect::<Vec<_>>(), waiting.manager.clone()),
                 _ => {
                     panes.remove(id);
                     return;
                 }
             }
         };
-        let outcome = mobile.desktop_input(id, || terminals.write_for_process(id, pid, &chunk));
+        let outcome = mobile.desktop_input(id, || match manager {
+            Some(manager) => manager.with_raw_terminal_input(id, || terminals.write_for_process(id, pid, &chunk)),
+            None => terminals.write_for_process(id, pid, &chunk),
+        });
         let (written, failure) = match outcome {
             Ok(()) => (chunk.len(), None),
             Err(error) => match error.downcast_ref::<InputStalled>() {
