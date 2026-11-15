@@ -13,13 +13,22 @@ export interface ConversationRow {
 export const conversationKey = (hostId: string, sessionId: string, tabId: string) => JSON.stringify([hostId, sessionId, tabId]);
 export const providerName = (harness: string) => ({ claude: "Claude Code", codex: "Codex" })[harness] ?? harness;
 
+/**
+ * What a tab is called: the name made for its conversation once there is one,
+ * else its own title, which until then is the first words of its request.
+ */
+export function tabTitle(tab: ConversationTab): string | undefined {
+  const made = typeof tab.generatedTitle === "string" ? tab.generatedTitle.trim() : "";
+  return made || (typeof tab.title === "string" ? tab.title.trim() : "") || undefined;
+}
+
 export function conversationLabel(tab: ConversationTab, tabs: ConversationTab[]): string {
   const provider = providerName(tab.harness);
-  const title = tab.title?.trim();
+  const title = tabTitle(tab);
   const base = title && title !== provider ? `${provider} · ${title}` : provider;
   // UUIDv7 IDs sort by creation time. Use them only to keep readable numbering
   // consistent when the host sends the same tabs in a different order.
-  const duplicates = tabs.filter((other) => other.harness === tab.harness && (other.title?.trim() || provider) === (title || provider))
+  const duplicates = tabs.filter((other) => other.harness === tab.harness && (tabTitle(other) || provider) === (title || provider))
     .sort((left, right) => left.id.localeCompare(right.id));
   if (duplicates.length < 2) return base;
   const number = duplicates.findIndex((other) => other.id === tab.id) + 1;
