@@ -8,6 +8,7 @@ import { codeText, roleLabel, stateLabel } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { LargeTitle } from "@mobile/ui/glass";
+import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -24,6 +25,8 @@ export default function CloudScreen() {
   const router = useRouter();
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
+  // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
+  const pull = usePullRefresh(() => catalog?.refresh());
 
   useFocusEffect(useCallback(() => {
     void catalog?.refresh();
@@ -35,12 +38,12 @@ export default function CloudScreen() {
   if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label="Sign in" onPress={() => void app.signIn()} /></View>;
 
   return <SectionList sections={sections} keyExtractor={(item) => item.workspace.id} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.content, { paddingBottom: bar + 24 }]}
-    refreshControl={<RefreshControl refreshing={snapshot.loading} onRefresh={() => void catalog?.refresh()} tintColor={palette.accent} />}
+    refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} />}
     ListHeaderComponent={<><LargeTitle title="Cloud" />{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
     renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text numberOfLines={1} style={[styles.sectionTitle, { color: palette.ink }]}>{section.title}</Text>{section.error ? <Text style={[styles.notice, { color: palette.warning }]}>{codeText(section.error)}</Text> : null}</View>}
     renderSectionFooter={({ section }) => section.data.length === 0 && section.loaded && !section.error ? <Text style={[styles.empty, { color: palette.muted }]}>No cloud workspaces you can see.</Text> : null}
     renderItem={({ item }) => <WorkspaceRow item={item} onPress={() => router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: item.workspace.name } })} />}
-    ListEmptyComponent={snapshot.loading || !snapshot.refreshedAt ? <EmptyState title="Loading cloud workspaces" detail="Reading the list from your account." busy /> : <EmptyState title="No organizations" detail="Cloud workspaces of your organizations appear here." />} />;
+    ListEmptyComponent={snapshot.loading || !snapshot.refreshedAt ? <EmptyState title="Loading cloud workspaces" detail="Reading the list from your account." /> : <EmptyState title="No organizations" detail="Cloud workspaces of your organizations appear here." />} />;
 }
 
 function WorkspaceRow({ item, onPress }: { item: CloudWorkspaceItem; onPress(): void }) {

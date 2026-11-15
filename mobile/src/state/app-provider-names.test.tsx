@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The app's wiring of saved hosts, names, reconnect and unpair, over a fake connection and real storage.
 const fake = vi.hoisted(() => ({
@@ -15,6 +15,9 @@ const fake = vi.hoisted(() => ({
   start: vi.fn(),
   stop: vi.fn(),
   restart: vi.fn(),
+  reportError: vi.fn(),
+  network: null as null | ((state: unknown) => void),
+  retryNow: vi.fn(),
   paired: null as any,
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({
@@ -32,7 +35,7 @@ vi.mock("expo-secure-store", () => ({
   setItemAsync: async (key: string, value: string) => void fake.storage.set(`secure:${key}`, value),
   deleteItemAsync: async (key: string) => void fake.storage.delete(`secure:${key}`),
 }));
-vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: () => () => undefined } }));
+vi.mock("@react-native-community/netinfo", () => ({ default: { addEventListener: (listener: (state: unknown) => void) => { fake.network = listener; return () => undefined; } } }));
 vi.mock("react-native", () => ({
   AppState: { addEventListener: () => ({ remove: () => undefined }) },
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
@@ -63,9 +66,12 @@ vi.mock("../transport/connection", () => ({
     onLog() { return () => undefined; }
     onEvent() { return () => undefined; }
     onConnected(listener: () => void) { fake.connected = listener; return () => undefined; }
+    reportError = fake.reportError;
+    retryNow = fake.retryNow;
   },
 }));
 vi.mock("../data/host-api", () => ({
+  isSessionSummary: (value: any) => typeof value?.id === "string" && Array.isArray(value.tabs),
   HostApi: class { resetConnection() {}
     describe = fake.describe;
     forgetPairing = fake.forgetPairing;
@@ -95,7 +101,7 @@ beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   fake.storage.clear();
   fake.credentialRead = null;
-  for (const mock of [fake.summaries, fake.describe, fake.forgetPairing, fake.start, fake.stop, fake.restart]) mock.mockReset();
+  for (const mock of [fake.summaries, fake.describe, fake.forgetPairing, fake.start, fake.stop, fake.restart, fake.reportError, fake.retryNow]) mock.mockReset();
   fake.describe.mockResolvedValue(null);
   fake.summaries.mockResolvedValue([]);
   fake.forgetPairing.mockResolvedValue(true);
@@ -305,14 +311,12 @@ it("drains the reconnect refresh even when the previous summary request rejects"
   await act(async () => { fail(new Error("old connection closed")); await pending; });
   expect(app.sessions).toEqual([summary("after-reconnect")]);
   expect(app.error).toBeNull();
-  expect(app.loadingSessions).toBe(false);
 });
 
 it("keeps current summary failures visible", async () => {
   fake.summaries.mockRejectedValueOnce(new Error("Could not read sessions"));
   await act(async () => app.refreshSessions());
   expect(app.error).toBe("Could not read sessions");
-  expect(app.loadingSessions).toBe(false);
 });
 
 it("ignores late credentials after another selection or disconnect", async () => {
@@ -381,4 +385,78 @@ it("reports malformed stored credentials without leaving an unhandled selection 
   expect(app.error).toBe(expected);
   expect(app.activeHost?.id).toBe(HOST.id);
   expect(fake.start).not.toHaveBeenCalled();
+});
+
+describe("the connection state's facts (#983)", () => {
+  it("counts the wait from when the phone starts trying, and not while connected or held on the Mac", async () => {
+    const before = Date.now();
+    await act(async () => fake.stage!("connecting", 0));
+    expect(app.connectionSince).toBeGreaterThanOrEqual(before);
+    const since = app.connectionSince;
+    // Later attempts of the same try keep its start.
+    await act(async () => fake.stage!("cant-connect", 4));
+    expect(app.connectionSince).toBe(since);
+    expect(app.connectionWaiting).toBe(false);
+    await connected();
+    expect(app.connectionSince).toBeNull();
+    await act(async () => fake.stage!("disconnected-on-mac", 0));
+    expect(app.connectionSince).toBeNull();
+  });
+
+  it("starts the count again on Try again, and tries at once", async () => {
+    await act(async () => fake.stage!("unreachable", 12));
+    const since = app.connectionSince!;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await act(async () => app.retryConnection());
+    expect(app.connectionSince).toBeGreaterThan(since);
+    expect(fake.retryNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("knows when the phone itself is offline", async () => {
+    expect(app.online).toBe(true);
+    await act(async () => fake.network!({ type: "none", isConnected: false, details: null }));
+    expect(app.online).toBe(false);
+    await act(async () => fake.network!({ type: "wifi", isConnected: true, details: { ipAddress: "192.0.2.9" } }));
+    expect(app.online).toBe(true);
+  });
+
+  it("is updating while it catches up after a connect, and only then", async () => {
+    let finish!: (value: unknown) => void;
+    fake.summaries.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await connected();
+    await act(async () => fake.connected!());
+    expect(app.updating).toBe(true);
+    await act(async () => { finish([summary("caught-up")]); });
+    await settle();
+    expect(app.updating).toBe(false);
+    // A refresh of its own (the list's timer, a pull) is not "Updating…".
+    fake.summaries.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    let pending!: Promise<void>;
+    await act(async () => { pending = app.refreshSessions(); });
+    expect(app.updating).toBe(false);
+    await act(async () => { finish([summary("again")]); await pending; });
+  });
+
+  it("does not report the connection's own failure as an error to show", async () => {
+    fake.summaries.mockRejectedValueOnce(new Error("Host is disconnected"));
+    await act(async () => app.refreshSessions());
+    expect(app.error).toBeNull();
+    expect(fake.reportError).toHaveBeenCalledWith("Session list refresh failed", expect.any(Error));
+  });
+
+  it("shows the session list saved last time at once on the next open, before the Mac answers", async () => {
+    fake.summaries.mockResolvedValue([summary("kept")]);
+    await connected();
+    await act(async () => fake.connected!());
+    await settle();
+    expect(app.sessions).toEqual([summary("kept")]);
+    await act(async () => root.unmount());
+    // The next open: the Mac does not answer yet.
+    fake.summaries.mockImplementation(() => new Promise(() => undefined));
+    root = createRoot(document.createElement("div"));
+    await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
+    await settle();
+    expect(app.activeHost?.id).toBe(HOST.id);
+    expect(app.sessions).toEqual([summary("kept")]);
+  });
 });

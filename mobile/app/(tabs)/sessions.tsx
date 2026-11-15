@@ -5,7 +5,10 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { ChevronDown, ChevronRight, Laptop } from "lucide-react-native";
 import { branchChats, chatRows, projectGroups, shortTime, type ChatRow } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
-import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
+import { Button, EmptyState } from "@mobile/ui/primitives";
+import { ConnectionLine } from "@mobile/ui/ConnectionLine";
+import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { useDeviceMenu } from "@mobile/ui/DeviceMenu";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { MacIcon, StateMark } from "@mobile/ui/MacIcon";
@@ -34,10 +37,12 @@ export default function SessionsScreen() {
   // Row status facts are cached on the Mac; a silent refresh keeps them current while this list is in view.
   useFocusEffect(useCallback(() => {
     const timer = setInterval(() => {
-      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions(true);
+      if (AppState.currentState === "active" && app.connectionStage === "connected") void app.refreshSessions();
     }, 10_000);
     return () => clearInterval(timer);
   }, [app.connectionStage, app.refreshSessions]));
+  const state = useConnectionState(app);
+  const pull = usePullRefresh(app.refreshSessions);
   // Removing the computer from here goes back to the device list.
   const menu = useDeviceMenu({ onRemoved: () => router.navigate("/(tabs)") });
   const rows = useMemo(() => chatRows(app.sessions), [app.sessions]);
@@ -49,10 +54,7 @@ export default function SessionsScreen() {
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
 
   const host = app.activeHost;
-  const connected = app.connectionStage === "connected";
-  const heldByMac = app.connectionStage === "disconnected-on-mac";
-  const diagnostic = connected || heldByMac ? undefined : [...app.logs].reverse().find((entry) => ["Trying connection paths", "Relay path failed", "Connection attempt failed"].includes(entry.message));
-  const stage = connectionCopy(app.connectionStage, app.connectionAttempt);
+  const connected = connectionUsable(state);
   const open = (row: ChatRow, tabId = row.tabId) => router.push({ pathname: "/session/[sessionId]", params: { sessionId: row.session.id, tabId, hostId: host.id, title: row.title } });
   const toggle = (project: string) => setCollapsed((current) => { const next = new Set(current); if (next.has(project)) next.delete(project); else next.add(project); return next; });
   const projects = view === "projects";
@@ -63,20 +65,22 @@ export default function SessionsScreen() {
     <View style={styles.header}>
       {/* The Mac these chats are on. */}
       <View style={styles.topBar}>
+        {/* The Mac's name, and beneath it the connection in the words every screen uses (#983). */}
         <Pressable accessibilityRole="button" accessibilityHint="Opens device options" onPress={() => menu.open(host)} onLongPress={() => menu.open(host)} style={styles.hostName}>
           <Laptop size={21} color={palette.ink} strokeWidth={1.8} />
-          <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
-          <StatusDot color={connected ? palette.success : palette.warning} />
+          <View style={styles.hostTitles}>
+            <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
+            <ConnectionLine state={state} />
+          </View>
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`Device options for ${menu.nameOf(host)}`} hitSlop={10} onPress={() => menu.open(host)} style={styles.hostChevron}><ChevronDown size={16} color={palette.muted} /></Pressable>
         <View style={styles.flex} />
+        {/* Only once the phone has really failed to reach the Mac: it keeps trying by itself meanwhile. */}
+        {state === "waiting" ? <Button label="Try again" kind="secondary" onPress={app.retryConnection} style={styles.retry} /> : null}
+        {state === "held" ? <Button label="Reconnect" kind="secondary" onPress={() => app.connection.restart("reconnect was chosen", true)} style={styles.retry} /> : null}
         {/* The button shows where it goes: the list of chats from the projects, the projects from the list. */}
         <GlassIconButton label={projects ? "Show all chats" : "Group by project"} size={40} icon={<MacIcon name={projects ? "LayoutList" : "FolderTree"} size={20} color={palette.ink} strokeWidth={1.4} />} onPress={() => setView(projects ? "chats" : "projects")} />
       </View>
-      {!connected ? <View style={styles.offline}>
-        <Text style={[styles.offlineText, { color: palette.muted }]}><Text style={{ color: palette.warning }}>{stage.title}. </Text>{diagnostic?.detail ? `${diagnostic.message}: ${diagnostic.detail}` : stage.hint ?? "Showing what this phone saved."}</Text>
-        <Button label={heldByMac ? "Reconnect" : "Retry"} kind="secondary" onPress={() => app.connection.restart(heldByMac ? "reconnect was chosen" : "retry was tapped", true)} style={styles.retry} />
-      </View> : null}
     </View>
   </View>;
 
@@ -89,12 +93,12 @@ export default function SessionsScreen() {
     style={{ backgroundColor: palette.page }}
     contentContainerStyle={[styles.content, { paddingTop: headerHeight + 4, paddingBottom: bar + 16 }]}
     scrollIndicatorInsets={{ top: headerHeight, bottom: bar }}
-    refreshControl={<RefreshControl refreshing={app.loadingSessions} onRefresh={() => void app.refreshSessions()} tintColor={palette.accent} progressViewOffset={headerHeight} />}
+    refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={headerHeight} />}
     renderSectionHeader={({ section }) => projects ? <ProjectHeader title={section.title} open={!collapsed.has(section.key)} onPress={() => toggle(section.key)} /> : null}
     renderItem={({ item }) => projects ? <ProjectChat row={item} onOpen={(tabId) => open(item, tabId)} /> : <ChatListRow row={item} onPress={() => open(item)} />}
-    ListEmptyComponent={app.loadingSessions ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." busy />
+    ListEmptyComponent={state === "updating" ? <EmptyState title="Loading sessions" detail="Reading summaries from your Mac." />
       : connected ? <EmptyState title="No sessions" detail="Sessions running on this Mac will appear here." />
-      : <EmptyState title="Sessions are offline" detail="Cached transcripts remain available after you reopen a session from recent history." />}
+      : <EmptyState title="No saved sessions" detail="This Mac's sessions appear here once the phone connects." />}
   />{header}</View>;
 }
 
@@ -141,14 +145,6 @@ function ProjectChat({ row, onOpen }: { row: ChatRow; onOpen(tabId: string): voi
   </View>;
 }
 
-function connectionCopy(stage: string, attempt: number): { title: string; hint?: string } {
-  if (stage === "connected") return { title: "Live · end-to-end encrypted" };
-  if (stage === "disconnected-on-mac") return { title: "Disconnected on your Mac", hint: "This phone stays paired. Reconnect when you want it back." };
-  if (stage === "unreachable") return { title: "Unreachable", hint: "Check that the Mac is awake and reachable over Wi-Fi, VPN, or relay." };
-  if (stage === "cant-connect") return { title: `Can’t connect · attempt ${attempt}` };
-  return { title: "Reconnecting…" };
-}
-
 const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
   flex: { flex: 1 },
@@ -158,10 +154,9 @@ const styles = StyleSheet.create({
   header: { gap: 10, paddingHorizontal: 20, paddingTop: 2, paddingBottom: 6 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10 },
   hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
+  hostTitles: { flexShrink: 1, gap: 1 },
   hostText: { flexShrink: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
   hostChevron: { height: 44, justifyContent: "center", marginLeft: -6 },
-  offline: { flexDirection: "row", alignItems: "center", gap: 12 },
-  offlineText: { flex: 1, fontSize: 13, lineHeight: 18 },
   retry: { minHeight: 34, paddingHorizontal: 14 },
   // As on the Mac: a project's folder at the edge, its branches a step in, quiet times at the end.
   time: { fontSize: 12, letterSpacing: 0, fontVariant: ["tabular-nums"], fontFamily: MONO },
