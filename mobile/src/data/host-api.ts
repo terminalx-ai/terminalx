@@ -25,7 +25,23 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
-  tabs: { id: string; title?: string | null; harness: string; status: SessionStatus; markedUnread?: boolean }[];
+  tabs: {
+    id: string;
+    /** The tab's own title: the reader's, else the first words of its first request. */
+    title?: string | null;
+    /**
+     * The name made for the tab once its conversation has one: a lone tab's
+     * session title, else the ticket it names or the title its agent gave it.
+     * Absent while nothing has been made, for a tab the reader named, and
+     * from older Macs; `title` stands then.
+     */
+    generatedTitle?: string | null;
+    harness: string;
+    status: SessionStatus;
+    markedUnread?: boolean;
+    /** When the tab was last active (RFC 3339); absent from older Macs. */
+    modified?: string;
+  }[];
 }
 
 /** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
@@ -475,7 +491,7 @@ export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): Age
 
 export type SyncPage = { deleted: true } | { deleted?: false; events: AgentEvent[]; cursor: SyncCursor; reset: boolean; hasMore: boolean; hasEarlier: boolean };
 
-function isSessionSummary(value: unknown): value is SessionSummary {
+export function isSessionSummary(value: unknown): value is SessionSummary {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === "string" && typeof record.title === "string" && typeof record.project === "string" && typeof record.worktree === "string" && typeof record.modified === "string" && Array.isArray(record.tabs) && record.tabs.every(isSummaryTab);

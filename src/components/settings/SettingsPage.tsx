@@ -1,10 +1,11 @@
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { settingsSectionOffered } from "@/lib/settingsSections";
 import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Mic, Network, Palette, Plug, Return, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings2, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   agents: Bot,
   orchestrator: Network,
   environment: KeyRound,
+  localVms: Monitor,
   transcription: Mic,
   integrations: Plug,
   projects: FolderPlus,
@@ -70,11 +72,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [selected, setSelected] = useState(0);
   const [selectionRequest, setSelectionRequest] = useState(0);
   // A section behind a switch in Settings → Experimental is listed, and found, only while the switch is on.
-  const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
-  const offered = useCallback((key: string) => key !== "orchestrator" || orchestratorRuns, [orchestratorRuns]);
-  // searchSettings reads the Experimental switch itself; orchestratorRuns re-runs it when the switch changes.
+  const switches = useExperimentalSettings();
+  const orchestratorRuns = switches?.orchestratorRuns === true;
+  const localVmTasks = switches?.localVmTasks === true;
+  // settingsSectionOffered reads the switches as last read; these re-run it when one changes.
+  const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks]);
+  // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
-  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns]);
+  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns, localVmTasks]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   const highlight = useRef<{ row: HTMLElement; timers: number[] } | null>(null);

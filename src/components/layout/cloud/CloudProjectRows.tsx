@@ -52,6 +52,7 @@ import { createCloudSection, keepFocusForNameField, moveProjectToSection, sectio
 import { errorCode } from "@/lib/cloudTerminals";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { getSessionStore, selectCloudSession, selectCloudWorkspace, openWelcome, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
@@ -163,7 +164,8 @@ function startNewCloudSession(projectKey: string) {
 /** A cloud project, then its sessions along a guide line, like a local project's branches. */
 export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProject; onLifecycle: OnLifecycle }) {
   const store = useSessionStore();
-  const { animations, cloudProjects } = usePrefs();
+  const { cloudProjects } = usePrefs();
+  const reduced = useReducedMotion();
   const { status } = useAccount();
   const filter = useSidebarFilter();
   const menu = useRowMenu();
@@ -321,7 +323,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: project.orgId, workspaceId: only?.item.workspace.id ?? null }} onClose={() => setDiagnostics(false)} />}
       {pipelineOpen && <CloudIssuePipelineSettingsDialog project={project} open onOpenChange={setPipelineOpen} />}
       <div
-        className={cn("grid", animations && "transition-[grid-template-rows,opacity] duration-200 ease-out", open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
+        className={cn("grid", !reduced && "transition-[grid-template-rows,opacity] duration-200 ease-out", open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
         aria-hidden={!open}
         inert={!open}
         data-testid="cloud-project-sessions"

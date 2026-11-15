@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, RefreshControl, SectionList, Settings, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronDown, ChevronRight } from "lucide-react-native";
 import type { CloudOrganization, CloudWorkspaceItem } from "@mobile/cloud/api";
 import { workspaceTitle } from "@mobile/cloud/catalog";
@@ -13,6 +12,8 @@ import { useApp } from "@mobile/state/AppProvider";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { LargeTitle } from "@mobile/ui/glass";
 import { StateMark } from "@mobile/ui/MacIcon";
+import { usePullRefresh } from "@mobile/ui/pull-refresh";
+import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -26,19 +27,22 @@ const PLACEHOLDER_ROWS = 3;
  * While it is on the screen the list is read again now and then, so a
  * workspace someone started or stopped elsewhere shows as such (#500).
  *
- * The title is drawn at once, in its place: the list keeps its own top inset
- * rather than waiting for the system to adjust it (#988). Until the first
+ * The title is drawn at once, in its place: the list keeps its own top inset,
+ * under its own top bar, rather than waiting for the system to adjust it
+ * (#988, #984). Until the first
  * list is read, the one kept from before is shown, or placeholder rows.
  */
 export default function CloudScreen() {
   const app = useApp();
   const { palette } = useTheme();
   const bar = useTabBarInset();
-  const insets = useSafeAreaInsets();
+  const top = useTopBar();
   const router = useRouter();
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
   const [emptyOpen, setEmptyOpen] = useState(false);
+  // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
+  const pull = usePullRefresh(() => catalog?.refresh());
 
   useFocusEffect(useCallback(() => {
     void catalog?.refresh();
@@ -65,18 +69,19 @@ export default function CloudScreen() {
   const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;
   const open = (item: CloudWorkspaceItem) => router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
 
-  return <SectionList sections={sections} keyExtractor={(item) => item.workspace.id} contentInsetAdjustmentBehavior="never" stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }}
-    contentContainerStyle={[styles.content, { paddingTop: insets.top + 6, paddingBottom: bar + 24 }]}
-    scrollIndicatorInsets={{ top: insets.top, bottom: bar }}
-    refreshControl={<RefreshControl refreshing={snapshot.loading && !firstLoad} onRefresh={() => void catalog?.refresh()} tintColor={palette.accent} progressViewOffset={insets.top} />}
-    ListHeaderComponent={<><LargeTitle title="Cloud" />{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
+  // The list scrolls under its own top bar, never over the status bar (#984).
+  const { contentInset, contentOffset, scrollIndicatorInsets, paddingTop } = top.insets;
+  return <View style={[styles.screen, { backgroundColor: palette.page }]}><SectionList sections={sections} keyExtractor={(item) => item.workspace.id} automaticallyAdjustContentInsets={false} contentInsetAdjustmentBehavior="never" contentInset={contentInset} contentOffset={contentOffset} scrollIndicatorInsets={scrollIndicatorInsets} onScroll={top.onScroll} scrollEventThrottle={16} stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }}
+    contentContainerStyle={[styles.content, { paddingTop: paddingTop + styles.content.paddingTop, paddingBottom: bar + 24 }]}
+    refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={paddingTop} />}
+    ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)} />{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
     renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text accessibilityRole="header" numberOfLines={1} style={[styles.sectionTitle, { color: palette.muted }]}>{section.title}</Text>{section.error ? <Text style={[styles.notice, { color: palette.warning }]}>{codeText(section.error)}</Text> : null}</View>}
     renderItem={({ item, index, section }) => <WorkspaceRow item={item} title={workspaceTitle(snapshot, item.workspace)} first={index === 0} last={index === section.data.length - 1} onPress={() => open(item)} />}
     ListEmptyComponent={firstLoad ? <Placeholders />
       : snapshot.error && !snapshot.organizations.length ? undefined
       : empty.length ? <Text style={[styles.empty, { color: palette.muted }]}>No cloud workspaces you can see.</Text>
       : <EmptyState title="No organizations" detail="Cloud workspaces of your organizations appear here." />}
-    ListFooterComponent={empty.length ? <EmptyOrganizations organizations={empty} open={emptyOpen} onToggle={() => setEmptyOpen((value) => !value)} /> : undefined} />;
+    ListFooterComponent={empty.length ? <EmptyOrganizations organizations={empty} open={emptyOpen} onToggle={() => setEmptyOpen((value) => !value)} /> : undefined} /><TopBar title="Cloud" shown={top.shown} /></View>;
 }
 
 /**
@@ -138,7 +143,8 @@ function Placeholders() {
 
 const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
-  content: { paddingHorizontal: 16 },
+  screen: { flex: 1 },
+  content: { paddingHorizontal: 16, paddingTop: 6 },
   sectionHeader: { marginTop: 20, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
   sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.7, textTransform: "uppercase" },
   signInError: { fontSize: 14, lineHeight: 19, textAlign: "center" },

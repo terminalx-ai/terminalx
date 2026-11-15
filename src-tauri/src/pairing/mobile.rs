@@ -677,6 +677,9 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
     let mut sessions = Vec::new();
     for session in store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived) {
         let summary = snippets.get(&session.id);
+        // The name made for each tab, as the Mac names it (absent for a tab the
+        // reader named or one nothing has been made for); older phones ignore it.
+        let generated = summaries::generated_tab_titles(&session);
         // A quick chat has no project: its path is a scratch directory named
         // for the session, which would give the phone one group per chat.
         let quick = session.is_quick();
@@ -707,9 +710,12 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
             "tabs": session.tabs.into_iter().map(|tab| json!({
                 "id": tab.id,
                 "title": tab.title,
+                "generatedTitle": generated.get(&tab.id),
                 "harness": tab.harness,
                 "status": tab.status,
                 "markedUnread": tab.marked_unread,
+                // When the tab was last active: the phone's list shows it on each tab's row.
+                "modified": tab.modified,
             })).collect::<Vec<_>>(),
         }));
     }
@@ -1817,6 +1823,53 @@ mod tests {
         assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
         // Conditional summary reads must also see the metadata change.
         assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
+    }
+
+    #[test]
+    fn the_phone_summary_names_a_tab_by_its_generated_title_beside_its_own() {
+        let _home = store::temp_home();
+        let session = |id: &str, title: &str| -> SessionEntry {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": "/p", "cwd": "/p", "title": title, "created": "x", "modified": id,
+                "tabs": [{ "id": format!("{id}-tab"), "harness": "claude", "created": "x", "title": "You are a worker in a run led" }],
+            }))
+            .unwrap()
+        };
+        let made = session("a", "Tabs show the generated title");
+        let mut named = session("b", "Tabs show the generated title");
+        named.tabs[0].follow.title_pinned = true;
+        named.tabs[0].title = Some("Mine".into());
+        let untitled = session("c", "New session");
+        index::save(&[made, named, untitled]).unwrap();
+
+        let summaries = summaries_with_row_statuses(Value::Null).unwrap();
+        let tab = |id: &str| {
+            summaries["sessions"].as_array().unwrap().iter().find(|session| session["id"] == id).unwrap()["tabs"][0].clone()
+        };
+        // The tab's own title still goes, for older phones; the made one beside it.
+        assert_eq!(tab("a")["title"], "You are a worker in a run led");
+        assert_eq!(tab("a")["generatedTitle"], "Tabs show the generated title");
+        // A tab the reader named keeps its name, and one with nothing made yet has none.
+        assert_eq!(tab("b")["title"], "Mine");
+        assert!(tab("b")["generatedTitle"].is_null());
+        assert!(tab("c")["generatedTitle"].is_null());
+    }
+
+    #[test]
+    fn summaries_date_each_tab_by_its_own_last_activity() {
+        let _home = store::temp_home();
+        let session: SessionEntry = serde_json::from_value(json!({
+            "id": "s", "projectPath": "/p", "cwd": "/p", "title": "t", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-03T00:00:00Z",
+            "tabs": [
+                { "id": "a", "harness": "claude", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-02T08:00:00Z" },
+                { "id": "b", "harness": "codex", "created": "2026-01-01T00:00:00Z", "modified": "2026-01-03T09:30:00Z" },
+            ],
+        }))
+        .unwrap();
+        index::save(&[session]).unwrap();
+        let tabs = summaries_with_row_statuses(Value::Null).unwrap()["sessions"][0]["tabs"].clone();
+        assert_eq!(tabs[0]["modified"], "2026-01-02T08:00:00Z");
+        assert_eq!(tabs[1]["modified"], "2026-01-03T09:30:00Z");
     }
 
     #[test]

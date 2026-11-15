@@ -31,6 +31,7 @@ vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole, accessibilityLabel, testID }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : undefined} aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
   return {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null,
+    Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
     Alert: { alert: mocks.alert },
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
@@ -183,8 +184,9 @@ describe("the Cloud tab", () => {
     expect(text()).not.toContain("E2E Box");
     const folded = button("5 organizations with no workspaces");
     expect(folded.getAttribute("aria-expanded")).toBe("false");
-    // One row in total for the five, at the end.
-    expect(text().endsWith("5 organizations with no workspaces")).toBe(true);
+    // One row in total for the five, at the end of the list (the top bar, #984, is drawn after it).
+    const list = container.querySelector('[data-testid="top-bar"]')!.previousElementSibling!;
+    expect(list.textContent!.endsWith("5 organizations with no workspaces")).toBe(true);
     await click("5 organizations with no workspaces");
     expect(button("5 organizations with no workspaces").getAttribute("aria-expanded")).toBe("true");
     expect(text()).toContain("PersonalE2E BoxE2E VideoE2E IsolatedSandbox");
