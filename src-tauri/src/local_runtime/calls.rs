@@ -86,7 +86,10 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 crate::issue_pipeline::admission::open(session, None)?;
                 let (cols, rows) = size()?;
                 let cwd = string(&params, "cwd")?;
-                let env = crate::store::index::workspace_ports::environment(cwd)?;
+                let mut env = crate::store::index::workspace_ports::environment(cwd)?;
+                // On the session's agent accounts (#980), so `claude` or
+                // `codex` typed here signs in as its agent tabs do.
+                env.extend(crate::session_ops::session_account_env(&crate::store::index::get(session)?));
                 terminals.spawn(sink.clone(), id, crate::pty::PaneSpec { cwd, cols, rows, command: params["command"].as_str(), env: &env })?;
                 if let Some(title) = params["title"].as_str().filter(|title| !title.trim().is_empty()) { terminals.set_title(id, title); }
                 if let Some(shell) = terminals.shell(id) { sink.emit("pty_opened", &shell); }
@@ -191,8 +194,12 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         }
         "create" => {
             manager.accepting_work()?;
-            return Ok(serde_json::to_value(crate::session_ops::create_session_blocking(manager.sink().as_ref(), serde_json::from_value(params["req"].clone())?).map_err(anyhow::Error::msg)?)?);
+            // The account the first tab starts on (#980), beside the request's own fields.
+            let account = params["req"]["account"].as_str();
+            return Ok(serde_json::to_value(crate::session_ops::create_session_blocking_on(manager.sink().as_ref(), serde_json::from_value(params["req"].clone())?, account).map_err(anyhow::Error::msg)?)?);
         }
+        // This runtime starts tabs on the agent account they ask for (#980).
+        "accountSupport" => return Ok(json!(true)),
         "workspaceSetup" => return match string(&params, "operation")? {
             "list" => Ok(serde_json::to_value(crate::workspace_setup::list(manager)?)?),
             "rerun" => Ok(serde_json::to_value(crate::workspace_setup::start(manager, string(&params, "sessionId")?, true)?)?),
@@ -215,7 +222,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "automationDelete" => { crate::automations::remove_definition(&manager.automation_host(), string(&params, "id")?)?; return Ok(Value::Null); }
         "automationRun" => return Ok(serde_json::to_value(crate::automations::dispatch(&manager.automation_host(), string(&params, "id")?, crate::automations::AutomationTrigger::Manual, None)?)?),
         "paneAgents" => return Ok(serde_json::to_value(manager.pane_agents())?),
-        "addTab" => return Ok(serde_json::to_value(manager.add_tab(string(&params, "sessionId")?, &serde_json::from_value(params["tab"].clone())?)?)?),
+        "addTab" => return Ok(serde_json::to_value(manager.add_tab_on(string(&params, "sessionId")?, &serde_json::from_value(params["tab"].clone())?, params["account"].as_str())?)?),
         "resourceOverview" => return Ok(serde_json::to_value(manager.resource_overview())?),
         "resourceSample" => return Ok(serde_json::to_value(manager.resource_sample()?)?),
         "resourceKill" => return Ok(serde_json::to_value(manager.resource_kill(string(&params, "paneId")?, params["confirmed"].as_bool().context("confirmed must be a boolean")?)?)?),
@@ -231,6 +238,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "resetChat" => serde_json::to_value(manager.reset_chat(session, tab, serde_json::from_value(params.get("endSeq").context("endSeq is required (null for Undo)")?.clone())?, params["resetFiles"].as_bool().context("resetFiles is required")?, params["confirm"].as_str())?)?,
         "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
+        "switchAccount" => json!(manager.switch_account(session, tab, string(&params, "account")?)?),
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
         "ensureStarted" => { manager.ensure_started(session, tab)?; Value::Null }

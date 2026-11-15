@@ -188,6 +188,41 @@ struct CliLaunch {
     restart: Option<unsent::Restart>,
 }
 
+/// The agent account a launch resolved to (#980), from its grant.
+#[derive(Debug, Default)]
+struct AccountLaunch {
+    /// The account: `local`, a key, an added account. `None` in a cloud
+    /// workspace, where the workspace's grant decides.
+    id: Option<String>,
+    /// An added subscription's home: Claude Code's `CLAUDE_CONFIG_DIR`,
+    /// Codex's managed `CODEX_HOME`. `None` on This Mac's login or a key.
+    home: Option<PathBuf>,
+}
+
+impl AccountLaunch {
+    fn of(kind: CliKind, grant: &crate::cloud_grants::LaunchGrant) -> Self {
+        let variable = match kind {
+            CliKind::Claude => crate::agent_keys::home_variable(crate::agent_keys::Agent::Claude),
+            CliKind::Codex => crate::agent_keys::home_variable(crate::agent_keys::Agent::Codex),
+        };
+        let home = grant.after_profile.iter().find(|(name, _)| name == variable).map(|(_, value)| PathBuf::from(value));
+        Self { id: grant.account.clone(), home }
+    }
+
+    /// Record the launch under `launch` with the account it runs on: as the
+    /// agent's default when nothing chose another, so a tab with one login
+    /// is counted exactly as before.
+    fn record(&self, launch: &str, harness: &str, session_id: &str, tab_id: &str, asked: bool) {
+        let default = crate::agent_keys::Agent::of(harness)
+            .and_then(|agent| crate::agent_keys::store().and_then(|store| store.entry(agent)).ok())
+            .map(|entry| crate::agent_accounts::agent_default(&entry));
+        match &self.id {
+            Some(id) if asked || default.as_deref() != Some(id.as_str()) => crate::agent_keys::record_launch_on(launch, harness, session_id, tab_id, id),
+            _ => crate::agent_keys::record_launch(launch, harness, session_id, tab_id),
+        }
+    }
+}
+
 /// What the CLI's input box allowed, once a prompt could be typed into it.
 enum InputWait {
     /// Type now. Says, for the diagnostics, what the box was: `empty`;
@@ -1535,17 +1570,32 @@ enum Answering {
 /// Whether the provider's own sandbox could have narrowed what a command run
 /// in `cwd` reads (PRO-330). TerminalX runs a vetted read-only command itself,
 /// outside that sandbox, only when it could not. Not knowing is "it could".
-fn provider_may_restrict(kind: CliKind, session_id: &str, cwd: &Path, transcript: Option<&str>) -> bool {
+fn provider_may_restrict(kind: CliKind, session_id: &str, tab_id: &str, cwd: &Path, transcript: Option<&str>) -> bool {
     // The command's directory and the tab's launch directories: the CLI
     // loaded project settings from where it started, whatever `cd` the model
     // ran since.
     let Ok(session) = index::get(session_id) else { return true };
     let dirs = [cwd, Path::new(&session.cwd), Path::new(&session.project_path)];
     let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
-    let sources = crate::harness::provider_sandbox::Sources::from_env(transcript);
+    // The settings of the account the tab runs on (#980), which its CLI
+    // loaded instead of This Mac's own.
+    let (claude_account, codex_account) = account_dirs(kind, session.tab(tab_id));
+    let sources = crate::harness::provider_sandbox::Sources::from_env_on(transcript, claude_account.as_deref(), codex_account);
     match kind {
         CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
         CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+    }
+}
+
+/// The added account `tab` runs on (#980): Claude Code's directory, or the
+/// Codex account's managed home. Neither on This Mac's login or a key.
+fn account_dirs(kind: CliKind, tab: Option<&TabEntry>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(id) = tab.and_then(crate::session_ops::tab_running_account) else { return (None, None) };
+    let harness = match kind { CliKind::Claude => "claude", CliKind::Codex => "codex" };
+    let Some(dir) = crate::agent_accounts::directory(harness, id).ok().flatten() else { return (None, None) };
+    match kind {
+        CliKind::Claude => (Some(dir), None),
+        CliKind::Codex => (None, store::root().ok().map(|root| codex::home::account_paths(&root, id).1)),
     }
 }
 
@@ -4698,11 +4748,17 @@ impl SessionManager {
     /// session takes no Bypass tab, and the share cannot start between the
     /// check and the save because both hold the sharing lock.
     pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
+        self.add_tab_on(session_id, tab, None)
+    }
+
+    /// [`Self::add_tab`] on agent account `account` (#980); without one, on
+    /// the account its agent's other tabs in the session asked for.
+    pub fn add_tab_on(&self, session_id: &str, tab: &crate::session_ops::NewTab, account: Option<&str>) -> Result<index::TabEntry> {
         let sharing = self.sharing.lock().unwrap();
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
         }
-        let added = crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))?;
+        let added = crate::session_ops::add_tab_entry_on(session_id, tab, account).map_err(|error| anyhow!(error))?;
         self.first_starts.added(key_of(session_id, &added.id), Instant::now());
         Ok(added)
     }
@@ -4712,6 +4768,48 @@ impl SessionManager {
     /// a menu — so the change means replacing the process: now, or once the
     /// turn it would interrupt is over. Until that restart the tab is in the
     /// mode it was in, and is shown in it (`harness::settings`).
+    /// Restart a tab's agent on agent account `account` (#980) and resume
+    /// its conversation: "Switch account" on a tab, "Continue with …" at a
+    /// usage limit. Claude Code's accounts share `projects`, and Codex's
+    /// share `sessions`, so the conversation is found on the new one. A tab
+    /// whose agent is not running only records the account, which its next
+    /// start uses. Refused while a turn runs: it would be cut off.
+    ///
+    /// `true` when a running agent was restarted (or, native Codex, stopped
+    /// to resume on its next prompt); `false` when only the account was
+    /// recorded.
+    pub fn switch_account(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
+        let account = crate::session_ops::requested_account(Some(account)).map_err(|error| anyhow!(error))?.context("Choose an account to switch to.")?;
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        let agent = crate::agent_keys::Agent::of(&tab.harness).ok_or_else(|| anyhow!("This agent has no accounts to switch between."))?;
+        let accounts = crate::agent_keys::store()?.entry(agent)?;
+        anyhow::ensure!(crate::agent_accounts::exists(&accounts, &account), "That account is not one of {}'s on this Mac.", agent.label());
+        if let Some(rt_arc) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() {
+            let rt = rt_arc.lock().unwrap();
+            if let Some(refusal) = Self::by_hand_refusal(&rt, "its account") { bail!(refusal); }
+            anyhow::ensure!(!rt.turn_open, "Wait for the turn to end, or stop it, before switching accounts.");
+        }
+        self.mobile.invalidate_tab(session_id, tab_id);
+        index::update_tab(session_id, tab_id, |t| {
+            crate::session_ops::set_tab_account(t, Some(&account));
+            Ok(())
+        })?;
+        if !self.is_running(session_id, tab_id) {
+            return Ok(false);
+        }
+        let cli = matches!(&self.runtime(session_id, tab_id)?.lock().unwrap().engine, Engine::Cli(_));
+        if cli {
+            // In the same pane, resuming the conversation, as a settings
+            // restart does: the new launch reads the account from the tab.
+            self.restart_for_settings(session_id, tab_id)?;
+        } else {
+            // Native Codex resumes its thread with the next prompt it is sent.
+            self.stop(session_id, tab_id)?;
+        }
+        Ok(true)
+    }
+
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
         self.mobile.invalidate_tab(session_id, tab_id);
         let sharing = self.sharing.lock().unwrap();
@@ -5135,13 +5233,19 @@ impl SessionManager {
         // On a Mac, the API key saved for the agent in Settings, if it uses
         // one (`agent_keys`, PRO-306): a tab set to use a key this runtime
         // does not have is not started on another login.
-        let grant = crate::agent_keys::launch_grant(&tab.harness, Path::new(&entry.cwd))?;
+        // On the agent account the tab asked for, or its project's default,
+        // or its agent's (#980): an added subscription's directory is the
+        // agent's CLAUDE_CONFIG_DIR or CODEX_HOME. With This Mac's login
+        // alone the grant is the one above, word for word.
+        let asked = crate::session_ops::tab_account(tab).map(str::to_owned);
+        let grant = crate::agent_keys::launch_grant_on(&tab.harness, Path::new(&entry.cwd), crate::agent_keys::Choice { account: asked.as_deref(), project: crate::session_ops::project_key(entry) })?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
+        let on = AccountLaunch::of(kind, &grant);
         let launch = match kind {
-            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref())?,
-            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant)?,
+            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref(), &on)?,
+            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant, &on)?,
         };
         // The reader has been told about a substitution already.
         let launched_for = launched_for.map(|asked| Settings { model: launch.model.clone().unwrap_or(asked.model), ..asked });
@@ -5154,7 +5258,10 @@ impl SessionManager {
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
         crate::cloud_grants::record_launch(&pane, &grant);
-        crate::agent_keys::record_launch(&pane, &tab.harness, &rt.session_id, &rt.tab_id);
+        on.record(&pane, &tab.harness, &rt.session_id, &rt.tab_id, asked.is_some());
+        // Set again after the login shell's profile, which could export its
+        // own: an added account's directory (`cloud_grants::env_prefix`).
+        let after_profile = grant.after_profile.clone();
         let mut unset = Vec::new();
         for (name, value) in grant.env {
             match value {
@@ -5170,7 +5277,7 @@ impl SessionManager {
         // `--append-system-prompt` or `developer_instructions` would replace the first.
         let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
         let prompt = crate::cloud_config::prompt_args(&tab.harness, &[config.prompt.as_deref(), computer.note, sparse.as_deref()]);
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset);
+        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
@@ -5230,6 +5337,12 @@ impl SessionManager {
         // Stop path still owns this process.
         let committed = (|| -> Result<()> {
             if launching != waited { self.update_settings(rt, |s| s.launched())?; }
+            if let Some(account) = &on.id {
+                index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    crate::session_ops::set_launched_account(t, account);
+                    Ok(())
+                })?;
+            }
             if let Some(id) = launch.minted {
                 index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                     t.provider_session_id = Some(id.clone());
@@ -5257,8 +5370,11 @@ impl SessionManager {
     /// conversation with no file is refused ("No conversation found") and
     /// the CLI exits on the spot, so one that never started — or whose file
     /// has gone — is started again under the same id (#663).
-    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>) -> Result<CliLaunch> {
-        let projects = crate::agent_data::claude_projects_root().ok_or_else(|| anyhow!("no home directory"))?;
+    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>, on: &AccountLaunch) -> Result<CliLaunch> {
+        // An added account's `projects` is a link to the person's own, so a
+        // conversation resumes on whichever account the tab runs on; it is
+        // followed from where this CLI writes.
+        let projects = crate::agent_data::claude_projects_root_in(on.home.as_deref()).ok_or_else(|| anyhow!("no home directory"))?;
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Where the conversation's file is, not where a conversation started
         // in this folder would be: a resumed one is still written where it
@@ -5312,7 +5428,12 @@ impl SessionManager {
         // machine, the trust dialog for a folder it has not seen — would take
         // the first prompt instead of the composer. The reader adopted this
         // checkout when they made the session.
-        if let Err(e) = claude::trust::prepare(&entry.cwd) {
+        // In the account's own `.claude.json` when the tab runs on one.
+        let trusted = match on.home.as_deref() {
+            Some(dir) => claude::trust::prepare_in(dir, &entry.cwd),
+            None => claude::trust::prepare(&entry.cwd),
+        };
+        if let Err(e) = trusted {
             log::warn!("prepare the Claude Code config for {}: {e:#}", entry.cwd);
         }
         let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
@@ -5322,7 +5443,7 @@ impl SessionManager {
         // allowed: which of the two a `/clear` opens its new file in is the
         // CLI's business.
         let transcript_root = derived.parent().context("the transcript path has no directory")?.to_path_buf();
-        let mut conversation = crate::hooks::ConversationFile::new(projects, format!("{provider_id}.jsonl"));
+        let mut conversation = crate::hooks::ConversationFile::new(projects.clone(), format!("{provider_id}.jsonl"));
         if path != derived {
             conversation.adopt(&path);
         }
@@ -5330,7 +5451,7 @@ impl SessionManager {
         // into its new file when the first turn lands. The app already has all
         // of it, and the copy keeps each record's original uuid, so those are
         // the ones to drop.
-        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
+        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids_in(&projects, &entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
             model: route_model.filter(|model| *model != tab.model),
@@ -5354,6 +5475,7 @@ impl SessionManager {
         exe: &Path,
         env: &mut Vec<(String, String)>,
         grant: &crate::cloud_grants::LaunchGrant,
+        on: &AccountLaunch,
     ) -> Result<CliLaunch> {
         let launcher = codex::pty::Launcher::resolve()?;
         let route = grant.route.as_ref();
@@ -5377,8 +5499,17 @@ impl SessionManager {
             (None, None) => tab.model.clone(),
         };
 
-        let codex::home::Prepared { home, hooks_live } = codex::home::prepare(&entry.cwd, exe, grant.codex_auth.clone()).context("prepare the Codex home")?;
-        env.push(("CODEX_HOME".to_string(), home.to_string_lossy().into_owned()));
+        // An added account's managed home, which its grant names as
+        // CODEX_HOME: built again here for whether its hooks are live.
+        // Otherwise the default managed home, as before accounts.
+        let codex::home::Prepared { home, hooks_live } = match (&on.id, &on.home) {
+            (Some(id), Some(_)) => codex::home::prepare_account(&entry.cwd, exe, &store::root()?, id).context("prepare the account's Codex home")?,
+            _ => {
+                let prepared = codex::home::prepare(&entry.cwd, exe, grant.codex_auth.clone()).context("prepare the Codex home")?;
+                env.push(("CODEX_HOME".to_string(), prepared.home.to_string_lossy().into_owned()));
+                prepared
+            }
+        };
         if !hooks_live {
             // The hooks are what say a turn began, needs a decision, or ended.
             // Without them the chat is only the rollout, which never says the
@@ -6831,7 +6962,7 @@ impl SessionManager {
                 // narrowed what this one reads. Otherwise it is refused, never handed to the agent's
                 // shell: nobody is there to be asked.
                 let transcript = frame.payload["transcript_path"].as_str();
-                let call = crate::orchestration::guard::held(call, store::settings::load().agents.read_only_commands, |cwd| provider_may_restrict(kind, &frame.session, cwd, transcript));
+                let call = crate::orchestration::guard::held(call, store::settings::load().agents.read_only_commands, |cwd| provider_may_restrict(kind, &frame.session, &frame.tab, cwd, transcript));
                 match call {
                     crate::orchestration::guard::VerifierCall::Refuse(reason) => {
                         log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
@@ -7216,7 +7347,7 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                let unconfined = || cwd.is_some_and(|cwd| !provider_may_restrict(kind, &rt.session_id, Path::new(cwd), frame.payload["transcript_path"].as_str()));
+                let unconfined = || cwd.is_some_and(|cwd| !provider_may_restrict(kind, &rt.session_id, &rt.tab_id, Path::new(cwd), frame.payload["transcript_path"].as_str()));
                 match (store::settings::load().agents.read_only_commands && unconfined())
                     .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
                     Some(approved) => (None, Some(approved)),
@@ -7773,6 +7904,10 @@ mod send_tests;
 #[cfg(all(test, unix))]
 #[path = "session_agent_key_tests.rs"]
 mod agent_key_tests;
+
+#[cfg(all(test, unix))]
+#[path = "account_launch_tests.rs"]
+mod account_launch_tests;
 
 #[cfg(test)]
 static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);

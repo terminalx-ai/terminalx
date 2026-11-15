@@ -41,8 +41,9 @@ fn native_path(entry: &index::SessionEntry, tab: &TabEntry) -> Result<PathBuf> {
     let id = tab.provider_session_id.as_deref().context("This tab has no saved agent conversation yet.")?;
     anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid provider conversation id.");
     match tab.harness.as_str() {
-        "claude" => Ok(claude::transcript::locate_in(&crate::agent_data::claude_projects_root().context("Claude's transcript folder is unavailable.")?, &entry.cwd, id)),
-        "codex" => [Some(codex::home::managed_root()?), codex::home::native_root_if_made(), codex::home::user_root()]
+        // Where the account the tab runs on wrote it, then the shared places (#980).
+        "claude" => crate::agent_data::locate_claude(tab, &entry.cwd, id).context("Claude's transcript folder is unavailable."),
+        "codex" => [crate::agent_data::codex_account_home_of(tab), Some(codex::home::managed_root()?), codex::home::native_root_if_made(), codex::home::user_root()]
             .into_iter().flatten().find_map(|home| codex::home::find_rollout(&home, id)).context("Codex's rollout is unavailable."),
         _ => bail!("Reset supports Claude Code and Codex CLI conversations only."),
     }
