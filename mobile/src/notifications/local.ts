@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
+import { prepareCategory } from "../notification-actions";
 import { readHosts } from "../store/hosts";
 import { hostDisplayName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import type { HostConnection } from "../transport/connection";
@@ -217,8 +218,11 @@ async function deliver(hostId: string, event: HostNotification): Promise<void> {
   const settings = await loadNotificationSettings();
   if (!shouldShow(settings, hostId, event, new Date())) return;
   const shown = present(settings, hostId, await machineName(hostId), event);
+  // A question's options, or Allow and Deny, when the lock screen shows everything.
+  const categoryIdentifier = await prepareCategory(shown);
   await Notifications.scheduleNotificationAsync({
     content: {
+      ...(categoryIdentifier ? { categoryIdentifier } : {}),
       title: shown.title,
       body: shown.body,
       ...(shown.subtitle ? { subtitle: shown.subtitle } : {}),

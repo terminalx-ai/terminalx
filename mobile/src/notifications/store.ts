@@ -16,7 +16,10 @@ const listeners = new Set<(settings: NotificationSettings) => void>();
 export function loadNotificationSettings(): Promise<NotificationSettings> {
   if (current) return Promise.resolve(current);
   loading ??= readOrMigrate().then((settings) => {
-    current ??= settings;
+    if (current) return current;
+    current = settings;
+    // A screen that rendered before the first read shows the settings now.
+    for (const listener of [...listeners]) listener(settings);
     return current;
   }).finally(() => { loading = null; });
   return loading;
