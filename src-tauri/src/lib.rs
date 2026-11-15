@@ -148,6 +148,7 @@ mod container_vm;
 mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
+mod machine_name;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -203,6 +204,7 @@ mod terminal_perf;
 #[cfg(feature = "desktop")]
 mod work_claims;
 mod orchestration;
+mod orchestration_archive;
 mod worker_report;
 mod workspaces;
 mod workspace_restore;

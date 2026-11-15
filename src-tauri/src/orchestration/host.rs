@@ -31,6 +31,56 @@ impl ManagerHost {
     pub fn new(sink: Arc<dyn EventSink>, manager: SessionManager) -> Self {
         Self { sink, manager }
     }
+
+    fn queue_retirement(&self, run: &Run) {
+        if !run.state.ended() { return; }
+        let host = self.clone();
+        let run = run.clone();
+        engine::after_starting(move || host.retire_automatically(&run, true));
+    }
+
+    /// Sweep retries never stop final workers or a new turn. Preservation happens
+    /// before Stop; a prompt admitted while it runs makes the final check refuse.
+    pub(crate) fn retire_automatically(&self, snapshot: &Run, include_final: bool) {
+        static RETIRING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _retiring = RETIRING.lock().unwrap_or_else(|error| error.into_inner());
+        let Ok(run) = super::store::get(&snapshot.id) else { return };
+        if !run.state.ended() { return; }
+        let archival = run.archival_workers();
+        for worker in run.finished_workers() {
+            let archive = archival.iter().any(|w| w.session_id == worker.session_id);
+            if !archive && !include_final { continue; }
+            let Ok(session) = index::get(&worker.session_id) else { continue };
+            if session.archived || session.worktree_removed || session.archive.unarchived_at.is_some() { continue; }
+            let last_message = crate::store::message_activity::last_message_at(&session);
+            let idle = || index::get(&worker.session_id).is_ok_and(|current|
+                current.cwd == session.cwd && !current.worktree_removed
+                && current.archive.unarchived_at.is_none()
+                && crate::store::message_activity::last_message_at(&current) == last_message
+                && current.tabs.iter().all(|tab| self.manager.pipeline_idle(&current.id, &tab.id)));
+            if !idle() { continue; }
+            let head = crate::git::head_commit(Path::new(&session.cwd));
+            if archive && !super::retirement::retry_allowed(&run, worker, &head) { continue; }
+            let result = (|| -> anyhow::Result<()> {
+                if archive { Host::preserve_worker(self, &run, worker)?; }
+                use crate::issue_pipeline::admission::{self, Kind, Scope};
+                let _fence = {
+                    let _admission = admission::lock();
+                    anyhow::ensure!(idle() && !super::retirement::recovered(worker), "Worker resumed during preservation; leave its turn running");
+                    admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(Path::new(&session.cwd))])
+                };
+                Host::stop_worker_for_cleanup(self, worker)?;
+                if archive { Host::archive_worker(self, &run, worker)?; }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let failure = super::retirement::ArchiveFailure { head, reason: format!("{error:#}") };
+                if let Err(error) = super::retirement::record_failure(&run, worker, Some(failure)) {
+                    log::warn!("Record worker retirement failure: {error:#}");
+                }
+            }
+        }
+    }
 }
 
 /// How often the watcher looks for stalled workers and runs due to resume.
@@ -85,6 +135,42 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
 }
 
 impl Host for ManagerHost {
+    fn retire_workers_later(&self, run: &Run) { self.queue_retirement(run); }
+    fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
+        let Some(session) = index::load()?.into_iter().find(|s| s.id == worker.session_id) else { return Ok(false) };
+        if session.worktree_removed { return Ok(false); }
+        use crate::issue_pipeline::admission::{self, Kind, Scope};
+        let _fence = {
+            let _admission = admission::lock();
+            let current = index::get(&session.id)?;
+            anyhow::ensure!(current.cwd == session.cwd && current.tabs.iter().all(|tab| self.manager.pipeline_idle(&current.id, &tab.id)),
+                "Worker has moved or has an active or queued turn; leave it running and retry cleanup when idle");
+            admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(Path::new(&session.cwd))])
+        };
+        engine::stop_worker_agents(&session.tabs, &|tab| self.manager.is_running(&session.id, tab), &|tab| self.manager.stop(&session.id, tab))
+    }
+
+    fn preserve_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        if index::get(&worker.session_id)?.worktree_removed { return Ok(()); }
+        super::retirement::preserve(run, worker)
+    }
+
+    fn archive_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> {
+        use crate::issue_pipeline::admission::{self, Kind, Scope};
+        let session = index::get(&worker.session_id)?;
+        if session.worktree_removed { return Ok(()); }
+        let fence = {
+            let _admission = admission::lock();
+            anyhow::ensure!(!session.tabs.iter().any(|tab| self.manager.is_running(&session.id, &tab.id)), "Worker is still running");
+            admission::fence(Kind::Refuse(admission::RUN_MERGING), [Scope::working_tree(Path::new(&session.cwd))])
+        };
+        // Recheck the saved receipt under the prompt fence, without another full fetch.
+        super::retirement::verify_saved(run, worker)?;
+        crate::session_archive::set_archived(&*self.sink, std::slice::from_ref(&worker.session_id), true, crate::session_archive::By::Automation)?;
+        drop(fence);
+        Ok(())
+    }
+
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
@@ -429,6 +515,18 @@ impl Host for ManagerHost {
 }
 
 impl Checkouts for ManagerHost {
+    fn retire_workers_later(&self, run: &Run) { self.queue_retirement(run); }
+    fn worker_recovered(&self, worker: &SessionRef) -> bool { super::retirement::recovered(worker) }
+    fn stop_agents_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> { Host::stop_worker_for_cleanup(self, worker) }
+    fn preserve_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> { Host::preserve_worker(self, run, worker) }
+    fn archive_worker(&self, run: &Run, worker: &SessionRef) -> anyhow::Result<()> { Host::archive_worker(self, run, worker) }
+    fn run_pr_merged(&self, run: &Run) -> anyhow::Result<bool> { Ok(super::retirement::merged_pr(run)?.is_some()) }
+    fn preserve_worker_tip(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, tip: &str) -> anyhow::Result<()> {
+        Host::preserve_worker(self, run, worker)?;
+        anyhow::ensure!(super::retirement::preserved(Path::new(&run.project_path), &worktree.path, tip), "The exact worker tip is not preserved");
+        Ok(())
+    }
+
     fn lead_checkout(&self, run: &Run) -> anyhow::Result<PathBuf> {
         Ok(PathBuf::from(index::get(&run.lead.session_id).context("the lead's session is gone")?.cwd))
     }
@@ -504,21 +602,22 @@ impl Checkouts for ManagerHost {
     fn remove(&self, run: &Run, worker: &SessionRef, worktree: &Worktree, still_safe: &dyn Fn() -> Result<(), String>) -> anyhow::Result<()> {
         let path = worktree.path.to_string_lossy().into_owned();
         let expected = [worker.session_id.clone()];
+        let superseded = run.superseded_workers().iter().any(|w| w.session_id == worker.session_id);
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &run.project_path,
             path: &path,
-            sessions: crate::session_ops::SessionsFate::Delete,
+            sessions: if run.superseded_workers().iter().any(|w| w.session_id == worker.session_id) { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
             // Never the branch: what was merged is named by it, and what was not is kept by it.
             delete_branch: false,
             // `cleanup` has looked already, and looks again through `guard`: clean, and every commit in the
             // lead's branch (or, with the lead gone, in the project's base branch).
-            confirmation: crate::session_ops::Confirmation::Forced,
+            confirmation: if run.superseded_workers().iter().any(|w| w.session_id == worker.session_id) { crate::session_ops::Confirmation::Single } else { crate::session_ops::Confirmation::Forced },
             // Only the worker's own session goes: one somebody else opened there keeps the worktree.
             expected_sessions: Some(&expected),
             direct: crate::git::DirectDelete::Never,
-            fetch: crate::landed::Fetch::Skip,
+            fetch: if superseded { crate::landed::Fetch::Fresh } else { crate::landed::Fetch::Skip },
             guard: Some(still_safe),
-            archive: None,
+            archive: superseded.then(|| crate::archive_script::Runner { terminals: self.manager.terminals(), sink: &self.sink, unattended: true }),
             archive_failure: None,
             archive_retry: None,
             archive_started: None,

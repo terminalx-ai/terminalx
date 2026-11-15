@@ -1131,7 +1131,7 @@ fn cloud_agents(manager: &SessionManager, root: &Path, sink: Arc<dyn crate::sink
         fn put_checkpoint(&self, _: &str, _: &Checkpoint) -> Result<PutOutcome, CallError> { Ok(PutOutcome::Stored) }
         fn delete_checkpoint(&self, _: &str) -> Result<(), CallError> { Ok(()) }
     }
-    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: root.to_string_lossy().into_owned() };
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: Some(root.to_string_lossy().into_owned()) };
     let identity = crate::cloud_agents::Identity { organization_id: "org".into(), workspace_id: "ws".into() };
     crate::cloud_agents::CloudAgents::open(&root.join("cloud-agent"), Arc::new(ops), Some(sink), Some((Arc::new(Server), identity)), 1).unwrap()
 }

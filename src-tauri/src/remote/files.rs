@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -66,6 +66,13 @@ struct Upload {
 
 pub struct WorkspaceFiles {
     root: PathBuf,
+    /// Further folders a path may name absolutely: a machine project's own
+    /// worktrees that live outside its folder, when Settings puts worktrees
+    /// in an absolute directory (`machine/1`, docs/MACHINES.md). Canonical,
+    /// one worktree each, never the directory that holds them, so another
+    /// project's worktree beside it stays out of reach. Empty for a cloud
+    /// workspace, whose worktrees are inside it.
+    worktrees: RwLock<Vec<PathBuf>>,
     /// Staged uploads live here, outside the workspace, so a half-sent file
     /// is never seen by the tree, Git or an agent.
     staging: PathBuf,
@@ -84,23 +91,65 @@ impl WorkspaceFiles {
     /// `root` is canonical.
     pub fn new(root: PathBuf) -> Self {
         let staging = std::env::temp_dir().join(format!("terminalx-uploads-{}", uuid::Uuid::new_v4().simple()));
-        Self { root, staging, uploads: Mutex::new(HashMap::new()), searches: Mutex::new(HashMap::new()) }
+        Self { root, worktrees: RwLock::new(Vec::new()), staging, uploads: Mutex::new(HashMap::new()), searches: Mutex::new(HashMap::new()) }
+    }
+
+    /// The folder every relative path is resolved in.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The worktrees outside the folder that absolute paths may name; each
+    /// canonical. Replaces the previous set.
+    pub fn set_worktrees(&self, worktrees: Vec<PathBuf>) {
+        *self.worktrees.write().unwrap() = worktrees;
+    }
+
+    /// The folder `path` is inside: the root, or one of the outside
+    /// worktrees. Compared by components, so `/a/bc` is not inside `/a/b`.
+    fn base(&self, path: &Path) -> Option<PathBuf> {
+        if path.starts_with(&self.root) {
+            return Some(self.root.clone());
+        }
+        self.worktrees.read().unwrap().iter().find(|worktree| path.starts_with(worktree)).cloned()
+    }
+
+    /// Whether `path` (canonical) is inside the root or an outside worktree.
+    pub fn contains(&self, path: &Path) -> bool {
+        self.base(path).is_some()
+    }
+
+    fn is_base(&self, path: &Path) -> bool {
+        path == self.root || self.worktrees.read().unwrap().iter().any(|worktree| worktree == path)
     }
 
     // ---- paths -----------------------------------------------------------
 
-    /// A workspace-relative path, lexically: no root, drive or `..`.
+    /// A workspace-relative path, lexically: no root, drive or `..`. An
+    /// absolute one only names a file in an outside worktree.
     pub fn lexical(&self, relative: &str) -> Result<PathBuf, RpcError> {
         if relative.len() > 4096 || relative.contains('\0') {
             return Err(RpcError::new("path_forbidden", "invalid path"));
         }
         let mut clean = PathBuf::new();
-        for component in Path::new(relative).components() {
+        let mut absolute = false;
+        for (index, component) in Path::new(relative).components().enumerate() {
             match component {
                 Component::Normal(part) => clean.push(part),
                 Component::CurDir => {}
+                Component::RootDir if index == 0 => {
+                    absolute = true;
+                    clean.push(Component::RootDir);
+                }
                 _ => return Err(RpcError::new("path_forbidden", "paths are workspace-relative and may not leave it")),
             }
+        }
+        if absolute {
+            // Lexically inside one of the project's own worktrees, or nothing.
+            return match self.base(&clean) {
+                Some(base) if base != self.root => Ok(clean),
+                _ => Err(RpcError::new("path_forbidden", "paths are workspace-relative and may not leave it")),
+            };
         }
         Ok(self.root.join(clean))
     }
@@ -109,7 +158,7 @@ impl WorkspaceFiles {
     pub fn existing_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
         let path = self.lexical(relative)?;
         let resolved = std::fs::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
-        if !resolved.starts_with(&self.root) {
+        if self.base(&resolved).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
         Ok(resolved)
@@ -119,12 +168,12 @@ impl WorkspaceFiles {
     /// resolve inside the workspace.
     fn entry_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
         let path = self.lexical(relative)?;
-        if path == self.root {
+        if self.is_base(&path) {
             return Err(RpcError::new("path_forbidden", "the workspace root cannot be replaced"));
         }
         let parent = path.parent().ok_or_else(|| RpcError::new("path_forbidden", "invalid path"))?;
         let parent = std::fs::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
-        if !parent.starts_with(&self.root) {
+        if self.base(&parent).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
         Ok(parent.join(path.file_name().expect("a normal component")))
@@ -139,6 +188,8 @@ impl WorkspaceFiles {
         Ok(path)
     }
 
+    /// How a client names `path`: relative to the root, or, in an outside
+    /// worktree, absolute.
     pub fn relative(&self, path: &Path) -> String {
         path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
     }
@@ -147,14 +198,15 @@ impl WorkspaceFiles {
     /// ancestors below the root is a symlink that leaves the workspace (a
     /// recursive watcher may have followed one).
     pub fn visible(&self, path: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(&self.root) else { return false };
-        let mut at = self.root.clone();
+        let Some(base) = self.base(path) else { return false };
+        let Ok(relative) = path.strip_prefix(&base) else { return false };
+        let mut at = base.clone();
         for component in relative.components() {
             let Component::Normal(part) = component else { return false };
             at.push(part);
             match std::fs::symlink_metadata(&at) {
                 Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(&at) {
-                    Ok(target) if target.starts_with(&self.root) => {}
+                    Ok(target) if self.base(&target).is_some() => {}
                     // Dangling or outside: the link itself may be named, nothing under it.
                     _ => return at == path,
                 },
@@ -191,7 +243,7 @@ impl WorkspaceFiles {
             let path = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
             let Ok(own) = entry.metadata() else { continue };
             let mut described = if own.file_type().is_symlink() {
-                let mut link = match std::fs::canonicalize(entry.path()).ok().filter(|target| target.starts_with(&self.root)) {
+                let mut link = match std::fs::canonicalize(entry.path()).ok().filter(|target| self.base(target).is_some()) {
                     Some(target) => match std::fs::metadata(&target) {
                         Ok(meta) => stat_json(&name, &meta),
                         Err(_) => continue,
@@ -512,7 +564,10 @@ impl WorkspaceFiles {
         if let Some(previous) = self.searches.lock().unwrap().insert(key.clone(), flag.clone()) {
             previous.store(true, Ordering::Relaxed);
         }
-        let result = crate::files::search_text_under(&self.root, &base, &p.query, p.regex, p.case_sensitive, p.whole_word, limit, None, &flag);
+        // Hits are named relative to the folder searched in; one in an outside
+        // worktree is named absolutely, as every path there is.
+        let within = self.base(&base).ok_or_else(|| RpcError::new("path_forbidden", "the path resolves outside the workspace"))?;
+        let result = crate::files::search_text_under(&within, &base, &p.query, p.regex, p.case_sensitive, p.whole_word, limit, None, &flag);
         {
             let mut searches = self.searches.lock().unwrap();
             if searches.get(&key).is_some_and(|current| Arc::ptr_eq(current, &flag)) {
@@ -525,6 +580,9 @@ impl WorkspaceFiles {
         let mut hits = Vec::with_capacity(found.hits.len());
         let mut files = std::collections::HashSet::new();
         for mut hit in found.hits {
+            if within != self.root {
+                hit.path = within.join(&hit.path).to_string_lossy().into_owned();
+            }
             let shown = hit.text.chars().count() as u32;
             hit.matches.retain(|(start, _)| *start < shown);
             hit.matches.truncate(MAX_MATCHES_PER_HIT);
@@ -580,9 +638,11 @@ impl WorkspaceFiles {
             let mut paths: Vec<String> = events
                 .iter()
                 .filter(|event| files.visible(&event.path))
-                .filter_map(|event| event.path.strip_prefix(&files.root).ok())
-                .filter(|path| !path.starts_with(".git"))
-                .map(|path| path.to_string_lossy().into_owned())
+                .filter_map(|event| {
+                    let base = files.base(&event.path)?;
+                    let inner = event.path.strip_prefix(&base).ok()?;
+                    (!inner.starts_with(".git")).then(|| files.relative(&event.path))
+                })
                 .filter(|path| !path.is_empty() && !is_staging_name(path))
                 .collect();
             paths.sort();
