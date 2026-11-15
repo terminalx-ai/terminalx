@@ -168,3 +168,18 @@ it("does not invent a provisioning link when details omit it", async () => {
   expect(screen.queryByRole("button", { name: "Open provisioning log" })).toBeNull();
   expect(m.openUrl).not.toHaveBeenCalled();
 });
+
+it("invalidates an open card across an account switch away and back without copying again", async () => {
+  const view = render(<CloudWorkspaceDetailsCard item={item} initialCopy="machine" />);
+  await waitFor(() => expect(m.copy).toHaveBeenCalledTimes(1));
+  act(() => {
+    m.status.context.account = "other";
+    m.accountListeners.forEach((fn) => fn());
+    m.status.context.account = "me";
+    m.accountListeners.forEach((fn) => fn());
+  });
+  view.rerender(<CloudWorkspaceDetailsCard item={item} initialCopy="machine" />);
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("account changed"));
+  expect(screen.queryByText("artifact-sha")).toBeNull();
+  expect(m.copy).toHaveBeenCalledTimes(1);
+});

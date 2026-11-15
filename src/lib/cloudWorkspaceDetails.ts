@@ -53,9 +53,20 @@ function requireContracts() {
 }
 
 /** Scope includes active profile: these APIs require the active organization. */
-export function detailsScope(): string {
+function accountScope(): string {
   const { status } = getAccount();
   return JSON.stringify([status.state, status.context, status.identity?.email, status.identity?.organizationId]);
+}
+
+// Remember transitions, including A -> B -> A between asynchronous observations.
+let accountEpoch = 0;
+let observedScope = accountScope();
+subscribeAccount(() => {
+  const next = accountScope();
+  if (next !== observedScope) { observedScope = next; ++accountEpoch; }
+});
+export function detailsScope(): string {
+  return JSON.stringify([accountEpoch, accountScope()]);
 }
 
 export function useWorkspaceDetailsAvailable(): boolean {
@@ -149,8 +160,14 @@ export async function restartCloudWorkspace(item: CloudWorkspaceListItem): Promi
         validate(observed, operationId);
         snapshot = observed;
         pollDelay = 1500;
-      } catch {
+      } catch (error) {
         current();
+        const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+        if (["invalid_access_token", "active_organization_required", "cloud_workspace_not_found",
+          "cloud_workspace_manager_required", "organization_admin_required", "account_context_changed",
+          "account_context_changed_after_send"].includes(code)) {
+          throw new Error(lifecycleErrorMessage(code));
+        }
         // Retry this operation, never POST another restart. Invalid/mismatched
         // responses cannot settle it either. Bound traffic during outages.
         pollDelay = Math.min(pollDelay * 2, 30_000);

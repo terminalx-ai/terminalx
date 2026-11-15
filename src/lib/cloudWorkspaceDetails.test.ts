@@ -5,10 +5,10 @@ import type { CloudWorkspaceDetailsResponse } from "./cloudWorkspaceDetails";
 const m = vi.hoisted(() => ({
   status: { organizations: [{ id: "org", role: "member" }], state: "signed-in", context: { scope: "org", revision: "1", account: "me" }, identity: { email: "a@b.c", organizationId: "org" } },
   api: { phase2DesktopContractsAvailable: vi.fn(), cloudWorkspaceRestart: vi.fn(), cloudWorkspaceOperationDto: vi.fn(), cloudWorkspaceDetails: vi.fn() },
-  apply: vi.fn(), refresh: vi.fn(), reconnect: vi.fn(),
+  listeners: new Set<() => void>(), apply: vi.fn(), refresh: vi.fn(), reconnect: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: m.api, projectCloudWorkspaceSnapshot: (s: any) => ({ ...s, operation: { ...s.operation, action: s.operation.action === "restart" ? "resume" : s.operation.action, transportAction: s.operation.action } }) }));
-vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: m.status }), subscribeAccount: () => () => {} }));
+vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: m.status }), subscribeAccount: (fn: () => void) => { m.listeners.add(fn); return () => m.listeners.delete(fn); } }));
 vi.mock("@/lib/cloudCatalog", () => ({ applyCloudSnapshot: m.apply, refreshCloudCatalog: m.refresh }));
 vi.mock("@/lib/cloudConnections", () => ({ reconnectCloudWorkspace: m.reconnect }));
 vi.mock("@/lib/cloudCollab", () => ({ workspaceAuthority: (w: any) => ({ lifecycle: w.you?.role === "manager" }) }));
@@ -144,7 +144,7 @@ it("retries polling errors with capped backoff without releasing pending ownersh
 it("stops outage retries on account change without applying or reconnecting", async () => {
   vi.useFakeTimers();
   m.api.cloudWorkspaceRestart.mockResolvedValue(snapshot("queued"));
-  m.api.cloudWorkspaceOperationDto.mockRejectedValue({ code: "invalid_access_token" });
+  m.api.cloudWorkspaceOperationDto.mockRejectedValue(new Error("Network unavailable"));
   const pending = restartCloudWorkspace(item);
   const refusal = expect(pending).rejects.toThrow("account changed");
   await vi.advanceTimersByTimeAsync(1500);
@@ -164,4 +164,32 @@ it("keeps active-org and preparation management restrictions while allowing ordi
   expect(canRestartWorkspace(preparation)).toBe(true);
   m.status.identity.organizationId = "other";
   expect(canRestartWorkspace(item)).toBe(false);
+});
+
+it("surfaces permanent polling refusal and releases the local pending guard", async () => {
+  vi.useFakeTimers();
+  m.api.cloudWorkspaceRestart.mockResolvedValue(snapshot("queued"));
+  m.api.cloudWorkspaceOperationDto.mockRejectedValue({ code: "cloud_workspace_not_found" });
+  const pending = restartCloudWorkspace(item);
+  const refusal = expect(pending).rejects.toThrow("cloud_workspace_not_found");
+  await vi.advanceTimersByTimeAsync(1500);
+  await refusal;
+  expect(m.reconnect).not.toHaveBeenCalled();
+  m.api.cloudWorkspaceRestart.mockResolvedValue(snapshot("succeeded"));
+  await restartCloudWorkspace(item);
+});
+it("fences an account transition away and back between polls", async () => {
+  vi.useFakeTimers();
+  m.api.cloudWorkspaceRestart.mockResolvedValue(snapshot("queued"));
+  const pending = restartCloudWorkspace(item);
+  const refusal = expect(pending).rejects.toThrow("account changed");
+  await Promise.resolve();
+  m.status.context.account = "other";
+  m.listeners.forEach((fn) => fn());
+  m.status.context.account = "me";
+  m.listeners.forEach((fn) => fn());
+  await vi.advanceTimersByTimeAsync(1500);
+  await refusal;
+  expect(m.api.cloudWorkspaceOperationDto).not.toHaveBeenCalled();
+  expect(m.reconnect).not.toHaveBeenCalled();
 });

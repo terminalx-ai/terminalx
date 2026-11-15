@@ -111,3 +111,7 @@ with mocks, not a native build. This worker reports partial integration because
 the required native commands are absent from this branch and collecting or
 editing their files is outside the allowed scope. The lead must collect the
 contracts worker before native integration validation; activation remains held.
+
+## Lead integration validation
+
+The accepted native contracts are collected on the desktop wave branch. Production activation remains held until SaaS shared integration and live readiness are confirmed. Contract checks use local HTTP mocks and frontend fixtures; they do not certify live delivery, native two-account timing, or deployed restart/reattachment. Existing catalog polling remains enabled.

@@ -100,3 +100,9 @@ Try 3 local checks:
   changing the lockfile, then reran the required command successfully.
 - TypeScript compiler-host check substituting only the contracts branch's
   `src/lib/api.ts` in memory: exit 0, zero diagnostics. No shared file changed.
+
+## Lead integration validation
+
+The accepted native contracts are collected on the desktop wave branch. Production activation remains held until SaaS shared integration and live readiness are confirmed. Contract checks use local HTTP mocks and frontend fixtures; they do not certify live delivery, native two-account timing, or deployed restart/reattachment. Existing catalog polling remains enabled.
+
+Restart observation retries transient failures with bounded backoff. Permanent authentication/access refusals surface an error and release the local dialog guard; this does not cancel the server operation. Account transition epochs invalidate in-flight work and open details even when switching away and back between polls.
