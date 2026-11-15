@@ -77,6 +77,18 @@ pub struct Settings {
     /// Paired phones (PRO-314). The Rust side holds the power assertion, so
     /// it reads these for itself.
     pub pairing: PairingSettings,
+    /// Operating this computer from another one (PRO-338). The runtime opens
+    /// its listener and relay registration only while this says so.
+    pub machines: MachinesSettings,
+}
+
+/// Other computers that operate this one (docs/MACHINES.md decisions 4 and 9).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MachinesSettings {
+    /// "Let other computers operate this Mac": off until the person turns it
+    /// on. Off, the runtime opens no listener and registers nothing.
+    pub allow_operating: bool,
 }
 
 /// Paired phones and this Mac (docs/PAIRING-APPROVAL.md).
@@ -723,6 +735,7 @@ impl Default for Settings {
             diagnostics: DiagnosticsSettings::default(),
             orchestrator: OrchestratorSettings::default(),
             pairing: PairingSettings::default(),
+            machines: MachinesSettings::default(),
         }
     }
 }

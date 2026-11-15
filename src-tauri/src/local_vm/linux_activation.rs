@@ -16,11 +16,7 @@ pub(super) fn capability() -> Value {
     json!({"available":false,"reason":"Linux activation requires verified native artifacts and live supervision acceptance. Source/fixture verification does not enable production activation."})
 }
 fn script() -> String {
-    let helpers = include_str!("guest_linux_install.py")
-        .split("\nif __name__ == \"__main__\":")
-        .next()
-        .unwrap();
-    format!("{helpers}\n{}", include_str!("guest_linux_activation.py"))
+    format!("{}\n{}", linux_install::helpers(), include_str!("guest_linux_activation.py"))
 }
 pub(super) fn invoke(target: &Target, header: &Value) -> Result<Value> {
     invoke_at(

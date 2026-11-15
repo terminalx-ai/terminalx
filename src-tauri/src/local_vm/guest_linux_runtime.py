@@ -1,0 +1,69 @@
+"""Loaded after the installer helpers and run as root by exact-ID exec (#978).
+
+seal: stores the host's verified artifact, delivered on stdin, as the sealed
+runtime. Root never reads a file the guest account can write.
+
+rpc: proves the sealed inode still holds the digest the host expects, drops to
+the dedicated account and executes that same descriptor. This process never
+reads stdin, so the host key stays in the pipe until the verified runtime
+reads it; on any refusal it is never read at all.
+"""
+import base64
+
+ACCOUNT = "cua"
+
+
+def drop_to_account():
+    entry = pwd.getpwnam(ACCOUNT)
+    require(entry.pw_uid != 0 and entry.pw_dir == "/home/cua", "Dedicated nonroot cua account required")
+    os.initgroups(ACCOUNT, entry.pw_gid)
+    os.setgid(entry.pw_gid)
+    os.setuid(entry.pw_uid)
+    require(os.getuid() == os.geteuid() == entry.pw_uid and os.getgid() == os.getegid() == entry.pw_gid,
+            "Privilege drop failed")
+    try:
+        os.setuid(0)
+    except PermissionError:
+        return entry
+    raise ValueError("Privilege drop is reversible")
+
+
+def runtime_main(argv, stdin, execute=os.execve, drop=drop_to_account):
+    require(len(argv) == 1 and len(argv[0]) <= 4096, "Bounded runtime envelope required")
+    header = json.loads(base64.b64decode(argv[0], validate=True))
+    expected = header.get("runtimeSha256")
+    require(isinstance(expected, str) and len(expected) == 64
+            and all(c in "0123456789abcdef" for c in expected), "Verified runtime digest required")
+    require(os.geteuid() == SEALED_OWNER, "The sealed runtime is managed as root")
+    if header.get("action") == "seal":
+        require(set(header) == {"action", "runtimeSha256", "bytes"} and isinstance(header["bytes"], int)
+                and 64 <= header["bytes"] <= LIMIT, "Unknown seal fields")
+        data = stdin.read(header["bytes"] + 1)
+        require(len(data) == header["bytes"], "Incomplete or oversized artifact input")
+        return {"status": seal(data, expected), "path": str(SEALED), "runtimeSha256": expected}
+    require(header.get("action") == "rpc" and set(header) == {"action", "runtimeSha256"},
+            "Unknown runtime action")
+    fd = open_sealed(expected)
+    entry = drop()
+    os.chdir(entry.pw_dir)
+    env = {"HOME": entry.pw_dir, "USER": ACCOUNT, "LOGNAME": ACCOUNT,
+           "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+    # fexecve: the inode just hashed, not whatever the path names next. The
+    # runtime runs as cua, like the workers; its first act is to make itself
+    # non-dumpable (guest.rs seal_key_holder), which closes /proc/<pid>/fd/0,
+    # mem and ptrace to them. Known residual (#1000): the key is forwarded to
+    # the owner's socket under cua's own runtime directory, which a worker as
+    # cua can replace, and a worker can race that first instruction. Closing
+    # it needs the key-verifying owner under its own account.
+    execute(fd, [str(SEALED), "local-vm-rpc", "-"], env)
+    raise ValueError("Sealed runtime did not execute")
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps({"ok": True, "result": runtime_main(sys.argv[1:], sys.stdin.buffer)},
+                         separators=(",", ":")))
+    except Exception as error:
+        # Exit 0, like `local-vm-rpc`: the host reads this refusal's reason
+        # from the reply, where a failing exit would replace it with a generic one.
+        print(json.dumps({"ok": False, "error": str(error)}, separators=(",", ":")))

@@ -176,8 +176,10 @@ mod quit;
 mod native_menu;
 #[cfg(feature = "desktop")]
 mod chat_windows;
-mod relay_e2ee;
+pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_host;
+pub mod machine_wire;
 mod session;
 mod sidebar_activity;
 mod session_archive;

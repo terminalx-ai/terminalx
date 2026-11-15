@@ -2184,10 +2184,14 @@ pub async fn project_overview(project_path: String) -> CmdResult<crate::project_
         .map_err(err)
 }
 
-/// Take the agent's title for a conversation that still has a made-up one.
+/// Take the agent's title for a conversation that still has a made-up one,
+/// and give its tabs the names made for them.
 #[tauri::command]
 pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
-    if let Some(session) = crate::session_ops::adopt_agent_title(&session_id)? {
+    let named = crate::session_ops::adopt_agent_title(&session_id)?;
+    // Then its tabs, so a lone tab takes the session's new name.
+    let tabs = crate::session_ops::adopt_tab_titles(&session_id)?;
+    if let Some(session) = tabs.or(named) {
         let _ = app.emit("session_updated", &session);
     }
     Ok(())

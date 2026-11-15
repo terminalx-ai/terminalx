@@ -40,6 +40,21 @@ args=sys.argv[1:]
 if args[0]=='inspect':
  assert args==['inspect','--format','{{json .}}','a'*64]
  print((root/'inspection.json').read_text());sys.exit(0)
+if args[:4]==['exec','-i','--user','0:0']:
+ # The root sealed-runtime program, with a disposable root it owns.
+ assert args[4:10]==['--workdir','/','a'*64,'/usr/bin/python3','-I','-c'] and len(args)==12
+ module=types.ModuleType('disposable_sealed_runtime')
+ exec(compile(args[10].replace('if __name__ == "__main__":','if False:'),'<runtime-source>','exec'),module.__dict__)
+ module.SEALED_ROOT=root/'sealed-root'
+ module.SEALED_ROOT.mkdir(mode=0o755,exist_ok=True)
+ module.SEALED=module.SEALED_ROOT/'opt/terminalx-local/bin/terminalx-serve'
+ module.SEALED_OWNER=__import__('os').geteuid()
+ with (root/'calls').open('a') as out: out.write('seal\n')
+ if (root/'lose-seal').exists(): sys.exit(74)
+ try: result=module.runtime_main(args[11:],sys.stdin.buffer)
+ except Exception as error: print(json.dumps({'ok':False,'error':str(error)}));sys.exit(0)
+ result['path']='/opt/terminalx-local/bin/terminalx-serve'
+ print(json.dumps({'ok':True,'result':result}));sys.exit(0)
 assert args[:10]==['exec','-i','--user','cua','--workdir','/home/cua','a'*64,'/usr/bin/python3','-I','-c']
 assert len(args)==11
 module=types.ModuleType('disposable_guest_installer')
@@ -92,37 +107,13 @@ print(json.dumps({'ok':True,'result':result}))
         linux_profile::prepare(&self.root(), key, &self.binding, &self.artifact).unwrap()
     }
     pub(crate) fn deliver(&self, key: &str) -> Value {
-        linux_profile::execute_prepared(
-            &self.root(),
-            &self.journal,
-            key,
-            |binding, path, intent| {
-                let bytes = std::fs::read(path)?;
-                invoke_at(
-                    &self.driver,
-                    &binding.target,
-                    &header("install", key, intent)?,
-                    Some(&bytes),
-                )?;
-                invoke_at(
-                    &self.driver,
-                    &binding.target,
-                    &header("receipt", key, intent)?,
-                    None,
-                )
-            },
-        )
-        .unwrap()
+        deliver_with(&self.root(), &self.journal, key, &|_| Ok(self.driver.clone())).unwrap()
     }
     fn reconcile(&self, key: &str) -> Result<Value> {
-        linux_profile::reconcile_prepared(&self.root(), key, true, |binding, intent| {
-            invoke_at(
-                &self.driver,
-                &binding.target,
-                &header("receipt", key, intent)?,
-                None,
-            )
-        })
+        reconcile_with(&self.root(), key, &|_| Ok(self.driver.clone()))
+    }
+    fn sealed(&self) -> std::path::PathBuf {
+        self.dir.path().join("sealed-root/opt/terminalx-local/bin/terminalx-serve")
     }
 }
 
@@ -266,6 +257,57 @@ fn real_guest_installer_retains_lost_reply_and_reconciles_original_receipt_witho
         .path()
         .join("guest/.terminalx-local/account-binding.json")
         .exists());
+}
+
+#[test]
+fn delivery_seals_the_verified_runtime_and_recovery_completes_a_lost_seal() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    let prepared = fixture.prepare("sealed");
+    std::fs::write(fixture.dir.path().join("lose-seal"), "").unwrap();
+    // The install receipt came back, but the seal reply was lost.
+    let lost = fixture.deliver("sealed");
+    assert_eq!(lost["status"], "outcomeUnknown");
+    assert!(!fixture.sealed().exists());
+    std::fs::remove_file(fixture.dir.path().join("lose-seal")).unwrap();
+    let receipt = fixture.reconcile("sealed").unwrap();
+    assert_eq!(receipt["status"], "installed");
+    let sealed = std::fs::metadata(fixture.sealed()).unwrap();
+    assert_eq!(sealed.mode() & 0o777, 0o555);
+    assert_eq!(
+        journal::digest(&std::fs::read(fixture.sealed()).unwrap()),
+        prepared["intent"]["runtimeSha256"]
+    );
+    let calls = std::fs::read_to_string(fixture.dir.path().join("calls")).unwrap();
+    assert_eq!(calls.lines().filter(|line| *line == "install").count(), 1);
+    assert_eq!(calls.lines().filter(|line| *line == "seal").count(), 2);
+    // A different runtime already sealed in the container is refused, never replaced.
+    let mut bytes = std::fs::read(fixture.sealed()).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    let error = seal_at(&fixture.driver, &fixture.binding.target, &json!({"runtimeSha256":journal::digest(&bytes)}), &bytes)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not match"), "{error}");
+    assert!(seal_at(&fixture.driver, &fixture.binding.target, &prepared["intent"], &bytes).is_err());
+}
+
+#[test]
+fn sealed_runtime_program_passes_its_fixtures() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime_test.py");
+    let source = format!(
+        "{}\n{}",
+        runtime_script().replace("if __name__ == \"__main__\":", "if False:"),
+        include_str!("guest_linux_runtime_test.py")
+    );
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new("python3").arg("-I").arg(path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
