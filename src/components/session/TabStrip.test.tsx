@@ -428,4 +428,23 @@ describe("the tab's agent account", () => {
     // Codex has one account: its tab is drawn as before accounts.
     expect(document.querySelector('[data-tab="t-codex"]')!.textContent).toBe("");
   });
+
+  it("marks the agent tabs in the workspace's row of tabs, and not a cloud session's", async () => {
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
+    act(() => takeAgentAccounts({ agent: "codex", accounts: [account("codex", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));
+    const { unmount } = render(<TabsHarness />);
+    await flush();
+    const markOf = (name: string) => within(within(strip()).getAllByRole("tab").find((item) => item.getAttribute("aria-label") === name)!).queryByTestId("tab-account-mark");
+    // Session a: two Claude tabs (on This Mac's login) and a Codex tab, whose agent has one account.
+    expect(markOf(LONG)?.getAttribute("aria-label")).toBe("On This Mac's login");
+    expect(markOf("Review")?.getAttribute("aria-label")).toBe("On This Mac's login");
+    expect(markOf("Fix flaky test")).toBeNull();
+    unmount();
+    // A cloud session's tabs run on its machine's logins, not this computer's accounts.
+    const { WorkspaceTabStrip } = await import("@/components/session/WorkspaceTabStrip");
+    const { TooltipProvider } = await import("@/components/ui/tooltip");
+    render(<TooltipProvider><WorkspaceTabStrip session={getSessionStore().sessions.find((item) => item.id === "a")!} selected={null} accounts={false} /></TooltipProvider>);
+    await flush();
+    expect(screen.queryByTestId("tab-account-mark")).toBeNull();
+  });
 });

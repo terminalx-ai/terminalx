@@ -233,6 +233,27 @@ describe("choosing an agent account from the phone", () => {
     expect(agentDefaults(withAccounts.agents[1] as NewSessionAgent).account).toBeNull();
   });
 
+  it("draws the Account section on the screen and starts the session on the account picked", async () => {
+    mocks.app.api.newSessionOptions.mockResolvedValue(withAccounts);
+    await render(<NewSessionScreen />);
+    // The project's default is chosen first.
+    expect(button("Work · Max")!.getAttribute("aria-pressed")).toBe("true");
+    await click("This Mac's login");
+    await type("First message", "Fix the login redirect");
+    await click("Start session");
+    expect(mocks.app.api.createSession).toHaveBeenLastCalledWith(expect.objectContaining({ agent: "claude", account: "local" }), "draft-1");
+    // Another account is another draft: a retry after a lost reply never lands on the first one's session.
+    mocks.app.api.createSession.mockResolvedValueOnce({ created: false, message: "lost" });
+    await render(<NewSessionScreen key="again" />);
+    await type("First message", "Fix the login redirect");
+    await click("Start session");
+    await click("This Mac's login");
+    await click("Start session");
+    const ids = mocks.app.api.createSession.mock.calls.slice(-2).map((call: unknown[]) => call[1]);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(mocks.app.api.createSession.mock.calls.at(-2)[0]).toMatchObject({ account: WORK });
+  });
+
   it("reads accounts from the Mac with no token field, and sends the account chosen", async () => {
     const calls: [string, unknown][] = [];
     const host = new HostApi({ request: vi.fn(async (method: string, params?: unknown) => {
