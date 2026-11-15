@@ -412,6 +412,13 @@ impl RelayHost {
         self.keypair.host_id()
     }
 
+    /// What this host serves. A machine's other routes (its direct listener)
+    /// serve the same one, so every route sees one set of terminals,
+    /// subscriptions and idempotency results.
+    pub fn rpc(&self) -> Arc<WorkspaceRpc> {
+        self.rpc.clone()
+    }
+
     pub fn status(&self) -> tokio::sync::watch::Receiver<HostStatus> {
         self.status.subscribe()
     }
@@ -1045,6 +1052,51 @@ pub async fn serve_workspace(
     let host = RelayHost::new(link, rpc, devices_path);
     tokio::spawn(host.clone().run());
     Ok(host)
+}
+
+/// Start serving every project of this machine through the relay
+/// (`machine/1`, PRO-340), as [`serve_workspace`] serves one root. The
+/// machine is named by the host key the link registers with, so its
+/// `machineId` is the relay host id; `has_window` says whether a desktop app
+/// runs here (`TERMINALX_LOCAL_DESKTOP`, set when the app starts the runtime).
+pub async fn serve_machine(
+    link: Arc<dyn RuntimeLink>,
+    sink: Arc<dyn crate::sink::EventSink>,
+    terminals: Arc<crate::pty::Terminals>,
+    sessions: Option<crate::session::SessionManager>,
+    devices_path: Option<PathBuf>,
+    agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+) -> Result<Arc<RelayHost>> {
+    let generation = runtime_generation(&link).await;
+    let identity = super::machine::Identity {
+        machine_id: HostKeypair::from_secret(link.host_secret()).host_id(),
+        has_window: std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1"),
+    };
+    let rpc = WorkspaceRpc::machine(identity, generation, sink, terminals, sessions)?;
+    if let Some(agents) = agents {
+        agents.set_generation(generation);
+        rpc.set_agents(agents);
+    }
+    let host = RelayHost::new(link, rpc, devices_path);
+    tokio::spawn(host.clone().run());
+    Ok(host)
+}
+
+/// The runtime generation in the link's Relay Token, waiting with backoff
+/// until the link yields a session.
+async fn runtime_generation(link: &Arc<dyn RuntimeLink>) -> u64 {
+    let mut attempt = 0u32;
+    loop {
+        let fetch = link.clone();
+        match tokio::task::spawn_blocking(move || fetch.session()).await.map_err(anyhow::Error::from).and_then(|session| session).and_then(|session| token_identity(&session.relay_token)) {
+            Ok(identity) => return identity.runtime_generation,
+            Err(error) => {
+                attempt += 1;
+                log::warn!("relay host: waiting for a runtime session: {error:#}");
+                tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+            }
+        }
+    }
 }
 
 /// A [`RuntimeLink`] returns this when the API rejects the runtime

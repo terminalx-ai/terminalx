@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -1711,9 +1712,9 @@ fn selected_repository_sessions_preserve_blank_root_and_use_the_child_checkout()
     let sessions = f.rpc.workspace_sessions().unwrap();
     assert!(sessions.iter().any(|session| session.id == old.id));
     assert!(sessions.iter().any(|session| session.id == entry.id));
-    let ops = crate::cloud_agents::ManagerOps { manager, root: f.root.to_string_lossy().into_owned() };
+    let ops = crate::cloud_agents::ManagerOps { manager, root: Some(f.root.to_string_lossy().into_owned()) };
     assert!(crate::cloud_agents::AgentOps::session(&ops, &entry.id).is_some());
-    assert!(f.rpc.git.repositories().0.contains(&"demo-repository".to_string()));
+    assert!(f.rpc.workspace_git_for_tests().git.repositories().0.contains(&"demo-repository".to_string()));
     let absolute = f.rpc.session_create(json!({
         "agent":"codex","useWorktree":true,"title":"Absolute selected child",
         "repository":{"identity":"github.com/acme/demo-repository","directory":child.join(".")}
@@ -1804,7 +1805,7 @@ async fn claude_model_validation_covers_session_creation_new_tabs_and_configurat
     );
     f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
     f.rpc.set_offered_for_tests(installed_agents());
-    let ops = crate::cloud_agents::ManagerOps { manager, root: f.root.to_string_lossy().into_owned() };
+    let ops = crate::cloud_agents::ManagerOps { manager, root: Some(f.root.to_string_lossy().into_owned()) };
     let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap();
     f.rpc.set_agents(agents);
     let session = seed_session(&f.root, "Existing", None);
@@ -2387,7 +2388,7 @@ async fn native_terminal_child() {
     );
     f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
     f.rpc.set_offered_for_tests(installed_agents());
-    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: f.root.to_string_lossy().into_owned() };
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: Some(f.root.to_string_lossy().into_owned()) };
     f.rpc.set_agents(crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap());
     shared(&f);
     let created = f.rpc.session_create(json!({ "agent": "codex", "nativeCodex": true })).unwrap();
