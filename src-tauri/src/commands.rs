@@ -1972,7 +1972,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req: NewSession) -> CmdResult<SessionEntry> {
+pub async fn create_session(app: AppHandle, state: State<'_, AppState>, req: crate::session_ops::OnAccount<NewSession>) -> CmdResult<SessionEntry> {
+    // `account`: the agent account its first tab starts on (#980).
+    let crate::session_ops::OnAccount { mut req, account } = req;
+    let account = crate::session_ops::requested_account(account.as_deref())?;
     let privacy = crate::github_process::ticket();
     if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
         && !crate::configuration_commands::review(&app, &req.project_path).await? {
@@ -1981,7 +1984,7 @@ pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req:
     let sessions = state.sessions().map_err(err)?;
     github_work(move || crate::github_process::with_ticket(privacy, || {
         crate::session_ops::prefer_native_codex_session(&mut req);
-        sessions.create(&req).map_err(err)
+        sessions.create_on(&req, account.as_deref()).map_err(err)
     }))
         .await
         .map_err(err)?
@@ -2032,11 +2035,13 @@ fn announce_session(app: &AppHandle, session_id: &str) {
 }
 
 #[tauri::command]
-pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, mut tab: NewTab) -> CmdResult<TabEntry> {
+pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, mut tab: NewTab, account: Option<String>) -> CmdResult<TabEntry> {
     let sessions = state.sessions().map_err(err)?;
+    // The agent account it starts on (#980); none: its session's.
+    let account = crate::session_ops::requested_account(account.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex(&mut tab, false);
-        let tab = sessions.add_tab(&session_id, &tab).map_err(err)?;
+        let tab = sessions.add_tab_on(&session_id, &tab, account.as_deref()).map_err(err)?;
         announce_session(&app, &session_id);
         Ok(tab)
     }).await.map_err(err)?
@@ -2279,10 +2284,23 @@ pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> Cmd
 /// Create a quick chat: a session with no project, in a scratch directory of
 /// its own (or in `req.cwd`, which does not become a project).
 #[tauri::command]
-pub async fn create_quick_chat(app: AppHandle, mut req: crate::session_ops::NewQuickChat) -> CmdResult<SessionEntry> {
+pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::OnAccount<crate::session_ops::NewQuickChat>) -> CmdResult<SessionEntry> {
+    // `account`: the agent account its first tab starts on (#980). The
+    // entry is written here; the runtime starts the tab, and one older than
+    // accounts starts it on This Mac's login, which the reply says.
+    let crate::session_ops::OnAccount { mut req, account } = req;
+    let account = crate::session_ops::requested_account(account.as_deref())?;
+    let older = match &account {
+        Some(_) => !app.state::<AppState>().sessions().and_then(|sessions| sessions.supports_accounts()).map_err(err)?,
+        None => false,
+    };
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(tab) = &mut req.tab { crate::session_ops::prefer_native_codex(tab, false) }
-        crate::session_ops::create_quick_chat_blocking(&app, req)
+        let mut entry = crate::session_ops::create_quick_chat_blocking_on(&app, req, if older { None } else { account.as_deref() })?;
+        if older {
+            for tab in &mut entry.tabs { tab.unknown.insert(crate::session_ops::TAB_ACCOUNT_FALLBACK.into(), serde_json::json!("olderRuntime")); }
+        }
+        Ok(entry)
     })
         .await
         .map_err(err)?
@@ -3665,9 +3683,22 @@ pub async fn pane_agents(state: State<'_, AppState>) -> CmdResult<Vec<crate::ses
 /// Start a tab's agent again on one of the tab's conversations (#437): the
 /// one it holds, or one it held before another agent was run in its terminal.
 #[tauri::command]
-pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
+///
+/// `account` (#980): on that agent account instead — "Switch account" on a
+/// tab, "Continue with …" at a usage limit. A running agent is restarted on
+/// it and resumes the conversation it holds; one that is not running starts
+/// on it with `provider_session_id`. The account stays the tab's.
+pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String, account: Option<String>) -> CmdResult<()> {
     let manager = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
+    let account = crate::session_ops::requested_account(account.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(account) = account.as_deref() {
+            if manager.switch_account(&session_id, &tab_id, account).map_err(err)? {
+                return Ok(());
+            }
+        }
+        manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)
+    }).await.map_err(err)?
 }
 
 #[tauri::command]
