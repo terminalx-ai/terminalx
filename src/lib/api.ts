@@ -3,6 +3,7 @@ import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, 
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AgentAccountUsage } from "@/lib/agentAccounts";
 import {
   WorkspaceRpcClient,
   type Activation,
@@ -136,6 +137,34 @@ export interface NewTab {
   permissionMode?: string | null;
 }
 
+/**
+ * What a tab entry says of its agent account (#980, docs/AGENT-ACCOUNTS.md).
+ * The native side keeps these on the tab entry beside its other fields; with
+ * This Mac's login alone none of them is there.
+ */
+export interface TabAccount {
+  /** The account the tab asked for: every start and restart of its agent uses it. */
+  account?: string | null;
+  /** The account its agent last started on, as the launch resolved it (absent while that is This Mac's login). */
+  launchedAccount?: string | null;
+  /**
+   * In a create or add-tab reply only: the tab asked for an account and the background runtime
+   * is older than accounts, so it starts on This Mac's login. The window says so.
+   */
+  accountFallback?: "olderRuntime";
+}
+
+/** The account `tab` runs on, or last ran on; `null` for This Mac's login or the defaults. */
+export function tabAccount(tab: TabEntry): string | null {
+  const fields = tab as TabEntry & TabAccount;
+  return fields.launchedAccount ?? fields.account ?? null;
+}
+
+/** Whether `tab` asked for an account its runtime could not start it on. */
+export function tabAccountFellBack(tab: TabEntry): boolean {
+  return (tab as TabEntry & TabAccount).accountFallback === "olderRuntime";
+}
+
 /** The tail of one session's active tab, as the dashboard cards need it. */
 export interface SessionSummary {
   sessionId: string;
@@ -227,6 +256,8 @@ export interface NewSession {
   tab?: NewTab;
   /** Started with Orchestrate (PRO-337): any run the session leads waits for the person's Approve. */
   orchestrate?: boolean;
+  /** The agent account the first tab starts on (#980). Absent: the project's default, then the agent's. */
+  account?: string | null;
 }
 
 export interface WorkspaceRename {
@@ -241,6 +272,8 @@ export interface NewQuickChat {
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
+  /** The agent account the first tab starts on (#980). Absent: the agent's default. */
+  account?: string | null;
 }
 
 export interface QuickChatScratch {
@@ -646,7 +679,9 @@ export const api = {
   moveQuickChatToProject: (sessionId: string, projectPath: string) => invoke<SessionEntry>("move_quick_chat_to_project", { sessionId, projectPath }),
   /** What a session's scratch directory holds, for the delete confirmation. */
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
-  addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
+  /** `account` (#980): the agent account it starts on; absent, the one its agent's tabs in the session asked for. */
+  addTab: (sessionId: string, tab: NewTab, account?: string | null) =>
+    invoke<TabEntry>("add_tab", account ? { sessionId, tab, account } : { sessionId, tab }),
   /** Close an agent tab. One that holds a conversation stays reopenable (`reopenTab`); nothing of it is deleted. */
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
   /** Bring a closed tab back into its session, with its conversation. */
@@ -1793,6 +1828,11 @@ export interface UsageSnapshot {
     liveRefused?: LiveUsageRefused | null;
   };
   codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null; skipped?: UsageRefreshSkip | null };
+  /**
+   * Each agent account's usage windows (#980), under its label, for the usage popover and Stats. Absent from a
+   * runtime older than accounts, and with This Mac's login alone.
+   */
+  accounts?: AgentAccountUsage[];
   windows: UsageWindow[];
   codex?: {
     credits?: {
@@ -2131,6 +2171,13 @@ export const agent = {
   /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
   resumeConversation: (sessionId: string, tabId: string, harness: string, providerSessionId: string) =>
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
+  /**
+   * Switch account (#980): restart the tab's agent on `account` and resume its conversation; "Continue with …" at a
+   * usage limit too. An agent that is not running starts on it with `providerSessionId`. The account stays the tab's.
+   * Rejected while a turn runs, and by a background runtime older than accounts.
+   */
+  switchAccount: (sessionId: string, tabId: string, harness: string, providerSessionId: string, account: string) =>
+    invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId, account }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   /** `confirm`: the token from an overlap refusal, to go ahead with exactly the plan that was shown. */

@@ -101,11 +101,12 @@ struct NativeLaunch {
 }
 
 /// The workspace's grant snapshot and configuration for a launch under `key`.
-fn cloud_launch(key: &str, cwd: &str) -> Result<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
+fn cloud_launch(key: &str, cwd: &str, choice: crate::agent_keys::Choice<'_>) -> Result<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
     #[cfg(test)]
     if let Some(stand_in) = tests::cloud_stand_in() { return Ok(stand_in); }
-    // On a Mac, the API key saved for Codex in Settings, if it uses one (PRO-306).
-    Ok((crate::agent_keys::launch_grant("codex", Path::new(cwd))?, crate::cloud_config::launch_config("codex", key)))
+    // On a Mac, the API key saved for Codex in Settings, if it uses one
+    // (PRO-306), or the agent account the tab runs on (#980).
+    Ok((crate::agent_keys::launch_grant_on("codex", Path::new(cwd), choice)?, crate::cloud_config::launch_config("codex", key)))
 }
 
 /// `computer` is the Local VM's arguments; `note` what else the agent is
@@ -230,7 +231,7 @@ impl SessionManager {
         let result = (|| {
             self.accepting_work()?;
             let rt_arc = self.runtime(session_id, tab_id)?;
-            let (running, resume, _switching) = {
+            let (running, resume, account_home, _switching) = {
                 // Inspect before fencing, under the same admission as sends and
                 // protocol writes. Fencing an active connection can reject its
                 // next approval/interrupt/start frame and falsely fail its turn.
@@ -247,7 +248,9 @@ impl SessionManager {
                     record(&rt, tab.transport, &report(Stage::WaitingForTurn, None));
                     return Ok(false);
                 }
-                (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
+                // The managed home of the added account it runs on (#980).
+                let account_home = crate::agent_data::codex_account_home_of(tab);
+                (running, tab.provider_session_id.clone(), account_home, fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
             };
             #[cfg(test)]
             tests::handoff_fenced();
@@ -257,9 +260,14 @@ impl SessionManager {
             category = ErrorCategory::ConversationUnavailable;
             let saved = if let Some(id) = resume {
                 let managed = codex::home::managed_root()?;
-                let source = [codex::home::native_root_if_made(), codex::home::user_root()]
-                    .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
-                    .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?;
+                // On an added account Codex wrote it in that account's home,
+                // whose `sessions` is the managed home's: nothing to copy.
+                let shared = account_home.as_deref().is_some_and(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()));
+                let source = if shared { managed.clone() } else {
+                    [codex::home::native_root_if_made(), codex::home::user_root()]
+                        .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
+                        .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?
+                };
                 Some((id, managed, source))
             } else { None };
             if running {
@@ -498,7 +506,11 @@ impl SessionManager {
         // grant snapshot like a terminal launch's; read here, off every lock,
         // because the first grant sync may still be on its way.
         let key = key_of(session, tab);
-        let (grant, config) = cloud_launch(&key, cwd)?;
+        // The account the tab asked for, or its project's default (#980).
+        let entry = index::get(session).ok();
+        let asked = entry.as_ref().and_then(|entry| entry.tab(tab)).and_then(crate::session_ops::tab_account).map(str::to_owned);
+        let project = entry.as_ref().and_then(crate::session_ops::project_key).map(str::to_owned);
+        let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
         let mut native = native_launch(&grant, &config, &crate::local_vm::launch_args("codex"), sparse.as_deref());
         // In a workspace Codex signs in with the workspace's credential, in a
@@ -518,7 +530,15 @@ impl SessionManager {
             if let (Some(model), Engine::CodexStdio(engine)) = (native.model, &mut rt.engine) { engine.route_model(model); }
         }
         crate::cloud_grants::record_launch(&key, &grant);
-        crate::agent_keys::record_launch(&key, "codex", session, tab);
+        super::AccountLaunch::of(CliKind::Codex, &grant).record(&key, "codex", session, tab, asked.is_some());
+        if let Some(account) = grant.account.as_deref() {
+            if let Err(error) = index::update_tab(session, tab, |t| {
+                crate::session_ops::set_launched_account(t, account);
+                Ok(())
+            }) {
+                log::warn!("record the account {session}/{tab} started on: {error:#}");
+            }
+        }
         let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
         let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
         let cancelled = {
