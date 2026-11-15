@@ -6,6 +6,8 @@ import { providerName } from "@mobile/data/conversations";
 import type { NewTabSettings, SessionSummary } from "@mobile/data/host-api";
 import { branchChats } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
+import type { ConnectionState } from "@mobile/state/connection-view";
+import { ConnectionLine } from "./ConnectionLine";
 import { AgentMark } from "./AgentMark";
 import { GlassIconButton } from "./glass";
 import { StateMark } from "./MacIcon";
@@ -18,9 +20,11 @@ import { useTheme } from "./theme";
  * and on the right one glass button to the other view: Terminal from the
  * chat, Chat from the terminal.
  */
-export function SessionHeader({ title, subtitle, onBack, view, onView }: {
+export function SessionHeader({ title, subtitle, connection, onBack, view, onView }: {
   title: string;
   subtitle?: string;
+  /** While not simply connected, the connection takes the subtitle's place, in the shared words (#983); connected says nothing. */
+  connection?: ConnectionState;
   onBack(): void;
   /** Absent when the Mac offers no terminal view. */
   view?: "chat" | "terminal";
@@ -32,7 +36,8 @@ export function SessionHeader({ title, subtitle, onBack, view, onView }: {
     <GlassIconButton label="Back" size={40} icon={<ChevronLeft size={24} color={palette.ink} strokeWidth={2.2} style={styles.chevron} />} onPress={onBack} />
     <View style={styles.titles}>
       <Text numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
-      {subtitle ? <Text numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null}
+      {connection && connection !== "connected" && connection !== "none" ? <ConnectionLine state={connection} />
+        : subtitle ? <Text numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null}
     </View>
     {view ? <GlassIconButton label={view === "chat" ? "Terminal" : "Chat"} size={40} icon={view === "chat" ? <SquareTerminal size={19} color={palette.ink} strokeWidth={1.9} /> : <MessageSquare size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => onView(view === "chat" ? "terminal" : "chat")} /> : null}
   </View>;
@@ -43,7 +48,11 @@ export function SessionHeader({ title, subtitle, onBack, view, onView }: {
  * each by its agent's mark and its own title, the open one underlined, and
  * `+` for another chat in the same branch.
  */
-export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose }: { session: SessionSummary; selectedTabId: string; onSelect(tabId: string): void; onAdd?(): void; onClose?(tabId: string): void }) {
+/**
+ * `actionsDisabled`: + and × stay where they are, dimmed, while the Mac cannot
+ * act on them (not connected), so the strip does not change with the connection (#983).
+ */
+export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose, actionsDisabled = false }: { session: SessionSummary; selectedTabId: string; onSelect(tabId: string): void; onAdd?(): void; onClose?(tabId: string): void; actionsDisabled?: boolean }) {
   const { palette } = useTheme();
   const chats = branchChats(session);
   const scroll = useRef<ScrollViewInstance>(null);
@@ -59,14 +68,14 @@ export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose }: {
             <Text numberOfLines={1} style={[styles.tabName, { color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "400" }]}>{chat.name}</Text>
             <StateMark state={chat.state} info={palette.info} warning={palette.warning} />
             {/* As on the Mac, a tab closes from its own ×: here the open one's, so a scroll is never a close. */}
-            {selected && onClose && chats.length > 1 ? <Pressable accessibilityRole="button" accessibilityLabel={`Close ${chat.name}`} hitSlop={10} onPress={() => onClose(chat.id)} style={({ pressed }) => [styles.close, { backgroundColor: pressed ? palette.selected : palette.raised }]}>
+            {selected && onClose && chats.length > 1 ? <Pressable accessibilityRole="button" accessibilityLabel={`Close ${chat.name}`} accessibilityState={{ disabled: actionsDisabled }} disabled={actionsDisabled} hitSlop={10} onPress={() => onClose(chat.id)} style={({ pressed }) => [styles.close, { backgroundColor: pressed ? palette.selected : palette.raised, opacity: actionsDisabled ? 0.4 : 1 }]}>
               <X size={11} color={palette.muted} strokeWidth={2.4} />
             </Pressable> : null}
           </View>
           <View style={[styles.underline, { backgroundColor: selected ? palette.ink : "transparent" }]} />
         </Pressable>;
       })}
-      {onAdd ? <Pressable accessibilityRole="button" accessibilityLabel="New chat in this branch" hitSlop={8} onPress={onAdd} style={({ pressed }) => [styles.add, pressed && { opacity: 0.5 }]}>
+      {onAdd ? <Pressable accessibilityRole="button" accessibilityLabel="New chat in this branch" accessibilityState={{ disabled: actionsDisabled }} disabled={actionsDisabled} hitSlop={8} onPress={onAdd} style={({ pressed }) => [styles.add, { opacity: actionsDisabled ? 0.4 : pressed ? 0.5 : 1 }]}>
         <Plus size={18} color={palette.muted} strokeWidth={2} />
       </Pressable> : null}
     </ScrollView>
