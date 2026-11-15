@@ -276,7 +276,10 @@ async fn revoking_closes_the_connection_and_refuses_the_credential() {
     paired(&rig, "desk", [5; 32], "desk-token");
     let mut computer = ask(&rig, [5; 32], "desk-token").await;
     assert_eq!(computer.answer(Duration::from_secs(5)).await, Answer::In);
-    assert_eq!(computer.call("list", "session.list", json!({})).await["ok"], true);
+    let hello = computer.call("hello", "rpc.hello", json!({ "protocol": "terminalx-workspace-rpc/1", "want": ["machine/1", "session/1"], "client": { "app": "terminalx-desktop" } })).await;
+    assert_eq!(hello["ok"], true, "{hello}");
+    let listed = computer.call("list", "session.list", json!({})).await;
+    assert_eq!(listed["ok"], true, "{listed}");
     eventually("connected", || rig.host.status().computers.first().is_some_and(|computer| computer.connected).then_some(())).await;
     let revoked = Instant::now();
     assert!(rig.host.revoke("desk").unwrap());
