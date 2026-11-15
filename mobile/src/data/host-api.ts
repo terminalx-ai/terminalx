@@ -39,6 +39,8 @@ export interface SessionSummary {
     harness: string;
     status: SessionStatus;
     markedUnread?: boolean;
+    /** When the tab was last active (RFC 3339); absent from older Macs. */
+    modified?: string;
   }[];
 }
 
@@ -489,7 +491,7 @@ export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): Age
 
 export type SyncPage = { deleted: true } | { deleted?: false; events: AgentEvent[]; cursor: SyncCursor; reset: boolean; hasMore: boolean; hasEarlier: boolean };
 
-function isSessionSummary(value: unknown): value is SessionSummary {
+export function isSessionSummary(value: unknown): value is SessionSummary {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === "string" && typeof record.title === "string" && typeof record.project === "string" && typeof record.worktree === "string" && typeof record.modified === "string" && Array.isArray(record.tabs) && record.tabs.every(isSummaryTab);

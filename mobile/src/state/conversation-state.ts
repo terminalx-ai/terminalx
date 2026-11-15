@@ -29,4 +29,47 @@ export function useConversationState<T>(key: string, initial: T) {
 /** Drop retained state whose key starts with `prefix` (the person signed out: their drafts do not wait for the next one). */
 export function forgetConversationState(prefix: string): void {
   for (const key of [...retained.keys()]) if (key.startsWith(prefix)) retained.delete(key);
+  // A message held for a Mac that is forgotten, or for a person who signed out, is never sent.
+  for (const key of [...heldSends.keys()]) if (key.startsWith(prefix)) heldSends.delete(key);
+}
+
+// A message sent while not connected (#983), one per conversation, kept past its screen: it goes when
+// the phone connects to that Mac, whether or not the conversation is open then.
+const heldSends = new Map<string, { host: string; deliver: () => Promise<void> }>();
+// Conversations on screen: their screen sends what they hold, as it knows the conversation is still on the Mac.
+const shownConversations = new Map<string, number>();
+
+/** Holds `key`'s message until the phone connects to `host`; `deliver` sends it, once. */
+export function holdSend(key: string, host: string, deliver: () => Promise<void>): void {
+  heldSends.set(key, { host, deliver });
+}
+
+/** The message is no longer held (edited, or sent). */
+export function releaseSend(key: string): void {
+  heldSends.delete(key);
+}
+
+/** Takes `key`'s held message to send it: whoever takes it sends it, so it goes at most once. */
+export function takeHeldSend(key: string): (() => Promise<void>) | null {
+  const held = heldSends.get(key);
+  heldSends.delete(key);
+  return held?.deliver ?? null;
+}
+
+/** The conversation is on screen until the returned function is called. */
+export function showConversation(key: string): () => void {
+  shownConversations.set(key, (shownConversations.get(key) ?? 0) + 1);
+  return () => {
+    const count = (shownConversations.get(key) ?? 1) - 1;
+    if (count > 0) shownConversations.set(key, count);
+    else shownConversations.delete(key);
+  };
+}
+
+/** The phone connected to `host`: every message held for it that is not on screen is sent now. */
+export function sendHeldMessages(host: string): void {
+  for (const [key, held] of [...heldSends]) {
+    if (held.host !== host || shownConversations.has(key)) continue;
+    void takeHeldSend(key)?.().catch(() => undefined);
+  }
 }

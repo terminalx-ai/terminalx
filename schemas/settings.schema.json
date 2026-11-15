@@ -64,6 +64,10 @@
     "experimental": {
       "additionalProperties": false,
       "properties": {
+        "localVmTasks": {
+          "description": "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.",
+          "type": "boolean"
+        },
         "nativeCodex": {
           "description": "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.",
           "type": "boolean"
@@ -127,6 +131,15 @@
         "string",
         "null"
       ]
+    },
+    "machines": {
+      "additionalProperties": false,
+      "properties": {
+        "allowOperating": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "mergedCleanup": {
       "additionalProperties": false,
@@ -398,7 +411,7 @@
       "additionalProperties": false,
       "properties": {
         "animations": {
-          "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically.",
+          "description": "The raccoon forages in an empty session and runs along the composer while an agent is working. Off hides the raccoon only; working marks keep moving unless your system's Reduce motion is on.",
           "type": "boolean"
         },
         "autocorrect": {

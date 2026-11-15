@@ -216,7 +216,9 @@ try {
   await toolbar.getByRole('button', { name: 'Download' }).click();
   assert.deepEqual(await page.evaluate(() => window.actions), ['copy', 'download', 'copy', 'download']);
   await page.evaluate(() => window.configureToolbar({ contentsDisabled: true }));
-  assert(await toolbar.getByRole('button', { name: 'Copy file contents' }).isDisabled());
+  // The toolbar re-renders after configureToolbar returns: wait for the disabled
+  // state instead of reading it once (a loaded CI runner read it too early).
+  await toolbar.getByRole('button', { name: 'Copy file contents', disabled: true }).waitFor();
   await page.evaluate(() => window.configureToolbar({}));
   console.log('ok view options toggles and actions');
   if (process.env.SHOTS) {

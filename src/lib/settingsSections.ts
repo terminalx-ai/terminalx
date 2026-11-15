@@ -13,11 +13,12 @@ export const SETTINGS_SECTIONS = [
   { id: "agents", title: "Agents", description: "Install and sign in to agents, permissions and skills", terms: ["claude codex gemini approval idle archive computer use browser runtime"] },
   { id: "orchestrator", title: "Orchestrator", description: "Runs a lead session splits across workers: approval, limits, budget and worker permissions", terms: ["orchestration run plan pieces lead workers approve bypass deny rules", "queue concurrent budget points dollars window stall"] },
   { id: "environment", title: "Environment", description: "User and repository variables for local agents and shells", terms: ["env dotenv secrets keychain overrides import"] },
+  { id: "localVms", title: "Local VMs", description: "Set up a local Cua VM and run selected tasks in it", terms: ["vm virtual machine cua lume sandbox guest macos linux environments"] },
   { id: "transcription", title: "Transcription", description: "Dictation, microphone and speech models", terms: ["voice recording audio mute noise personalization language download"] },
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost and orchestration runs", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs and Local VM tasks", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 
@@ -25,7 +26,9 @@ export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 
 /** A section behind a switch in Settings → Experimental is found only while the switch is on. Shared with the row search. */
 export function settingsSectionOffered(tab: SettingsTab): boolean {
-  return tab !== "orchestrator" || getExperimentalSettings()?.orchestratorRuns === true;
+  if (tab === "orchestrator") return getExperimentalSettings()?.orchestratorRuns === true;
+  if (tab === "localVms") return getExperimentalSettings()?.localVmTasks === true;
+  return true;
 }
 
 /**

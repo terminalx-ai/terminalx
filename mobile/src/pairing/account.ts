@@ -2,13 +2,14 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { x25519 } from "@noble/curves/ed25519";
 import * as Crypto from "expo-crypto";
 import { AUTH_CONFIG, type CloudSession } from "../auth/protocol";
-import { readHosts, removeAutomaticHosts, removeHost } from "../store/hosts";
+import { removeAutomaticHosts, removeHost } from "../store/hosts";
 import { AccountPairingClient, type AccountHost } from "./account-client";
 import { base64Url } from "./bytes";
-import { ACCOUNT_PAIRING_CAPABILITY, PairingOfferSchema, hostIdForPublicKey } from "./contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, PairingOfferSchema } from "./contracts";
 import { openAccountPairingEnvelope } from "./hpke";
 import { clearInstallation, loadOrCreateInstallation, readInstallation, registrationProof, signGrantRequest } from "./installation";
 import { pairFromOffer } from "./pair";
+import { accountHostIdentityMatches } from "./account-identity";
 
 export type InstallationState = "ready" | "approval-required" | "reauthentication-required";
 const LOGOUT_OUTBOX_KEY = "terminalx:account-pairing:logout-outbox:v1";
@@ -22,8 +23,8 @@ export async function discoverMachines(session: CloudSession): Promise<{ hosts: 
   if (registration.reauthenticationRequired || registration.installation.trustState !== "trusted") {
     return { hosts: [], installationState: registration.reauthenticationRequired ? "reauthentication-required" : "approval-required" };
   }
-  const pairedKeys = new Set((await readHosts()).map((host) => host.publicKeyB64));
-  return { hosts: (await client.hosts()).filter((host) => !pairedKeys.has(host.hostPublicKeyB64)), installationState: "ready" };
+  // All of them: the phone tells paired from unpaired itself, and reads a paired one's state from its record (#987).
+  return { hosts: await client.hosts(), installationState: "ready" };
 }
 
 export async function pairDiscoveredMachine(session: CloudSession, host: AccountHost): Promise<void> {
@@ -69,9 +70,7 @@ export async function pairDiscoveredMachine(session: CloudSession, host: Account
   }
 }
 
-export function accountHostIdentityMatches(host: AccountHost): boolean {
-  return hostIdForPublicKey(host.hostPublicKeyB64) === host.hostId;
-}
+export { accountHostIdentityMatches };
 
 export async function signOutPairing(session: CloudSession): Promise<void> {
   pairingEpoch++;

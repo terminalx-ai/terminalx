@@ -9,7 +9,8 @@ import SettingsScreen from "../app/(tabs)/settings";
 // A phone starts sessions and changes this Mac's settings as the desktop does.
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), replace: vi.fn(), navigate: vi.fn(), uuids: 0 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
-vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {}, name: "Den", setName: vi.fn() }) }));
+vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {}, name: "Den", setName: vi.fn() }), THEMES: ["Den"], themePalette: () => ({ page: "#000", accent: "#fff" }) }));
+vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.1.1", ios: { buildNumber: "2" } } } }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), useRouter: () => ({ push: mocks.push, replace: mocks.replace, navigate: mocks.navigate, dismissTo: vi.fn() }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `draft-${++mocks.uuids}` }));
 vi.mock("@mobile/notifications/local", () => ({ localNotificationsEnabled: async () => false, enableLocalNotifications: vi.fn(), disableLocalNotifications: vi.fn() }));
@@ -19,7 +20,7 @@ vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     AppState: { currentState: "active" },
-    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, Alert: { alert: vi.fn() },
+    View: Box, Text: Box, RefreshControl: () => null, Platform: { OS: "ios" }, Alert: { alert: vi.fn() }, useColorScheme: () => "dark",
     Modal: ({ visible, children }: any) => visible ? <div>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
@@ -62,7 +63,7 @@ beforeEach(() => {
   mocks.push.mockReset(); mocks.replace.mockReset(); mocks.uuids = 0;
   const host = { id: "mac-1", label: "Mac", hostName: "Studio", provenance: { kind: "explicit" } };
   mocks.app = {
-    ready: true, session: null, hosts: [host], activeHost: host, connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingSessions: false,
+    ready: true, session: null, hosts: [host], activeHost: host, connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [],
     connection: { restart: vi.fn() }, refreshSessions: vi.fn(async () => undefined), forgetHost: vi.fn(), renameHost: vi.fn(), reconnectHost: vi.fn(), connectHost: vi.fn(),
     api: {
       features: vi.fn(async () => ({ sessionCreate: 1, macSettings: 1 })),
@@ -160,7 +161,9 @@ describe("this Mac's settings on the phone", () => {
 
   it("turns Native Codex on for the Mac's next Codex sessions", async () => {
     await render(<SettingsScreen />);
-    expect(container.textContent).toContain("This Mac · Studio");
+    // Under the machine's name (#987), not "This Mac".
+    expect(container.textContent).toContain("Studio");
+    expect(container.textContent).not.toContain("This Mac");
     const toggle = container.querySelector("input[aria-label='Native Codex']") as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     await act(async () => { toggle.click(); });
@@ -179,7 +182,7 @@ describe("this Mac's settings on the phone", () => {
   it("asks for an update on a Mac that does not offer its settings", async () => {
     mocks.app.api.macSettings.mockResolvedValue(null);
     await render(<SettingsScreen />);
-    expect(container.textContent).toContain("Update TerminalX on this Mac to change its settings");
+    expect(container.textContent).toContain("Update TerminalX on this machine to change its settings");
     expect(container.querySelector("input[aria-label='Native Codex']")).toBeNull();
   });
 });
