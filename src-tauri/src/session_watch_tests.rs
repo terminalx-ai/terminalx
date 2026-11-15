@@ -3499,3 +3499,64 @@ fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
     assert!(rig.rt.lock().unwrap().stopping);
     assert!(index::get(SESSION).is_ok(), "failed stop-all must retain session metadata");
 }
+
+/// #979: a paired phone answers an agent's question through the runtime's
+/// phone handler, and the agent gets what the desktop's card would have sent.
+/// A read-only phone, a tab of another session and a question already closed
+/// are each refused, and none of them answers anything.
+#[test]
+fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
+    use crate::local_runtime::{mobile, Lifetime};
+    let rig = Rig::in_mode(CliKind::Claude, "manual");
+    let device = |id: &str, scope: &str| json!({"id":id,"label":"Fixture","platform":"test","token":format!("{id}-hash"),
+        "scope":scope,"provenance":"explicit","bindingGeneration":0,"createdAt":index::now()});
+    store::write_json(&store::root().unwrap().join("devices.json"), &json!({"devices":[device("driver","driver"),device("viewer","viewer")]})).unwrap();
+    let lifetime = Lifetime::new(Duration::from_secs(60));
+    let lease = lifetime.command("runtime.attach", json!({"protocol":1})).unwrap();
+    let actor: mobile::Actor = serde_json::from_value(json!({"epoch":lease["epoch"],"lease":lease["lease"],"generation":1,"userId":null})).unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "phone", "driver").unwrap();
+    rig.manager.mobile.register(&lifetime, actor.clone(), "watch", "viewer").unwrap();
+
+    let questions = json!({"questions":[
+        {"question":"Which checks should run?","header":"Checks","multiSelect":true,
+            "options":[{"label":"Lint, format","description":"Both"},{"label":"Tests","description":"Unit tests"}]},
+        {"question":"Which branch?","header":"Branch","multiSelect":false,"options":[{"label":"main","description":""}]},
+    ]});
+    let manager = rig.manager.clone();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: json!({"cwd": "/workspace/app", "tool_name": "AskUserQuestion", "tool_input": questions}),
+    };
+    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish the question");
+        std::thread::sleep(MOMENT);
+    };
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::QuestionsAsked { request_id, questions, .. } if *request_id == request && questions.len() == 2)));
+
+    // What the desktop's card sends for the same choices: labels joined with ", " in the order picked.
+    let answers = json!({"Which checks should run?":"Tests, Lint, format","Which branch?":"release/1.0"});
+    let answer = |connection: &str, tab: &str| mobile::execute(&rig.manager, &lifetime, "questions",
+        json!({"actor":actor,"connection":connection,"sessionId":SESSION,"tabId":tab,"requestId":request,"answers":answers}));
+    let refused = |result: Result<Value>| format!("{:#}", result.unwrap_err());
+
+    assert!(refused(answer("watch", TAB)).contains("read-only"), "a viewer may read the question, not answer it");
+    assert!(refused(answer("phone", "another-tab")).contains("does not belong to this session"));
+    assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "a refused answer leaves the question open");
+
+    assert_eq!(answer("phone", TAB).unwrap(), json!({"status":"answered"}));
+    let reply = worker.join().unwrap().output.expect("the agent is answered");
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], answers);
+    assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["questions"], questions["questions"], "the questions go back as they were asked");
+    assert!(rig.rt.lock().unwrap().pending.is_empty());
+    assert!(rig.events().iter().any(|event| matches!(&event.payload, Payload::PermissionDecided { request_id, label, .. } if *request_id == request && label == "Answered")),
+        "every device's card goes away on this event");
+    assert_eq!(*rig.observer.answered.lock().unwrap(), [(SESSION.to_string(), TAB.to_string())]);
+
+    // The Mac, or another phone, answered first: said, not swallowed.
+    assert!(refused(answer("phone", TAB)).contains("that question is no longer open"));
+    lifetime.command("runtime.detach", lease).unwrap();
+}

@@ -402,9 +402,9 @@ pub struct Checked {
     /// Scope, branch state and commands, as far as they ran.
     pub gates: Vec<GateResult>,
     pub facts: Facts,
-    /// The whole diff against the lead's branch: what a verifier is shown. Never stored.
+    /// The diff against the starting baseline: what a verifier is shown. Never stored.
     pub diff: String,
-    /// The lead's branch the result was compared with.
+    /// The starting baseline (or lead branch for older tries) used for the diff.
     pub base: String,
 }
 
@@ -430,9 +430,15 @@ pub fn tail(text: &str, lines: usize) -> String {
 }
 
 /// Gate 2: the committed change touches only what the piece owns.
-fn scope(checkout: &Checkout, piece: &Piece, commit: &str) -> Result<(GateResult, Vec<String>), GateResult> {
-    let range = format!("{}...{commit}", checkout.base);
-    let listed = git(checkout, &["diff", "--name-only", "-z", &range, "--"]).map_err(|error| GateResult::failed(Gate::Scope, format!("The change could not be compared with the lead's branch `{}`: {error:#}", checkout.base)))?;
+fn scope(checkout: &Checkout, piece: &Piece, commit: &str, base: &str) -> Result<(GateResult, Vec<String>), GateResult> {
+    // A saved baseline must remain in the result's ancestry. Otherwise a
+    // rebase could silently remove dependency code from the checked result.
+    if piece.tries.last().is_some_and(|attempt| attempt.base_commit.is_some())
+        && !matches!(crate::git::raw(&checkout.cwd, &["merge-base", "--is-ancestor", base, commit]), Some((0, _))) {
+        return Err(GateResult::failed(Gate::Scope, "The result no longer contains its starting commit and accepted dependencies. Restore that ancestry before reporting done."));
+    }
+    let range = format!("{base}...{commit}");
+    let listed = git(checkout, &["diff", "--name-only", "-z", &range, "--"]).map_err(|error| GateResult::failed(Gate::Scope, format!("The change could not be compared with its baseline `{base}`: {error:#}")))?;
     let files: Vec<String> = listed.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect();
     let outside: Vec<&String> = files.iter().filter(|path| !plan::owns(&piece.owns, path)).collect();
     if outside.is_empty() {
@@ -561,14 +567,15 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
 /// fails. No model is asked anything. `project_check` is the project's own
 /// check command, run after the piece's when the piece changed files.
 pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, timeout: Duration) -> Checked {
-    let mut checked = Checked { base: checkout.base.clone(), ..Checked::default() };
+    let base = piece.tries.last().and_then(|attempt| attempt.base_commit.as_deref()).unwrap_or(&checkout.base);
+    let mut checked = Checked { base: base.to_string(), ..Checked::default() };
     // Every gate reads this one commit, by its id: what is accepted is what was checked.
     let commit = match git(checkout, &["rev-parse", "--verify", "HEAD^{commit}"]) {
         Ok(commit) => commit.trim().to_string(),
         Err(error) => return Checked::unreadable(Gate::Scope, format!("The worktree has no commit to check: {error:#}")),
     };
     checked.facts.commit = Some(commit.clone());
-    match scope(checkout, piece, &commit) {
+    match scope(checkout, piece, &commit, base) {
         Ok((gate, files)) => {
             checked.gates.push(gate);
             checked.facts.files = files;
@@ -604,7 +611,7 @@ pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, ti
         checked.gates.push(GateResult::failed(Gate::Branch, format!("The branch moved while its commands ran: they were run on {} and it is now at {}. A done-check must not commit; the result has to be checked as it was reported.", &commit[..commit.len().min(12)], if head.is_empty() { "no commit" } else { &head[..head.len().min(12)] })));
         return checked;
     }
-    let range = format!("{}...{commit}", checkout.base);
+    let range = format!("{base}...{commit}");
     checked.diff = git(checkout, &["diff", "--no-color", "--no-ext-diff", &range, "--"]).unwrap_or_default();
     let numbers = git(checkout, &["diff", "--numstat", &range, "--"]).unwrap_or_default();
     // A binary file counts as changed, with no lines to count.

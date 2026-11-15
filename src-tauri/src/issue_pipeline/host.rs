@@ -418,12 +418,20 @@ impl Host for LocalHost {
         self.open_tab(author, tab, "Reviewer", chosen)
     }
 
-    fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
+    fn workspace_idle(&self, pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
         let cwd = cwd.canonicalize()?;
         // Closed for work that is no conversation's turn: an orchestration run is being merged into it.
         if super::admission::closed(&cwd) { return Ok(false); }
+        // Another pipeline's detached recorder also owns the checkout while
+        // every conversation is idle. Admission serializes this look with
+        // the next reservation, so two pipelines cannot both take it.
+        for reservation in super::store::list()?.into_iter().filter(|other|
+            other.id != pipeline.id && (other.checking_locally || other.resolution.is_some())) {
+            let owner = self.session(&reservation.author.session_id)?;
+            if super::admission::same_checkout(Path::new(&owner.cwd), &cwd) { return Ok(false); }
+        }
         for session in index::load()? {
-            if Path::new(&session.cwd).canonicalize().ok().as_ref() != Some(&cwd) { continue; }
+            if !super::admission::same_checkout(Path::new(&session.cwd), &cwd) { continue; }
             for tab in &session.tabs {
                 if !matches!(tab.status, index::TabStatus::Idle | index::TabStatus::Completed)
                     || !self.manager.pipeline_idle(&session.id, &tab.id) { return Ok(false); }
@@ -497,7 +505,9 @@ impl Host for LocalHost {
         let Some(incident) = state.active() else { return Ok(None) };
         let affected = new_validation || incident.blocked_pipelines.contains(&pipeline.id) || state.launches.iter().any(|launch|
             incident.launches.contains(&launch.id) && [Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().any(|who|
-                launch.pane == SessionManager::pane_id(&who.tab_id) || crate::pty::shell_session(&launch.pane) == Some(who.session_id.as_str())));
+                launch.pane == SessionManager::pane_id(&who.tab_id)
+                    || crate::pty::shell_session(&launch.pane) == Some(who.session_id.as_str())
+                    || self.session(&who.session_id).is_ok_and(|session| session.tabs.iter().any(|tab| launch.pane == SessionManager::pane_id(&tab.id)))));
         if affected { crate::startup::validation_blocker(Some(&pipeline.id)) } else { Ok(None) }
     }
 
@@ -607,6 +617,105 @@ impl Host for LocalHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reservations_and_busy_folders_hold_validation_but_nested_worktrees_continue() {
+        let _home = crate::store::temp_home();
+        let checkout = repository();
+        let source = checkout.path().join("src");
+        let docs = checkout.path().join("docs");
+        let worker = checkout.path().join(".raccoon/worktrees/worker");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        git(checkout.path(), &["worktree", "add", "-qb", "worker", worker.to_str().unwrap()]);
+        let author: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": checkout.path(), "cwd": source, "title": "Issue",
+            "created": "2026-11-14T00:00:00Z", "modified": "2026-11-14T00:00:00Z",
+            "tabs": [{"id": "t1", "harness": "claude", "created": "2026-11-14T00:00:00Z"}]
+        })).unwrap();
+        let mut other = author.clone();
+        other.id = "other".into();
+        other.cwd = docs.to_str().unwrap().into();
+        other.tabs[0].status = index::TabStatus::InProgress;
+        index::save(&[author.clone(), other.clone()]).unwrap();
+        let pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        let host = LocalHost::new(sink, manager);
+        assert!(!host.workspace_idle(&pipeline, &source).unwrap(), "a sibling folder can change the checked head");
+        other.cwd = worker.to_str().unwrap().into();
+        index::save(&[author, other]).unwrap();
+        assert!(host.workspace_idle(&pipeline, &source).unwrap(), "a separate working tree can keep working");
+        let mut reservation = pipeline.clone();
+        reservation.id = "recorder-owner".into();
+        reservation.checking_locally = true;
+        super::super::store::insert(&reservation).unwrap();
+        assert!(!host.workspace_idle(&pipeline, &source).unwrap(), "another pipeline's recorder still owns this checkout");
+        assert!(host.workspace_idle(&reservation, &source).unwrap(), "the owner can finish its own checks");
+        reservation.checking_locally = false;
+        super::super::store::commit(&mut reservation).unwrap();
+        assert!(host.workspace_idle(&pipeline, &source).unwrap());
+    }
+
+    #[test]
+    fn incidents_cover_other_author_tabs_and_persist_indirect_dependencies() {
+        let _home = crate::store::temp_home();
+        let author: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "author", "projectPath": "/repo", "cwd": "/repo", "title": "Issue",
+            "created": "2026-11-14T00:00:00Z", "modified": "2026-11-14T00:00:00Z",
+            "tabs": [
+                {"id": "t1", "harness": "claude", "created": "2026-11-14T00:00:00Z"},
+                {"id": "other-author-tab", "harness": "claude", "created": "2026-11-14T00:00:00Z"}
+            ]
+        })).unwrap();
+        index::save(&[author]).unwrap();
+        let mut pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        pipeline.author = SessionRef { session_id: "author".into(), tab_id: "t1".into() };
+        pipeline.pr = None;
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+            Arc::new(crate::pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()),
+            crate::hooks::prepare_control().unwrap(),
+        );
+        let host = LocalHost::new(sink, manager);
+        let mut state = crate::startup::Snapshot::default();
+        state.launches.push(serde_json::from_value(serde_json::json!({
+            "id": "launch", "pane": "tab:other-author-tab", "generation": "generation", "pid": null,
+            "category": "agent", "evidence": "readiness", "phase": "awaitingReady",
+            "startedAt": 0, "lastProgressAt": 0, "exitCode": null, "cpuTime": null, "residentBytes": null
+        })).unwrap());
+        state.incidents.push(crate::startup::Incident {
+            id: uuid::Uuid::new_v4().to_string(), detected_at: 120_000, escalated_at: None,
+            recovered_at: None, launches: vec!["launch".into()], recovery_waits: vec![], blocked_pipelines: vec![], probe: None,
+        });
+        let path = crate::store::ensure_dir(crate::store::root().unwrap().join("startup")).unwrap().join("incidents.json");
+        crate::store::write_json(&path, &state).unwrap();
+        let reason = host.startup_blocker(&pipeline, false).unwrap().unwrap();
+        assert!(reason.contains(&state.incidents[0].id));
+        assert_eq!(crate::startup::snapshot().unwrap().active().unwrap().blocked_pipelines, [pipeline.id.clone()]);
+        assert_eq!(host.startup_blocker(&pipeline, false).unwrap(), Some(reason));
+        assert_eq!(crate::startup::snapshot().unwrap().active().unwrap().blocked_pipelines.len(), 1);
+
+        let mut dependency = pipeline.clone();
+        dependency.id = "indirect".into();
+        dependency.author = SessionRef { session_id: "unrelated".into(), tab_id: "unrelated-tab".into() };
+        assert!(host.startup_blocker(&dependency, false).unwrap().is_none(), "unrelated work continues");
+        assert!(host.startup_blocker(&dependency, true).unwrap().is_some(), "new heavy validation is held");
+        // Forget the original launch to model reopening after history changes.
+        let mut reopened = crate::startup::snapshot().unwrap();
+        reopened.launches.clear();
+        reopened.incidents[0].escalated_at = Some(420_000);
+        crate::store::write_json(&path, &reopened).unwrap();
+        for affected in [&pipeline, &dependency] {
+            assert!(host.startup_blocker(affected, false).unwrap().unwrap().contains("needs attention"));
+        }
+        assert_eq!(crate::startup::snapshot().unwrap().active().unwrap().blocked_pipelines.len(), 2);
+    }
 
     #[test]
     fn reviewer_is_a_fresh_named_tab_owned_and_archived_with_the_author() {

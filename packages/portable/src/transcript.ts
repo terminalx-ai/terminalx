@@ -94,6 +94,41 @@ export interface PendingAsk {
   questions?: Question[];
 }
 
+/**
+ * A question card's state, by position: question index → the indices of its
+ * chosen options, in the order they were picked. Positions, not labels, so a
+ * label holding ", ", or two equal labels or questions, stay distinct (#703).
+ */
+export type QuestionChoices = Readonly<Record<number, readonly number[]>>;
+
+/** One option tapped: a single-select question keeps only it, a multi-select one adds it or takes it back. */
+export function toggleQuestionChoice(chosen: QuestionChoices, question: number, option: number, multi: boolean): QuestionChoices {
+  const current = chosen[question] ?? [];
+  const next = !multi ? [option] : current.includes(option) ? current.filter((index) => index !== option) : [...current, option];
+  return { ...chosen, [question]: next };
+}
+
+/**
+ * What Answer sends, in the agent's format: each question's text to its
+ * answer. A typed answer wins over the chosen options; chosen labels are
+ * joined with ", " in the order picked; a question left unanswered is left
+ * out. Every card, on the desktop and on a phone, sends exactly this, so the
+ * agent reads the same thing from either. Skip sends `{}`.
+ */
+export function questionAnswers(questions: readonly Question[], chosen: QuestionChoices, typed: Readonly<Record<number, string>>): Record<string, string> {
+  const answers: Record<string, string> = {};
+  questions.forEach((question, index) => {
+    const value = typed[index]?.trim() || (chosen[index] ?? []).map((option) => question.options[option]?.label).filter((label) => label !== undefined).join(", ");
+    if (value) answers[question.question] = value;
+  });
+  return answers;
+}
+
+/** A question card's label. */
+export function questionsLabel(count: number): string {
+  return count > 1 ? `${count} questions` : "Question";
+}
+
 export interface Transcript {
   goal?: Goal;
   turns: Turn[];

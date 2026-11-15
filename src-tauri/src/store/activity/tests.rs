@@ -719,7 +719,10 @@ fn app_child() {
     shutdown().unwrap();
     assert!(!owns(&root), "the app never opens the writer");
     assert!(lease_held(&root), "the runtime holds the lease while the app runs");
-    fs::write(root.join("app-ready"), saved.agents_spawned.to_string()).unwrap();
+    // Existence is the parent's readiness barrier: publish the count only
+    // after all bytes are written, rather than exposing an empty new file.
+    fs::write(root.join("app-ready.tmp"), saved.agents_spawned.to_string()).unwrap();
+    fs::rename(root.join("app-ready.tmp"), root.join("app-ready")).unwrap();
     wait_until("the app is told to quit", || root.join("app-quit").exists());
     assert!(lease_held(&root), "the runtime still holds the lease as the app quits");
 }

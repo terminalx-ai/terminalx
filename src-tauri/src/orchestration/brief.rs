@@ -32,6 +32,9 @@ pub fn render(run: &Run, piece: &Piece) -> String {
     });
     section(&mut out, "Out of scope", &or(&brief.out_of_scope, "Everything the scope does not name. Other workers own other files at the same time: do not edit, format or move a file you do not own, even to fix something you notice. Put it in your report instead."));
     let mut known = brief.known.clone();
+    if let Some(base) = piece.tries.last().and_then(|attempt| attempt.base_commit.as_deref()) {
+        known.push(format!("Your starting commit is `{base}`. It already includes the accepted commits of your dependencies. Keep that ancestry; scope checks measure your changes against it."));
+    }
     known.extend(piece.depends_on.iter().filter_map(|id| {
         let dependency = run.piece(id)?;
         let result = dependency.note.as_deref().map(|note| format!(" Its worker reported: {note}")).unwrap_or_default();

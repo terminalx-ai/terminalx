@@ -270,6 +270,9 @@ describe("a cloud workspace on the phone", () => {
     await approver.session.start();
     await connected(approver);
     expect(await approver.session.decide("t1", { requestId: "r1", optionId: "allow" })).toMatchObject({ kind: "permission-decision", requestId: "r1" });
+    // #979: an agent's question is answered by the same command, carrying the answers, and by the same right.
+    expect(await approver.session.decide("t1", { requestId: "q1", answers: { "Which branch?": "main" } })).toMatchObject({ kind: "permission-decision", requestId: "q1", state: "queued" });
+    expect(approver.posted).toHaveLength(2);
     approver.session.close();
   });
 

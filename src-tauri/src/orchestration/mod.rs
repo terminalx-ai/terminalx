@@ -527,6 +527,12 @@ pub struct Try {
     pub worker: Option<SessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Trusted starting commit, including accepted dependencies; refreshed when
+    /// sent back onto the current lead. Scope and verifier diffs count only
+    /// changes made after this commit. Older tries
+    /// without it retain their comparison against the lead's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     /// Absent while it runs, and before it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
@@ -568,7 +574,7 @@ pub struct Try {
 impl Try {
     /// A try that has no worker yet.
     pub fn planned(step: ladder::Step, model: &str, effort: Option<&str>, tier: Option<routing::Tier>) -> Self {
-        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, outcome: None, detail: None, archive_failure: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
+        Self { step, model: model.to_string(), effort: effort.map(str::to_owned), tier, worker: None, branch: None, base_commit: None, outcome: None, detail: None, archive_failure: None, cost_usd: None, cost_unpriced_models: Vec::new(), verification: None, report: None, output_tokens: None, from_commit: None, started: None, ended: None }
     }
 }
 
@@ -639,7 +645,7 @@ pub struct Piece {
     pub tries: Vec<Try>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<SessionRef>,
-    /// The worker's branch, cut from the lead's.
+    /// The worker's branch, cut from the lead plus accepted dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// Why its worker has a session but was not sent its brief: the session could not be

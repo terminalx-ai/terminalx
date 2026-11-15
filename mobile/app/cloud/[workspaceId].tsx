@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Send, Square } from "lucide-react-native";
@@ -13,7 +13,7 @@ import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
-import { CompactingLine, PermissionCard, TurnCard } from "@mobile/ui/transcript";
+import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
 import { linkedText } from "@mobile/ui/LinkedText";
 
 /**
@@ -119,6 +119,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   const tab = snapshot.tabs.find((entry) => entry.tabId === tabId);
   const [draft, setDraft] = useConversationState(`cloud:${scope}:${tabId}:draft`, "");
   const [sending, setSending] = useState(false);
+  const answeringQuestion = useRef(false);
   const [failure, setFailure] = useState<string | null>(null);
   const nameOf = useNames(catalog);
   const [notesOpen, setNotesOpen] = useState(false);
@@ -204,6 +205,18 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   };
 
   const decide = (ask: PendingAsk, optionId: string) => void run(() => session.decide(tabId, { requestId: ask.requestId, optionId }));
+  // A question is answered as the desktop answers a cloud tab's: the same decision command, carrying the answers (#979).
+  // One at a time: a second tap lands before the first one's render, and would only be told the question is already answered.
+  const answer = (ask: PendingAsk, answers: Record<string, string>) => {
+    if (answeringQuestion.current) return;
+    answeringQuestion.current = true;
+    void run(() => session.decide(tabId, { requestId: ask.requestId, answers })).finally(() => { answeringQuestion.current = false; });
+  };
+  /** What the runtime said of this phone's answer when it would not take it: someone answered first. */
+  const refusedAnswer = (ask: PendingAsk) => {
+    const entry = outbox.find((item) => item.kind === "permission-decision" && item.requestId === ask.requestId && item.state === "rejected");
+    return entry ? codeText(entry.category) ?? "That answer was not taken." : undefined;
+  };
 
   const addNote = () => {
     const text = note.trim();
@@ -234,7 +247,10 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
       renderItem={({ item }) => <TurnCard turn={item} />}
       latest={<>
         {transcript.compacting ? <CompactingLine /> : null}
-        {transcript.pendingAsks.map((ask) => snapshot.canApprove
+        {transcript.pendingAsks.map((ask) => ask.kind === "questions"
+          // The question and its options are for everyone here; answering is for those who may approve.
+          ? <QuestionCard key={ask.requestId} ask={ask} stateKey={`cloud:${scope}:${tabId}`} connected={!stopped} answering={sending || session.outbox.isDeciding(ask.requestId)} readOnly={snapshot.canApprove ? null : CANNOT_ANSWER} error={refusedAnswer(ask)} onAnswer={(answers) => answer(ask, answers)} />
+          : snapshot.canApprove
           ? <PermissionCard key={ask.requestId} ask={ask} connected={!stopped} answering={sending || session.outbox.isDeciding(ask.requestId)} onRespond={(optionId) => decide(ask, optionId)} />
           : <Text key={ask.requestId} style={[styles.notice, { color: palette.warning }]}>The agent is waiting for a permission ({ask.title ?? ask.toolName ?? "request"}). Waiting for someone who can approve.</Text>)}
         {pending.map((entry) => { const line = outboxLine(entry, stopped, nameOf)!; return <View key={entry.clientCommandId} style={styles.pending}>
@@ -258,6 +274,9 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
       : <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
   </KeyboardAvoidingView>;
 }
+
+/** Why someone who may not approve sees a question without Answer and Skip (contract §21.4). */
+const CANNOT_ANSWER = "Only someone allowed to approve can answer this question.";
 
 const styles = StyleSheet.create({
   page: { flex: 1 },

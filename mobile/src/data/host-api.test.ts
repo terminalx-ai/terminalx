@@ -271,3 +271,22 @@ it("clears a reminder on the host and preserves a refusal", async () => {
   request.mockResolvedValue({ ok: false, refusal: { message: "Device revoked" } });
   await expect(hostApi(request).markRead("session", "tab")).rejects.toThrow("Device revoked");
 });
+
+describe("answering an agent's question (#979)", () => {
+  it("sends the answers as the desktop's card words them, and passes on the Mac's refusal", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { status: "answered" } });
+    const api = hostApi(request);
+    const answers = { "Which checks should run?": "Tests, Lint, format", "Which branch?": "release/1.0" };
+    await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: true });
+    expect(request).toHaveBeenLastCalledWith("questions.respond", { sessionId: "session", tabId: "tab", requestId: "q1", answers });
+    // Skip is an empty answer set.
+    await api.answerQuestions("session", "tab", "q1", {});
+    expect(request).toHaveBeenLastCalledWith("questions.respond", { sessionId: "session", tabId: "tab", requestId: "q1", answers: {} });
+
+    // The Mac, or another device, answered first.
+    request.mockResolvedValueOnce({ ok: false, refusal: { code: "unavailable", message: "internal: that question is no longer open" } });
+    await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: false, message: "internal: that question is no longer open" });
+    request.mockResolvedValueOnce({ ok: true, value: {} });
+    await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: false, message: "The host did not answer this question." });
+  });
+});
