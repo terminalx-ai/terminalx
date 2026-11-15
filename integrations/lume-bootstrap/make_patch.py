@@ -113,18 +113,28 @@ def render(base):
     edit(vm, "        removeShutdownSignalHandlers()", "        terminalXBootstrapOwner?.close()\n        terminalXBootstrapOwner = nil\n        removeShutdownSignalHandlers()")
     edit(vm, "        if !activeVNCPolicy.isEnabled {", "        if !activeVNCPolicy.isEnabled && !terminalXBootstrapMode {")
 
-    # The system ssh/scp fallback reads no ssh_config and forwards nothing
-    # (TerminalXSSHPolicy); `lume ssh` reaches it when its built-in client fails.
+    # The system ssh/scp fallback reads no ssh_config, forwards nothing and
+    # verifies the guest's host key against its one pin file
+    # (TerminalXSSHPolicy); `lume ssh` reaches it when its built-in client
+    # fails. Upstream's two options that turned host key checking off are
+    # removed, not merely preceded: nothing in the file may disable the check.
     ssh = "src/SSH/SystemSSHClient.swift"
     edit(ssh, """    private func sshArguments(extraArgs: [String]) -> [String] {
         var args = [
-            "-o", "StrictHostKeyChecking=no",""", """    private func sshArguments(extraArgs: [String]) -> [String] {
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+""", """    private func sshArguments(extraArgs: [String]) -> [String] {
         var args = TerminalXSSHPolicy.arguments + [
-            "-o", "StrictHostKeyChecking=no",""")
+""")
     edit(ssh, """        var args = [
             "-q", "-r",
-            "-o", "StrictHostKeyChecking=no",""", """        var args = ["-q", "-r"] + TerminalXSSHPolicy.arguments + [
-            "-o", "StrictHostKeyChecking=no",""")
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+""", """        var args = ["-q", "-r"] + TerminalXSSHPolicy.arguments + [
+""")
+    for disabled in ["StrictHostKeyChecking", "UserKnownHostsFile", "GlobalKnownHostsFile"]:
+        if disabled in changed[ssh]:
+            raise ValueError(f"Upstream still sets {disabled} in {ssh}")
 
     service = "src/Virtualization/VMVirtualizationService.swift"
     edit(service, "    let networkMode: NetworkMode\n}", "    let networkMode: NetworkMode\n    var terminalXBootstrapMode: Bool = false\n}")

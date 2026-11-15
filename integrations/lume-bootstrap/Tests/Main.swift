@@ -53,9 +53,26 @@ import Darwin
                 "sessionRetained": service.session != nil]), as: UTF8.self))
             return
         }
-        // ssh-policy: the fixed options Lume's system ssh and scp fallback use.
+        // ssh-policy: the options Lume's system ssh and scp fallback use, with
+        // the pin file they name and this account's home as the policy reads
+        // it. `ssh-policy <home>`: the pin file the policy derives for `home`.
+        // `ssh-policy-with <pin file>`: the same options over a disposable pin
+        // file, which only this fixture can name; Lume itself never takes one.
         if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "ssh-policy" {
-            print(String(decoding: try txJSON(["arguments": TerminalXSSHPolicy.arguments]), as: UTF8.self))
+            let home = TerminalXSSHPolicy.accountHome()
+            print(String(decoding: try txJSON(["arguments": TerminalXSSHPolicy.arguments,
+                "accountHome": home ?? "", "knownHosts": TerminalXSSHPolicy.knownHosts(home: home),
+                "noPin": TerminalXSSHPolicy.noPin]), as: UTF8.self))
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "ssh-policy" {
+            print(String(decoding: try txJSON(["knownHosts": TerminalXSSHPolicy.knownHosts(home: CommandLine.arguments[2])]),
+                as: UTF8.self))
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "ssh-policy-with" {
+            print(String(decoding: try txJSON(["arguments": TerminalXSSHPolicy.arguments(knownHosts: CommandLine.arguments[2])]),
+                as: UTF8.self))
             return
         }
         // publish <owned directory> <count> <size>: the real TXPinnedPath.writeNew

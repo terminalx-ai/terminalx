@@ -105,9 +105,59 @@ refuses one, a mounted share, or a binding that names a share.
 fallback, which `lume ssh` uses when its built-in client cannot connect:
 `-F /dev/null` (no user or system ssh_config) plus no agent, X11, port,
 tunnel, local-command, proxy or control-socket use, and password-only sign-in.
-`Tests/ssh_policy_test.py` checks the compiled options against a hostile
-ssh_config with `ssh -G`, which evaluates configuration without connecting. No request can choose a
-filename, host endpoint, VM, share, account, input action or termination target.
+No request can choose a filename, host endpoint, VM, share, account, input
+action or termination target.
+
+### Pinning a guest's host key
+
+Upstream ran that fallback with `StrictHostKeyChecking=no` and
+`UserKnownHostsFile=/dev/null` while signing in with the guest password, so
+whatever answered at the guest's address was given the password and the
+session. The patch removes both options, and the policy verifies the host key:
+
+- **Strict, against one file.** `StrictHostKeyChecking=yes` with
+  `UserKnownHostsFile=<home>/.lume/ssh_known_hosts`. `<home>` comes from the
+  account database, never from `$HOME`. A home that `ssh` would split or
+  expand names no file, and then every host is refused.
+- **No other source.** `GlobalKnownHostsFile=/dev/null`,
+  `KnownHostsCommand=none`, `VerifyHostKeyDNS=no`, `UpdateHostKeys=no` and
+  `NoHostAuthenticationForLocalhost=no`. Only `ssh-ed25519` host keys are
+  accepted, as on TerminalX's own transport.
+- **Nothing is learned.** There is no trust on first use. A guest with no
+  pinned key, or with another key, is refused by `ssh` before authentication,
+  and Lume never writes or updates the file.
+
+The person pins a guest by adding one line for the address Lume connects to,
+with the guest's ed25519 host key:
+
+```
+192.168.64.5 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI…
+```
+
+Read the key in the guest's own console (`cat
+/etc/ssh/ssh_host_ed25519_key.pub`). For a VM TerminalX set up, it is the key
+whose fingerprint the person confirmed there. A pin is per address: if the
+guest gets another address, or the address goes to another VM, the connection
+is refused until the line is changed.
+
+Limits, stated plainly:
+
+- **TerminalX writes no pin and never uses this path.** Its legacy route
+  refuses every command that could reach `lume ssh`, and its personalized
+  transport pins the host key itself. This is hardening of the patched
+  executable for anyone else who runs it.
+- **Lume's built-in client is unchanged.** It runs before this fallback and
+  accepts any host key (upstream `AcceptAllHostKeysDelegate`). The fallback
+  is reached only when that client cannot connect. Pinning the built-in
+  client means editing a second upstream file and a full candidate rebuild;
+  it is not done here.
+
+`Tests/ssh_policy_test.py` checks the compiled options two ways. `ssh -G`,
+which evaluates configuration without connecting, shows each option winning
+over a hostile ssh_config. And an `sshd` the test starts on the loopback
+interface, with a host key it has just generated and no way to log in, shows
+real verification for both `ssh` and `scp`: only the pinned key gets as far as
+authentication, and no pin file is created or changed.
 
 ## Original host launch lifecycle
 
