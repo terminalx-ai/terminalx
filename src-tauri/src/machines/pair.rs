@@ -183,16 +183,22 @@ async fn describe(connection: &mut Connection) -> Option<MachineIdentity> {
         log::debug!("machines: rpc.hello after pairing: {error:#}");
         return None;
     }
-    match connection.call("pair-describe", "machine.describe", json!({})).await {
-        Ok(described) => Some(MachineIdentity {
-            machine_id: described["machineId"].as_str()?.into(),
-            name: described["name"].as_str()?.into(),
-            os: MachineOs { family: described["os"]["family"].as_str()?.into(), version: described["os"]["version"].as_str().map(str::to_string) },
-            version: described["version"].as_str()?.into(),
-        }),
+    let described = match connection.call("pair-describe", "machine.describe", json!({})).await {
+        Ok(described) => described,
         Err(error) => {
             log::debug!("machines: machine.describe after pairing: {error:#}");
-            None
+            return None;
         }
+    };
+    // The projects are PRO-345's to keep; asking here checks that the new
+    // credential is served the machine's workspace.
+    if let Err(error) = connection.call("pair-projects", "machine.projects", json!({})).await {
+        log::debug!("machines: machine.projects after pairing: {error:#}");
     }
+    Some(MachineIdentity {
+        machine_id: described["machineId"].as_str()?.into(),
+        name: described["name"].as_str()?.into(),
+        os: MachineOs { family: described["os"]["family"].as_str()?.into(), version: described["os"]["version"].as_str().map(str::to_string) },
+        version: described["version"].as_str()?.into(),
+    })
 }

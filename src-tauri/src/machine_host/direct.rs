@@ -275,7 +275,7 @@ async fn await_allow<S: AsyncRead + AsyncWrite + Unpin>(
             host.decline(request_id);
             Some(Outcome::Refused(REFUSED_NOT_APPROVED))
         }
-        _ = socket.next() => None,
+        _ = gave_up(socket) => None,
     };
     match answered {
         Some(answered) => Some(answered),
@@ -286,6 +286,12 @@ async fn await_allow<S: AsyncRead + AsyncWrite + Unpin>(
             (ended != Outcome::Waiting).then_some(ended)
         }
     }
+}
+
+/// Resolves when the waiting computer sends anything but a ping or pong, or
+/// its connection ends. Nothing it sends before Allow is answered.
+async fn gave_up<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenite::WebSocketStream<S>) {
+    while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = socket.next().await {}
 }
 
 /// `pairing_refused`, sealed, then the socket closes.
