@@ -73,6 +73,11 @@ def validate(workflow):
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
     assert native["needs"] == "macos-rust-changes", "macOS coverage selection dependency"
     assert any(s.get("run") == "cargo test --locked" and s.get("if") == "needs.macos-rust-changes.outputs.required == 'true'" for s in native["steps"]), "macOS full suite"
+    # The guest helper is its own workspace: nothing in src-tauri builds it, and
+    # it runs as root in a guest, so its checks are never conditional.
+    for run, name in [("cargo clippy --locked --all-targets -- -D warnings", "Clippy"), ("cargo test --locked", "tests")]:
+        assert any(s.get("run") == run and s.get("working-directory") == "native/vm-bootstrap" and "if" not in s
+                   for s in native["steps"]), f"VM bootstrap guest helper {name}"
 
 
 class WorkflowSecurity(unittest.TestCase):
@@ -162,6 +167,17 @@ class WorkflowSecurity(unittest.TestCase):
             show = next(s for s in w["jobs"]["macos-native"]["steps"] if s.get("name") == "Show the Rust toolchain")
             show["run"] = show["run"].replace(" && command -v rg", "")
         self.rejects(change)
+
+    def test_missing_or_conditional_guest_helper_checks_are_rejected(self):
+        def helper(w, run):
+            return next(s for s in w["jobs"]["macos-native"]["steps"]
+                        if s.get("working-directory") == "native/vm-bootstrap" and s.get("run", "").startswith(run))
+        for run in ["cargo clippy", "cargo test"]:
+            self.rejects(lambda w, run=run: w["jobs"]["macos-native"]["steps"].remove(helper(w, run)))
+            self.rejects(lambda w, run=run: helper(w, run).update({"if": "needs.macos-rust-changes.outputs.required == 'true'"}))
+            self.rejects(lambda w, run=run: helper(w, run).update({"working-directory": "src-tauri"}))
+        self.rejects(lambda w: helper(w, "cargo clippy").update(run="cargo clippy --locked --all-targets"))
+        self.rejects(lambda w: helper(w, "cargo test").update(run="cargo test --locked --lib"))
 
     def test_missing_security_fixture_dependency_is_rejected(self):
         def change(w):
