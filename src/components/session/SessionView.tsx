@@ -55,6 +55,7 @@ import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -327,8 +328,14 @@ function CloudLocation({
     </>
   );
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
+  const detailsRequest = request && ["restart", "details", "copy-machine", "copy-info"].includes(request.action);
+  const detailsVisible = !cloud.locked && !!item && request?.item.workspace.id === cloud.workspaceId && request.item.workspace.orgId === cloud.orgId;
+  useEffect(() => {
+    if (detailsRequest && !detailsVisible) setRequest(null);
+  }, [detailsRequest, detailsVisible]);
   return (
     <>
+      {item && !cloud.locked && <CloudWorkspaceDetails item={item} />}
       {item || diagnosticsOffered || onShowPorts ? (
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -344,7 +351,7 @@ function CloudLocation({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
-            {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {item && <WorkspaceActionItems item={item} detailsAllowed={!cloud.locked} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
             {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
             {item && !cloud.locked && (
               <>
@@ -379,7 +386,7 @@ function CloudLocation({
           {error}
         </span>
       )}
-      {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
+      {request && (!detailsRequest || detailsVisible) && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
       {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
       {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
