@@ -814,10 +814,13 @@ piece whose session was made but could not be made safe to brief keeps that sess
 says why) and is tried again with it, never with a second one.
 
 Each worker is a session you started (`sessions list --children-of` lists them), in a
-worktree of its own on a branch cut from your branch as it is committed when the piece
-starts, with the piece's agent, model and effort. Commit shared starting context before starting
-the run. A dependent piece's brief names its accepted dependencies' reports and branches;
-those branches are not automatically merged into the lead's checkout. The worker is sent a brief built from its piece (goal, why, scope and out of
+worktree of its own, starting from your committed branch plus the exact accepted commits of
+its dependencies, with the piece's agent, model and effort. Commit shared starting context
+before starting the run. Conflicting or unavailable dependencies prevent launch and say why.
+Each try records this starting commit as `baseCommit`: scope checks and verifier diffs count
+only the worker's changes after it, while conflict checks still use your current branch.
+Dependency preparation does not change the lead's checkout; `runs merge` integrates results
+there after verification. The worker is sent a brief built from its piece (goal, why, scope and out of
 scope, known facts, files to read first, done-check, limits, report format) and is held to a
 `terminalx-report` block, as with `sessions create --report`.
 

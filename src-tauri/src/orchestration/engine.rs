@@ -75,6 +75,7 @@ pub struct Started {
     pub session_id: String,
     pub tab_id: String,
     pub branch: Option<String>,
+    pub base_commit: Option<String>,
 }
 
 /// What a worker in a turn has been doing: what tells a stall from a long build.
@@ -188,7 +189,7 @@ pub trait Host: Send + Sync {
     fn retry_waits(&self, run_id: &str);
     fn limits(&self, project_path: &str) -> OrchestratorLimits;
     /// Make the piece's worker: a session of the lead, in a worktree of its
-    /// own on a branch cut from the lead's, with the piece's agent, model and
+    /// own on a branch with the lead's code and accepted dependencies, with its agent, model and
     /// effort, in `mode`. Nothing is sent to it yet.
     fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started>;
     /// Make a new worker safe to brief: its branch pushes nowhere by itself. Asked again
@@ -531,7 +532,7 @@ fn tell_started(host: &dyn Host, start: &Start, decided: &str) {
     host.tell_lead(
         run,
         &format!(
-            "{decided}{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and call `terminalx runs start {id} --json` when a piece is done: it starts the pieces that waited on it. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
+            "{decided}{edited} {started}\n\nDo not poll. Wait with `terminalx wait --children-of {lead} --json`: while this run is open it returns when a piece's result is accepted or a piece is blocked, not each time a worker's turn ends. A worker's `done` is checked by TerminalX before the piece is done (its report, the files it touched, its branch, your commands; a verifier reads the diff only where those cannot settle it), and a result that fails goes back to a fresh worker without you. When the wait returns, read the run with `terminalx runs show {id} --json`, and follow the results: pieces start automatically when their dependencies pass verification and worker slots are available. Do not merge the workers' branches by hand: `terminalx runs merge {id} --json` merges every accepted piece into your branch in dependency order and runs the integration check after each, and the run is done once all are merged."
         ),
     );
 }
@@ -783,6 +784,7 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
                     let attempt = piece.tries.last_mut().expect("a try was just planned");
                     attempt.worker = Some(reference.clone());
                     attempt.branch = worker.branch.clone();
+                    attempt.base_commit = worker.base_commit.clone();
                     attempt.started = Some(crate::store::index::now());
                 })?;
                 (reference, worker.branch)

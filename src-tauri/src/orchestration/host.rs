@@ -134,6 +134,28 @@ fn lead_base(cwd: &Path) -> anyhow::Result<String> {
     }
 }
 
+/// Assemble the exact accepted inputs without changing any checkout, index or
+/// branch. Merge commits retain dependency ancestry for the final run merge.
+fn dependency_base(cwd: &Path, dependencies: &[(&str, &str)]) -> anyhow::Result<String> {
+    let mut base = crate::git::run(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?.trim().to_string();
+    for (id, accepted) in dependencies {
+        let commit = crate::git::run(cwd, &["rev-parse", "--verify", &format!("{accepted}^{{commit}}")])
+            .with_context(|| format!("the accepted commit of dependency {id} is unavailable"))?.trim().to_string();
+        if matches!(crate::git::raw(cwd, &["merge-base", "--is-ancestor", &commit, &base]), Some((0, _))) {
+            continue;
+        }
+        if matches!(crate::git::raw(cwd, &["merge-base", "--is-ancestor", &base, &commit]), Some((0, _))) {
+            base = commit;
+            continue;
+        }
+        let merged = crate::git::run(cwd, &["merge-tree", "--write-tree", &base, &commit])
+            .with_context(|| format!("dependency {id} cannot be combined with this worker's starting code; resolve the dependency conflict before retrying"))?;
+        let tree = merged.lines().next().context("the dependency merge returned no tree")?;
+        base = crate::git::run(cwd, &["-c", "user.name=TerminalX", "-c", "user.email=terminalx@localhost", "commit-tree", tree, "-p", &base, "-p", &commit, "-m", &format!("Orchestration dependency {id}")])?.trim().to_string();
+    }
+    Ok(base)
+}
+
 impl Host for ManagerHost {
     fn retire_workers_later(&self, run: &Run) { self.queue_retirement(run); }
     fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
@@ -219,7 +241,12 @@ impl Host for ManagerHost {
 
     fn create_worker(&self, run: &Run, piece: &Piece, mode: &str) -> anyhow::Result<Started> {
         let lead = index::get(&run.lead.session_id).context("the lead's session is gone")?;
-        let base = lead_base(Path::new(&lead.cwd))?;
+        let dependencies = piece.depends_on.iter().map(|id| {
+            let dependency = run.piece(id).with_context(|| format!("dependency {id} is missing"))?;
+            let commit = dependency.accepted_commit().with_context(|| format!("dependency {id} has no accepted commit; verify its result before starting {}", piece.id))?;
+            Ok((id.as_str(), commit))
+        }).collect::<anyhow::Result<Vec<_>>>()?;
+        let base = dependency_base(Path::new(&lead.cwd), &dependencies)?;
         let entry = crate::session_ops::create_named_session_blocking(
             &*self.sink,
             NewSession {
@@ -231,7 +258,7 @@ impl Host for ManagerHost {
                 on_main: false,
                 checkout_branch: None,
                 checkout_pr: None,
-                base_ref: Some(base),
+                base_ref: Some(base.clone()),
                 // Each try has a worktree and a branch of its own: the one before it keeps its.
                 worktree_name: Some(match piece.tries.len() {
                     0 | 1 => format!("{}-{}", piece.id, piece.title),
@@ -249,7 +276,7 @@ impl Host for ManagerHost {
         let tab = entry.tabs.first().ok_or_else(|| anyhow!("the new session has no tab"))?;
         // It is marked a worker as it is made (`session_ops::inherit_run_limits`), while this
         // lead's start is under way; `secure_worker` checks that before it is briefed.
-        Ok(Started { session_id: entry.id.clone(), tab_id: tab.id.clone(), branch: entry.branch.clone() })
+        Ok(Started { session_id: entry.id.clone(), tab_id: tab.id.clone(), branch: entry.branch.clone(), base_commit: Some(base) })
     }
 
     fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()> {
@@ -643,6 +670,113 @@ mod tests {
     use super::activity_of;
     use crate::events::AgentEvent;
     use serde_json::json;
+
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        crate::git::run(cwd, args).unwrap().trim().to_string()
+    }
+
+    fn commit_file(cwd: &std::path::Path, file: &str, content: &str) -> String {
+        std::fs::write(cwd.join(file), content).unwrap();
+        git(cwd, &["add", file]);
+        git(cwd, &["commit", "-qm", file]);
+        git(cwd, &["rev-parse", "HEAD"])
+    }
+
+    fn repository() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "lead"]);
+        git(repo.path(), &["config", "user.name", "T"]);
+        git(repo.path(), &["config", "user.email", "t@example.com"]);
+        commit_file(repo.path(), "README", "initial\n");
+        repo
+    }
+
+    fn worktree(repo: &std::path::Path, name: &str, base: &str) -> std::path::PathBuf {
+        let path = repo.join(name);
+        git(repo, &["worktree", "add", "-q", "-b", name, path.to_str().unwrap(), base]);
+        path
+    }
+
+    fn consumer() -> super::Piece {
+        use super::super::{plan, routing};
+        let agents = ["claude".to_string()];
+        let rules = plan::Rules { piece_limit: 8, default_agent: "claude", agents: &agents, worker_mode: "bypassPermissions", approval: true, checkout: None, routing: &routing::tests::TABLE, models: &routing::tests::MODELS, lead_model: "fable" };
+        let plan = serde_json::from_value(json!({"goal": "Use accepted contracts", "pieces": [{
+            "id": "consumer", "title": "Consumer", "kind": "code", "owns": ["consumer.ts"],
+            "doneChecks": [{"type": "command", "run": "test -f contracts.ts && test -f config.ts && test -f consumer.ts"}]
+        }]})).unwrap();
+        plan::validate(&plan, &rules).unwrap().remove(0)
+    }
+
+    #[test]
+    fn dependent_worktrees_include_only_accepted_inputs_and_verify_only_their_own_changes() {
+        use super::super::{ladder::Step, verify, Try};
+        let _home = crate::store::temp_home();
+        let repo = repository();
+        let lead = git(repo.path(), &["rev-parse", "HEAD"]);
+        let contracts = worktree(repo.path(), "contracts", "lead");
+        let accepted = commit_file(&contracts, "contracts.ts", "export type Contract = string;\n");
+        let config = worktree(repo.path(), "config", "lead");
+        let configuration = commit_file(&config, "config.ts", "export const enabled = true;\n");
+        // A later, unverified dependency tip must never leak into the consumer.
+        commit_file(&contracts, "unverified.ts", "not accepted\n");
+        let base = super::dependency_base(repo.path(), &[("contracts", &accepted), ("config", &configuration)]).unwrap();
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), lead);
+        assert!(!repo.path().join("contracts.ts").exists(), "the lead checkout is untouched");
+        let cwd = worktree(repo.path(), "consumer", &base);
+        assert!(cwd.join("contracts.ts").exists() && cwd.join("config.ts").exists());
+        assert!(!cwd.join("unverified.ts").exists());
+        // Both accepted commits remain ancestors for the final dependency-order merge.
+        for accepted in [&accepted, &configuration] {
+            git(&cwd, &["merge-base", "--is-ancestor", accepted, "HEAD"]);
+        }
+        let mut piece = consumer();
+        let mut attempt = Try::planned(Step::First, "", None, None);
+        attempt.base_commit = Some(base.clone());
+        // The baseline survives persistence and restart.
+        piece.tries.push(serde_json::from_str(&serde_json::to_string(&attempt).unwrap()).unwrap());
+        commit_file(&cwd, "consumer.ts", "import type { Contract } from './contracts';\n");
+        let checkout = verify::Checkout { cwd: cwd.clone(), base: "lead".into(), branch: Some("consumer".into()), commands: true, marks: None };
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        assert!(checked.passed(), "{:?}", checked.gates);
+        assert_eq!(checked.base, base);
+        assert_eq!(checked.facts.files, ["consumer.ts"]);
+        assert!(checked.diff.contains("diff --git a/consumer.ts"));
+        assert!(!checked.diff.contains("diff --git a/contracts.ts"));
+
+        // Lead conflict checks still use the live lead branch, not the scope baseline.
+        commit_file(repo.path(), "consumer.ts", "conflicting lead implementation\n");
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        assert!(checked.gates.iter().any(|gate| gate.gate == verify::Gate::Branch && !gate.passed));
+        // Inherited files are not exempt from ownership: editing them is still refused.
+        commit_file(&cwd, "contracts.ts", "unauthorized change\n");
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (verify::Gate::Scope, false));
+        assert!(checked.gates[0].detail.as_ref().unwrap().contains("contracts.ts"));
+        // Rewriting history cannot discard the accepted starting code unnoticed.
+        git(&cwd, &["reset", "--hard", &lead]);
+        commit_file(&cwd, "consumer.ts", "missing dependencies\n");
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        assert!(checked.gates[0].detail.as_ref().unwrap().contains("starting commit"));
+    }
+
+    #[test]
+    fn conflicting_or_missing_dependencies_fail_without_changing_the_lead() {
+        let repo = repository();
+        let left = worktree(repo.path(), "left", "lead");
+        let left_commit = commit_file(&left, "shared.ts", "left\n");
+        let right = worktree(repo.path(), "right", "lead");
+        let right_commit = commit_file(&right, "shared.ts", "right\n");
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let status = git(repo.path(), &["status", "--porcelain"]);
+        let error = super::dependency_base(repo.path(), &[("left", &left_commit), ("right", &right_commit)]).unwrap_err();
+        assert!(format!("{error:#}").contains("dependency right cannot be combined"));
+        let error = super::dependency_base(repo.path(), &[("missing", &"0".repeat(40))]).unwrap_err();
+        assert!(format!("{error:#}").contains("dependency missing is unavailable"));
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo.path(), &["status", "--porcelain"]), status);
+        assert!(crate::git::operation_in_progress(repo.path()).unwrap().is_none());
+    }
 
     fn event(seq: u64, ts: &str, payload: serde_json::Value) -> AgentEvent {
         serde_json::from_value(json!({"id": format!("e{seq}"), "sessionId": "w", "tabId": "t", "harness": "claude", "seq": seq, "ts": ts, "payload": payload})).unwrap()

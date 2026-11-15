@@ -174,7 +174,7 @@ impl Host for Fake {
         }
         let session = format!("w{}-{}", world.made.len() + 1, piece.id);
         world.made.push(Made { piece: piece.id.clone(), agent: piece.agent.clone(), model: piece.model.clone(), effort: piece.effort.clone(), mode: mode.into(), session: session.clone() });
-        Ok(Started { session_id: session.clone(), tab_id: format!("{session}-tab"), branch: Some(format!("raccoon/{}", piece.id)) })
+        Ok(Started { session_id: session.clone(), tab_id: format!("{session}-tab"), branch: Some(format!("raccoon/{}", piece.id)), base_commit: Some("fixture-base".into()) })
     }
 
     fn secure_worker(&self, worker: &SessionRef, branch: Option<&str>) -> anyhow::Result<()> {
@@ -612,6 +612,7 @@ fn start_starts_only_the_pieces_whose_dependencies_are_done() {
 
     let first = engine::start(&host, id).unwrap();
     assert_eq!(first.started, vec!["map"]);
+    assert_eq!(store::get(id).unwrap().piece("map").unwrap().tries[0].base_commit.as_deref(), Some("fixture-base"), "the exact worker baseline is persisted with its try");
     assert_eq!(first.waiting.iter().map(|waiting| (waiting.piece.as_str(), waiting.on.join(","))).collect::<Vec<_>>(), vec![("store", "map".to_string()), ("session", "store".into()), ("pipeline", "store".into()), ("cli", "store".into()), ("docs", "session,pipeline,cli".into())]);
     assert_eq!(states(&first.run)[..2], [("map", PieceState::Running), ("store", PieceState::Queued)]);
     // Called again while `map` is still working, it starts nothing.
