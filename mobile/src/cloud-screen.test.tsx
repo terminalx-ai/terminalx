@@ -228,6 +228,12 @@ describe("the Cloud tab", () => {
     await click("Sign in");
     expect(mocks.app.signIn).toHaveBeenCalled();
   });
+
+  it("says why sign-in failed, under the button", async () => {
+    mocks.app = { session: null, signIn: vi.fn(), error: "The sign-in page could not open: error 2." };
+    await show(<CloudScreen />);
+    expect(text()).toContain("The sign-in page could not open: error 2.");
+  });
 });
 
 describe("a cloud workspace screen", () => {

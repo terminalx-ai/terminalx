@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AUTH_CONFIG, MOBILE_REDIRECT_URI, buildAuthorizeUrl, exchangeAuthorizationCode, parseCallbackUrl, refreshSession } from "./protocol";
+import { AUTH_CONFIG, MOBILE_REDIRECT_URI, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseCallbackUrl, refreshSession } from "./protocol";
 
 describe("mobile OAuth PKCE", () => {
   it("builds the registered first-party authorization request", () => {
@@ -35,5 +35,19 @@ describe("mobile OAuth PKCE", () => {
     const unavailable = vi.fn(async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
     await expect(refreshSession(AUTH_CONFIG, session, rejected)).resolves.toEqual({ status: "rejected" });
     await expect(refreshSession(AUTH_CONFIG, session, unavailable)).resolves.toEqual({ status: "unavailable", reason: "refresh_failed_503" });
+  });
+});
+
+describe("the sign-in sheet's outcome", () => {
+  it("reports a sheet iOS could not present", () => {
+    expect(authSessionFailure({ type: "cancel", error: "The operation couldn’t be completed. (com.apple.AuthenticationServices.WebAuthenticationSession error 2.)" }))
+      .toBe("The sign-in page could not open: The operation couldn’t be completed. (com.apple.AuthenticationServices.WebAuthenticationSession error 2.)");
+  });
+
+  it("says nothing when the person closed it, or it succeeded", () => {
+    expect(authSessionFailure({ type: "cancel", error: "The operation couldn’t be completed. (com.apple.AuthenticationServices.WebAuthenticationSession error 1.)" })).toBeNull();
+    expect(authSessionFailure({ type: "cancel" })).toBeNull();
+    expect(authSessionFailure({ type: "dismiss", error: null })).toBeNull();
+    expect(authSessionFailure({ type: "success", error: "ignored" })).toBeNull();
   });
 });

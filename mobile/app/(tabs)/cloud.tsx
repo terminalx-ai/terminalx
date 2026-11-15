@@ -47,7 +47,7 @@ export default function CloudScreen() {
 
   const { sections, empty } = useMemo(() => cloudSections(snapshot.organizations), [snapshot.organizations]);
 
-  if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label="Sign in" onPress={() => void app.signIn()} /></View>;
+  if (!app.session) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Sign in for cloud workspaces" detail="Cloud workspaces belong to your TerminalX account." /><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.signInError, { color: palette.danger }]}>{app.error}</Text> : null}</View>;
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
   const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;
@@ -124,6 +124,7 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 16 },
   sectionHeader: { marginTop: 18, marginBottom: 2, paddingHorizontal: 4, gap: 3 },
   sectionTitle: { fontSize: 20, fontWeight: "700", letterSpacing: -0.3 },
+  signInError: { fontSize: 14, lineHeight: 19, textAlign: "center" },
   notice: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
   empty: { fontSize: 15, paddingHorizontal: 4, paddingVertical: 14 },
   row: { minHeight: 68, paddingHorizontal: 4, paddingVertical: 11, flexDirection: "row", gap: 12, alignItems: "flex-start", borderRadius: 10 },
