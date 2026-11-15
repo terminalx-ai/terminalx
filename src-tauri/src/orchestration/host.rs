@@ -315,6 +315,9 @@ impl Host for ManagerHost {
             if let Err(error) = super::engine::verify(&host, &run) {
                 log::warn!("check the results of run {run}: {error}");
             }
+            // Accepted results can unblock dependencies after the turn-end
+            // scheduler already ran while the checks were still pending.
+            engine::fill_slots(&host);
         });
         if let Err(error) = spawned {
             log::warn!("start the check of run {run_id}: {error}");

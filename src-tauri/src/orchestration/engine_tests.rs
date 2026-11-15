@@ -1000,22 +1000,23 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     assert_eq!(engine::check_failed(&host, id, "ghost", "exit 101").unwrap_err().code, "piece_not_found");
 
     host.reports("cli", Status::Done, "CLI reads moved.");
-    engine::worker_turn_ended(&host, "w1-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     assert_eq!(store::get(id).unwrap().piece("cli").unwrap().state, PieceState::Done);
     let output = "test control::tests::create_reads_default_mode ... FAILED\nleft: Some(\"manual\")  right: Some(\"auto\")";
     let failed = engine::check_failed(&host, id, "cli", output).unwrap();
     // The next try is started at once: nobody has to ask.
     assert_eq!((failed.retried, failed.blocked, failed.piece.as_str()), (true, false, "cli"));
     assert_eq!(tried(&failed.run, "cli"), vec![(Step::First, "sonnet".to_string(), Some("medium".to_string()), Some(Outcome::CheckFailed)), (Step::Effort, "sonnet".into(), Some("high".into()), None)]);
-    let brief = host.world().briefs["w2-cli"].clone();
+    let retry = host.session_of("cli");
+    let brief = host.world().briefs[&retry].clone();
     assert!(brief.contains("> The done-check did not hold: cargo t control") && brief.contains("> test control::tests::create_reads_default_mode ... FAILED"), "{brief}");
 
     // Twice more, and the piece is blocked: its worker's `done` does not stand over the check.
     host.reports("cli", Status::Done, "Fixed.");
-    engine::worker_turn_ended(&host, "w2-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     assert!(engine::check_failed(&host, id, "cli", output).unwrap().retried);
     host.reports("cli", Status::Done, "Fixed again.");
-    engine::worker_turn_ended(&host, "w3-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     let last = engine::check_failed(&host, id, "cli", output).unwrap();
     assert_eq!((last.retried, last.blocked), (false, true));
     let piece = last.run.piece("cli").unwrap();
@@ -1024,12 +1025,12 @@ fn a_failed_done_check_takes_the_same_ladder_with_the_checks_output() {
     let again = engine::refreshed(&host, id).unwrap();
     assert_eq!(again.piece("cli").unwrap().state, PieceState::Blocked, "the worker still says done; the check said otherwise");
     assert_eq!(engine::check_failed(&host, id, "cli", output).unwrap_err().code, "piece_not_done");
-    assert_eq!(host.made(), vec!["cli", "cli", "cli"]);
+    assert_eq!(host.made(), vec!["cli", "docs", "cli", "cli"]);
 
     // A long output keeps its end: that is where a test run says what failed.
     let (host, id) = one_piece_for("other-lead");
     host.reports("cli", Status::Done, "Done.");
-    engine::worker_turn_ended(&host, "w1-cli");
+    engine::worker_turn_ended(&host, &host.session_of("cli"));
     let long = format!("{}\nFAILED at the very end", "noise ".repeat(4000));
     let failed = engine::check_failed(&host, &id, "cli", &long).unwrap();
     let detail = failed.run.piece("cli").unwrap().tries[0].detail.clone().unwrap();
@@ -1413,18 +1414,95 @@ fn with_a_limit_of_two_two_of_five_run_and_each_finish_starts_one_more() {
 }
 
 #[test]
-fn a_piece_that_becomes_ready_by_a_dependency_still_waits_for_the_lead() {
+fn a_piece_that_becomes_ready_by_a_dependency_starts_without_the_lead() {
     let _home = crate::store::temp_home();
     let host = free_host(|settings| settings.workers_per_run = 1);
     let run = engine::create(&host, &plan(), "lead", None).unwrap();
     assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["map"]);
     host.reports("map", Status::Done, "41 call sites");
     engine::worker_turn_ended(&host, &host.session_of("map"));
-    // `store` is ready now, but the lead may have to collect `map`'s branch first.
     let run = store::get(&run.id).unwrap();
-    assert_eq!((run.piece("store").unwrap().state, run.piece("store").unwrap().queued_for), (PieceState::Queued, None));
-    assert_eq!(host.made(), vec!["map"]);
-    assert_eq!(engine::start(&host, &run.id).unwrap().started, vec!["store"]);
+    assert_eq!((run.piece("store").unwrap().state, run.piece("store").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(host.made(), vec!["map", "store"]);
+}
+
+#[test]
+fn delayed_dependency_checks_queue_for_global_capacity_then_another_run_wakes_them() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| {
+        settings.workers_per_run = 2;
+        settings.workers_at_once = 3;
+    });
+    let dependent = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::start(&host, &dependent.id).unwrap();
+    host.world().hold_checks = true;
+    host.reports("map", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("map"));
+    assert_eq!(store::get(&dependent.id).unwrap().piece("store").unwrap().state, PieceState::Queued);
+
+    let other = engine::create(&host, &flat_plan(3, "claude"), "lead-2", None).unwrap();
+    engine::start(&host, &other.id).unwrap();
+    let third = engine::create(&host, &flat_plan(1, "codex"), "lead-3", None).unwrap();
+    engine::start(&host, &third.id).unwrap();
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 3);
+
+    engine::verify(&host, &dependent.id).unwrap();
+    // The watch recovers a newly ready piece with no queuedFor marker.
+    assert!(engine::watch(&host));
+    let current = store::get(&dependent.id).unwrap();
+    assert_eq!(current.piece("store").unwrap().queued_for, Some(Hold::AppLimit));
+    assert_eq!(current.piece("store").unwrap().state, PieceState::Queued);
+
+    host.world().hold_checks = false;
+    host.reports("p2", Status::Done, "done");
+    engine::worker_turn_ended(&host, &host.session_of("p2"));
+    let current = store::get(&dependent.id).unwrap();
+    assert_eq!((current.piece("store").unwrap().state, current.piece("store").unwrap().queued_for), (PieceState::Running, None));
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 3);
+    assert!(store::list().unwrap().iter().all(|run| run.in_turn() <= 2));
+}
+
+#[test]
+fn watch_recovers_a_missed_dependency_turn_end() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|_| {});
+    let run = engine::create(&host, &plan(), "lead", None).unwrap();
+    engine::start(&host, &run.id).unwrap();
+    host.reports("map", Status::Done, "done");
+    assert!(engine::watch(&host));
+    assert_eq!(store::get(&run.id).unwrap().piece("store").unwrap().state, PieceState::Running);
+}
+
+#[test]
+fn watch_recovers_an_idle_run_with_unmarked_ready_pieces() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_per_run = 2);
+    let run = engine::create(&host, &flat_plan(3, "claude"), "lead", None).unwrap();
+    store::update(&run.id, |run| {
+        run.state = RunState::Running;
+        Ok(())
+    }).unwrap();
+    assert!(engine::watch(&host));
+    let current = store::get(&run.id).unwrap();
+    assert_eq!(current.in_turn(), 2);
+    assert_eq!(queued_for(&current), vec![("p3", Some(Hold::RunLimit))]);
+    engine::fill_slots(&host);
+    assert_eq!(host.made(), vec!["p1", "p2"], "repeated scheduling never duplicates workers");
+}
+
+#[test]
+fn filling_slots_refreshes_workers_even_in_runs_without_queued_pieces() {
+    let _home = crate::store::temp_home();
+    let host = free_host(|settings| settings.workers_at_once = 1);
+    let first = engine::create(&host, &flat_plan(1, "claude"), "lead", None).unwrap();
+    engine::start(&host, &first.id).unwrap();
+    let second = engine::create(&host, &plan(), "lead-2", None).unwrap();
+    engine::start(&host, &second.id).unwrap();
+    // No turn-end event arrived for the first run.
+    host.reports("p1", Status::Done, "done");
+    engine::fill_slots(&host);
+    assert_eq!(store::get(&second.id).unwrap().piece("map").unwrap().state, PieceState::Running);
+    assert_eq!(store::list().unwrap().iter().map(Run::in_turn).sum::<usize>(), 1);
 }
 
 #[test]
@@ -2870,7 +2948,7 @@ fn a_note_to_a_blocked_pieces_worker_opens_its_try_again_in_the_same_session() {
     engine::worker_turn_ended(&host, "w3-cli");
     let run = store::get(&id).unwrap();
     assert_eq!((run.piece("cli").unwrap().state, run.piece("cli").unwrap().tries[2].outcome), (PieceState::Done, Some(Outcome::Done)));
-    assert_eq!(run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+    assert_eq!(run.piece("docs").unwrap().state, PieceState::Running);
 
     // A worker whose session is gone gets no note: a fresh one is what widening is for. (A lead leads one run at a time.)
     engine::stop(&host, &id, engine::By::Cli).unwrap();
