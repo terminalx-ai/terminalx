@@ -112,24 +112,30 @@ def team_id(identity: str) -> str:
     return match.group(1)
 
 
-def local_secrets(runner: Runner, env: Mapping[str, str] = os.environ) -> dict[str, str]:
+def local_secrets(runner: Runner, env: Mapping[str, str] = os.environ, *,
+                  require_signing: bool = True) -> dict[str, str]:
     """This machine's own secrets, for the secret scan to look for. Values are never printed or
     written; only the label of one that matched is."""
     needles: dict[str, str] = {}
-    notary = notary_key(env)
-    needles['notary key id'] = notary.key_id
-    needles['notary issuer id'] = notary.issuer_id
-    body = [line for line in notary.key_path.read_text().splitlines() if line.strip() and not line.startswith('-----')]
-    for i, line in enumerate(body):
-        needles[f'notary key body line {i + 1}'] = line.strip()
-    key = updater_key(env)
-    needles['updater signing key (file)'] = key
-    try:
-        decoded = base64.b64decode(key, validate=True).decode()
-    except (binascii.Error, UnicodeDecodeError):
-        decoded = ''
-    for i, line in enumerate(l for l in decoded.splitlines() if len(l) >= 20 and 'untrusted comment' not in l):
-        needles[f'updater signing key line {i + 1}'] = line
+    # Archive scans also run on machines without release signing credentials.
+    # Skip only absent default files; configured or malformed sources fail closed.
+    notary_config = _home(NOTARY_CONFIG, env)
+    if require_signing or env.get('TERMINALX_NOTARY_CONFIG') or notary_config.exists():
+        notary = notary_key(env)
+        needles['notary key id'] = notary.key_id
+        needles['notary issuer id'] = notary.issuer_id
+        body = [line for line in notary.key_path.read_text().splitlines() if line.strip() and not line.startswith('-----')]
+        for i, line in enumerate(body):
+            needles[f'notary key body line {i + 1}'] = line.strip()
+    if require_signing or env.get('TERMINALX_UPDATER_KEY') or _home(UPDATER_KEY, env).exists():
+        key = updater_key(env)
+        needles['updater signing key (file)'] = key
+        try:
+            decoded = base64.b64decode(key, validate=True).decode()
+        except (binascii.Error, UnicodeDecodeError):
+            decoded = ''
+        for i, line in enumerate(l for l in decoded.splitlines() if len(l) >= 20 and 'untrusted comment' not in l):
+            needles[f'updater signing key line {i + 1}'] = line
     password = updater_key_password(env)
     if password:
         needles['updater key password'] = password

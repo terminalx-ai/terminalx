@@ -404,3 +404,98 @@ fn reading_a_completed_tab_does_not_change_its_dashboard_order() {
     assert_eq!(after.tab(TAB).unwrap().status, TabStatus::Idle);
     assert_eq!(rt.lock().unwrap().status, TabStatus::Idle);
 }
+
+#[test]
+fn orchestration_cleanup_stop_settles_a_dead_workers_stale_turn() {
+    use crate::orchestration::engine::Host as _;
+    let rig = Rig::new(json!({}));
+    rig.manager.set_status_for_test(SESSION, TAB, TabStatus::InProgress);
+    let host = crate::orchestration::host::ManagerHost::new(rig.manager.sink().clone(), rig.manager.clone());
+    let worker = crate::orchestration::SessionRef { session_id: SESSION.into(), tab_id: Some(TAB.into()) };
+    host.stop_worker_for_cleanup(&worker).unwrap();
+    assert!(!rig.running());
+    assert!(!matches!(rig.manager.status_for_test(SESSION, TAB), TabStatus::InProgress | TabStatus::Waiting));
+}
+
+#[test]
+fn retirement_failure_backs_off_without_stopping_a_live_worker_and_respects_new_turns() {
+    use crate::orchestration::{Run, SessionRef};
+    let rig = Rig::new(json!({}));
+    let git = |args: &[&str]| crate::git::run(&rig.checkout, args).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Initial"]);
+    let worker_path = rig._dir.path().join("worker");
+    git(&["worktree", "add", "-q", "-b", "worker", worker_path.to_str().unwrap()]);
+    let mut session = index::get(SESSION).unwrap();
+    session.cwd = worker_path.to_string_lossy().into_owned();
+    index::save(&[session]).unwrap();
+    let worker = SessionRef { session_id: SESSION.into(), tab_id: Some(TAB.into()) };
+    let run: Run = serde_json::from_value(json!({
+        "id":"retry-retirement", "lead":{"sessionId":"gone"}, "projectPath":rig.checkout,
+        "goal":"cleanup", "state":"failed", "workerMode":"bypassPermissions",
+        "created":index::now(), "modified":index::now(),
+        "pieces":[{"id":"piece", "title":"piece", "brief":{"goal":"cleanup"}, "doneChecks":[],
+            "state":"failed", "agent":"claude", "tries":[{"step":"first", "worker":worker, "outcome":"failed"}]}]
+    })).unwrap();
+    crate::orchestration::store::insert(&run).unwrap();
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    rig.idle_for_the_limit();
+    let host = crate::orchestration::host::ManagerHost::new(rig.manager.sink().clone(), rig.manager.clone());
+    host.retire_automatically(&run, false); // no remote
+    assert!(rig.running(), "preservation failure must precede Stop");
+    let failed = crate::orchestration::store::get(&run.id).unwrap();
+    let failure = failed.pieces[0].tries[0].archive_failure.as_ref().unwrap();
+    assert!(!failure.reason.is_empty());
+    assert!(!crate::orchestration::retirement::retry_allowed(&failed, &worker, &failure.head));
+    host.retire_automatically(&run, false);
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap(), failed, "unchanged failure makes no further attempt");
+    assert!(rig.running());
+    crate::git::run(&worker_path, &["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "New work"]).unwrap();
+    let new_head = crate::git::head_commit(&worker_path);
+    assert!(crate::orchestration::retirement::retry_allowed(&failed, &worker, &new_head));
+    rig.rt().lock().unwrap().turn_open = true;
+    assert!(host.stop_worker_for_cleanup(&worker).is_err(), "explicit bulk cleanup must also leave a new turn running");
+    host.retire_automatically(&run, false);
+    assert!(rig.running());
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap(), failed, "a person's turn must not even start preservation");
+    rig.rt().lock().unwrap().turn_open = false;
+    host.retire_automatically(&run, false);
+    let retried = crate::orchestration::store::get(&run.id).unwrap();
+    assert_eq!(retried.pieces[0].tries[0].archive_failure.as_ref().unwrap().head, new_head);
+    assert!(rig.running());
+    let remote = rig._dir.path().join("remote.git");
+    git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+    git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    host.retire_automatically(&run, false);
+    assert!(rig.running(), "fixing remote configuration alone does not lift backoff");
+    use crate::orchestration::engine::Host as _;
+    host.preserve_worker(&run, &worker).unwrap(); // manual retry bypasses backoff
+    assert!(crate::orchestration::store::get(&run.id).unwrap().pieces[0].tries[0].archive_failure.is_none());
+    host.retire_automatically(&run, false);
+    assert!(!rig.running());
+    assert!(index::get(SESSION).unwrap().archived);
+}
+
+#[test]
+fn stopping_a_signed_out_process_keeps_the_sign_in_incident() {
+    let rig = Rig::new(json!({}));
+    rig.manager.ensure_started(SESSION, TAB).unwrap();
+    rig.idle_for_the_limit();
+    {
+        let rt = rig.rt();
+        rig.manager.needs_recovery(&mut rt.lock().unwrap(), RecoveryKind::SignedOut, crate::recovery_log::Source::SignIn);
+    }
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert!(!rig.running());
+    assert!(rig.manager.pipeline_idle(SESSION, TAB));
+    assert_eq!(rig.manager.wait_view(SESSION, TAB).recovery, Some(RecoveryKind::SignedOut));
+    // The automatic retry calls Stop again after authentication. It must not
+    // dismiss the incident before the retry can send either.
+    rig.manager.stop(SESSION, TAB).unwrap();
+    assert_eq!(rig.manager.wait_view(SESSION, TAB).recovery, Some(RecoveryKind::SignedOut));
+    let events = rig.manager.load_events(SESSION, TAB).unwrap();
+    let recovery: Vec<_> = events.iter().filter_map(|event| match event.payload { Payload::Recovery { kind } => Some(kind), _ => None }).collect();
+    assert_eq!(recovery, [Some(RecoveryKind::SignedOut)]);
+}
