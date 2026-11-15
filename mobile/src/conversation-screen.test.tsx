@@ -48,6 +48,9 @@ vi.mock("react-native", () => {
     // The + sheet: the test picks a file unless it chose the photo library.
     ActionSheetIOS: { showActionSheetWithOptions: ({ options }: { options: string[] }, choose: (index: number) => void) => choose(options.indexOf(mocks.sheetChoice)) },
     AppState: { currentState: "active" },
+    AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
+    Animated: { View: Box, Value: class { setValue() {} interpolate() { return "0deg"; } }, loop: () => ({ start: () => undefined, stop: () => undefined }), timing: () => ({}) },
+    Easing: { linear: (value: number) => value },
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
     Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false },
     PanResponder: { create: () => ({ panHandlers: {} }) },
@@ -55,7 +58,7 @@ vi.mock("react-native", () => {
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{children}</button>,
+    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress}>{children}</button>,
     TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur }: any) => <input value={value} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
@@ -64,7 +67,9 @@ vi.mock("react-native", () => {
       const mounted = mocks.initialBatchOnly ? data.slice(0, props.initialNumToRender ?? 10) : data;
       return <div>{ListHeaderComponent}{data.length ? mounted.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}<div data-testid="list-footer">{ListFooterComponent}</div></div>;
     },
-    SectionList: ({ sections, renderItem, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.flatMap((section: any) => section.data.map((item: any) => <div key={item.key}>{renderItem({ item })}</div>)) : ListEmptyComponent}</div>,
+    SectionList: ({ sections, renderItem, renderSectionHeader, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <section key={section.key} data-section={section.key}>
+      {renderSectionHeader?.({ section })}{section.data.map((item: any, index: number) => <div key={item.key}>{renderItem({ item, index, section })}</div>)}
+    </section>) : ListEmptyComponent}{ListFooterComponent}</div>,
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
@@ -192,6 +197,15 @@ describe("mobile transcript presentation (#388)", () => {
     expect(container.textContent).not.toContain("Internal harness instructions");
     expect(mocks.listProps.data).toHaveLength(1);
   });
+});
+
+// #987: the session says which machine it is on, by the name it has on this phone.
+it("names the machine in the session subtitle with the name saved on this phone", async () => {
+  const host = { id: mocks.params.hostId, label: "This Mac", hostName: "Office iMac", customName: "Desk", publicKeyB64: "k", endpoint: "localhost", lastConnectedAt: 1, provenance: { kind: "explicit" } };
+  mocks.app = { ...mocks.app, hosts: [host], activeHost: host };
+  await render();
+  expect(container.textContent).toContain("TerminalX · Desk");
+  expect(container.textContent).not.toContain("Office iMac");
 });
 
 describe("mobile transcript ordering (#384)", () => {
@@ -534,39 +548,58 @@ describe("mobile conversation navigation", () => {
     }
   });
 
-  it("lists each chat once, as the desktop does, opening the conversation that waits on the reader", async () => {
+  it("lists each session once with its status in words, and opens its tabs in place", async () => {
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], issueRef: "PRO-132", manualStatus: "in_review" }];
     await render(true);
-    // Named by its worktree on a Mac that sends no branch, and saying it needs the reader.
-    const rows = () => [...container.querySelectorAll("button")].filter((item) => item.getAttribute("aria-label")?.startsWith("issue-132"));
+    // Named by its title, its status and tabs in words, its branch after; on a Mac that sends no row facts a waiting tab needs the person.
+    const rows = () => [...container.querySelectorAll("button")].filter((item) => item.getAttribute("aria-label")?.startsWith("Create a new issue"));
     expect(rows()).toHaveLength(1);
-    expect(rows()[0].getAttribute("aria-label")).toContain("needs you");
+    expect(rows()[0].getAttribute("aria-label")).toBe("Create a new issue, Needs you, 2 tabs, branch issue-132");
+    expect(rows()[0].getAttribute("aria-description")).toContain("Shows its tabs");
+    // Under the pinned section, and nothing about its issue or manual status.
+    expect(container.querySelector('[data-section="needs"]')?.textContent).toContain("Needs you");
+    expect(container.textContent).not.toMatch(/PRO-132|Backlog|In review/);
     await act(async () => rows()[0].click());
-    expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ sessionId: "worktree", tabId: "claude", hostId: mocks.params.hostId }) }));
-    // Then the one working, once nothing waits.
-    mocks.app.sessions = [{ ...mocks.app.sessions[0], tabs: [{ ...mocks.app.sessions[0].tabs[0], status: "idle" }, mocks.app.sessions[0].tabs[1]] }];
+    expect(rows()[0].getAttribute("aria-expanded")).toBe("true");
+    expect(mocks.push).not.toHaveBeenCalled();
+    expect(button("Claude Code, Needs you")).toBeTruthy();
+    await click("Codex, Working");
+    expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ sessionId: "worktree", tabId: "codex", hostId: mocks.params.hostId }) }));
+    // The Mac says what the tab waits for: a question reads in the issue's words, and wins over the working tab.
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], rowStatus: { tabs: [{ status: "waiting", activity: "needs_answer" }, { status: "in_progress", activity: null }] } }];
     await render(true);
-    expect(rows()[0].getAttribute("aria-label")).toContain("working");
+    expect(rows()[0].getAttribute("aria-label")).toContain("Needs your answer, 2 tabs");
+    // A session with one tab opens it at once.
+    mocks.app.sessions = [{ ...mocks.app.sessions[0], rowStatus: undefined, tabs: [{ id: "codex", harness: "codex", status: "in_progress" }] }];
+    await render(true);
+    expect(rows()[0].getAttribute("aria-label")).toBe("Create a new issue, Working, branch issue-132");
     await act(async () => rows()[0].click());
     expect(mocks.push).toHaveBeenLastCalledWith(expect.objectContaining({ params: expect.objectContaining({ tabId: "codex" }) }));
   });
 
-  it("keeps manual status visible and updated in both the Chats and Projects lists", async () => {
-    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "in_review" }];
+  it("filters to what needs the person or what works, with counts, and keeps the choice", async () => {
+    const working = { id: "busy", title: "Runtime handover", project: "TerminalX", worktree: "pro-341", branch: "pro-341-runtime", modified: "2026-11-07T10:00:00Z", tabs: [{ id: "w", harness: "claude", status: "in_progress" }] };
+    mocks.app.sessions = [mocks.app.sessions[0], working];
     await render(true);
-    const row = () => [...container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label")?.startsWith("issue-132"))!;
-    expect(row().textContent).toContain("In review");
-    expect(row().getAttribute("aria-label")).toContain("In review");
-    await click("Group by project");
-    expect(row().textContent).toContain("In review");
-    expect(row().getAttribute("aria-label")).toContain("In review");
-    mocks.app.sessions = [{ ...mocks.app.sessions[0], manualStatus: "done" }];
+    const titles = () => [...container.querySelectorAll("button")].map((item) => item.getAttribute("aria-label") ?? "").filter((label) => /^(Create a new issue|Runtime handover),/.test(label)).map((label) => label.split(",")[0]);
+    expect(titles()).toEqual(["Create a new issue", "Runtime handover"]);
+    await click("Needs you, 1");
+    expect(button("Needs you, 1").getAttribute("aria-pressed")).toBe("true");
+    expect(titles()).toEqual(["Create a new issue"]);
+    expect(container.textContent).toContain("1 session is waiting for you.");
+    await click("Working, 1");
+    expect(titles()).toEqual(["Runtime handover"]);
+    // Leaving the list and coming back keeps the filter while the app runs.
+    await act(async () => { root.render(<div />); });
     await render(true);
-    expect(row().textContent).toContain("Done");
-    expect(row().textContent).not.toContain("In review");
-    await click("Show all chats");
-    expect(row().textContent).toContain("Done");
-    expect(row().getAttribute("aria-label")).toContain("Done");
-    expect(row().textContent).not.toContain("In review");
+    expect(button("Working, 1").getAttribute("aria-pressed")).toBe("true");
+    // Search from the header narrows every count.
+    await click("Search sessions");
+    await type("handover");
+    expect(button("All, 1")).toBeTruthy();
+    expect(button("Needs you, 0")).toBeTruthy();
+    await click("Close search");
+    await click("All, 2");
   });
 
   it("switches agents, keeps drafts and transcripts separate, and sends to the selected tab", async () => {

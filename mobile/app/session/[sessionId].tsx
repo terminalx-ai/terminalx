@@ -14,6 +14,7 @@ import { draftContent, draftIdFor, readDraftId, type DraftId } from "@mobile/dat
 import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import { connectionWords, useConnectionState, type ConnectionState } from "@mobile/state/connection-view";
+import { useMachines } from "@mobile/state/useMachines";
 import { hostDisplayName } from "@mobile/store/host-name";
 import { canRetry, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
@@ -65,6 +66,8 @@ export default function SessionScreen() {
   // view. One that gains it while this is open offers it then.
   const features = useHostFeatures(app.api, app.activeHost?.id);
   const state = useConnectionState(app);
+  // The machine it runs on, by the name it has on this phone (#987).
+  const machineName = useMachines().paired.find((machine) => machine.active)?.name;
   const terminalOffered = features?.terminal === 1;
   const terminal = terminalOffered && view === "terminal";
   const linked = app.connectionStage === "connected";
@@ -100,7 +103,7 @@ export default function SessionScreen() {
   };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
-    <SessionHeader title={named} subtitle={summary && summary.kind !== "quick" ? summary.project : undefined} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} />
+    <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} />
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} actionsDisabled={!linked} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}

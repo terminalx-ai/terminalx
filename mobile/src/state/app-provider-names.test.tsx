@@ -19,6 +19,8 @@ const fake = vi.hoisted(() => ({
   network: null as null | ((state: unknown) => void),
   retryNow: vi.fn(),
   paired: null as any,
+  session: null as any,
+  discover: vi.fn(),
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({
   default: {
@@ -41,10 +43,10 @@ vi.mock("react-native", () => ({
   Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
   Platform: { OS: "ios", constants: { interfaceIdiom: "phone" } },
 }));
-vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => null, refreshStoredSession: vi.fn(), signOut: vi.fn() }));
+vi.mock("../auth/native", () => ({ beginSignIn: vi.fn(), finishSignIn: vi.fn(), readSession: async () => fake.session, refreshStoredSession: async (session: unknown) => ({ status: "fresh", session }), signOut: vi.fn() }));
 vi.mock("../auth/protocol", () => ({ isAuthCallbackUrl: () => false }));
 vi.mock("../notifications/local", () => ({ handleNotificationEvent: vi.fn(), restoreLocalNotifications: vi.fn() }));
-vi.mock("../pairing/account", () => ({ discoverMachines: vi.fn(), pairDiscoveredMachine: vi.fn(), signOutPairing: vi.fn() }));
+vi.mock("../pairing/account", () => ({ discoverMachines: fake.discover, pairDiscoveredMachine: vi.fn(), signOutPairing: vi.fn() }));
 vi.mock("../pairing/errors", () => ({ pairingStep: (_step: string, work: () => unknown) => work() }));
 vi.mock("../pairing/parse", async (original) => ({ ...(await original<typeof import("../pairing/parse")>()), parsePairingCodeOrThrow: () => ({}) }));
 vi.mock("../pairing/pair", () => ({
@@ -106,6 +108,8 @@ beforeEach(async () => {
   fake.summaries.mockResolvedValue([]);
   fake.forgetPairing.mockResolvedValue(true);
   fake.paired = HOST;
+  fake.session = null;
+  fake.discover.mockReset();
   await savePairedHost(HOST, { v: 1, deviceToken: "token" });
   root = createRoot(document.createElement("div"));
   await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
@@ -459,4 +463,38 @@ describe("the connection state's facts (#983)", () => {
     expect(app.activeHost?.id).toBe(HOST.id);
     expect(app.sessions).toEqual([summary("kept")]);
   });
+});
+
+// Review of #994 (#987): a machine forgotten here that is still on the account is hidden on this phone, not offered again at once.
+it("hides a forgotten machine that is still on the account, and only that one", async () => {
+  const { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } = await import("../pairing/contracts");
+  const record = (seed: number) => {
+    const hostPublicKeyB64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(seed)));
+    return { hostId: hostIdForPublicKey(hostPublicKeyB64)!, hostPublicKeyB64, bindingGeneration: 1, displayName: `Machine ${seed}`, capabilities: [ACCOUNT_PAIRING_CAPABILITY], state: "active" as const, reachability: "exited" as const };
+  };
+  const onAccount = record(1);
+  const forged = { ...record(2), hostId: "not-its-id" };
+  const paired = { ...HOST, id: onAccount.hostId, publicKeyB64: onAccount.hostPublicKeyB64, provenance: { kind: "automatic" as const, userId: "u" } };
+  const other = { ...HOST, id: "host-forged", publicKeyB64: forged.hostPublicKeyB64 };
+  await savePairedHost(paired, { v: 1, deviceToken: "token" });
+  await savePairedHost(other, { v: 1, deviceToken: "token" });
+  fake.session = { user: { userId: "u", email: "a@b.c" }, expiresAt: Date.now() + 3_600_000 };
+  fake.discover.mockResolvedValue({ hosts: [onAccount, forged], installationState: "ready" });
+  await act(async () => root.unmount());
+  root = createRoot(document.createElement("div"));
+  await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
+  await settle();
+  await act(async () => app.refreshMachines());
+  expect(app.availableHosts).toEqual([]);
+
+  await act(async () => app.forgetHost(paired.id));
+  expect(app.availableHosts).toEqual([onAccount]);
+  expect(app.accountMachinePrefs).toEqual({ [onAccount.hostId]: { hidden: true } });
+  // Kept on the phone: still hidden after a restart.
+  const { readAccountMachinePrefs } = await import("../store/account-machines");
+  expect(await readAccountMachinePrefs()).toEqual({ [onAccount.hostId]: { hidden: true } });
+
+  // A record that does not match its key is not acted on.
+  await act(async () => app.forgetHost(other.id));
+  expect(app.accountMachinePrefs).toEqual({ [onAccount.hostId]: { hidden: true } });
 });

@@ -144,7 +144,10 @@ mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
-mod local_vm;
+mod container_vm;
+mod computer_targets;
+#[cfg(unix)]
+pub mod local_vm;
 mod machine_name;
 mod memory_baseline;
 mod merged_cleanup;
@@ -171,8 +174,10 @@ mod quit;
 mod native_menu;
 #[cfg(feature = "desktop")]
 mod chat_windows;
-mod relay_e2ee;
+pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_host;
+pub mod machine_wire;
 mod session;
 mod sidebar_activity;
 mod session_archive;
@@ -531,6 +536,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::local_vm_request,
             data_privacy::data_privacy_status,
             data_privacy::data_privacy_set,
             updater::app_update_check,

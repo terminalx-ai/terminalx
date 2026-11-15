@@ -19,7 +19,10 @@ vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
+  // The top bar (#984) fades in and out; here it only needs to exist.
+  const Animated = { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) };
   return {
+    Animated,
     AppState: { currentState: "active" },
     View: Box, Text: Box, ScrollView: Box, Platform: { OS: "ios", select: ({ default: fallback }: any) => fallback },
     // The spinner of the connection line, drawn so a test can see it.
@@ -92,6 +95,8 @@ describe("a list's spinner is the person's pull alone (#983)", () => {
 
   it.each(lists)("%s: an empty list waiting for its first load says so without a spinner of its own", async (_name, screen, backgroundLoad) => {
     backgroundLoad(true);
+    // Machines says it is loading only while no machine is paired yet (#994).
+    if (_name === "Machines") Object.assign(mocks.app, { hosts: [], activeHost: null });
     await show(screen());
     expect(container.textContent).toMatch(/Loading|Looking for your Macs/);
     expect(container.querySelector("[data-empty-spinner]")).toBeNull();
@@ -137,7 +142,8 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
     await act(async () => { reconnect.click(); });
     expect(mocks.app.connection.restart).toHaveBeenCalledWith("reconnect was chosen", true);
     await show(<MachinesScreen />);
-    expect(container.textContent).toContain("Disconnected on your Mac · tap to reconnect");
+    // The machine row keeps its own words for it (#994).
+    expect(container.textContent).toContain("Disconnected on that machine · tap to reconnect");
   });
 
   it("never shows what the connection log holds: paths, addresses, raw failures", async () => {
@@ -149,10 +155,10 @@ describe("the Sessions header and the machine's row say the same (#983)", () => 
     }
   });
 
-  it("names a machine that is not in use by when it was last seen", async () => {
+  it("names a machine that is not in use by when the phone last reached it", async () => {
     mocks.app.activeHost = null;
     mocks.app.hosts = [{ ...host, lastConnectedAt: Date.now() - 3 * 60_000 }];
     await show(<MachinesScreen />);
-    expect(container.textContent).toContain("Last seen 3 min ago");
+    expect(container.textContent).toContain("Last connected 3 minutes ago");
   });
 });
