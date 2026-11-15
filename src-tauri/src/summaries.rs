@@ -8,10 +8,11 @@
 //! has what a card shows; opening the dashboard on fifty sessions then costs
 //! about one block per tab rather than fifty whole transcripts.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -294,19 +295,78 @@ pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> 
     for tab in session.tabs.iter().filter(|tab| !tab.follow.title_pinned) {
         let first = store::log_path(&session.id, &tab.id)
             .ok()
-            .and_then(|path| first_request(&path, tab.follow.conversation.as_deref()))
+            .and_then(|path| cached_first_request(&path, tab.follow.conversation.as_deref()))
             .unwrap_or_default();
         let agent_title = (tab.harness == "claude")
             .then(|| tab.provider_session_id.as_deref())
             .flatten()
             .and_then(|id| crate::harness::claude::transcript::locate(&session.cwd, id))
-            .filter(|path| path.is_file())
-            .and_then(|path| crate::harness::claude::transcript::ai_title(&path));
+            .and_then(|path| cached_agent_title(&path));
         if let Some(title) = crate::session_names::chosen_name(&first, agent_title) {
             out.insert(tab.id.clone(), title);
         }
     }
     out
+}
+
+/// A file as it stood when it was read: its length and when it last changed.
+/// Logs and transcripts are only appended to, so the same stamp means the
+/// same contents.
+type Stamp = (u64, Option<std::time::SystemTime>);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = fs::metadata(path).ok().filter(|meta| meta.is_file())?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
+/// What was read for each tab's name, kept for the next list: the phone asks
+/// for one on every change, and reading each transcript's tail again would
+/// cost megabytes a time for names that seldom change.
+#[derive(Default)]
+struct NameReads {
+    /// By log and conversation: the first request once found, which never
+    /// changes after; else the stamp of the log it was not in.
+    requests: HashMap<(std::path::PathBuf, Option<String>), Result<String, Stamp>>,
+    /// By transcript: the title its agent last gave it, and the stamp it was read at.
+    titles: HashMap<std::path::PathBuf, (Stamp, Option<String>)>,
+}
+
+static NAME_READS: LazyLock<Mutex<NameReads>> = LazyLock::new(Default::default);
+
+/// [`first_request`], read once a conversation has one, and otherwise again
+/// only when its log has grown.
+fn cached_first_request(path: &Path, conversation: Option<&str>) -> Option<String> {
+    let key = (path.to_path_buf(), conversation.map(String::from));
+    let now = stamp(path)?;
+    match NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests.get(&key) {
+        Some(Ok(found)) => return Some(found.clone()),
+        Some(Err(seen)) if *seen == now => return None,
+        _ => {}
+    }
+    let found = first_request(path, conversation);
+    NAME_READS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .requests
+        .insert(key, found.clone().ok_or(now));
+    found
+}
+
+/// The title Claude gave a conversation, read again only when its transcript has changed.
+fn cached_agent_title(path: &Path) -> Option<String> {
+    let now = stamp(path)?;
+    if let Some((seen, title)) = NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).titles.get(path) {
+        if *seen == now {
+            return title.clone();
+        }
+    }
+    let title = crate::harness::claude::transcript::ai_title(path);
+    NAME_READS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .titles
+        .insert(path.to_path_buf(), (now, title.clone()));
+    title
 }
 
 /// The first top-level request of the conversation a tab holds now, read
@@ -634,6 +694,35 @@ mod tests {
         assert_eq!(titles.get("moved").map(String::as_str), Some("PRO-123 Short generated names"));
         assert!(!titles.contains_key("named"));
         assert!(!titles.contains_key("quiet"), "nothing said yet, nothing made");
+    }
+
+    #[test]
+    fn name_reads_are_kept_until_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("tab.jsonl");
+        write(&log, &[event(serde_json::json!({"type": "assistant_message", "text": "Hello"}))]);
+        assert_eq!(cached_first_request(&log, None), None, "nothing asked yet");
+        // The log grew: it is read again, and the request found.
+        write(&log, &[
+            event(serde_json::json!({"type": "assistant_message", "text": "Hello"})),
+            event(serde_json::json!({"type": "user_message", "text": WORKER_PROMPT})),
+        ]);
+        assert_eq!(cached_first_request(&log, None).as_deref(), Some(WORKER_PROMPT));
+        // Once found, a conversation's first request is never read again.
+        fs::remove_file(&log).unwrap();
+        write(&log, &[event(serde_json::json!({"type": "user_message", "text": "Something else, much later on. And more."}))]);
+        assert_eq!(cached_first_request(&log, None).as_deref(), Some(WORKER_PROMPT));
+        // Another conversation in the same log is its own read.
+        assert_eq!(cached_first_request(&log, Some("c2")), None);
+
+        let transcript = dir.path().join("claude.jsonl");
+        assert_eq!(cached_agent_title(&transcript), None, "no transcript yet");
+        let title = |text: &str| serde_json::json!({"type": "ai-title", "aiTitle": text}).to_string();
+        write(&transcript, &[title("Fix the login")]);
+        assert_eq!(cached_agent_title(&transcript).as_deref(), Some("Fix the login"));
+        // The agent titled it again as the talk moved on.
+        write(&transcript, &[title("Fix the login"), title("Fix the login timeout")]);
+        assert_eq!(cached_agent_title(&transcript).as_deref(), Some("Fix the login timeout"));
     }
 
     #[test]
