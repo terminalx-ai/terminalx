@@ -132,6 +132,15 @@
         "null"
       ]
     },
+    "machines": {
+      "additionalProperties": false,
+      "properties": {
+        "allowOperating": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "mergedCleanup": {
       "additionalProperties": false,
       "properties": {

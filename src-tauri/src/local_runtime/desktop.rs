@@ -276,6 +276,27 @@ impl Desktop {
         if matches!(method, "clear" | "revoke" | "check") { self.client.quick(&command, params) } else { self.client.call(&command, params) }
     }
 
+    /// The runtime's machine host (PRO-341, `crate::machine_wire`): its
+    /// status, or `None` from a runtime too old to host.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn machine_host_status(&self) -> Result<Option<crate::machine_wire::Status>> {
+        match self.client.quick::<serde_json::Value>(crate::machine_wire::STATUS, serde_json::json!({})) {
+            Ok(status) => Ok(Some(serde_json::from_value(status)?)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A machine host command that names this attachment.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn machine_host(&self, command: &str, mut params: serde_json::Value) -> Result<serde_json::Value> {
+        let attachment = self.attachment()?;
+        let object = params.as_object_mut().ok_or_else(|| anyhow::anyhow!("Machine host parameters must be an object."))?;
+        object.insert("epoch".into(), attachment.epoch.into());
+        object.insert("lease".into(), attachment.lease.into());
+        self.client.quick(command, params)
+    }
+
     /// A view connection for `window`. When it ends by itself it leaves the
     /// window, so the next attach opens another, and the loss is reported.
     fn view(&self, window: &str) -> Result<(u64, Bridge)> {
