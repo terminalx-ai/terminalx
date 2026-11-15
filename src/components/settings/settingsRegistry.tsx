@@ -75,7 +75,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns" | "localVmTasks" | "machines";
+  requires?: "orchestratorRuns" | "localVmTasks";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -309,25 +309,25 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "machines.allowOperating", section: "machines", title: "Let other computers operate this Mac",
     description: "Computers you approve can start sessions, open terminals and change files here. Connections are end-to-end encrypted; the relay only passes sealed messages.",
-    searchTerms: ["machines", "operate", "remote", "allow", "computers", "host"], scope: "user", requires: "machines",
+    searchTerms: ["machines", "operate", "remote", "allow", "computers", "host"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.allowOperating" },
   }),
   defineSetting({
     id: "machines.pairingCode", section: "machines", title: "Create pairing code",
     description: "A one-time code another computer pastes in Add a machine. It works once and lasts five minutes.",
-    searchTerms: ["machines", "pairing", "code", "pair", "create", "one-time"], scope: "user", requires: "machines",
+    searchTerms: ["machines", "pairing", "code", "pair", "create", "one-time"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime (in memory; never saved)" }, layout: "content",
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
     description: "Computers this Mac can operate, and Add a machine.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay"], scope: "user", requires: "machines",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({
     id: "machines.computers", section: "machines", title: "Computers that can operate this Mac",
     description: "Each has its own credential. Revoke ends it and closes its connection.",
-    searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user", requires: "machines",
+    searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
   }),
   defineSetting({
