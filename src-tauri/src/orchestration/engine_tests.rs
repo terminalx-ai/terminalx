@@ -3897,6 +3897,9 @@ fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_par
     assert!(message.starts_with("Handed titles to the lead to finish: its try on opus at high fell short, and no top model of"), "{message}");
     let told = host.world().told.last().unwrap().clone();
     assert!(told.starts_with(&format!("TerminalX handed you piece titles (\"Session titles\") of run {id} by itself:")) && told.contains("One edge case is left: titles of resumed sessions."), "{told}");
+    // Nobody widened it: a person approved its files, and the lead the run handed it to is held to them.
+    assert!(told.contains("You are held to the files it owns") && !told.contains("You are not held"), "{told}");
+    assert!(store::get(id).unwrap().piece("titles").unwrap().tries.last().unwrap().held_to_owns);
 
     // A second piece that runs out while the lead has the first waits for it, and says so.
     run_out_of_models(&host, id, "icons");
@@ -3904,7 +3907,12 @@ fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_par
     let icons = run.piece("icons").unwrap();
     assert_eq!((icons.state, icons.to_lead.as_ref().and_then(|to_lead| to_lead.waits.as_deref())), (PieceState::Blocked, Some("It goes to the lead once the lead is done with piece titles.")));
     assert!(icons.note.as_deref().unwrap().contains("It goes to the lead."), "{:?}", icons.note);
-    // The lead finishes the first: the second goes to it at once.
+    // A finish that changes another piece's files would widen this one: the person's, so refused.
+    host.world().lead_work = Some(engine::LeadWork { head: "4d1c0e7aa".into(), changes: vec![verify::FileChange { path: "src/titles/mod.rs".into(), added: Some(30), removed: Some(4) }, verify::FileChange { path: "src/icons/mod.rs".into(), added: Some(2), removed: Some(0) }], uncommitted: Vec::new() });
+    let error = engine::finish(&host, id, "titles", By::Cli, true).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("person_only", json!(["src/icons/mod.rs"])));
+    assert_eq!(store::get(id).unwrap().piece("titles").unwrap().state, PieceState::Lead);
+    // The lead finishes the first within its files: the second goes to it at once.
     host.world().lead_work = Some(engine::LeadWork { head: "4d1c0e7aa".into(), changes: vec![verify::FileChange { path: "src/titles/mod.rs".into(), added: Some(30), removed: Some(4) }], uncommitted: Vec::new() });
     engine::finish(&host, id, "titles", By::Cli, true).unwrap();
     let run = store::get(id).unwrap();

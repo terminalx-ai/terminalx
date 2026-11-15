@@ -1023,7 +1023,9 @@ checkout as it is; when not, fix it there) or when no model is left above its la
 (finish it). The piece is `blocked` with `toLead` until you are free: you take one piece at a
 time, and `toLead.waits` says what it waits for. Then it is `lead`, and you are sent its
 brief as with `runs take-over`, saying the run handed it to you. Finish it the same way, with
-`terminalx runs finish <piece> --json`. You are not asked to tell the person: it is not
+`terminalx runs finish <piece> --json`. In a run a person approved you are held to the files
+the piece owns, as with a take-over of your own: `finish` refuses a change outside them, since
+widening a piece is the person's. You are not asked to tell the person: it is not
 theirs to decide.
 
 Every step a run takes by itself is in the run's `events` (`runs show`), each with `at`,
