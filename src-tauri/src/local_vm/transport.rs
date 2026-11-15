@@ -139,6 +139,15 @@ fn linux_rpc_at(path: &Path, env: &Environment, method: &str, mut params: Value,
     decode(&process::run(&mut command, &input, budget)?)
 }
 
+/// The guest runtime answered and refused the request: unlike a stopped VM
+/// or a lost exec, this is the guest's own verdict (#978 review).
+#[derive(Debug)]
+pub struct GuestRefused(pub String);
+impl std::fmt::Display for GuestRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "Guest request refused: {}", self.0) }
+}
+impl std::error::Error for GuestRefused {}
+
 /// A guest runtime's reply, on either transport: only `ok: true` with a
 /// result acknowledges the request (review 2: the legacy route also took any
 /// reply that was not `ok: false`, the whole object standing in for a result).
@@ -146,7 +155,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Value> {
     let response: Value = serde_json::from_slice(bytes).context("Invalid guest response")?;
     if response.get("ok") == Some(&Value::Bool(false)) {
         let error = &response["error"];
-        bail!("Guest request refused: {}", error["message"].as_str().map(String::from).unwrap_or_else(|| error.to_string()));
+        return Err(GuestRefused(error["message"].as_str().map(String::from).unwrap_or_else(|| error.to_string())).into());
     }
     if response.get("ok") != Some(&Value::Bool(true)) {
         bail!("Guest response did not acknowledge the authenticated RPC");

@@ -140,6 +140,11 @@ pub struct Task {
     /// (`HISTORY`), out of the journal every VM operation reads (#978).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub archived_events: u64,
+    /// An abandoned task whose guest answered but refused to report it (a
+    /// lost start, a reset guest): nothing will ever come back, so the
+    /// supervisor stops polling it (#978 review). Its outcome stays unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guest_unaccounted: bool,
 }
 
 impl Task {
@@ -148,7 +153,8 @@ impl Task {
     /// worker a resumed VM may still be running (#978). Polling only reads;
     /// an abandoned task is never dispatched.
     pub fn polled(&self) -> bool {
-        !self.status.terminal() || (self.status == TaskStatus::Abandoned && self.dispatch_started)
+        !self.status.terminal()
+            || (self.status == TaskStatus::Abandoned && self.dispatch_started && !self.guest_unaccounted)
     }
 }
 
@@ -450,6 +456,7 @@ impl Journal {
                 event_bytes: 0,
                 events_dropped: 0,
                 archived_events: 0,
+                guest_unaccounted: false,
             };
             state
                 .tasks
@@ -658,19 +665,43 @@ fn compact(dir: &Path, state: &mut State) -> Result<()> {
             .environments
             .get(&task.target.environment_id)
             .is_none_or(|env| env.deleted_at.is_some());
-        if task.events.is_empty() || !task.status.terminal() || (task.polled() && !deleted) {
+        if !task.status.terminal() || (task.polled() && !deleted) {
             continue;
         }
-        // `append_all` refuses archived tasks; should events still appear,
-        // they extend the retained file rather than replace it.
-        let events = retained_events(dir, task)?;
+        // Decided from the journal's own events, so a task already compacted
+        // costs nothing: its kept tail is within the bound and nothing moves.
+        let start = tail_start(&task.events);
+        if start == 0 {
+            continue;
+        }
+        let mut events = archived(dir, task)?;
+        events.extend(task.events.drain(..start));
         private_directory(&dir.join(HISTORY))?;
         let history = History { version: 1, target: task.target.clone(), events };
-        task.events.clear();
         atomic_private_write(&history_path(dir, &task.target)?, &serde_json::to_vec(&history)?)?;
         task.archived_events = history.events.len() as u64;
     }
     Ok(())
+}
+
+/// A finished task keeps its latest events in the journal, so its card still
+/// shows its last progress without reading the history file (#978 review).
+const TAIL_EVENTS: usize = 32;
+const TAIL_BYTES: usize = 64 * 1024;
+
+/// Where the kept tail of `events` begins: the latest events within
+/// `TAIL_EVENTS` and `TAIL_BYTES`.
+fn tail_start(events: &[TaskEvent]) -> usize {
+    let mut bytes = 0;
+    let mut start = events.len();
+    while start > 0 && events.len() - start < TAIL_EVENTS {
+        bytes += serde_json::to_vec(&events[start - 1]).map_or(usize::MAX / 2, |b| b.len());
+        if bytes > TAIL_BYTES {
+            break;
+        }
+        start -= 1;
+    }
+    start
 }
 
 fn history_path(dir: &Path, target: &TaskTarget) -> Result<PathBuf> {
@@ -678,22 +709,31 @@ fn history_path(dir: &Path, target: &TaskTarget) -> Result<PathBuf> {
     Ok(dir.join(HISTORY).join(format!("{}.json", target.task_id)))
 }
 
-/// Every event the host retained for `task`, including those compacted to its
-/// history file. Read without the journal lock: the file is written once,
-/// complete, before the journal stops holding its events.
-pub(super) fn retained_events(dir: &Path, task: &Task) -> Result<Vec<TaskEvent>> {
+/// The events of `task` held in its history file, none if it has none.
+fn archived(dir: &Path, task: &Task) -> Result<Vec<TaskEvent>> {
     if task.archived_events == 0 {
-        return Ok(task.events.clone());
+        return Ok(Vec::new());
     }
     let path = history_path(dir, &task.target)?;
     let history: History = serde_json::from_slice(&fs::read(&path).with_context(|| {
         format!("Retained history of task {} is missing", task.target.task_id)
     })?)
     .context("read retained task history")?;
-    if history.version != 1 || history.target != task.target || history.events.len() as u64 != task.archived_events {
+    // A file longer than the journal's count is a compaction the journal did
+    // not record before a crash: the journal's count is what was committed.
+    if history.version != 1 || history.target != task.target || (history.events.len() as u64) < task.archived_events {
         bail!("Retained task history does not match the journal; refusing to use it");
     }
     let mut events = history.events;
+    events.truncate(task.archived_events as usize);
+    Ok(events)
+}
+
+/// Every event the host retained for `task`: its history file, then the
+/// tail the journal kept. Read without the journal lock: the file is written
+/// complete before the journal stops holding those events.
+pub(super) fn retained_events(dir: &Path, task: &Task) -> Result<Vec<TaskEvent>> {
+    let mut events = archived(dir, task)?;
     events.extend(task.events.iter().cloned());
     Ok(events)
 }
@@ -1004,26 +1044,38 @@ mod tests {
         assert!(running > 50 * 4096, "a running task's events stay in the journal");
         journal.transaction(|s| { let t = bound(s, &task.target)?; t.status = TaskStatus::Completed; t.dispatch_started = true; Ok(()) }).unwrap();
         let compacted = journal.read().unwrap().tasks[&task.target.task_id].clone();
-        assert!(compacted.events.is_empty());
-        assert_eq!((compacted.archived_events, compacted.last_event_seq), (50, 50));
-        assert!(fs::metadata(dir.join("journal.json")).unwrap().len() < 16 * 1024);
+        // The latest events stay, so the card still shows its last progress.
+        let kept = compacted.events.len();
+        assert!(kept > 0 && kept < 50 && kept <= TAIL_EVENTS);
+        assert_eq!(compacted.events.last(), appended.events.last());
+        assert_eq!((compacted.archived_events, compacted.last_event_seq), (50 - kept as u64, 50));
+        assert!(fs::metadata(dir.join("journal.json")).unwrap().len() < (TAIL_BYTES + 16 * 1024) as u64);
         let retained = retained_events(&dir, &compacted).unwrap();
         assert_eq!(retained, appended.events);
+        // Later transactions leave it as it is, without reading its history.
+        journal.transaction(|s| { s.enabled = !s.enabled; Ok(()) }).unwrap();
+        assert_eq!(journal.read().unwrap().tasks[&task.target.task_id], compacted);
+        // A crash after the history file but before the journal: the journal's count holds.
+        let history = dir.join(HISTORY).join(format!("{}.json", task.target.task_id));
+        let mut longer: serde_json::Value = serde_json::from_slice(&fs::read(&history).unwrap()).unwrap();
+        longer["events"].as_array_mut().unwrap().push(serde_json::to_value(event(99)).unwrap());
+        fs::write(&history, serde_json::to_vec(&longer).unwrap()).unwrap();
+        assert_eq!(retained_events(&dir, &compacted).unwrap(), appended.events);
         assert!(journal.append_all(&task.target, &[event(51)], None).is_err(), "an archived task gains no events");
         // An abandoned task is still polled, so its events stay until the guest answers,
         // or until its VM is deleted and nothing can answer.
         let abandoned = journal.submit("abandoned", input).unwrap();
-        journal.append_all(&abandoned.target, &[event(1)], None).unwrap();
+        journal.append_all(&abandoned.target, &(1..=50).map(event).collect::<Vec<_>>(), None).unwrap();
         journal.transaction(|s| { let t = bound(s, &abandoned.target)?; t.status = TaskStatus::Abandoned; t.dispatch_started = true; Ok(()) }).unwrap();
-        assert_eq!(journal.read().unwrap().tasks[&abandoned.target.task_id].events.len(), 1);
+        assert_eq!(journal.read().unwrap().tasks[&abandoned.target.task_id].events.len(), 50);
         journal.transaction(|s| { s.environments.get_mut(&abandoned.target.environment_id).unwrap().deleted_at = Some(now()); Ok(()) }).unwrap();
         let gone = journal.read().unwrap().tasks[&abandoned.target.task_id].clone();
-        assert_eq!((gone.events.len(), gone.archived_events), (0, 1));
+        assert!(gone.archived_events > 0 && gone.events.len() < 50);
         // A history file that no longer matches is refused, never silently used.
         fs::write(dir.join(HISTORY).join(format!("{}.json", task.target.task_id)), b"{\"version\":1,\"target\":null,\"events\":[]}").unwrap();
         assert!(retained_events(&dir, &compacted).is_err());
         let reopened = Journal::open_existing(&dir).unwrap();
-        assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id].archived_events, 50);
+        assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id].archived_events, compacted.archived_events);
         fs::remove_dir_all(dir).unwrap();
     }
 

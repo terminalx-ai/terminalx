@@ -301,6 +301,28 @@ pub struct Guest {
     _lock: File,
 }
 
+/// A Linux guest process that receives the host key, `local-vm-rpc` or the
+/// activated owner, runs as the same account as the workers it supervises.
+/// Marked non-dumpable first thing, its /proc entries (the stdin pipe at
+/// fd/0, mem, environ) become root's and same-account ptrace is refused, so a
+/// worker cannot read the key out of it (#978 review). Residual: a worker
+/// that wins the race between exec and this call, or that can impersonate
+/// the owner's socket as the same account, still could; closing that needs
+/// the owner under its own account.
+#[cfg(target_os = "linux")]
+pub fn seal_key_holder() {
+    let rpc = std::env::args().nth(1).as_deref() == Some("local-vm-rpc");
+    if !rpc && std::env::var_os("TERMINALX_LINUX_ACTIVATION").is_none() {
+        return;
+    }
+    // SAFETY: PR_SET_DUMPABLE takes plain integer arguments and touches no memory.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        // Refuse to hold the key while readable by the workers.
+        eprintln!("terminalx-serve: cannot protect the host key from same-account processes");
+        std::process::exit(70);
+    }
+}
+
 fn linux_activation_identity() -> Option<Value> {
     let id = std::env::var("TERMINALX_LINUX_ACTIVATION").ok()?;
     let instance = std::env::var("TERMINALX_LINUX_INSTANCE").ok()?;

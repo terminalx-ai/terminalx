@@ -39,6 +39,10 @@ pub(super) fn live(root: &Path, now: std::time::SystemTime) -> Result<Vec<String
     Ok(live)
 }
 
+/// Slack past a desktop call's own timeout before its marker counts as a call
+/// given up on: covers lock-to-exec and exit-to-receipt time under load.
+const CALL_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug)]
 pub struct Guard { _file: File, pub(super) marker: PathBuf }
 
@@ -175,7 +179,10 @@ impl Guard {
         let operation = uuid::Uuid::new_v4().to_string();
         guard.marker = guard.marker.with_extension(format!("call.{operation}.json"));
         atomic_private_write(&guard.marker, &serde_json::to_vec(&serde_json::json!({
-            "target":target,"operationId":operation,"startedAt":super::journal::now(),"status":"awaitingExitReceipt","expiresAt":expires_at(within),
+            // The command's own timeout starts after this marker is written,
+            // and its exit is confirmed after it ends: the grace keeps a call
+            // still inside its timeout from counting as given up (#978 review).
+            "target":target,"operationId":operation,"startedAt":super::journal::now(),"status":"awaitingExitReceipt","expiresAt":expires_at(within + CALL_GRACE),
         }))?)?;
         Ok(guard)
     }
@@ -367,7 +374,11 @@ mod tests {
         let abandoned = Guard::call(dir.path(), &target, &journal, std::time::Duration::ZERO).unwrap();
         let marker = abandoned.marker.clone();
         drop(abandoned);
-        assert!(marker.exists());
+        // Within its grace a zero-timeout call still counts as running.
+        Guard::call(dir.path(), &target, &journal, minute).unwrap().completed().unwrap();
+        let mut retained: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        retained["expiresAt"] = serde_json::json!(1);
+        atomic_private_write(&marker, &serde_json::to_vec(&retained).unwrap()).unwrap();
         assert!(Guard::call(dir.path(), &target, &journal, minute).unwrap_err().to_string().contains("Stop or reset"));
         assert!(Guard::acquire(dir.path(), &target).is_err());
         let stop = Lifecycle::begin(dir.path(), &target, &journal, minute).unwrap();

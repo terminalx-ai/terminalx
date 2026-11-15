@@ -476,6 +476,7 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
             if let Err(error) = advance(journal, env, &task, stopped) {
                 journal.transaction(|s| {
                     let t = journal::bound(s, &task.target)?;
+                    settle_abandoned(t, &error);
                     if t.status.terminal() {
                         return Ok(());
                     }
@@ -496,6 +497,23 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
     }
     Ok(())
 }
+/// An abandoned task is polled so that a VM which comes back can report what
+/// its worker did. A stopped or unreachable guest keeps it polled; a guest
+/// that answers and refuses has no record to give, so polling ends there,
+/// the outcome still unknown (#978 review).
+fn settle_abandoned(task: &mut Task, error: &anyhow::Error) {
+    if task.status != TaskStatus::Abandoned || task.guest_unaccounted
+        || error.downcast_ref::<super::transport::GuestRefused>().is_none()
+    {
+        return;
+    }
+    task.guest_unaccounted = true;
+    let note = format!("The guest answered but has no record of this task ({}); it is no longer polled and its outcome stays unknown.",
+        crate::remote::protocol::redact(&error.to_string()));
+    task.detail = Some(match task.detail.take() { Some(detail) => format!("{detail} {note}"), None => note });
+    task.updated_at = journal::now();
+}
+
 fn claim_provision(journal: &Journal, env: &Environment) -> Result<bool> {
     if super::creation::hold_queued(journal, env)? {
         return Ok(false);
@@ -747,6 +765,32 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #978 review: an abandoned task the guest cannot account for was
+    /// polled forever; a stopped VM still keeps it polled.
+    #[test]
+    fn an_abandoned_task_stops_polling_only_when_its_guest_refuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let env = journal.enroll("Guest", "local:test").unwrap();
+        let input = journal::TaskInput { parent_session_id: journal::new_id(), parent_tab_id: journal::new_id(), parent_message_id: journal::new_id(),
+            environment_id: env.id.clone(), prompt: "p".into(), harness: "codex".into(), model: String::new(), effort: None,
+            permission_mode: "manual".into(), files: vec![], desktop: true };
+        let mut task = journal.submit("abandoned", input).unwrap();
+        task.status = TaskStatus::Abandoned;
+        task.dispatch_started = true;
+        settle_abandoned(&mut task, &anyhow::anyhow!("Guest VM is stopped or unavailable"));
+        assert!(task.polled(), "a stopped VM may still resume the worker");
+        settle_abandoned(&mut task, &super::super::transport::GuestRefused("Unknown task".into()).into());
+        assert!(!task.polled() && task.guest_unaccounted);
+        assert_eq!(task.status, TaskStatus::Abandoned, "the outcome stays unknown");
+        assert!(task.detail.as_deref().unwrap().contains("no record of this task"));
+        let mut running = task.clone();
+        running.status = TaskStatus::Running;
+        running.guest_unaccounted = false;
+        settle_abandoned(&mut running, &super::super::transport::GuestRefused("x".into()).into());
+        assert!(!running.guest_unaccounted, "only abandoned tasks settle this way");
+    }
+
     #[test]
     fn legacy_queued_creation_cannot_claim_an_unsupported_account_profile() {
         let dir = tempfile::tempdir().unwrap();

@@ -496,17 +496,27 @@ pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
         None => crate::store::ensure_dir(crate::store::root()?.join("computer").join("screens"))?.join(format!("screen-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"))),
     };
-    // Its capture and its copy, each with its own QUICK.
+    // Its capture, its copy and its cleanup, each with its own QUICK.
     #[cfg(unix)]
-    let admission = call_admission(target, QUICK * 2)?;
-    let inside = "/tmp/terminalx-screen.png";
-    let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK)
+    let admission = call_admission(target, QUICK * 3)?;
+    // Screenshots share the container's lock (#978), so each has its own
+    // file: two at once never return each other's or a half-written image.
+    let inside = screen_path(&uuid::Uuid::new_v4().to_string());
+    let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", &inside], QUICK)
         .context("capture the screen")
         .and_then(|_| run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out"));
+    // Removed whether or not the copy worked; a failed removal leaves one
+    // small file in the container's /tmp and does not fail the screenshot.
+    let _ = run(&path, &["exec", "-u", "cua", id, "rm", "-f", "--", &inside], QUICK);
     #[cfg(unix)]
     if exited(&copied) { admission.completed()?; }
     copied?;
     Ok(out)
+}
+
+/// The in-container file one screenshot captures to.
+fn screen_path(operation: &str) -> String {
+    format!("/tmp/terminalx-screen-{operation}.png")
 }
 
 fn shell_quote(s: &str) -> String {
@@ -815,6 +825,14 @@ mod tests {
         assert!(exited(&failed.context("capture the screen")), "context keeps what happened");
         let abandoned = run(Path::new("/bin/sh"), &["-c", "sleep 5"], Duration::from_millis(200));
         assert!(abandoned.is_err() && !exited(&abandoned));
+    }
+
+    /// #978 review: screenshots run concurrently, so they never share a file.
+    #[test]
+    fn each_screenshot_captures_to_its_own_file() {
+        let (a, b) = (screen_path(&uuid::Uuid::new_v4().to_string()), screen_path(&uuid::Uuid::new_v4().to_string()));
+        assert_ne!(a, b);
+        assert!(a.starts_with("/tmp/terminalx-screen-") && a.ends_with(".png"));
     }
 
     #[test]
