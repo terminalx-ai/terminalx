@@ -246,9 +246,14 @@ pub fn open(session_id: &str, tab_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn same_checkout(a: &str, b: &str) -> bool {
-    let normalized = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
-    normalized(a) == normalized(b)
+pub(super) fn same_checkout(a: &Path, b: &Path) -> bool {
+    let tree = |path: &Path| {
+        let path = canonical(path);
+        // Find the nearest working tree without launching another process
+        // under admission. A nested worktree has its own .git file.
+        path.ancestors().find(|folder| folder.join(".git").exists()).unwrap_or(&path).to_path_buf()
+    };
+    tree(a) == tree(b)
 }
 
 /// Called under the admission lock before dispatching a new prompt.
@@ -261,14 +266,13 @@ pub fn check(session_id: &str, tab_id: &str) -> Result<()> {
     if reservations.is_empty() { return Ok(()); }
     let session = index::get(session_id)?;
     for pipeline in reservations {
-        if pipeline.checking_locally && same_checkout(&index::get(&pipeline.author.session_id)?.cwd, &session.cwd) {
+        if pipeline.checking_locally && same_checkout(Path::new(&index::get(&pipeline.author.session_id)?.cwd), Path::new(&session.cwd)) {
             bail!("TerminalX is running checks on this checkout. Wait for them to finish before starting another turn.");
         }
         if pipeline.resolution.is_none() { continue; }
-        let Some(resolver) = pipeline.resolver.as_ref() else { continue };
-        if resolver.session_id == session_id && resolver.tab_id == tab_id { continue; }
+        if pipeline.resolver.as_ref().is_some_and(|resolver| resolver.session_id == session_id && resolver.tab_id == tab_id) { continue; }
         let owner = index::get(&pipeline.author.session_id)?;
-        if same_checkout(&owner.cwd, &session.cwd) {
+        if same_checkout(Path::new(&owner.cwd), Path::new(&session.cwd)) {
             bail!("This checkout is reserved for conflict resolution. Wait for the resolver to finish before starting another turn.");
         }
     }
@@ -296,6 +300,44 @@ mod tests {
     }
 
     #[test]
+    fn pending_validation_reserves_every_folder_of_its_working_tree_after_reopening() {
+        let _home = crate::store::temp_home();
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        let git = |args: &[&str]| {
+            let result = std::process::Command::new("git").current_dir(root).args(args).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=T", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "initial"]);
+        let source = root.join("src");
+        let docs = root.join("docs");
+        let worker = root.join(".raccoon/worktrees/worker");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        git(&["worktree", "add", "-qb", "worker", worker.to_str().unwrap()]);
+        let elsewhere = tempfile::tempdir().unwrap();
+        index::save(&[
+            session("author", source.to_str().unwrap()),
+            session("root", root.to_str().unwrap()),
+            session("sibling", docs.to_str().unwrap()),
+            session("worker", worker.to_str().unwrap()),
+            session("elsewhere", elsewhere.path().to_str().unwrap()),
+        ]).unwrap();
+        let mut pipeline: Pipeline = serde_json::from_str(include_str!("../fixtures/issue_pipeline.json")).unwrap();
+        pipeline.author = SessionRef { session_id: "author".into(), tab_id: "t1".into() };
+        pipeline.checking_locally = true;
+        super::super::store::insert(&pipeline).unwrap();
+        let mut reopened = super::super::store::get(&pipeline.id).unwrap();
+        assert!(reopened.checking_locally);
+        for id in ["author", "root", "sibling"] { assert!(check(id, "t1").is_err(), "{id} must wait for the recorder"); }
+        for id in ["worker", "elsewhere"] { assert!(check(id, "t1").is_ok(), "{id} can keep working"); }
+        reopened.checking_locally = false;
+        super::super::store::commit(&mut reopened).unwrap();
+        assert!(check("sibling", "t1").is_ok());
+    }
+
+    #[test]
     fn a_reservation_excludes_other_conversations_but_allows_its_resolver() {
         let _home = crate::store::temp_home();
         index::save(&[session("author", "/checkout"), session("other", "/checkout"), session("elsewhere", "/another")]).unwrap();
@@ -308,6 +350,11 @@ mod tests {
         assert!(check("other", "t1").is_err());
         assert!(check("author", "resolver").is_ok());
         assert!(check("elsewhere", "t1").is_ok());
+        // Missing identity is not evidence that the checkout owner exited.
+        pipeline.resolver = None;
+        super::super::store::commit(&mut pipeline).unwrap();
+        assert!(check("author", "t1").is_err());
+        assert!(check("author", "resolver").is_err());
         pipeline.resolution = None;
         pipeline.checking_locally = true;
         super::super::store::commit(&mut pipeline).unwrap();

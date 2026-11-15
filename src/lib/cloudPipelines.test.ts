@@ -243,6 +243,14 @@ describe("a cloud workspace's pipelines on this desktop", () => {
     expect(vi.mocked(connections.waitCloudConnected).mock.calls.at(-1)?.[2]).toEqual({ stoppedIsError: true });
     expect(connections.wakeCloudConnection).toHaveBeenCalledTimes(1);
   });
+
+  it("reports that cloud resolver restart is unsupported without sending an RPC", async () => {
+    const fake = runtime();
+    await connect(fake);
+    await expect(actOnCloudPipeline(shown()!, "restartResolve")).rejects.toThrow("not supported by cloud workspaces");
+    expect(fake.calls).not.toContain("act:restartResolve");
+    expect(connections.wakeCloudConnection).not.toHaveBeenCalled();
+  });
 });
 
 describe("merging a cloud workspace's pull request from this computer", () => {

@@ -805,16 +805,25 @@ limits, and returns `started` (piece ids), `waiting` (each queued piece with the
 waits `on`, and `queuedFor` when a limit holds it) and
 `failed` (pieces whose worker could not be started, with the `error`). On a `planned` run
 the person changed before you started it, it also returns `edited`, saying what they changed
-(the plan, its limits, or both): read the run again with `runs show` before going on. Call it again
-whenever a piece is done: it starts the pieces that waited on it, and tries again a piece
-whose worker could not be started. Calling it when nothing new is ready starts nothing. A
+(the plan, its limits, or both): read the run again with `runs show` before going on.
+Once running, pieces start automatically when their dependencies pass verification and worker
+slots are available. A freed slot rechecks queued pieces across all active runs; `queuedFor`
+names the run limit, app limit, or budget holding a ready piece. Call `runs start` again to
+retry a piece whose worker could not be started. Calling it when nothing new is ready starts nothing. A
 piece whose session was made but could not be made safe to brief keeps that session (`held`
 says why) and is tried again with it, never with a second one.
 
 Each worker is a session you started (`sessions list --children-of` lists them), in a
-worktree of its own on a branch cut from your branch as it is committed when the piece
-starts, with the piece's agent, model and effort. Commit what a later piece needs before you
-start it. The worker is sent a brief built from its piece (goal, why, scope and out of
+worktree of its own, starting from your committed branch plus the exact accepted commits of
+its dependencies, with the piece's agent, model and effort. Commit shared starting context
+before starting the run. Conflicting or unavailable dependencies prevent launch and say why.
+Each try records this starting commit as `baseCommit`: scope checks and verifier diffs count
+only the worker's changes after it, while conflict checks still use your current branch.
+Dependency preparation does not change the lead's checkout; `runs merge` integrates results
+there after verification. When a worker is sent back after a failed merge or integration check,
+TerminalX refreshes its baseline from the current lead and accepted dependencies. Its recovery
+brief gives the exact rebase command to replay only its own changes; trusted lead changes
+are excluded from its next ownership check, while edits to those files are still checked. The worker is sent a brief built from its piece (goal, why, scope and out of
 scope, known facts, files to read first, done-check, limits, report format) and is held to a
 `terminalx-report` block, as with `sessions create --report`.
 
@@ -984,9 +993,9 @@ terminalx runs check-failed <piece> --output check.log --reason "exit 101" --jso
 `--output` is a file with what the check printed (`-` for standard input); `--reason` is a
 line of your own; give at least one. The piece takes the same next step as above, with that
 text as what its next worker is told failed. It returns `run`, `piece`, `retried` (a worker
-was started for the next try) and `blocked` (the piece ran out of tries). Run the check
-before you call `runs start` for the pieces that depend on it: they are cut from what is
-committed when they start. It is refused with `piece_not_done` for a piece that did not
+was started for the next try) and `blocked` (the piece ran out of tries). Put required checks
+in the plan's `doneChecks` so they run before dependent pieces start automatically.
+It is refused with `piece_not_done` for a piece that did not
 report `done`, and a run's worker cannot call it (`not_the_lead`).
 
 `runs show` returns the run: `state`, `goal`, `budget`, `workerMode`, `pieces`, `ready` (the
@@ -1037,8 +1046,8 @@ in `usage`.
   at most the app-wide limit across every run. `runs start` starts what fits and leaves the
   rest `queued` with `queuedFor: "runLimit"` or `"appLimit"`. Those start by themselves when
   a worker's turn ends, in this run or another: do not call `runs start` for them, and do not
-  poll. A piece that becomes ready only because a piece it depends on finished still waits
-  for your `runs start`, so you can collect that branch first. A retry or an escalated try
+  poll. A piece whose dependencies have passed their checks is also scheduled automatically,
+  with the same worker limits and budget checks. A retry or an escalated try
   (`tries`) takes a slot like any other worker: it queues when none is free, and starts by
   itself when one is. A stalled worker still holds its slot. A `verifying` piece does not:
   its worker's turn has ended, its verifiers are not counted, and a result that fails its
@@ -1191,13 +1200,28 @@ A run that is `needsYou` when its last piece is accepted, with no merge to resol
 A piece whose merge failed the integration check is not checked again until its commit or
 your branch has changed; `--recheck` runs the check again all the same (a flaky test).
 
-`terminalx runs cleanup --yes --json` removes the workers' worktrees, each with its
-session, once you no longer need them. It is separate and explicit: without `--yes` it
-removes nothing and lists what would go. It refuses, per worktree and with the reason, one
-with uncommitted work, one with commits that are not in your branch (a try that fell
-short, a worker that went on after its result was accepted), one whose piece is still
-being worked on or checked, and one with an agent running in it. Branches are always kept.
-It returns `removed` and `refused`.
+When a run ends, TerminalX queues retirement outside run-start admission. It preserves
+eligible workers before stopping idle agents through normal stop handling, including stale
+turn indicators. A new turn is left running. Successful runs archive superseded tries and retain the
+lead and final tries in the sidebar. Failed or stopped runs archive their workers but keep
+their worktrees for inspection. Before archiving, unpublished commits pass the secret scan
+and are pushed to `refs/heads/raccoon/archive/<run>/<piece>-tryN`. Every archived try gets its own
+archive ref, even if another remote branch already contains its commits. A failed scan or
+backup keeps the conversation visible and records the reason on the try. Automatic attempts
+back off until HEAD changes; `runs cleanup --yes` retries manually.
+
+`terminalx runs cleanup --yes --json` retries preservation and archival. For a successful
+run whose PR is verified merged, it removes clean superseded worktrees while retaining
+their archived conversations and backups. The ordinary worktree deletion and merged
+cleanup paths recognize the same exact-commit preservation proof. Dirty files, stashes,
+active agents and other normal deletion guards still prevent removal. A failed run's
+worktrees remain recoverable. Cleanup works from the saved project and run information
+even when the lead session or checkout is gone. Without `--yes`, it reports what would
+be removed without pushing, archiving or removing anything. It returns `removed` and
+`refused`, with a reason for each refusal. Recovered (unarchived) conversations are excluded
+from bulk cleanup; remove their workspace explicitly if desired. Branches are always kept by
+`runs cleanup`. Explicitly deleting the lead's worktree also cleans its merged final workers
+first; those final workers keep the local-only cleanup path without archive scripts or fetches.
 
 #### What a worker may not do
 
@@ -1468,9 +1492,19 @@ terminalx pipelines attach <existing-session-or-author-tab> [--adopt-pr] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
+terminalx pipelines resolve <pipeline> --restart [--project <project>] --json
 terminalx pipelines resolve-conflicts <pipeline> on|off [--project <project>] --json
 terminalx pipelines stop|resume|advance|review|merge|refresh <pipeline> [--project <project>] --json
 ```
+
+`resolve --restart` closes the old resolver after confirming its process exited, releases its
+checkout reservation, and starts a fresh resolver conversation with the current sign-in. It can
+restart stopped resolution even when automatic conflict resolution is off, without changing
+that switch or consuming another automatic resolution round. A restart also allows a fresh
+independent review if the previous attempt exhausted its review rounds. Inspect unfinished changes
+if restart asks for help. `advance` rechecks the remote head and latest base before deciding a
+resolver is still running; a remotely resolved branch continues through the existing review
+and merge gates.
 
 `start` (`attach` is an alias) activates Autopilot in an existing local session. A session
 selector uses its active author tab; use the exact tab id to avoid ambiguity. It preserves the

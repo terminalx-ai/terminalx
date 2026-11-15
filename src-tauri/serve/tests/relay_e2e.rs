@@ -40,6 +40,11 @@
 //! closes the connection, drops the queued input and rotates the key, then a
 //! reconnect under the new role.
 //!
+//! PRO-340 (`a_machine_serves_…`): a local runtime with no project root
+//! serves two projects over one connection: `machine/1` in `rpc.hello`, the
+//! machine and its projects, a session created in each, the session list
+//! naming each one's project, and file calls held to the project they name.
+//!
 //! PRO-24 (`cloud_files_…`): files in bounded parts, change notifications,
 //! a save refused after an agent's edit and made after a reconnect, a staged
 //! large write, bounded search, symlink escapes and a participant's limits.
@@ -1874,4 +1879,80 @@ async fn a_launched_workspace_opens_on_its_first_prompt_through_the_relay() {
     assert_eq!(mailbox.launch().completions.len(), 1);
     desk.supervisor.stop();
     drop(runtime);
+}
+
+/// PRO-340: one connection to a machine's runtime lists both its projects,
+/// starts a session in each, and keeps each project's files to itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn a_machine_serves_two_projects_over_one_connection() {
+    use common::agent::{AgentWorld, Serve};
+
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let second = world.home.join("code/second");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(second.join("secret.txt"), "second only\n").unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["-c", "user.email=t@example.com", "-c", "user.name=t", "add", "."][..], &["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init"][..]] {
+        assert!(Command::new("git").args(args).current_dir(&second).status().unwrap().success());
+    }
+    let second = std::fs::canonicalize(&second).unwrap();
+    // The projects the machine already knows, as its window registered them.
+    let paths = [world.project.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()];
+    let projects: Vec<Value> = paths.iter().map(|path| json!({ "path": path, "name": Path::new(path).file_name().unwrap().to_string_lossy(), "kind": "git" })).collect();
+    std::fs::write(world.data.join("projects.json"), json!({ "projects": projects }).to_string()).unwrap();
+
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    write_link(&link, &secret, &relay_token, &harness.director, json!([attachment("att-computer", "computer-desk", &token, "runtime")]));
+    let mut command = world.machine_command();
+    command.args(["--runtime-kind", "local", "--relay-link"]).arg(&link);
+    let serve = Serve::start(command, &world.data);
+    common::agent::wait_until("relay registration", || serve.lines.lock().unwrap().iter().rev().find(|line| line["type"] == "relay" && line["status"]["state"] == "registered").cloned());
+    let ready = serve.lines.lock().unwrap().iter().find(|line| line["type"] == "ready").cloned().unwrap();
+    assert_eq!(ready["projectRoot"], Value::Null, "{ready}");
+
+    let mut desk = Client::start(source(&harness, &link_dir.path().join("link.json.attachments"), "att-computer", "computer-desk", &relay_host_id));
+    desk.connected().await;
+    // Today's client is served what names no project, and told why not the rest.
+    assert_eq!(desk.refused("fs.list", json!({})).await, "capability_not_granted");
+    let hello = desk.ok("rpc.hello", json!({ "protocol": raccoon_lib::remote::protocol::PROTOCOL, "want": raccoon_lib::remote::protocol::served(true) })).await;
+    let granted: Vec<&str> = hello["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(granted.contains(&"machine/1") && !granted.contains(&"keys/1"), "{hello}");
+    let machine = desk.ok("machine.describe", json!({})).await;
+    assert_eq!(machine["machineId"], json!(relay_host_id), "the machine is named by its host key");
+    assert_eq!(machine["hasWindow"], false);
+    let listed = desk.ok("machine.projects", json!({})).await;
+    let ids: Vec<String> = listed["projects"].as_array().unwrap().iter().map(|project| project["projectId"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids.len(), 2, "{listed}");
+    for (id, path) in ids.iter().zip(&paths) {
+        assert_eq!(*id, raccoon_lib::remote::machine::project_id(path));
+    }
+    let mut sessions = Vec::new();
+    for (index, id) in ids.iter().enumerate() {
+        let created = desk.ok("session.create", json!({ "agent": "claude", "model": "sonnet", "title": format!("Machine {index}"), "projectId": id, "clientRequestId": format!("machine-session-{index}") })).await;
+        assert_eq!(created["session"]["projectId"], json!(id), "{created}");
+        assert_eq!(created["session"]["projectPath"], json!(paths[index]));
+        sessions.push(created["sessionId"].as_str().unwrap().to_string());
+    }
+    let listed = desk.ok("session.list", json!({})).await;
+    for (session, id) in sessions.iter().zip(&ids) {
+        let entry = listed["sessions"].as_array().unwrap().iter().find(|entry| entry["id"] == json!(session)).unwrap_or_else(|| panic!("{session} listed"));
+        assert_eq!(entry["projectId"], json!(id));
+    }
+    // Files: each project's own, and nothing outside it.
+    assert_eq!(desk.ok("fs.read", json!({ "projectId": ids[1], "path": "secret.txt" })).await["text"], "second only\n");
+    assert_eq!(desk.ok("fs.read", json!({ "projectId": ids[0], "path": "README.md" })).await["text"], "fake agent project\n");
+    assert_eq!(desk.refused("fs.read", json!({ "projectId": ids[0], "path": second.join("secret.txt") })).await, "path_forbidden");
+    assert_eq!(desk.refused("fs.read", json!({ "projectId": ids[0], "path": "../home/code/second/secret.txt" })).await, "path_forbidden");
+    assert_eq!(desk.refused("fs.read", json!({ "path": "README.md" })).await, "invalid_params");
+    let status = desk.ok("git.status", json!({ "projectId": ids[1] })).await;
+    assert_eq!(status["branch"], "main", "{status}");
+    drop(serve);
 }

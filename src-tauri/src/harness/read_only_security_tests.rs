@@ -482,6 +482,8 @@ fn startup_launched_terminalx_runs_approved_commands_without_a_shell() {
         ("pwd; cat file | grep hello", 0, format!("{}\nhello\n", root.display())),
         ("git status --short", 0, "?? file\n".to_string()),
     ];
+    // PATH can contain a provider-bundled rg outside the trusted directories
+    // used for auto-approved commands. Exercise rg only when approval can find it.
     if crate::binpath::find("rg").is_some() {
         commands.push(("rg hello file", 0, "hello\n".into()));
     }
