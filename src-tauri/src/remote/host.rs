@@ -1503,6 +1503,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn phase2_collaboration_v2_refresh_attachment_route_fences_negotiation_generation_and_reconnect() {
+        let client_key = general_purpose::STANDARD.encode([7u8; 32]);
         struct Link {
             session: Mutex<RelaySession>,
             completed: Mutex<Vec<String>>,
@@ -1565,7 +1566,7 @@ mod tests {
         let mut cancellations = Vec::new();
         for scope in ["runtime", "session"] {
             let (cancel, cancelled) = mpsc::unbounded_channel();
-            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.unwrap();
+            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", &client_key, cancel).await.unwrap();
             assert_eq!(device.user_id.as_deref(), Some("driver"));
             cancellations.push(cancelled);
         }
@@ -1577,7 +1578,7 @@ mod tests {
         for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok()); }
         for scope in ["runtime", "session"] {
             let (cancel, _) = mpsc::unbounded_channel();
-            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.is_err());
+            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", &client_key, cancel).await.is_err());
         }
         let saved = std::fs::read_to_string(&devices_path).unwrap();
         assert!(!saved.contains("-first"));
@@ -1604,12 +1605,13 @@ mod tests {
         pending.await.unwrap().unwrap();
         assert_eq!(link.completed.lock().unwrap().len(), 4);
         let (cancel, _) = mpsc::unbounded_channel();
-        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", cancel).await.is_err());
+        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", &client_key, cancel).await.is_err());
         relay.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn phase2_collaboration_v2_rejected_refresh_still_retires_independent_revocations() {
+        let client_key = general_purpose::STANDARD.encode([7u8; 32]);
         use std::sync::atomic::Ordering;
 
         struct Link {
@@ -1667,7 +1669,7 @@ mod tests {
             let mut cancellations = Vec::new();
             for scope in ["runtime", "session"] {
                 let (cancel, cancelled) = mpsc::unbounded_channel();
-                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.unwrap();
+                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", &client_key, cancel).await.unwrap();
                 cancellations.push(cancelled);
             }
             {
@@ -1689,7 +1691,7 @@ mod tests {
             for scope in ["runtime", "session"] {
                 for runtime in [&host, &restored] {
                     let (cancel, _) = mpsc::unbounded_channel();
-                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
+                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", &client_key, cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
                 }
             }
             relay.abort();
