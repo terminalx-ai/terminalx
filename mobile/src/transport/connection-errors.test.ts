@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { canRetry, closeDetail, connectionProblem, mayHaveArrived, problemText } from "./connection-errors";
+import { canRetry, closeDetail, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "./connection-errors";
 import { RelayOuterError } from "./relay-client";
 
 describe("transport failures in plain words (#670)", () => {
@@ -43,5 +44,46 @@ describe("transport failures in plain words (#670)", () => {
     expect(closeDetail(new RelayOuterError(4408, "", true))).toBe("relay_outer_4408 (no reason, clean)");
     // A refused relay hello has no close event to describe.
     expect(closeDetail(new RelayOuterError(4404))).toBe("relay_outer_4404");
+  });
+});
+
+describe("no transport message reaches a screen (#983)", () => {
+  // Every message this side raises while making or keeping the connection, read from the source itself,
+  // so a new one added there without being classified fails here.
+  const thrown = (file: string) => {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    return [...source.matchAll(/new Error\((?:"([^"]+)"|`([^`]+)`)\)/g)].map((match) => (match[1] ?? match[2]!)
+      // A template's parts are filled the way they are at run time.
+      .replace(/\$\{redactEndpoint\([^}]*\)\}/g, "wss://relay.example.test")
+      .replace(/\$\{DIRECT_GRACE_MS \/ 1_000\}/g, "3")
+      .replace(/\$\{direct \? "Direct" : "Relay"\}/g, "Relay")
+      .replace(/\$\{method\}/g, "session.send")
+      .replace(/\$\{response\.status\}/g, "502")
+      .replace(/\$\{relayError\(error\)\}|\$\{safeError\(error\)\}/g, "Relay connection closed")
+      .replace(/\$\{errors\.join\("; "\)\}|\$\{reason\}/g, "wss://relay.example.test: Relay connection closed"));
+  };
+  // What is not the connection's: the Mac's refusal, said as it said it, and the pairing sheet's
+  // own plain words for a pairing the person did not approve on the Mac in time.
+  const theMacs = new Set(["${result.refusal.code}: ${result.refusal.message}", "The Mac did not answer the pairing request in time"]);
+  const messages = [...thrown("./connection.ts"), ...thrown("./relay-client.ts")].filter((message) => !theMacs.has(message) && !message.includes("${"));
+
+  it("finds the messages to check", () => {
+    expect(messages).toContain("Host is disconnected");
+    expect(messages).toContain("Relay connection closed");
+    expect(messages.length).toBeGreaterThan(12);
+  });
+
+  it.each(messages)("%s", (message) => {
+    const error = new Error(message);
+    expect(isTransportError(error)).toBe(true);
+    expect(screenMessage(error, "fallback")).toBe("fallback");
+  });
+
+  it("keeps the Mac's own message, and never an address", () => {
+    expect(screenMessage(new Error("Open this conversation on your Mac."), "fallback")).toBe("Open this conversation on your Mac.");
+    expect(screenMessage(new Error("Could not reach 192.0.2.4"), "fallback")).toBe("fallback");
+    expect(screenMessage(new Error("ws://mac.local:6768 refused"), "fallback")).toBe("fallback");
+    expect(screenMessage(new RelayOuterError(4408, "", false), "fallback")).toBe("fallback");
+    expect(screenMessage("not an error", "fallback")).toBe("fallback");
   });
 });

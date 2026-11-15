@@ -1,3 +1,4 @@
+import type { ConnectionState } from "./connection-view";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
 import type { AccountHost } from "../pairing/account-client";
@@ -19,7 +20,7 @@ const account = (seed: number, fields: Partial<AccountHost> = {}): AccountHost =
   return { hostId: hostIdForPublicKey(hostPublicKeyB64)!, hostPublicKeyB64, bindingGeneration: 1, displayName: `Machine ${seed}`, platform: "darwin", capabilities: [ACCOUNT_PAIRING_CAPABILITY], state: "active", reachability: "live", lastSeenAt: null, ...fields };
 };
 const stored = (id: string, fields: Partial<StoredHost> = {}): StoredHost => ({ id, label: "Paired Mac", publicKeyB64: `key-${id}`, endpoint: "ws://x", lastConnectedAt: NOW - DAY, provenance: { kind: "explicit" }, ...fields });
-const input = (fields: Partial<MachineInput>): MachineInput => ({ hosts: [], accountHosts: [], prefs: {}, activeHostId: null, connectionStage: "idle", connectionAttempt: 0, now: NOW, ...fields });
+const input = (fields: Partial<MachineInput>): MachineInput => ({ hosts: [], accountHosts: [], prefs: {}, activeHostId: null, connection: "none", now: NOW, ...fields });
 
 describe("machine states", () => {
   it("marks the machine in use, then online, offline and unknown ones", () => {
@@ -35,7 +36,7 @@ describe("machine states", () => {
       ],
       accountHosts: [online, offline],
       activeHostId: "active",
-      connectionStage: "connected",
+      connection: "connected",
     }));
     expect(list.paired.map((machine) => [machine.name, machine.state, machine.active, machine.connectBlocked])).toEqual([
       ["Studio MacBook", "Connected", true, null],
@@ -104,10 +105,18 @@ describe("machine states", () => {
     ]);
   });
 
-  it("says what is happening with the machine in use", () => {
-    const one = (connectionStage: string) => machineList(input({ hosts: [stored("a")], activeHostId: "a", connectionStage, connectionAttempt: 3 })).paired[0]!;
-    expect([one("connecting").state, one("cant-connect").state, one("disconnected-on-mac").state]).toEqual(["Connecting…", "Can’t connect · attempt 3", "Disconnected on that machine · tap to reconnect"]);
-    expect(one("cant-connect").tone).toBe("attention");
+  it("says the machine in use in the words every screen uses (#983)", () => {
+    const one = (connection: ConnectionState) => machineList(input({ hosts: [stored("a")], activeHostId: "a", connection })).paired[0]!;
+    const states: ConnectionState[] = ["connecting", "updating", "connected", "waiting", "offline", "held"];
+    expect(states.map((state) => one(state).state)).toEqual(["Connecting…", "Updating…", "Connected", "Waiting for Mac…", "No internet", "Disconnected on your Mac · tap to reconnect"]);
+    expect(states.map((state) => one(state).tone)).toEqual(["unknown", "connected", "connected", "attention", "unknown", "attention"]);
+    // None of the old words: attempt counts, "Can’t connect", "Reconnecting".
+    for (const state of states) expect(one(state).state).not.toMatch(/attempt|Can’t|Reconnecting|retrying/);
+  });
+
+  it("says a machine left disconnected on its side the same way when it is not in use", () => {
+    const list = machineList(input({ hosts: [stored("a", { disconnectedOnMacAt: NOW - DAY })] }));
+    expect(list.paired[0]!.state).toBe("Disconnected on your Mac · tap to reconnect");
   });
 });
 
