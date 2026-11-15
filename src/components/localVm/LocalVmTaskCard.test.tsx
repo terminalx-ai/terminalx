@@ -11,6 +11,20 @@ beforeEach(() => { mocks.invoke.mockReset(); mocks.invoke.mockResolvedValue(null
 afterEach(cleanup);
 
 describe("durable local VM task actions", () => {
+  it("reads a finished task's archived events only when they are opened (#978)", async () => {
+    const archived = { seq: 1, timestamp: "2026-10-24T00:00:01Z", payload: { type: "archived-step" } };
+    const record = task({ status: "completed", events: [], archivedEvents: 1, lastEventSeq: 1 });
+    mocks.invoke.mockImplementation(async (_command: string, args: { method: string }) => args.method === "task.history" ? { target: record.target, events: [archived] } : null);
+    render(<LocalVmTaskCard task={record} destinationRoot="/project" readOnly={false} />);
+    const details = screen.getByText("Retained task events · 1").closest("details")!;
+    expect(calls("task.history")).toHaveLength(0);
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() => expect(details.querySelector("pre")?.textContent).toContain("archived-step"));
+    expect(calls("task.history")).toHaveLength(1);
+    expect(calls("task.history")[0][1].params).toEqual({ target: record.target });
+  });
+
   it("shows latest guest progress without expanding its raw diagnostic events", () => {
     const record = task({ events: [{ seq: 1, timestamp: "2026-10-24T00:00:01Z", payload: { id: "guest-event", sessionId: "guest-session", tabId: "guest-tab", harness: "codex", seq: 1, ts: "2026-10-24T00:00:01Z", payload: { type: "tool_call_started", callId: "navigate", name: "computer", title: "Navigate to the project page", input: {} } } }] });
     const view = render(<LocalVmTaskCard task={record} destinationRoot="/project" readOnly={false} />);
@@ -31,12 +45,16 @@ describe("durable local VM task actions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Abandon task…" }));
     const dialog = screen.getByRole("dialog");
     expect(dialog.textContent).toMatch(/can no longer answer/);
+    expect(dialog.textContent).toMatch(/outcome stays unknown/);
     fireEvent.click(within(dialog).getByRole("button", { name: "Keep waiting" }));
     expect(calls("task.abandon")).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Abandon task…" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Abandon task" }));
     await waitFor(() => expect(calls("task.abandon")).toHaveLength(1));
     expect(calls("task.abandon")[0][1].params).toEqual({ target: task().target, confirm: true });
+    // Abandoned is not failed (#978): once abandoned there is nothing more to abandon.
+    view.rerender(<LocalVmTaskCard task={task({ status: "abandoned", dispatchStarted: true })} destinationRoot="/project" readOnly={false} />);
+    expect(screen.queryByRole("button", { name: "Abandon task…" })).toBeNull();
   });
 
   it("answers an open guest question from the task card, and offers nothing once it is answered (review 2)", async () => {

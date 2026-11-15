@@ -88,6 +88,10 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
             # Never replace it, even if a PID or socket appears absent.
             require(not (directory / "run").exists() and not (directory / "local-vm-guest").exists(),
                     "Existing runtime ownership/history requires its original lifecycle")
+            # The owner later receives the host key, so it is the sealed runtime,
+            # never the copy the guest account can rewrite (#978). Checked
+            # before any retained state so a refusal leaves nothing to fence.
+            os.close(open_sealed(header["installation"]["intent"]["runtimeSha256"]))
             lease_path = directory / "activation-owner.lock"
             fd = os.open(lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             lease = os.fdopen(fd, "r+b")
@@ -96,12 +100,11 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
             value = {"version": 1, "binding": binding, "status": "outcomeUnknown",
                      "instance": str(uuid.uuid4()), "cancelRequested": False}
             write_new(path, canonical(value))  # precedes process creation
-            base = home / ".terminalx-local"
             env = {"HOME": str(home), "USER": "cua", "LOGNAME": "cua",
                    "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
                    "TERMINALX_LINUX_ACTIVATION": header["activationId"],
                    "TERMINALX_LINUX_INSTANCE": value["instance"]}
-            child = spawn([str(base / "bin/terminalx-serve"), "--data-dir", str(directory),
+            child = spawn([str(SEALED), "--data-dir", str(directory),
                            "--runtime-kind", "local"], cwd=home, env=env,
                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                           close_fds=True, pass_fds=(lease.fileno(),), start_new_session=True)

@@ -169,6 +169,9 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    // Before anything reads stdin, a socket or the host key (#978 review).
+    #[cfg(target_os = "linux")]
+    crate::local_vm::guest::seal_key_holder();
     #[cfg(target_os = "linux")]
     if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
