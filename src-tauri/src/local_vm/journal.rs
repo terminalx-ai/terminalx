@@ -185,7 +185,7 @@ pub struct Journal {
 }
 
 impl Journal {
-    pub(super) fn has_desktop_reservations(&self)->Result<bool> { super::admission::has_reservations(&self.dir) }
+    pub(super) fn has_desktop_reservations(&self)->Result<bool> { super::admission::has_guest_reservations(&self.dir) }
     pub(super) fn desktop_admission(&self, env: &Environment) -> Result<Option<super::admission::Guard>> {
         super::admission::Guard::acquire(&self.dir, &env.transport.target(&env.id,&env.generation)).map(Some)
     }

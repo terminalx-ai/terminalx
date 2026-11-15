@@ -154,7 +154,9 @@ pub(super) fn state_busy(state: &journal::State) -> bool {
 }
 
 fn journal_busy(root: &Path, initialized: bool) -> Result<bool> {
-    if super::admission::has_reservations(root)? { return Ok(true); }
+    // A guest's lease only: the container's own markers (`vm call`, a
+    // screenshot given up on) are its Stop and Reset's to settle (review 3).
+    if super::admission::has_guest_reservations(root)? { return Ok(true); }
     if !root.join("journal.json").try_exists()? {
         return Ok(initialized);
     }
@@ -181,17 +183,39 @@ pub fn prepare_stop() -> Result<Exclusive> {
     Ok(Exclusive { _admission: guard, _tick: tick })
 }
 
+/// A setup this process is still driving; a restart records it as outcomeUnknown.
+fn setup_driven(setup: &Value) -> bool { setup["status"] == "working" }
+
+/// Provisioning this process is still driving; a restart records it as outcomeUnknown.
+fn provision_driven(env: &journal::Environment) -> bool {
+    env.provision.as_ref().and_then(|provision| provision.get("status")).and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "running" | "canceling"))
+}
+
+/// What a replacement could not carry on: the setup or provisioning that
+/// `Supervisor::start` would record as outcomeUnknown.
+fn driving(state: &journal::State) -> bool {
+    state.environments.values().any(|env| env.setup.as_ref().is_some_and(setup_driven) || provision_driven(env))
+}
+
 /// Held through a runtime handover (#765) until the exec, or until the
-/// handover is off. Local VM work is not carried over: the replacement starts
-/// its own supervisor from the journal. So none may be in flight or under way,
-/// and none is admitted meanwhile.
+/// handover is off, so no VM operation or tick runs across it. The
+/// replacement starts its own supervisor from the journal and carries on
+/// tasks, manual control, an unready setup and every admission marker, so
+/// those never hold a handover off (review 3); only a setup or provisioning
+/// this process is driving does. An unreadable journal drives nothing.
 /// A tick still running after `settle` makes the handover unsettled, to be
 /// tried again, as anything else that has not settled does.
 pub fn prepare_handover(settle: Duration) -> Result<Exclusive> {
     let tick = tick_within(settle)?;
     let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight"))?;
-    if has_work() {
-        bail!("Local VM work is under way");
+    let root = host::root()?;
+    if root.join("journal.json").try_exists()? {
+        match Journal::open_existing(&root).and_then(|journal| journal.read()) {
+            Ok(state) if driving(&state) => bail!("Local VM setup or provisioning is under way"),
+            Ok(_) => {}
+            Err(error) => log::warn!("local vm handover: journal unreadable, nothing to carry: {error:#}"),
+        }
     }
     Ok(Exclusive { _admission: guard, _tick: tick })
 }
@@ -230,7 +254,7 @@ impl Supervisor {
         journal.transaction(|s|{
         for env in s.environments.values_mut(){
             if let Some(setup)=env.setup.as_mut() {
-                if setup["status"]=="working" {
+                if setup_driven(setup) {
                     setup["status"]=json!("outcomeUnknown");
                     setup["detail"]=json!("The owner restarted during setup. Inspect the existing guest; installers and account/permission requests were not replayed.");
                     if let Some(steps)=setup["steps"].as_array_mut() { for step in steps {if step["state"]=="working" {step["state"]=json!("unknown");}} }
@@ -240,7 +264,7 @@ impl Supervisor {
                     }}
                 }
             }
-            if env.provision.as_ref().and_then(|p|p.get("status")).and_then(Value::as_str).is_some_and(|p|matches!(p,"running"|"canceling")) {
+            if provision_driven(env) {
                 env.provision=Some(host::progress("outcomeUnknown","The supervisor restarted during provisioning. Inspect the existing VM and cache; creation was not replayed."));
             }
         }
@@ -858,6 +882,24 @@ mod tests {
     }
 
     #[test]
+    fn a_container_marker_is_not_owner_work_but_a_guest_lease_is() {
+        use crate::computer_targets::{Runtime, Target};
+        let dir = tempfile::tempdir().unwrap();
+        Journal::open(dir.path()).unwrap().read().unwrap();
+        let markers = dir.path().join("computer-admission");
+        journal::private_directory(&markers).unwrap();
+        let write = |name: &str, target: Target| journal::atomic_private_write(&markers.join(format!("{name}.json")),
+            &serde_json::to_vec(&json!({"target":target,"status":"awaitingExitReceipt"})).unwrap()).unwrap();
+        write("docker-a", Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) });
+        assert!(!journal_busy(dir.path(), true).unwrap(), "a vm call given up on is the container's Stop and Reset's to settle");
+        write("macos-g", Target::MacosGuest { environment_id: journal::new_id(), generation: journal::new_id() });
+        assert!(journal_busy(dir.path(), true).unwrap(), "a guest lease keeps the owner");
+        std::fs::remove_file(markers.join("macos-g.json")).unwrap();
+        std::fs::write(markers.join("unknown.json"), b"not a receipt").unwrap();
+        assert!(journal_busy(dir.path(), true).unwrap(), "a marker whose target is unknown counts");
+    }
+
+    #[test]
     fn missing_or_corrupt_initialized_history_is_not_idle_or_recreated() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!journal_busy(dir.path(), false).unwrap());
@@ -938,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handover_waits_for_vm_work_and_holds_off_new_work_until_it_is_off() {
+    fn a_handover_waits_only_for_what_a_restart_would_cut_off() {
         let _home = crate::store::temp_home();
         let life = Lifetime::new(Duration::ZERO);
         let operation = admit(&life).unwrap();
@@ -946,9 +988,25 @@ mod tests {
         drop(operation);
         let journal = host::journal().unwrap();
         let env = journal.enroll("held guest", "local:test").unwrap();
+        // The replacement carries these on from the journal (review 3): manual
+        // control, an unfinished task's guest, a marker left by a vm call.
         journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = true; Ok(()) }).unwrap();
+        let markers = host::root().unwrap().join("computer-admission");
+        journal::private_directory(&markers).unwrap();
+        let container = crate::computer_targets::Target::LinuxContainer { runtime: crate::computer_targets::Runtime::Docker, id: "a".repeat(64) };
+        journal::atomic_private_write(&markers.join("docker-a.json"), &serde_json::to_vec(&json!({"target":container,"status":"awaitingExitReceipt"})).unwrap()).unwrap();
+        drop(prepare_handover(Duration::from_secs(1)).unwrap());
+        // What this process drives, and a restart would record as outcomeUnknown.
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().provision = Some(host::progress("running", "Downloading")); Ok(()) }).unwrap();
         assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("under way"));
-        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().manual_control = false; Ok(()) }).unwrap();
+        journal.transaction(|state| {
+            let env = state.environments.get_mut(&env.id).unwrap();
+            env.provision = Some(host::progress("completed", "Ready"));
+            env.setup = Some(json!({"status":"working"}));
+            Ok(())
+        }).unwrap();
+        assert!(format!("{:#}", prepare_handover(Duration::from_secs(1)).unwrap_err()).contains("under way"));
+        journal.transaction(|state| { state.environments.get_mut(&env.id).unwrap().setup = None; Ok(()) }).unwrap();
         let handover = prepare_handover(Duration::from_secs(1)).unwrap();
         assert!(ADMISSION.try_read().is_err(), "no VM operation starts during a handover");
         drop(handover);

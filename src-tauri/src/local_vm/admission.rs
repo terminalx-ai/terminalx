@@ -13,11 +13,21 @@ use super::journal::{atomic_private_write, private_directory, Journal};
 #[derive(Debug)]
 pub struct Guard { _file: File, pub(super) marker: PathBuf }
 
-pub(super) fn has_reservations(root:&Path)->Result<bool> {
+/// A reservation on a guest, whose receipt the host owner must settle: not
+/// the container's own markers, which its Stop and Reset settle (review 3).
+/// A marker that cannot be read counts, as its target is unknown.
+pub(super) fn has_guest_reservations(root:&Path)->Result<bool> {
     let directory=root.join("computer-admission");
     if !directory.try_exists()? { return Ok(false); }
     for entry in std::fs::read_dir(directory)? {
-        if entry?.path().extension().is_some_and(|ext|ext=="json") { return Ok(true); }
+        let path=entry?.path();
+        if path.extension().is_some_and(|ext|ext=="json")
+            && read_marker(&path).ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_none_or(|marker| marker["target"]["kind"] != "linuxContainer")
+        {
+            return Ok(true);
+        }
     }
     Ok(false)
 }
