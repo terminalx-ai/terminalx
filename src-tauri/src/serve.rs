@@ -342,11 +342,22 @@ fn run(options: Options) -> Result<()> {
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
     // link file in development and tests.
-    let link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
+    let mut link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
         (Some(path), _) => Some(Arc::new(crate::remote::host::FileLink::open(path).context("open the relay link")?)),
         (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
         (None, None) => None,
     };
+    // A local runtime hosts operating computers while the switch is on
+    // (PRO-341): it opens nothing until then.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        let parts = crate::machine_host::Parts { sink: runtime.sink.clone(), terminals: runtime.terminals.clone(), sessions: runtime.manager.clone() };
+        let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
+        let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
+        // One key answers on every route of a machine.
+        if let (Some(relay), true) = (link.take(), options.serves_machine()) {
+            link = Some(crate::machine_host::KeyedLink::wrap(&machine, relay));
+        }
+    }
     // The self-test checks the local runtime only.
     let mut agents = None;
     // A root serves one workspace; none, on a local runtime, its machine.
@@ -387,6 +398,9 @@ fn run(options: Options) -> Result<()> {
                             // An explicitly configured relay server is a
                             // standing service, not a detached desktop owner.
                             options.relay_link.is_some()
+                                // Hosting operating computers is a standing
+                                // service, and a connected computer is a client.
+                                || crate::machine_host::installed().is_some_and(|host| host.keeps_runtime())
                                 || runtime.manager.has_background_work()
                                 || runtime.manager.idle_process_roots().is_none()
                                 || crate::issue_pipeline::engine::holding() != 0
@@ -962,12 +976,18 @@ fn start_relay_host(
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
+    let serves_machine = root.is_none();
     let root = root.map(PathBuf::from);
     let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
         let served = match root {
             Some(root) => crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
-            None => crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
+            None => {
+                // The relay admits the machine's paired computers and passes
+                // on its phones (PRO-341).
+                let routes = crate::machine_host::installed().map(|machine| machine.clone() as Arc<dyn crate::remote::host::MachineRoutes>);
+                crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone(), routes).await
+            }
         };
         let host = match served {
             Ok(host) => host,
@@ -976,6 +996,10 @@ fn start_relay_host(
                 return;
             }
         };
+        // The machine's direct listener serves this same RPC.
+        if let (true, Some(machine)) = (serves_machine, crate::machine_host::installed()) {
+            machine.use_rpc(host.rpc());
+        }
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();

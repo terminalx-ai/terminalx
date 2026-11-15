@@ -118,6 +118,24 @@ impl KeyStore {
         Ok(HostKeypair::from_secret(secret))
     }
 
+    /// Whether a key is kept already.
+    pub(crate) fn exists(&self) -> Result<bool> {
+        Ok(self.read()?.is_some())
+    }
+
+    /// Keep `secret` as this runtime's own key if it has none yet: a server
+    /// first started with `--relay-link` takes the link's key, so the relay
+    /// and the direct listener answer with one key.
+    pub(crate) fn seed(&self, secret: [u8; 32]) -> Result<()> {
+        if self.needs_window() {
+            bail!("the window owns this machine's host key");
+        }
+        if self.exists()? {
+            bail!("this runtime keeps a host key already");
+        }
+        self.write(&secret)
+    }
+
     fn read(&self) -> Result<Option<[u8; 32]>> {
         let bytes = match &self.location {
             Location::Keychain { service } => self.secrets.get(service, ACCOUNT).context("read the machine host key from the Keychain")?,

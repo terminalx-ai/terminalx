@@ -313,6 +313,19 @@ PRO-341 settled these points while building decision 4.
   not exit when idle, so a computer can connect with the window closed. It
   keeps this Mac awake while a computer is connected and
   `pairing.keepAwake` is on, as for a phone.
+- **The port changes hands by closing connections.** Both sides bind 6768
+  exclusively, as the phone listener always has, and on macOS and Linux an open
+  connection on the port keeps it from being bound again. So when the switch
+  turns on, the window closes its listener and the phones connected to it
+  (they reconnect through the runtime, which passes them back), and when it
+  turns off the runtime closes its listener, its computers and the phones it
+  passed on, and the window binds the port again. On macOS, connections closed
+  this way hold the port in TIME_WAIT for up to 30 seconds; both sides retry
+  once a second until it is free, as the window already did after an app
+  restart. On Linux, where only the runtime listens, it sets SO_REUSEADDR:
+  Linux still refuses a second listener with it, and TIME_WAIT is 60 s there.
+- The relay host is given the machine's routes before it registers, so no
+  connection is answered without them.
 - `TERMINALX_MACHINE_HOST_PORT` moves the listener off 6768 for tests.
 - The contract between the runtime and the window is
   `src-tauri/src/machine_wire.rs`.
