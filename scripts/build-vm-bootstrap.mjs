@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 // Builds the macOS VM guest helper, validation probe and seed tool
 // (native/vm-bootstrap) for arm64, offline from the locked crates, and writes a
-// manifest of digests and signing state. It never signs: Developer ID signing
-// and notarization are a separate, held release step, so these artifacts carry
-// only the linker's ad hoc signature and the manifest says so.
+// manifest of digests and signing state.
+//
+// Without `--sign` the artifacts carry only the linker's ad hoc signature and
+// the manifest says so. With it they are signed with the TerminalX release's
+// Developer ID Application identity, hardened runtime and a secure timestamp.
+// That identity is the release's own, and this script never looks one up: it
+// takes it from APPLE_SIGNING_IDENTITY, which the release flow sets from its
+// one resolver (scripts/release/txrelease/credentials.py) exactly as it does
+// for the app build. Run a signed build through
+//   python3 -I scripts/release/release.py vm-bootstrap <new-output-directory>
+// which also checks the result. No key, certificate or password is read here
+// or kept in the repository; codesign uses the keychain. Nothing is notarized.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -14,6 +23,44 @@ const crate = path.join(root, 'native/vm-bootstrap')
 const target = 'aarch64-apple-darwin'
 export const BINARIES = ['terminalx-vm-bootstrap', 'terminalx-vm-validation-probe', 'terminalx-vm-seed']
 export const PLISTS = ['com.terminalx.next.vm-bootstrap.plist', 'com.terminalx.next.vm-validation-probe.plist']
+// Each executable's code signing identifier: with the team, its designated
+// requirement. The helper's and the probe's are their launchd labels.
+export const IDENTIFIERS = {
+  'terminalx-vm-bootstrap': 'com.terminalx.next.vm-bootstrap',
+  'terminalx-vm-validation-probe': 'com.terminalx.next.vm-validation-probe',
+  'terminalx-vm-seed': 'com.terminalx.next.vm-seed',
+}
+const IDENTITY = /^Developer ID Application: [^"]+ \(([A-Z0-9]{10})\)$/
+
+// The release identity as the release flow hands it over. The same form
+// scripts/release/txrelease/credentials.py requires; anything else, an ad hoc
+// `-` included, is refused before anything is built.
+export function signingIdentity(env) {
+  const named = (env.APPLE_SIGNING_IDENTITY ?? '').trim()
+  if (!IDENTITY.test(named)) {
+    throw new Error('--sign needs the release identity in APPLE_SIGNING_IDENTITY ("Developer ID Application: Name (TEAMID)"). '
+      + 'Run `python3 -I scripts/release/release.py vm-bootstrap <new-output-directory>`, which reads it from where the release does.')
+  }
+  return named
+}
+export const teamOf = identity => identity.match(IDENTITY)[1]
+export const signArguments = (identity, name, file) =>
+  ['--force', '--sign', identity, '--options', 'runtime', '--timestamp', '--identifier', IDENTIFIERS[name], file]
+
+// What `codesign -d --verbose=4` must report for an executable signed as
+// `signArguments` asks: this identity and its team, the identifier, the
+// hardened runtime and a secure timestamp.
+export function requireSigned(report, identity, name) {
+  const signing = parseCodesign(report)
+  const problems = []
+  if (!report.split('\n').includes(`Authority=${identity}`)) problems.push('is not signed by the release identity')
+  if (signing.teamIdentifier !== teamOf(identity)) problems.push(`has team ${signing.teamIdentifier ?? 'none'}`)
+  if (!report.split('\n').includes(`Identifier=${IDENTIFIERS[name]}`)) problems.push(`is not identified as ${IDENTIFIERS[name]}`)
+  if (!(signing.flags ?? '').split(',').includes('runtime')) problems.push('lacks the hardened runtime')
+  if (!/^Timestamp=.+$/m.test(report)) problems.push('has no secure timestamp')
+  if (problems.length) throw new Error(`${name} ${problems.join(', ')}`)
+  return signing
+}
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8' })
@@ -36,7 +83,10 @@ export function parseCodesign(report) {
   }
 }
 
-export function build(out) {
+// `identity`: the release's Developer ID Application identity to sign with, or
+// null for an unsigned (linker ad hoc) build.
+export function build(out, { identity = null } = {}) {
+  if (identity !== null && !IDENTITY.test(identity)) throw new Error('A Developer ID Application identity is required to sign')
   if (existsSync(out) && readdirSync(out).length) throw new Error('Output directory must be new or empty')
   mkdirSync(out, { recursive: true })
   const targetDir = path.join(out, 'target')
@@ -47,9 +97,18 @@ export function build(out) {
     copyFileSync(path.join(targetDir, target, 'release', name), file)
     const archs = run('lipo', ['-archs', file]).stdout
     if (archs !== 'arm64') throw new Error(`${name} must be thin arm64, found ${archs}`)
+    const built = readFileSync(file)
+    // What the linker produced, before any signature replaces its own.
+    const unsigned = { bytes: built.length, sha256: sha256(built) }
+    if (identity) {
+      run('codesign', signArguments(identity, name, file))
+      run('codesign', ['--verify', '--strict', file])
+    }
     const bytes = readFileSync(file)
-    const signing = parseCodesign(spawnSync('codesign', ['-dv', file], { encoding: 'utf8' }).stderr)
-    return { name, path: file, bytes: bytes.length, sha256: sha256(bytes), archs, signing }
+    const report = spawnSync('codesign', ['-d', '--verbose=4', file], { encoding: 'utf8' }).stderr
+    const signing = identity ? requireSigned(report, identity, name) : parseCodesign(report)
+    return { name, path: file, bytes: bytes.length, sha256: sha256(bytes), archs, signing,
+      ...(identity ? { identifier: IDENTIFIERS[name], unsigned } : {}) }
   })
   for (const name of PLISTS) {
     const plist = path.join(out, name)
@@ -67,9 +126,12 @@ export function build(out) {
     cargoLockSha256: sha256(readFileSync(path.join(crate, 'Cargo.lock'))),
     target,
     artifacts,
-    developerIdSigned: artifacts.some(a => a.signing?.developerId),
+    developerIdSigned: identity !== null && artifacts.filter(a => a.signing).every(a => a.signing.developerId),
+    ...(identity ? { signingTeam: teamOf(identity) } : {}),
     notarized: false,
-    note: 'Built only. Not Developer ID signed, notarized, installed or run in a guest.',
+    note: identity
+      ? 'Developer ID signed with the hardened runtime and a secure timestamp. Not notarized, installed or run in a guest.'
+      : 'Built only. Not Developer ID signed, notarized, installed or run in a guest.',
   }
   writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
   return manifest
@@ -77,7 +139,12 @@ export function build(out) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    if (process.argv.length !== 3) throw new Error('usage: build-vm-bootstrap.mjs <new-output-directory>')
-    console.log(JSON.stringify(build(path.resolve(process.argv[2])), null, 2))
+    const args = process.argv.slice(2)
+    const sign = args.includes('--sign')
+    const rest = args.filter(a => a !== '--sign')
+    if (rest.length !== 1 || rest[0].startsWith('-')) throw new Error('usage: build-vm-bootstrap.mjs <new-output-directory> [--sign]')
+    // Refused before the build when the release identity is not given.
+    const identity = sign ? signingIdentity(process.env) : null
+    console.log(JSON.stringify(build(path.resolve(rest[0]), { identity }), null, 2))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

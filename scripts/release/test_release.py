@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import release as cli  # noqa: E402
-from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source, verify  # noqa: E402
+from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source, verify, vm_bootstrap  # noqa: E402
 from txrelease.config import LATEST_DMG, ReleaseError  # noqa: E402
 from txrelease.proc import Result, Runner, sha256, write_json  # noqa: E402
 
@@ -262,6 +262,136 @@ class CredentialTests(TempCase):
             credentials.signing_identity(FakeRunner([(['security', 'find-identity'], Result(0, '0 valid identities found'))]), {})
         self.assertIn('install the Developer ID Application certificate', raised.exception.code)
         self.assertEqual(credentials.team_id(IDENTITY), 'ABCDE12345')
+
+
+class VmBootstrapTests(TempCase):
+    """The guest helper is signed with the identity the release resolves, and checked as the app is."""
+
+    TEAM = 'ABCDE12345'
+
+    def details(self, name, **changes):
+        fields = {'Identifier': vm_bootstrap.IDENTIFIERS[name], 'flags': 'flags=0x10000(runtime)', 'Authority': IDENTITY,
+                  'TeamIdentifier': self.TEAM, 'Timestamp': 'Nov 15, 2026 at 5:00:00 PM', **changes}
+        lines = [f'Executable=/out/{name}', f'Identifier={fields["Identifier"]}',
+                 f'CodeDirectory v=20500 size=1 {fields["flags"]} hashes=1+7 location=embedded',
+                 f'Authority={fields["Authority"]}', 'Authority=Developer ID Certification Authority', 'Authority=Apple Root CA',
+                 f'TeamIdentifier={fields["TeamIdentifier"]}']
+        if fields['Timestamp'] is not None:
+            lines.append(f'Timestamp={fields["Timestamp"]}')
+        return '\n'.join(lines)
+
+    def runner(self, out, *, keychain=None, changes=None, manifest=None, build_code=0, tamper=None):
+        """A fake build that leaves `out` as a signed build would; `changes` alters one executable's report."""
+        seen = {}
+
+        def build(argv):
+            seen['argv'] = argv
+            if build_code:
+                return Result(build_code, 'cargo build failed')
+            out.mkdir(parents=True)
+            artifacts = []
+            for name in vm_bootstrap.IDENTIFIERS:
+                (out / name).write_bytes(f'signed {name}'.encode())
+                artifacts.append({'name': name, 'sha256': sha256(out / name), 'identifier': vm_bootstrap.IDENTIFIERS[name]})
+            write_json(out / 'manifest.json', {'version': 1, 'crate': 'native/vm-bootstrap', 'artifacts': artifacts,
+                                               'developerIdSigned': True, 'signingTeam': self.TEAM, 'notarized': False,
+                                               **(manifest or {})})
+            if tamper:
+                tamper(out)
+            return Result(0, '')
+
+        def describe(argv):
+            name = Path(argv[-1]).name
+            return Result(0, self.details(name, **((changes or {}).get(name, {}))))
+
+        responses = [(['node'], build), (['codesign', '--verify', '--strict'], Result(0, '')), (['codesign', '-d', '--verbose=4'], describe)]
+        if keychain is not None:
+            responses.insert(0, (['security', 'find-identity'], Result(0, keychain)))
+        runner = FakeRunner(responses)
+        original = runner.execute
+
+        def execute(argv, *, cwd, env, log):
+            if argv[0] == 'node':
+                seen['env'], seen['cwd'] = env, cwd
+            return original(argv, cwd=cwd, env=env, log=log)
+        runner.execute = execute
+        return runner, seen
+
+    def test_the_build_is_given_the_identity_the_release_resolves_and_each_executable_is_checked(self):
+        out = self.directory / 'signed'
+        keychain = f'  1) AAAA "{IDENTITY}"\n     1 valid identities found'
+        runner, seen = self.runner(out, keychain=keychain)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = vm_bootstrap.build_signed(REPO_ROOT, out, runner, {'HOME': str(self.directory), 'PATH': '/usr/bin'})
+        # No variable named it: the one keychain identity is the release's, as for the app build.
+        self.assertEqual(seen['argv'], ['node', str(REPO_ROOT / 'scripts/build-vm-bootstrap.mjs'), str(out), '--sign'])
+        self.assertEqual((seen['env']['APPLE_SIGNING_IDENTITY'], seen['env']['PATH'], seen['cwd']), (IDENTITY, '/usr/bin', REPO_ROOT))
+        self.assertEqual(result['signingTeam'], self.TEAM)
+        self.assertEqual(set(result['executables']), set(vm_bootstrap.IDENTIFIERS))
+        self.assertEqual((result['developerIdSigned'], result['notarized']), (True, False))
+        for name in vm_bootstrap.IDENTIFIERS:
+            self.assertTrue(runner.ran('codesign', '--verify', '--strict', str(out / name)), name)
+            self.assertTrue(runner.ran('codesign', '-d', '--verbose=4', str(out / name)), name)
+        # A named identity is used as it is, and the keychain is not searched.
+        named, seen = self.runner(self.directory / 'named')
+        with contextlib.redirect_stdout(io.StringIO()):
+            vm_bootstrap.build_signed(REPO_ROOT, self.directory / 'named', named, {'APPLE_SIGNING_IDENTITY': IDENTITY})
+        self.assertEqual(seen['env']['APPLE_SIGNING_IDENTITY'], IDENTITY)
+        self.assertFalse(named.ran('security'))
+
+    def test_no_single_release_identity_builds_nothing(self):
+        for keychain in ['     0 valid identities found',
+                         f'  1) AAAA "{IDENTITY}"\n  2) BBBB "Developer ID Application: Another Maker (ZYXWV98765)"']:
+            runner, seen = self.runner(self.directory / 'none', keychain=keychain)
+            with self.assertRaises(ReleaseError):
+                vm_bootstrap.build_signed(REPO_ROOT, self.directory / 'none', runner, {})
+            self.assertFalse(runner.ran('node'))
+        runner, _ = self.runner(self.directory / 'adhoc')
+        with self.assertRaises(ReleaseError) as refused:
+            vm_bootstrap.build_signed(REPO_ROOT, self.directory / 'adhoc', runner, {'APPLE_SIGNING_IDENTITY': '-'})
+        self.assertIn('Developer ID Application', refused.exception.code)
+        self.assertFalse(runner.ran('node'))
+
+    def test_a_failed_build_or_an_executable_signed_any_other_way_is_refused(self):
+        env = {'APPLE_SIGNING_IDENTITY': IDENTITY}
+        helper = 'terminalx-vm-bootstrap'
+        cases = [
+            ('build failed', {'build_code': 1}, 'exited 1'),
+            ('another identity', {'changes': {helper: {'Authority': 'Developer ID Application: Another Maker (ZYXWV98765)', 'TeamIdentifier': 'ZYXWV98765'}}}, 'not signed by the release identity'),
+            ('another team', {'changes': {'terminalx-vm-seed': {'TeamIdentifier': 'ZYXWV98765'}}}, 'terminalx-vm-seed is not signed by the release identity'),
+            ('linker identifier', {'changes': {helper: {'Identifier': 'terminalx_vm_bootstrap-5555'}}}, 'is not identified as com.terminalx.next.vm-bootstrap'),
+            ('no hardened runtime', {'changes': {helper: {'flags': 'flags=0x0(none)'}}}, 'lacks the hardened runtime'),
+            ('ad hoc', {'changes': {helper: {'flags': 'flags=0x20002(adhoc,linker-signed)'}}}, 'lacks the hardened runtime'),
+            ('no timestamp', {'changes': {helper: {'Timestamp': None}}}, 'has no secure timestamp'),
+            ('manifest says unsigned', {'manifest': {'developerIdSigned': False}}, 'does not record a build signed by the release identity'),
+            ('manifest names another team', {'manifest': {'signingTeam': 'ZYXWV98765'}}, 'does not record a build signed by the release identity'),
+            ('manifest claims notarization', {'manifest': {'notarized': True}}, 'does not record'),
+            ('changed after the manifest', {'tamper': lambda out: (out / helper).write_bytes(b'replaced')}, 'is not the executable its manifest records'),
+            ('missing executable', {'tamper': lambda out: (out / helper).unlink()}, 'is missing from the signed build'),
+            ('linked executable', {'tamper': lambda out: ((out / helper).unlink(), (out / helper).symlink_to(out / 'terminalx-vm-seed'))}, 'is missing from the signed build'),
+        ]
+        for index, (name, arguments, message) in enumerate(cases):
+            runner, _ = self.runner(self.directory / f'case-{index}', **arguments)
+            with self.assertRaises(ReleaseError, msg=name) as refused, contextlib.redirect_stdout(io.StringIO()):
+                vm_bootstrap.build_signed(REPO_ROOT, self.directory / f'case-{index}', runner, env)
+            self.assertIn(message, refused.exception.code, name)
+
+    def test_the_executables_and_identifiers_are_the_build_scripts_own(self):
+        script = (REPO_ROOT / 'scripts/build-vm-bootstrap.mjs').read_text()
+        for name, identifier in vm_bootstrap.IDENTIFIERS.items():
+            self.assertIn(f"'{name}': '{identifier}'", script)
+        self.assertEqual(script.count("': 'com.terminalx.next.vm-"), len(vm_bootstrap.IDENTIFIERS))
+        # The identity form the build script accepts is the one the release resolves.
+        self.assertIn('Developer ID Application: [^"]+ \\(([A-Z0-9]{10})\\)', script)
+
+    def test_the_command_line_needs_an_output_directory_and_stays_out_of_the_release_pipeline(self):
+        self.assertNotIn('vm-bootstrap', cli.PIPELINE)
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main(['vm-bootstrap']), 1)
+        self.assertIn('needs a new or empty output directory', errors.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main(['vm-bootstrap', str(self.directory / 'out'), '--dry-run']), 1)
+        self.assertIn('--dry-run applies to the publish step only', errors.getvalue())
 
 
 class AssetTests(TempCase):

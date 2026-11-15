@@ -10,6 +10,12 @@ Run from the repository root, on main, after the version bump and changelog comm
 Each step reads the records the earlier ones left in .raccoon/release-<version>/ and refuses to run
 on anything they did not pass. docs/RELEASING.md describes the steps, the records and the
 credentials (all read from outside the repository).
+
+Apart from the release itself:
+
+    python3 -I scripts/release/release.py vm-bootstrap <new-output-directory>
+
+builds the macOS VM guest helper and signs it with the same Developer ID identity the release uses.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ from pathlib import Path
 # `python3 -I` leaves this script's own directory off sys.path; the package lives beside it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from txrelease import assets, build, config, credentials, notarize, publish, secrets_scan, source, verify  # noqa: E402
+from txrelease import assets, build, config, credentials, notarize, publish, secrets_scan, source, verify, vm_bootstrap  # noqa: E402
 from txrelease.config import ReleaseError  # noqa: E402
 from txrelease.proc import Runner  # noqa: E402
 
@@ -80,8 +86,9 @@ def check_dmg(path: Path, runner: Runner) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('step', choices=['prepare', *PIPELINE, 'all', 'check-dmg'])
-    parser.add_argument('path', nargs='?', type=Path, help='check-dmg: the DMG to assess')
+    parser.add_argument('step', choices=['prepare', *PIPELINE, 'all', 'check-dmg', 'vm-bootstrap'])
+    parser.add_argument('path', nargs='?', type=Path,
+                        help='check-dmg: the DMG to assess; vm-bootstrap: a new or empty directory for the signed build')
     parser.add_argument('--dry-run', action='store_true', help='publish: run every gate, print what would be pushed and uploaded')
     parser.add_argument('--notes', help='assemble: the one-line notes latest.json carries (default "TerminalX <version>")')
     parser.add_argument('--base', help='scan: scan commits from this revision (default: the main commit prepare recorded)')
@@ -96,6 +103,12 @@ def main(argv: list[str] | None = None) -> int:
             if not args.path:
                 raise ReleaseError('check-dmg needs the path of a DMG')
             print(json.dumps(check_dmg(args.path, runner), indent=2))
+            return 0
+        if args.step == 'vm-bootstrap':
+            # Not a release step: it needs no version, checkout state or records, only the identity.
+            if not args.path:
+                raise ReleaseError('vm-bootstrap needs a new or empty output directory')
+            print(json.dumps(vm_bootstrap.build_signed(repository_root(), args.path.resolve(), runner), indent=2))
             return 0
         release = config.load(repository_root())
         steps = PIPELINE if args.step == 'all' else [args.step]
