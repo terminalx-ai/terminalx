@@ -49,7 +49,7 @@ import {
   useCloudWorkspaceSessions,
   type CloudSessionRow,
 } from "@/lib/cloudSessions";
-import { createCloudSection, keepFocusForNameField, moveProjectToSection, sectionOfProject, useCloudSidebarSections } from "@/lib/cloudSidebarSections";
+import { createCloudSection, isBuiltInSection, keepFocusForNameField, moveProjectToSection, sectionOfProject, useCloudSidebarSections } from "@/lib/cloudSidebarSections";
 import { errorCode } from "@/lib/cloudTerminals";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
@@ -345,8 +345,8 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
 
 /** "Move to section" in a project's menu: the reader's sections, a new one, or none. */
 function MoveToSectionItems({ project }: { project: CloudProject }) {
-  const sections = useCloudSidebarSections(project.orgId);
-  const current = sectionOfProject(sections, project.identity);
+  const sections = useCloudSidebarSections(project.orgId).filter((section) => !isBuiltInSection(section.id));
+  const current = sectionOfProject(sections, project.identity, project.workspaces.map((node) => node.item.workspace.id));
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger>
@@ -359,18 +359,18 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
             role="menuitemradio"
             aria-checked={current?.id === section.id}
             disabled={current?.id === section.id}
-            onSelect={() => moveProjectToSection(project.orgId, project.identity, section.id)}
+            onSelect={() => moveProjectToSection(project.orgId, project.identity, section.id, project.workspaces.map((node) => node.item.workspace.id))}
           >
             {current?.id === section.id ? <Check /> : <span aria-hidden className="size-4 shrink-0" />}
             <span className="truncate">{section.name}</span>
           </DropdownMenuItem>
         ))}
         {sections.length > 0 && <DropdownMenuSeparator />}
-        <DropdownMenuItem onSelect={() => createCloudSection(project.orgId, project.identity)}>
+        <DropdownMenuItem onSelect={() => createCloudSection(project.orgId, project.identity, project.workspaces.map((node) => node.item.workspace.id))}>
           <FolderPlus /> New section…
         </DropdownMenuItem>
         {current && (
-          <DropdownMenuItem onSelect={() => moveProjectToSection(project.orgId, project.identity, null)}>
+          <DropdownMenuItem onSelect={() => moveProjectToSection(project.orgId, project.identity, null, project.workspaces.map((node) => node.item.workspace.id))}>
             <X /> <span className="min-w-0 truncate">Remove from {current.name}</span>
           </DropdownMenuItem>
         )}
@@ -407,7 +407,7 @@ function OpenWorkspaceItem({ node }: { node: CloudWorkspaceNode }) {
 }
 
 /** A workspace's sessions; with several workspaces in the project, under a row that names the workspace. */
-function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle }) {
+export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle; extraActions?: ReactNode }) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
   const menu = useRowMenu();
@@ -491,6 +491,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[17rem]">
+              {extraActions}
               <WorkspaceActionItems item={node.item} onLifecycle={onLifecycle} run={run} />
             </DropdownMenuContent>
           </DropdownMenu>

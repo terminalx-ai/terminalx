@@ -23,7 +23,7 @@ import { parseArgs } from "node:util";
 const checks = [
   "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "orchestration", "run-limits", "run-sidebar",
   "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "working-marks",
-  "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "local-sections",
+  "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "workspace-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
   "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
