@@ -30,7 +30,7 @@ import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, r
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
-import { AgentSetup } from "./AgentSetup";
+import { AgentSetupNotice } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
 import { StartFromPicker, type BranchTarget } from "./StartFromPicker";
 import { usePrMention } from "@/components/chat/usePrMention";
@@ -224,6 +224,26 @@ export function NewSessionView({
   // The chosen agent's login on the machine, when it says (PRO-350); a definite "signed out" holds Create back.
   const machineSignIn = machine ? agentSignIn(machine.agents, harness?.id) : null;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
+  // Setup belongs to the agent the person picks (#1064): one notice, for one agent, only when this Mac
+  // knows it is missing or signed out. A check under way or an unverified login shows nothing.
+  const [setupPick, setSetupPick] = useState<string | null>(null);
+  const needsSetup = (id: string) => {
+    const state = readiness.values?.[id]?.state;
+    return state === "missing" || state === "signed_out";
+  };
+  const setupTarget = remote ? null
+    : store.harnesses.find((item) => item.id === setupPick && needsSetup(item.id))
+      ?? (harness ? (needsSetup(harness.id) ? harness : null)
+      // Nothing can start: the agent last used, else the first, once the check has answered.
+      : readiness.checking ? null
+      : store.harnesses.find((item) => item.id === prefs.lastAgent && needsSetup(item.id)) ?? store.harnesses.find((item) => needsSetup(item.id)) ?? null);
+  // The agent picked for setup is ready now: it is the one the chat starts with.
+  const pickedReady = !!setupPick && readiness.values?.[setupPick]?.state === "ready";
+  useEffect(() => {
+    if (!pickedReady || !setupPick) return;
+    agentSelection.selectHarness(setupPick);
+    setSetupPick(null);
+  }, [pickedReady, setupPick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
@@ -673,12 +693,11 @@ export function NewSessionView({
           {!remote && !projectless && preset && !project && <p role="alert" className="mb-3 text-sm text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
           {!remote && (
             <div className="mb-3 space-y-2 empty:hidden">
-              {!harness && <p role="status" className="px-1 text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
-              {(harness ? [harness] : store.harnesses).map((item) => (
-                <AgentSetup newSession key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
+              {setupTarget && (
+                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness} onRefresh={() => {
                   void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
                 }} />
-              ))}
+              )}
             </div>
           )}
           {cloud && starting && (
@@ -864,7 +883,7 @@ export function NewSessionView({
             </div>
 
             <div className="flex items-center gap-1 px-2 pb-2">
-              <AgentMenu selection={agentSelection} disabled={busy} />
+              <AgentMenu selection={agentSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
               {!remote && harness && !available && (
                 <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
                   {harness.name} isn't installed

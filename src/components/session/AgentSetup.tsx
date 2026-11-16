@@ -101,9 +101,50 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
         <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
         {copyStatus && <span role="status">{copyStatus}</span>}
       </div>}
-      {!compact && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
+      {!compact && !newSession && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
     </>}
   </section>;
+}
+
+/**
+ * New Session's word on one agent (#1064): a single line, and only when this Mac knows the agent is
+ * missing or signed out. An unverified login or a check still under way says nothing, since the CLI may
+ * work. The line offers the install or sign-in and the setup guide; the full setup opens from it on
+ * demand, and shows by itself while a run it started is under way or has stopped.
+ */
+export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking }: {
+  harness: HarnessInfo;
+  value: AgentReadiness | null;
+  checking: boolean;
+  onRefresh: () => void;
+  /** No other agent can start this chat: say so, and that the draft stays. */
+  blocking: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const flow = useAgentSetupFlow(harness.id);
+  const active = setupActive(flow);
+  const state = value?.state;
+  if (!active && state !== "missing" && state !== "signed_out") return null;
+  if (active || open) return <div className="min-w-0">
+    <AgentSetup newSession harness={harness} value={value} checking={checking} onRefresh={onRefresh} />
+    {!active && <div className="mt-1 flex justify-end">
+      <Button type="button" size="xs" variant="ghost" aria-expanded onClick={() => setOpen(false)}>Hide details</Button>
+    </div>}
+  </div>;
+  const install = state === "missing";
+  const text = install
+    ? (blocking ? `Install ${harness.name} to start a chat. Your draft is kept.` : `${harness.name} isn't installed.`)
+    : (blocking ? `Sign in to ${harness.name} to start a chat. Your draft is kept.` : `${harness.name} is signed out.`);
+  return <div role="note" aria-label={`${harness.name} setup`} data-testid="agent-setup-notice"
+    className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-well py-1.5 pl-3 pr-1.5 text-xs">
+    <span className="min-w-0 flex-1 text-muted-foreground">{text}</span>
+    {harness.installable && <Button type="button" size="xs" disabled={checking} aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
+      onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
+      {install && <Download />} {install ? "Install and sign in" : "Sign in"}
+    </Button>}
+    <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+    <Button type="button" size="xs" variant="ghost" aria-expanded={false} onClick={() => setOpen(true)}>Details</Button>
+  </div>;
 }
 
 /** A run under way, or stopped: what it is doing, why it stopped, and its terminal. */

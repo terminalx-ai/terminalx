@@ -27,7 +27,12 @@ import { AccountRadioItems } from "./SessionAgentControls";
  * what the agent may do unasked is never a menu away (PRO-162); Bypass is
  * marked as a warning and Plan in the composer's plan colour.
  */
-export function AgentMenu({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
+export function AgentMenu({ selection, disabled = false, onSetup }: {
+  selection: ReturnType<typeof useSessionAgent>;
+  disabled?: boolean;
+  /** New Session (#1064): an agent this Mac knows is missing or signed out can be picked to set it up, here rather than in a card per agent. */
+  onSetup?: (id: string) => void;
+}) {
   const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
   const menu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modelText = unavailableModel ? `Unavailable: ${unavailableModel}` : (model ? runningModelName(model) : (harness?.name ?? "Agent"));
@@ -69,7 +74,9 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           const state = readiness?.[h.id]?.state;
           const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
           const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
-          return <DropdownMenuItem key={h.id} disabled={unavailable} onSelect={() => selectHarness(h.id)}>
+          // Only a definite answer offers setup: "checking…" stays off until the check says.
+          const setup = unavailable && !!onSetup && (state === "missing" || state === "signed_out");
+          return <DropdownMenuItem key={h.id} disabled={unavailable && !setup} onSelect={() => setup ? onSetup(h.id) : selectHarness(h.id)}>
             <AgentMark id={h.id} decorative brand />
             <span>{h.name}</span>
             {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}

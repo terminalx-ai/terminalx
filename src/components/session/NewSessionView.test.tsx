@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project, SessionEntry } from "@/types/session";
 
@@ -150,6 +150,9 @@ describe("new session attachments", () => {
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
     expect(onCreated).not.toHaveBeenCalled();
     signedIn = true;
+    // One line for the agent; its full setup, with Check again, opens from it.
+    expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
+    fireEvent.click(within(screen.getByTestId("agent-setup-notice")).getByRole("button", { name: "Details" }));
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     fireEvent.click(start);
@@ -164,7 +167,7 @@ describe("new session attachments", () => {
     render(<NewSessionView quick />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this question" } });
     const ask = screen.getByRole("button", { name: "Ask" });
-    await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+    await screen.findByText("Sign in to Claude to start a chat. Your draft is kept.");
     expect(ask.hasAttribute("disabled")).toBe(true);
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", metaKey: true });
     expect(createQuickChat).not.toHaveBeenCalled();
@@ -455,11 +458,11 @@ describe("one new-chat composer (PRO-173)", () => {
       : original(command, args));
     renderView();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
-    await screen.findByText("Not installed");
+    await screen.findByText("Install Codex to start a chat. Your draft is kept.");
 
     readiness = "signed_out";
     act(() => window.dispatchEvent(new Event("focus")));
-    await screen.findByText("Installed · sign in required");
+    await screen.findByText("Sign in to Codex to start a chat. Your draft is kept.");
     expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
 
     readiness = "ready";
@@ -551,7 +554,9 @@ describe("one new-chat composer (PRO-173)", () => {
       await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe(`${chosen} · Bypass`));
       expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(false);
     } else {
-      await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+      // One notice, for the agent the chat would start with, never a card per agent.
+      await screen.findByText("Sign in to Claude to start a chat. Your draft is kept.");
+      expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
       expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(true);
     }
     expect(createQuickChat).not.toHaveBeenCalled();
@@ -681,6 +686,51 @@ describe("what the new-session view says about the project and the agents (PRO-2
     delete project.scripts;
     rerender(<NewSessionView onCreated={vi.fn()} useWorktree={false} onUseWorktreeChange={vi.fn()} />);
     expect(screen.queryByTestId("setup-script-line")).toBeNull();
+  });
+
+  it.each(["unknown", "checking"] as const)("shows nothing above the prompt box for Claude and Codex while their logins are %s (#1064)", async (answer) => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex" }];
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? answer === "checking" ? new Promise(() => {}) : Promise.resolve({ state: "unknown", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    if (answer === "unknown") await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    else await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "check_agent_readiness").length).toBeGreaterThan(0));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+    expect(screen.queryByRole("region", { name: /setup$/ })).toBeNull();
+    expect(screen.queryByText(/Checking agents|Checking installation|could not be verified|TerminalX account is optional|Sign in to an agent/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Sign in|Copy command|Setup guide|Check again/ })).toBeNull();
+  });
+
+  it("picks a signed-out Codex from the menu for setup: one compact notice for Codex only, then Codex once it is signed in (#1064)", async () => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex", installable: true, installUrl: "https://example.com/codex" }];
+    let codex = "signed_out";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: args.harness === "codex" ? codex : "ready", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("agent-menu"));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Codex/ }));
+    const notice = await screen.findByTestId("agent-setup-notice");
+    expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
+    expect(notice.textContent).toContain("Codex is signed out.");
+    expect(within(notice).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Setup guide" })).toBeTruthy();
+    // The full setup opens on demand, without the TerminalX account sentence.
+    fireEvent.click(within(notice).getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("region", { name: "Codex setup" }).textContent).toContain("codex login");
+    expect(screen.queryByText(/TerminalX account is optional/)).toBeNull();
+
+    codex = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Codex setup" })).toBeNull();
   });
 
   it("lists only the agents that are installed and signed in, beside the Create note", async () => {
