@@ -115,7 +115,7 @@ describe("Settings → Machines card (21.02)", () => {
 });
 
 describe("the machine page (21.10)", () => {
-  it("says Needs update and lists the hidden features with both versions", async () => {
+  it("says it is connected, and its banner lists the hidden features with both versions", async () => {
     const devServer = pairedMachine({ machineId: "dev", name: "dev-server", os: { family: "linux", version: "24.04" }, version: "0.2.29" });
     attach(devServer, LIVE, fakeClient(ALL.filter((name) => name !== "ports/1" && name !== "pipeline/1"), "0.2.29", updateStatus({ current: "0.2.29" })));
     render(<MachinePage machineId="dev" onBack={() => undefined} />);
@@ -123,7 +123,7 @@ describe("the machine page (21.10)", () => {
     await waitFor(() => expect(banner.textContent).toContain("TerminalX 0.2.29 there, 0.2.33 here"));
     expect(banner.textContent).toContain("Port forwarding and issue pipelines are hidden for this machine until it is updated.");
     expect(within(screen.getByTestId("machine-hidden-features")).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Port forwarding", "Issue pipelines"]);
-    expect(screen.getByTestId("machine-page-state").textContent).toBe("Needs update");
+    expect(screen.getByTestId("machine-page-state").textContent).toBe("Connected");
     expect(within(banner).getByRole("button", { name: "Update dev-server" })).toBeTruthy();
     await waitFor(() => expect(screen.getByTestId("machine-page-meta").textContent).toContain("headless"));
   });

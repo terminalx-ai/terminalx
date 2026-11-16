@@ -6,9 +6,13 @@ import { MachineIcon, MachineStateMark, machineTone, routeText, toneText } from 
 import { MachineVersionBanner } from "./MachineUpdate";
 import { osLabel, shortDate } from "./machineText";
 
-/** "Connected" on the page and the card (21.02, 21.10); the chip's label otherwise. */
-export function pageStateLabel(view: MachineVersionView): string {
-  const state = view.shownState;
+/**
+ * "Connected" on the page and the card (21.02, 21.10); the chip's label
+ * otherwise. `state` is the card's shown state (Needs update while anything
+ * is hidden) or the page's own connection state, whose banner says what is
+ * hidden (21.10).
+ */
+export function pageStateLabel(view: MachineVersionView, state = view.shownState): string {
   switch (state.state) {
     case "direct":
     case "relay":
@@ -59,7 +63,8 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
       </div>
     );
   }
-  const tone = machineTone(view.shownState);
+  // The page says how the machine is connected; its version banner says what is hidden (21.10).
+  const tone = machineTone(view.state);
   return (
     <div className="grid gap-5" data-testid="machine-page" data-machine={machineId}>
       <Breadcrumb name={machine.name} onBack={onBack} />
@@ -70,9 +75,9 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2.5">
             <h2 className="truncate text-[20px] font-semibold leading-7">{machine.name}</h2>
-            <span className={cn("flex shrink-0 items-center gap-1.5 text-[12px]", toneText(tone))} data-testid="machine-page-state" data-state={view.shownState.state}>
-              <MachineStateMark state={view.shownState} />
-              {pageStateLabel(view)}
+            <span className={cn("flex shrink-0 items-center gap-1.5 text-[12px]", toneText(tone))} data-testid="machine-page-state" data-state={view.state.state}>
+              <MachineStateMark state={view.state} />
+              {pageStateLabel(view, view.state)}
             </span>
           </div>
           <div className="truncate text-[12.5px] text-muted-foreground" data-testid="machine-page-meta">
