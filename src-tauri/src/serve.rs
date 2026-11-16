@@ -42,8 +42,8 @@ Usage: terminalx-serve [options]
 Options:
   --project-root <dir>   Register <dir> as a project and run agents in it
   --data-dir <dir>       State directory (sessions, transcripts, sockets);
-                         required unless $TERMINALX_HOME is set, so the
-                         runtime never takes over the desktop app's ~/.raccoon
+                         defaults to $TERMINALX_HOME, else ~/.terminalx/data,
+                         never the desktop app's ~/.raccoon
   --runtime-kind <kind>  local (default) or cloud-workspace; cloud-workspace
                          requires --project-root
   --relay-link <file>    Register with the relay as a host and serve the
@@ -201,10 +201,15 @@ pub fn main() -> i32 {
         println!("{}", crate::local_runtime::handover::formats());
         return 0;
     }
+    // What a person runs on a headless server: service, pair, devices,
+    // login, logout and update (PRO-353).
+    if let Some(code) = crate::serve_cli::run(&args) {
+        return code;
+    }
     let options = match parse(&args) {
         Ok(Command::Serve(options)) => options,
         Ok(Command::Help) => {
-            println!("{USAGE}");
+            println!("{USAGE}\n\n{}", crate::serve_cli::USAGE);
             return 0;
         }
         Ok(Command::Version) => {
@@ -282,8 +287,20 @@ fn run(options: Options) -> Result<()> {
         std::env::set_var("TERMINALX_HOME", &dir);
     } else if crate::store::state_home_env().is_none() {
         // The default home belongs to the desktop app: its socket, control
-        // token and tab statuses would all be taken over.
-        bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
+        // token and tab statuses would all be taken over. The app always
+        // names a home for the runtime it launches; anything else is a
+        // headless install, whose home is ~/.terminalx/data (PRO-353).
+        if std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1") {
+            bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
+        }
+        let dir = crate::serve_cli::default_data_dir()?;
+        crate::serve_cli::check_socket_room(&dir)?;
+        // It holds the control token, the sockets and the host key's folder:
+        // only this user may enter it.
+        crate::machine_host::private_dir(&crate::serve_cli::install_root()?)?;
+        crate::machine_host::private_dir(&dir)?;
+        let dir = std::fs::canonicalize(&dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
+        std::env::set_var("TERMINALX_HOME", &dir);
     }
     let data_dir = crate::store::root().context("open the state directory")?;
     #[cfg(unix)]

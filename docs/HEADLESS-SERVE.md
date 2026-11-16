@@ -48,7 +48,7 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 | Flag | Meaning |
 | --- | --- |
 | `--project-root <dir>` | Registers the directory as a project; agents run in it |
-| `--data-dir <dir>` | State directory (sets `TERMINALX_HOME`). Required unless `TERMINALX_HOME` is set: the runtime never falls back to the desktop app's `~/.raccoon` |
+| `--data-dir <dir>` | State directory (sets `TERMINALX_HOME`). Without it or `TERMINALX_HOME`, a runtime the desktop did not launch uses `~/.terminalx/data` (created mode 0700, checked to leave room for its sockets); one the desktop launched (`TERMINALX_LOCAL_DESKTOP=1`) refuses to start. The runtime never falls back to the desktop app's `~/.raccoon` |
 | `--runtime-kind <kind>` | `local` (default) or `cloud-workspace`, which requires `--project-root`. Reported as `runtimeKind` by the control `status` command |
 | `--self-test` | Start, run the login shell in a PTY, type a command, wait for its answer and exit, then stop |
 | `--idle-grace-seconds <1–3600>` | Local runtime's unattached idle grace; defaults to 60 seconds |
@@ -288,8 +288,30 @@ resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) 
   (`cloud_github`).
 - **The `terminalx` agent CLI inside the runtime.** The CLI module links the desktop's
   computer-use and browser parsers, so it is still desktop-only.
-- **A signed artifact, and arm64 in the cloud.** `release-serve.yml` publishes
-  `terminalx-serve-linux-x64` and `-arm64` as a runtime prerelease after CI passes on
-  `main` ([RELEASING.md](RELEASING.md)). terminalx-saas installs the newest compatible x64
-  one by default (versioned directory, atomic `current` swap, health check, rollback). It
-  is verified by SHA-256, not signed, and the server does not provision the arm64 build.
+- **arm64 in the cloud.** `release-serve.yml` publishes `terminalx-serve-linux-x64` and
+  `-arm64` as a runtime prerelease ([RELEASING.md](RELEASING.md)). terminalx-saas installs
+  the newest compatible x64 one by default (versioned directory, atomic `current` swap,
+  health check, rollback), checked by SHA-256; it does not provision the arm64 build or
+  check the signature yet.
+
+## On a person's own server (PRO-353)
+
+[HEADLESS-SERVER.md](HEADLESS-SERVER.md) is the user's guide. What it rests on:
+
+- **Install.** `curl -fsSL https://terminalx.ai/install.sh | sh` runs
+  `scripts/install/install.sh` (served by the website from `main`). It picks the newest
+  runtime prerelease that carries `SHA256SUMS.sig`, checks that signature with
+  `ssh-keygen -Y verify` against the key in `scripts/install/allowed_signers`, checks the
+  binary and `terminalx-serve.json` against `SHA256SUMS`, and installs to
+  `~/.terminalx/versions/<version>/terminalx-serve` with an atomic `current` link. Nothing
+  under `~/.terminalx` changes until all of that has passed.
+- **Signing.** CI publishes runtime prereleases unsigned; the owner signs `SHA256SUMS` on
+  their own Mac with `scripts/release/sign-runtime.py` (an Ed25519 SSH signature, namespace
+  `terminalx-runtime`), so no signing key is on GitHub. The installer and
+  `terminalx-serve update` accept only signed releases, with the same key
+  (`RUNTIME_SIGNING_KEY` in `src/serve_cli/mod.rs`).
+- **Commands** (`src/serve_cli/`): `service install|status|uninstall` (a systemd user unit
+  with lingering, or a LaunchAgent), `pair`, `devices`, `projects`, `login`/`logout` and `update`. Each
+  finds the data directory as the runtime does: `--data-dir`, `TERMINALX_HOME`, then
+  `~/.terminalx/data`. Installing the service does not turn hosting on; `pair` does, with
+  consent in that terminal ([MACHINES.md](MACHINES.md), decision 9).

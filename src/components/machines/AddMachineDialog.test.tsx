@@ -32,6 +32,7 @@ beforeEach(() => {
     if (command === "machines_pair") return pairAnswer.promise;
     if (command === "machines_cancel_pairing") return null;
     if (command === "machines_set_route") return null;
+    if (command === "machine_name") return { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
     throw new Error(`unexpected ${command}`);
   });
 });
@@ -45,12 +46,14 @@ function open(onOpenChange = vi.fn(), onPaired = vi.fn()) {
 const paste = (dialog: HTMLElement, text = CODE) => fireEvent.change(within(dialog).getByLabelText("Pairing code"), { target: { value: text } });
 
 describe("Add a machine (screen 21.04)", () => {
-  it("is empty at first: the pairing code only, no tab bar, and a route hint per owner decision 4", () => {
+  it("is empty at first: Pairing code and Headless server tabs (no On your account), and a route hint per owner decision 4", () => {
     const { dialog } = open();
     expect(within(dialog).getByText("Operate another computer that runs TerminalX")).toBeTruthy();
-    expect(within(dialog).queryByRole("tablist")).toBeNull();
+    const tabs = within(within(dialog).getByRole("tablist")).getAllByRole("tab");
+    expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")])).toEqual([["Pairing code", "true"], ["Headless server", "false"]]);
     expect(within(dialog).queryByText("On your account")).toBeNull();
-    expect(within(dialog).queryByText("Headless server")).toBeNull();
+    // No stray source text (a leftover `return (` once rendered as a text node).
+    expect(dialog.textContent).not.toMatch(/return \(|=>|\{\s*\}/);
     expect(within(dialog).getByText("On the other computer, open Settings → Machines and choose Create pairing code.")).toBeTruthy();
     expect(within(dialog).getByText("The fingerprint shows here once a code is pasted.")).toBeTruthy();
     expect(within(dialog).getByRole("radio", { name: "Relay and nearby" }).getAttribute("aria-checked")).toBe("true");

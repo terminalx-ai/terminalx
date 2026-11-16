@@ -991,6 +991,69 @@ root), one record per `machineId` (name, os, version, pinned
 `machines_pair` tries each endpoint in order, five seconds each to connect,
 and waits up to 150 s for Allow. PRO-345 connects with what it stores.
 
+#### As built (PRO-353): a headless server
+
+A person's own Linux server (or a Mac without the app) runs `terminalx-serve`
+as a user service and is paired from its own terminal. The user's guide is
+[HEADLESS-SERVER.md](HEADLESS-SERVER.md); the operator's notes are in
+[HEADLESS-SERVE.md](HEADLESS-SERVE.md), "On a person's own server".
+
+- **Commands** (`src-tauri/src/serve_cli/`): `service install|status|uninstall`
+  (a systemd user unit with lingering, or a LaunchAgent), `pair`,
+  `devices [revoke <id>]`, `projects [add <folder>]`, `login`/`logout` and
+  `update [--check]`. Each finds the data directory as the runtime does:
+  `--data-dir`, `TERMINALX_HOME`, then `~/.terminalx/data`.
+- **Default data directory.** A runtime the desktop did not launch, given no
+  `--data-dir` or `TERMINALX_HOME`, uses `~/.terminalx/data` (mode 0700, and
+  `~/.terminalx` too), refused when `run/hooks-<pid>.sock` would not fit in a
+  socket path (103 bytes). A desktop-launched runtime
+  (`TERMINALX_LOCAL_DESKTOP=1`) still refuses to start without one.
+- **Decision 9 as built.** `service install` never turns hosting on. `pair`
+  asks "Let other computers operate this server? [y/N]" first, then makes the
+  code, waits, names the computer with the four-group fingerprint and asks
+  `Allow? [y/N]`. Only `y` approves; anything else, end of input, Ctrl-C or two
+  minutes declines.
+- **The screen's header.** 21.06's "On the server" panel shows a fingerprint
+  before any computer has asked, which cannot exist yet: the fingerprint binds
+  the computer's key and the token. `pair` shows `Machine ID <machineId>`
+  there instead, and the fingerprint on the request line, as the dialog does.
+- **Only a person answers.** `runtime.machineHost.createCode` and `approve`
+  take a `consent` parameter naming a witness socket the caller binds in
+  `<data dir>/run/`, with a nonce only the caller knows. The runtime reads the
+  witness's pid from the kernel (`SO_PEERCRED`, `LOCAL_PEERPID`), challenges it
+  with the nonce, and refuses (`person_required`) the runtime itself, any
+  process it started, one whose controlling terminal is one of its terminals,
+  and, on a runtime with no window, one with no controlling terminal. The
+  window's client sends a witness too. `pair` also refuses when its input or
+  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known
+  limits: a same-user process that detaches and opens a pseudo-terminal of its
+  own looks like a person anywhere; and on a desktop-launched runtime, which
+  must let the terminal-less window through, a process that detaches with
+  `setsid` and has no terminal is let through too, until the runtime can
+  recognise the window process itself (PRO-369).
+- **`projects.add`** on the control socket (new): registers a folder as a
+  project (`store::projects::ensure`) and emits `projects_changed`, so
+  `machine.changed` reaches connected computers. The runtime is the store's
+  only writer for it. A fresh server has no project until one is added, and
+  `machine/1` has no way to add one remotely.
+- **The account.** `login` uses the device authorization grant
+  (terminalx-saas `machine-relay-access.md`, "Device-code sign-in") and keeps
+  the desktop Cloud Session it ends in at `<data dir>/account/session.json`
+  (0600, in a 0700 folder; `src-tauri/src/machine_account.rs`). Nothing
+  registers with the relay from it yet: that is PRO-368, which reads this file
+  on a headless machine. The code still carries no `relay`.
+- **Signed releases.** `SHA256SUMS` of each runtime release is signed as an SSH
+  signature (namespace `terminalx-runtime`, principal `release@terminalx`) on
+  the owner's Mac (`scripts/release/sign-runtime.py`); no signing key is on
+  GitHub. The installer and `update` refuse an unsigned release or a bad
+  signature before anything under `~/.terminalx` changes, then check the
+  binary and `terminalx-serve.json` against the signed hashes and that the
+  binary reports the signed version.
+- **Tested** by `scripts/remote-runtime/e2e-install-linux.sh`: a fresh Ubuntu
+  24.04 container with systemd installs from a locally signed release over SSH,
+  refuses one signed by another key, pairs through `ssh -tt`, serves a first
+  session, and after `docker restart` the computer connects again and finds it.
+
 ### Pairing through the account
 
 1. Both computers are signed in to the same account. The machine has the switch
