@@ -1222,6 +1222,10 @@ impl ControlService {
             /// A worker: told to end with a report block, and held to it (`worker_report`).
             #[serde(default)]
             report: bool,
+            /// `--account`: the agent account the first tab starts on, by id
+            /// or label (#980). Absent: the project's default, then the agent's.
+            #[serde(default)]
+            account: Option<String>,
             /// `--parent`: the session to record as having started this one.
             #[serde(default)]
             parent: Option<String>,
@@ -1295,6 +1299,8 @@ impl ControlService {
         if p.experimental_codex_stdio && (p.agent != "codex" || p.issue.is_some()) {
             return Err(ControlError::invalid("Experimental stdio requires a new Codex session without an issue pipeline."));
         }
+        // Settled before anything is created, like the parent.
+        let account = p.account.as_deref().map(|selector| resolve_account(&p.agent, selector)).transpose()?;
         let mut first_tab = NewTab { transport: if p.experimental_codex_stdio { index::AgentTransport::ExperimentalCodexStdio } else { index::AgentTransport::Pty }, harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
         // Without the flag, Settings → Experimental → Native Codex decides.
         if !p.experimental_codex_stdio { crate::session_ops::prefer_native_codex(&mut first_tab, p.issue.is_some() || p.report); }
@@ -1304,7 +1310,7 @@ impl ControlService {
                 // The title a quick chat started from the window gets: the prompt's first line.
                 let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
                 let quick = crate::session_ops::NewQuickChat { section_id: None, title, cwd: p.cwd, tab: Some(first_tab), parent };
-                crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
+                crate::session_ops::create_quick_chat_blocking_on(&*self.sink, quick, account.as_deref()).map_err(ControlError::invalid)?
             }
             Some(selector) => {
                 let project = resolve_project(selector)?;
@@ -1316,7 +1322,7 @@ impl ControlService {
                     }
                     issue = Some(issue_for_session(&project.path, reference, p.provider.as_deref())?);
                 }
-                crate::session_ops::create_named_session_blocking(
+                crate::session_ops::create_named_session_blocking_on(
                     &*self.sink,
                     NewSession {
                         parent,
@@ -1336,6 +1342,7 @@ impl ControlService {
                         orchestrate: false,
                     },
                     p.name.as_deref(),
+                    account.as_deref(),
                 )
                 .map_err(workspace_error)?
             }
@@ -2301,6 +2308,31 @@ fn validate_control_session_target(use_worktree: bool, on_main: bool) -> Result<
         ));
     }
     Ok(())
+}
+
+/// The agent account `selector` names for `agent` (#980): its id, or its
+/// label, ignoring case. A label two accounts share names neither; an agent
+/// without accounts has none to choose. Only ids and labels are answered,
+/// never a token.
+pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, ControlError> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err(ControlError::invalid("--account cannot be empty."));
+    }
+    let Some(_) = crate::agent_keys::Agent::of(agent) else {
+        return Err(ControlError::invalid(format!("{agent} has no accounts to choose from; leave out --account.")));
+    };
+    let view = crate::agent_accounts::list(agent).map_err(ControlError::internal)?;
+    if let Some(account) = view.accounts.iter().find(|account| account.id == selector) {
+        return Ok(account.id.clone());
+    }
+    let named: Vec<_> = view.accounts.iter().filter(|account| account.label.to_lowercase() == selector.to_lowercase()).collect();
+    let listed = || view.accounts.iter().map(|account| format!("{} ({})", account.id, account.label)).collect::<Vec<_>>().join(", ");
+    match named.as_slice() {
+        [account] => Ok(account.id.clone()),
+        [] => Err(ControlError::invalid(format!("No {agent} account is called {selector}. Its accounts: {}.", listed()))),
+        _ => Err(ControlError::invalid(format!("More than one {agent} account is called {selector}; name it by id: {}.", listed()))),
+    }
 }
 
 /// Who a new session is recorded as started by (PRO-270). `--no-parent`

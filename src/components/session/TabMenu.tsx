@@ -27,6 +27,7 @@ import {
   TerminalSquare,
   Trash2,
   Undo2,
+  UserRound,
   X,
 } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -56,6 +57,7 @@ import { agent as agentApi, errorMessage } from "@/lib/api";
 import { openChatLink, parseChatLink } from "@/lib/chatLinks";
 import { dismissErrorKey, showError, type ErrorToastAction } from "@/lib/errorToasts";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { switchTabAccount, useAccountSwitch } from "@/components/session/AccountSwitch";
 
 const BULK: BulkClose[] = ["others", "right", "left", "idle", "all"];
 
@@ -234,6 +236,36 @@ export function openTabTelling(row: TabRow, what: NewTabKind, after?: PeerTab | 
 }
 
 /**
+ * Switch account (#980): restart the tab's agent on another of its agent's
+ * accounts and resume the conversation. Only when the agent has several;
+ * off while a turn runs (it would be cut off) or before there is a
+ * conversation to resume.
+ */
+function SwitchAccountItems({ session, tab, live, off }: { session: SessionEntry; tab: TabEntry; live: boolean; off: boolean }) {
+  const { targets } = useAccountSwitch(session, tab);
+  if (!targets.length) return null;
+  const why = live ? "Wait for the turn to end, or stop it, before switching accounts."
+    : !tab.providerSessionId ? "Send a message first: there is no conversation to continue yet." : null;
+  const key = `switch-account:${session.id}:${tab.id}`;
+  const run = (account: (typeof targets)[number]) => void switchTabAccount(session, tab, account).then(
+    () => dismissErrorKey(key),
+    (error: unknown) => showError(`Couldn't switch to ${account.label}`, error, { key }),
+  );
+  return (
+    <ContextMenuSub>
+      <ContextMenuSubTrigger disabled={off || !!why} title={why ?? undefined}>
+        <UserRound /> Switch account
+      </ContextMenuSubTrigger>
+      <ContextMenuSubContent>
+        {targets.map((account) => (
+          <ContextMenuItem key={account.id} onSelect={() => run(account)}>{account.label}</ContextMenuItem>
+        ))}
+      </ContextMenuSubContent>
+    </ContextMenuSub>
+  );
+}
+
+/**
  * The right-click menu of one tab, the same on the title bar strip and on
  * the sidebar's tab rows. It acts on the tab that was clicked, whether or
  * not it is the one on screen.
@@ -335,6 +367,7 @@ export function TabMenuItems({
           <RotateCw /> Restart agent
         </ContextMenuItem>
       ) : null}
+      {agentTab ? <SwitchAccountItems session={session} tab={agentTab} live={peerIsLive(tab)} off={off} /> : null}
       {tab.kind === "terminal" && peerShell(tab)?.exited ? (
         <ContextMenuItem disabled={off} onSelect={() => void restartTab(row, tab).catch(failed("restarting the shell"))}>
           <RotateCw /> Restart shell

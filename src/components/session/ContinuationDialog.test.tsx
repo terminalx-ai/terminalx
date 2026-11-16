@@ -26,6 +26,8 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: (harness?: string) => catalog.filter((m) => !harness || m.harness === harness),
 }));
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { forgetAgentAccounts } from "@/lib/useSessionAgent";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { continuationPrompt, IN_INPUT } from "@/lib/continuation";
 import { ContinuationDialog } from "./ContinuationDialog";
@@ -659,5 +661,38 @@ describe("continuation project selection", () => {
     expect(mocks.launchDestination.mock.calls[1][5]).toEqual(made);
     expect(mocks.launchDestination.mock.calls[1][3]).toBe(mocks.launchDestination.mock.calls[0][3]);
     expect(mocks.launch).not.toHaveBeenCalled();
+  });
+});
+
+// #980: a handoff starts on the source conversation's account, or the one picked.
+describe("agent accounts", () => {
+  const WORK = "0123456789abcdef";
+  const account = (id: string, label: string) => ({ id, agent: "claude", kind: "subscription", label, email: null, plan: null, organization: null, local: id === "local", isDefault: id === "local", missing: false, addedAt: null });
+  const accounts = (list: ReturnType<typeof account>[]) => {
+    forgetAgentAccounts();
+    vi.mocked(invoke).mockImplementation(async (command: string) => command === "agent_accounts_list" ? { agent: "claude", accounts: list, defaultAccount: "local", projectDefaults: {} } : []);
+  };
+  const delivered = () => mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
+
+  it("shows no account and sends none with one account", async () => {
+    accounts([account("local", "This Mac's login")]);
+    delivered();
+    open(); await loaded();
+    expect(screen.queryByTitle("Account")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, sourceSettings, expect.any(String), expect.any(Function), undefined, expect.any(Function)));
+  });
+
+  it("starts on the source conversation's account, and on another when it is picked", async () => {
+    accounts([account("local", "This Mac's login"), account(WORK, "work@example.com · Max")]);
+    delivered();
+    render(<ContinuationDialog session={session} source={{ ...source, launchedAccount: WORK } as TabEntry} onClose={vi.fn()} />);
+    await loaded();
+    expect((await screen.findByTitle("Account")).textContent).toContain("work@example.com · Max");
+    fireEvent.click(screen.getByTitle("Account"));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /This Mac's login/ }));
+    await waitFor(() => expect(screen.getByTitle("Account").textContent).toContain("This Mac's login"));
+    fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { ...sourceSettings, account: "local" }, expect.any(String), expect.any(Function), undefined, expect.any(Function)));
   });
 });

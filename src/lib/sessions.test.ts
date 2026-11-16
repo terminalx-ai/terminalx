@@ -319,6 +319,21 @@ describe("new chat", () => {
     expect(mocks.invoke.mock.calls.some(([command]) => command === "create_quick_chat" || command === "add_project")).toBe(false);
   });
 
+  it("starts an ordinary chat on the agent account chosen for it (#980), and names none when none was", async () => {
+    const chatsPath = "/Users/me/.raccoon/Chats";
+    const chat = { ...attached, projectPath: chatsPath, cwd: chatsPath };
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "chats_dir" ? Promise.resolve(chatsPath)
+      : command === "create_session" ? Promise.resolve(chat) : original(command, args));
+    const tab = { harness: "claude", model: "opus", permissionMode: "manual" };
+    await sessions.createChat({ title: "On work", tab, account: "0123456789abcdef" });
+    expect(mocks.invoke).toHaveBeenCalledWith("create_session", { req: {
+      projectPath: chatsPath, cwd: chatsPath, title: "On work", useWorktree: false, tab, account: "0123456789abcdef",
+    } });
+    await sessions.createChat({ title: "As before", tab, account: null });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "create_session").at(-1)![1]).not.toHaveProperty("req.account");
+  });
+
   it("resolves a removed conversation's project before opening its branch composer", async () => {
     const removed = "/repos/removed";
     const original = mocks.invoke.getMockImplementation()!;

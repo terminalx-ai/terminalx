@@ -1,12 +1,24 @@
 import { useState } from "react";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentReadinessMap } from "./agentReadiness";
 import type { ModelInfo } from "@/lib/api";
 import { closeBypass, useDialogs } from "@/lib/dialogs";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-import { handoffStart, launchDefaults, launchSettingsOf, useSessionAgent, type LaunchSettings } from "./useSessionAgent";
+import { forgetAgentAccounts, handoffStart, launchDefaults, launchSettingsOf, takeAgentAccounts, useSessionAgent, type LaunchSettings } from "./useSessionAgent";
+import type { AgentAccount, AgentAccounts } from "./agentAccounts";
+
+// The Mac's account index (#980), as `agent_accounts_list` answers it: per agent, or refused.
+const index = vi.hoisted(() => ({ views: {} as Record<string, unknown>, calls: [] as string[] }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (command: string, args: { harness: string }) => {
+    if (command !== "agent_accounts_list") throw new Error(`unexpected command ${command}`);
+    index.calls.push(args.harness);
+    if (!index.views[args.harness]) throw new Error("no index");
+    return index.views[args.harness];
+  }),
+}));
 
 const catalog = vi.hoisted(() => ({ models: [] as ModelInfo[] }));
 vi.mock("@/lib/models", async (original) => ({
@@ -37,6 +49,9 @@ beforeEach(() => {
   ];
   setPrefs({ lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", bypassConfirmed: false });
   closeBypass();
+  index.views = {};
+  index.calls = [];
+  forgetAgentAccounts();
 });
 afterEach(cleanup);
 
@@ -258,5 +273,100 @@ describe("where a handoff starts", () => {
     expect(start({ permissionMode: "accept_edits" })?.permissionMode).toBe("acceptEdits");
     // A source that names no mode at all starts from the saved one.
     expect(start({ permissionMode: "" })?.permissionMode).toBe("bypassPermissions");
+  });
+});
+
+// #980, docs/AGENT-ACCOUNTS.md: the account a session starts on.
+describe("the account a launch starts on", () => {
+  const WORK = "0123456789abcdef";
+  const PERSONAL = "fedcba9876543210";
+  const account = (agent: "claude" | "codex", id: string, label: string, extra: Partial<AgentAccount> = {}): AgentAccount => ({
+    id, agent, kind: "subscription", label, email: null, plan: null, organization: null, local: id === "local", isDefault: false, missing: false, addedAt: null, ...extra,
+  });
+  const view = (agent: "claude" | "codex", accounts: AgentAccount[], defaultAccount = "local", projectDefaults: Record<string, string> = {}): AgentAccounts =>
+    ({ agent, accounts: accounts.map((a) => ({ ...a, isDefault: a.id === defaultAccount })), defaultAccount, projectDefaults });
+  const local = (agent: "claude" | "codex" = "claude") => account(agent, "local", "This Mac's login");
+  const several = (projectDefaults: Record<string, string> = {}) =>
+    view("claude", [local(), account("claude", WORK, "work@example.com · Max"), account("claude", PERSONAL, "me@example.com · Pro")], "local", projectDefaults);
+
+  it("offers no choice and names no account with one account, as before accounts", async () => {
+    index.views.claude = view("claude", [local()]);
+    const { result } = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, undefined, "/repos/raccoon"));
+    await waitFor(() => expect(index.calls).toContain("claude"));
+    await act(async () => {});
+    expect(result.current.accounts).toBeNull();
+    expect(result.current.account).toBeNull();
+    expect(result.current.accountId).toBeUndefined();
+  });
+
+  it("offers no choice when the index cannot be read, or for a cloud start", async () => {
+    const { result } = renderHook(() => useSessionAgent(HARNESSES));
+    await waitFor(() => expect(index.calls).toContain("claude"));
+    await act(async () => {});
+    expect(result.current.accounts).toBeNull();
+    index.views.claude = several();
+    index.calls = [];
+    const cloud = renderHook(() => useSessionAgent(HARNESSES, false));
+    await act(async () => {});
+    // A cloud workspace signs its agents in itself: this Mac's accounts are not asked for.
+    expect(index.calls).toEqual([]);
+    expect(cloud.result.current.accounts).toBeNull();
+  });
+
+  it("shows two accounts, starting on the project's default, then the agent's, and on the one picked", async () => {
+    index.views.claude = several({ "/repos/raccoon": WORK });
+    const inProject = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, undefined, "/repos/raccoon"));
+    await waitFor(() => expect(inProject.result.current.accounts?.accounts).toHaveLength(3));
+    expect(inProject.result.current.account?.label).toBe("work@example.com · Max");
+    expect(inProject.result.current.accountId).toBe(WORK);
+
+    const elsewhere = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, undefined, "/repos/other"));
+    expect(elsewhere.result.current.accountId).toBe("local");
+
+    act(() => inProject.result.current.selectAccount(PERSONAL));
+    expect(inProject.result.current.accountId).toBe(PERSONAL);
+    // A pick is this start's own: it is never saved as a preference.
+    expect(JSON.stringify(getPrefs())).not.toContain(PERSONAL);
+    // An id the agent does not list is no choice.
+    act(() => inProject.result.current.selectAccount("ffffffffffffffff"));
+    expect(inProject.result.current.accountId).toBe(PERSONAL);
+  });
+
+  it("follows an agent's default set elsewhere, and a project default set in its settings", async () => {
+    index.views.claude = several();
+    const { result } = renderHook(() => useSessionAgent(HARNESSES, true, null, undefined, undefined, "/repos/raccoon"));
+    await waitFor(() => expect(result.current.accountId).toBe("local"));
+    act(() => takeAgentAccounts(several({ "/repos/raccoon": PERSONAL })));
+    expect(result.current.accountId).toBe(PERSONAL);
+  });
+
+  it("keeps a controlled form's account in its value, and drops it for another agent", async () => {
+    index.views.claude = several({ "/repos/raccoon": WORK });
+    index.views.codex = view("codex", [local("codex"), account("codex", WORK, "Team ChatGPT")]);
+    const { result } = renderHook(() => {
+      const [value, setValue] = useState<LaunchSettings>({ ...launchDefaults(), account: PERSONAL });
+      return { value, selection: useSessionAgent(HARNESSES, true, null, { value, onChange: setValue }, undefined, "/repos/raccoon") };
+    });
+    // The form's account wins over the project default.
+    await waitFor(() => expect(result.current.selection.accountId).toBe(PERSONAL));
+    act(() => result.current.selection.selectAccount(WORK));
+    expect(result.current.value.account).toBe(WORK);
+    act(() => result.current.selection.selectHarness("codex"));
+    expect(result.current.value.harness).toBe("codex");
+    expect(result.current.value.account).toBeUndefined();
+    await waitFor(() => expect(result.current.selection.accounts?.agent).toBe("codex"));
+    // Codex has no project default here: its own default.
+    expect(result.current.selection.accountId).toBe("local");
+  });
+
+  it("carries the source conversation's account into a handoff on its own agent only", () => {
+    const tab = { harness: "claude", model: "sonnet", effort: "low", permissionMode: "plan", launchedAccount: WORK } as unknown as TabEntry;
+    const source = launchSettingsOf(tab);
+    expect(source.account).toBe(WORK);
+    expect(handoffStart(source, HARNESSES, catalog.models, getPrefs())?.account).toBe(WORK);
+    // On another agent the account is that agent's to resolve.
+    expect(handoffStart(source, HARNESSES.filter((h) => h.id === "codex"), catalog.models, getPrefs())).not.toHaveProperty("account");
+    // A tab on This Mac's login records none, and carries none.
+    expect(launchSettingsOf({ ...tab, launchedAccount: undefined } as unknown as TabEntry)).not.toHaveProperty("account");
   });
 });

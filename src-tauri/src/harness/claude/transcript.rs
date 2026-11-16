@@ -41,19 +41,6 @@ use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
 use crate::harness::settings::{Setting, Signal, Stance};
 use crate::harness::tui::TurnMark;
 
-/// Where a session's transcript actually is.
-///
-/// The folder is named for the directory the conversation was *started* in,
-/// and the CLI goes on appending to that file when the conversation is
-/// resumed from somewhere else: a workspace that was renamed, a path reached
-/// through a symlink. So a file that exists under the session's id wins over
-/// the path derived from where the checkout is now (#250). With no file
-/// anywhere — a conversation that has yet to be written — it is the derived
-/// path.
-pub fn locate(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(locate_in(&projects_root()?, cwd, session_id))
-}
-
 /// The title the CLI gave the conversation from what it is about (an
 /// `ai-title` record, which it writes again as the talk moves on): the last
 /// one in the file's final stretch, where a recent one always is.
@@ -89,7 +76,18 @@ fn tail_text(path: &Path, limit: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// [`locate`] within a given projects folder.
+/// Where a session's transcript actually is.
+///
+/// The folder is named for the directory the conversation was *started* in,
+/// and the CLI goes on appending to that file when the conversation is
+/// resumed from somewhere else: a workspace that was renamed, a path reached
+/// through a symlink. So a file that exists under the session's id wins over
+/// the path derived from where the checkout is now (#250). With no file
+/// anywhere — a conversation that has yet to be written — it is the derived
+/// path.
+///
+/// Within `projects`: the folder of the agent account a tab runs on, or
+/// the person's own (`agent_data::locate_claude`, #980).
 pub fn locate_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let derived = transcript_in(projects, cwd, session_id);
     // An id is a file name here, never a path.
@@ -167,8 +165,10 @@ pub fn projects_root_from(config_dir: Option<&str>, home: Option<&Path>) -> Opti
 
 /// Every record uuid in a session's transcript. A fork copies those records
 /// into its own file, so this is what the copy will look like.
-pub fn record_uuids(cwd: &str, session_id: &str) -> Option<HashSet<String>> {
-    let path = locate(cwd, session_id)?;
+///
+/// Under `projects`: the transcript root of the account a tab runs on (#980).
+pub fn record_uuids_in(projects: &Path, cwd: &str, session_id: &str) -> Option<HashSet<String>> {
+    let path = locate_in(projects, cwd, session_id);
     let text = std::fs::read_to_string(path).ok()?;
     Some(uuids_in(&text))
 }

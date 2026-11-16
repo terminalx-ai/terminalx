@@ -260,7 +260,44 @@ fn children(dir: &Path) -> Vec<PathBuf> {
 /// one managed worktree that is gone, and no session holds or has forked
 /// from any of them. A folder with a transcript that says anything else, or
 /// nothing, is left alone entirely: whose it is cannot be told.
-fn claude_leftovers(root: &Path, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+/// The `projects` folders of added Claude Code accounts that are folders of
+/// their own rather than the link to the person's (#980), by account id.
+/// The linked ones lead to the person's folder, which is scanned already.
+fn claude_account_roots() -> Vec<(String, PathBuf)> {
+    agent_data::claude_account_projects_roots()
+        .into_iter()
+        .filter_map(|projects| Some((projects.parent()?.file_name()?.to_str()?.to_string(), projects)))
+        .collect()
+}
+
+/// The prefix of a Claude leftover's id: `claude:` in the person's folder,
+/// `claude@<account>:` in an account's own (#980).
+fn claude_prefix(account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("claude@{account}:"),
+        None => "claude:".to_string(),
+    }
+}
+
+/// The Claude projects folder a leftover id names and the folder in it:
+/// the person's (`claude:<folder>`), or the account's own
+/// (`claude@<account>:<folder>`), canonical.
+fn claude_root_of<'i>(id: &'i str, sources: &Sources<'_>) -> std::result::Result<(PathBuf, &'i str), String> {
+    match id.strip_prefix("claude@").and_then(|rest| rest.split_once(':')) {
+        Some((account, folder)) => claude_account_roots()
+            .into_iter()
+            .find(|(id, _)| id == account)
+            .and_then(|(_, root)| std::fs::canonicalize(root).ok())
+            .map(|root| (root, folder))
+            .ok_or_else(|| "That account's Claude data folder is not there".to_string()),
+        None => sources.claude_root
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .map(|root| (root, id.strip_prefix("claude:").unwrap_or_default()))
+            .ok_or_else(|| "Claude's data folder is not there".to_string()),
+    }
+}
+
+fn claude_leftovers(root: &Path, account: Option<&str>, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
     let Ok(root) = std::fs::canonicalize(root) else { return };
     let referenced = agent_data::referenced_conversations(sessions);
     let names: Vec<String> = children(&root).iter().filter_map(|path| path.file_name()?.to_str().map(String::from)).collect();
@@ -290,7 +327,7 @@ fn claude_leftovers(root: &Path, projects: &[Project], sessions: &[SessionEntry]
             }
         }
         out.push(Leftover {
-            id: format!("claude:{folder_name}"),
+            id: format!("{}{folder_name}", claude_prefix(account)),
             kind: LeftoverKind::AgentData,
             project_path: project.path.clone(),
             project_name: project.name.clone(),
@@ -378,7 +415,12 @@ pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
         branch_leftovers(project, &base, sources.sessions, &mut out);
     }
     if let Some(root) = sources.claude_root {
-        claude_leftovers(root, sources.projects, sources.sessions, &mut out);
+        claude_leftovers(root, None, sources.projects, sources.sessions, &mut out);
+        // What added accounts wrote where their `projects` is not the link
+        // to the person's folder (#980).
+        for (account, root) in claude_account_roots() {
+            claude_leftovers(&root, Some(&account), sources.projects, sources.sessions, &mut out);
+        }
     }
     if let Some(home) = sources.codex_home {
         codex_leftovers(home, sources.projects, sources.sessions, &mut out);
@@ -433,8 +475,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(0)
         }
         LeftoverKind::AgentData if leftover.agent.as_deref() == Some("Claude") => {
-            let root = sources.claude_root.and_then(|root| std::fs::canonicalize(root).ok()).ok_or("Claude's data folder is not there")?;
-            let folder_name = leftover.id.strip_prefix("claude:").unwrap_or_default();
+            let (root, folder_name) = claude_root_of(&leftover.id, sources)?;
             let folder = agent_data::real_child_dir(&root, folder_name).ok_or("refusing to delete: not a folder under Claude's projects")?;
             let mut freed = 0;
             // Only the conversations the scan listed: a transcript and its
@@ -1034,6 +1075,61 @@ mod tests {
         for kept in [&claude_live, &claude_project, &claude_unmanaged, &codex_unmanaged] {
             assert!(kept.exists(), "{}", kept.display());
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_accounts_own_claude_folder_is_scanned_and_a_linked_one_is_not_listed_twice() {
+        // No remote and no repository: only the agents' data is looked at.
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let path = base.join("project");
+        std::fs::create_dir_all(&path).unwrap();
+        let project: Project = serde_json::from_value(serde_json::json!({ "path": path, "name": "project" })).unwrap();
+        let claude_root = base.join("home/.claude/projects");
+        let codex_home = base.join("codex");
+        std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
+        let sources = Sources { projects: std::slice::from_ref(&project), sessions: &[], claude_root: Some(&claude_root), codex_home: Some(&codex_home), fetch: Fetch::Fresh };
+        let gone = git::worktree_path(&path, "gone");
+        let named = encoded_cwd(&gone.to_string_lossy());
+        let transcript_in = |projects: &Path, conversation: &str| {
+            let folder = projects.join(&named);
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = folder.join(format!("{conversation}.jsonl"));
+            std::fs::write(&file, format!("{}\n", serde_json::json!({ "type": "user", "cwd": gone }))).unwrap();
+            file
+        };
+        let accounts = crate::store::root().unwrap().join(crate::agent_accounts::DIRECTORY).join("claude");
+        // An account whose `projects` is a folder of its own (#980).
+        let own = accounts.join("0123456789abcdef/projects");
+        let transcript = transcript_in(&own, CONV_A);
+        // One whose `projects` is the link to the person's folder.
+        std::fs::create_dir_all(&claude_root).unwrap();
+        std::fs::create_dir_all(accounts.join("fedcba9876543210")).unwrap();
+        std::os::unix::fs::symlink(&claude_root, accounts.join("fedcba9876543210/projects")).unwrap();
+        let person = transcript_in(&claude_root, CONV_B);
+
+        let leftovers = scan_sources(&sources);
+        let mut ids: Vec<&str> = leftovers.iter().filter(|l| l.agent.as_deref() == Some("Claude")).map(|l| l.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, [format!("claude:{named}"), format!("claude@0123456789abcdef:{named}")]);
+
+        // A made-up account or folder names nothing.
+        let hostile: Vec<String> = [format!("claude@ffffffffffffffff:{named}"), "claude@0123456789abcdef:..".into(), "claude@..:x".into(), "claude@0123456789abcdef:".into()].into();
+        let removal = remove_from_sources(&sources, &hostile, &|_| {});
+        assert!(removal.removed.is_empty() && transcript.exists() && person.exists());
+
+        let removal = remove_from_sources(&sources, &[format!("claude@0123456789abcdef:{named}")], &|_| {});
+        assert_eq!(removal.failed, vec![]);
+        assert!(!transcript.exists(), "the account's own copy is removed");
+        assert!(person.exists(), "the person's is a leftover of its own");
+        assert!(own.exists() && accounts.join("fedcba9876543210/projects").exists());
+
+        // Without Claude's data in the scan, no account's is scanned either.
+        let without = Sources { claude_root: None, ..sources };
+        transcript_in(&own, CONV_A);
+        assert!(scan_sources(&without).iter().all(|l| l.agent.as_deref() != Some("Claude")));
     }
 
     #[test]

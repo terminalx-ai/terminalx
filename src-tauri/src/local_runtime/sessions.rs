@@ -24,6 +24,45 @@ impl Sessions {
         self.call("runtime.session.create", json!({"req": req}))
     }
 
+    /// [`Self::create`], its first tab on agent account `account` (#980).
+    /// The account rides in the request, where a runtime that does not know
+    /// accounts reads past it; when the runtime says it cannot honour it,
+    /// the tab is marked in the reply ([`crate::session_ops::TAB_ACCOUNT_FALLBACK`]):
+    /// it starts on This Mac's login, and the window says so.
+    pub fn create_on(&self, req: &crate::session_ops::NewSession, account: Option<&str>) -> Result<crate::store::index::SessionEntry> {
+        let Some(account) = account else { return self.create(req) };
+        let supported = self.supports_accounts()?;
+        let mut params = serde_json::to_value(req)?;
+        if supported { params["account"] = json!(account); }
+        let mut entry: crate::store::index::SessionEntry = self.call("runtime.session.create", json!({"req": params}))?;
+        if !supported {
+            for tab in &mut entry.tabs { mark_fallback(tab); }
+        }
+        Ok(entry)
+    }
+
+    /// Whether the runtime starts tabs on the account they ask for (#980).
+    /// One from before accounts answers that it has no such operation.
+    pub fn supports_accounts(&self) -> Result<bool> {
+        match self.quick::<bool>("runtime.session.accountSupport", json!({})) {
+            Ok(supported) => Ok(supported),
+            Err(error) if unsupported(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Restart a tab's agent on agent account `account` and resume its
+    /// conversation (#980). A runtime from before accounts cannot.
+    /// `true` when a running agent was restarted on it, `false` when the
+    /// account was only recorded for the tab's next start.
+    pub fn switch_account(&self, session: &str, tab: &str, account: &str) -> Result<bool> {
+        match self.tab::<bool>("switchAccount", session, tab, json!({"account": account})) {
+            Ok(restarted) => Ok(restarted),
+            Err(error) if unsupported(&error) => anyhow::bail!("{OLDER_RUNTIME}"),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn workspace_setup(&self, operation: &str, session: Option<&str>, pane: Option<&str>) -> Result<Value> {
         self.call("runtime.session.workspaceSetup", json!({"operation": operation, "sessionId": session, "paneId": pane}))
     }
@@ -160,6 +199,17 @@ impl Sessions {
 
     pub fn add_tab(&self, session: &str, tab: &crate::session_ops::NewTab) -> Result<crate::store::index::TabEntry> {
         self.call("runtime.session.addTab", add_tab_params(session, tab))
+    }
+
+    /// [`Self::add_tab`] on agent account `account` (#980); see [`Self::create_on`].
+    pub fn add_tab_on(&self, session: &str, tab: &crate::session_ops::NewTab, account: Option<&str>) -> Result<crate::store::index::TabEntry> {
+        let Some(account) = account else { return self.add_tab(session, tab) };
+        let supported = self.supports_accounts()?;
+        let mut params = add_tab_params(session, tab);
+        if supported { params["account"] = json!(account); }
+        let mut added: crate::store::index::TabEntry = self.call("runtime.session.addTab", params)?;
+        if !supported { mark_fallback(&mut added); }
+        Ok(added)
     }
 
     pub fn pane_agents(&self) -> Result<Vec<crate::session::follow::PaneAgent>> {
@@ -346,6 +396,20 @@ impl Sessions {
 
 /// The tab as the runtime makes it, transport included: a native Codex tab
 /// chosen on the desktop side must not arrive as a terminal one.
+/// What the window is told when the runtime it runs on predates accounts.
+pub const OLDER_RUNTIME: &str = "The background runtime is older than this app and starts every tab on This Mac's login. Quit and reopen TerminalX to update it, then choose the account again.";
+
+/// The runtime has no such operation: one from before it was added.
+fn unsupported(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("unsupported local session operation") || text.contains("unsupported local runtime operation")
+}
+
+/// A tab that asked for an account its runtime could not honour (#980).
+fn mark_fallback(tab: &mut crate::store::index::TabEntry) {
+    tab.unknown.insert(crate::session_ops::TAB_ACCOUNT_FALLBACK.into(), json!("olderRuntime"));
+}
+
 fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
     json!({"sessionId":session, "tab":{
         "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode,

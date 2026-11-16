@@ -45,8 +45,10 @@ fn resolve(cwd: &str, tab: &index::TabEntry) -> Option<PathBuf> {
     // Index ids are provider identities, never relative filesystem paths.
     if id.contains(['/', '\\']) || id == "." || id == ".." { return None; }
     match tab.harness.as_str() {
-        "claude" => claude::transcript::locate(cwd, id),
-        "codex" => codex::home::managed_root().ok().and_then(|home| codex::home::find_rollout(&home, id))
+        // Where the account the tab runs on wrote it, then the shared places (#980).
+        "claude" => crate::agent_data::locate_claude(tab, cwd, id),
+        "codex" => crate::agent_data::codex_account_home_of(tab).and_then(|home| codex::home::find_rollout(&home, id))
+            .or_else(|| codex::home::managed_root().ok().and_then(|home| codex::home::find_rollout(&home, id)))
             .or_else(|| codex::home::user_root().and_then(|home| codex::home::find_rollout(&home, id))),
         _ => None,
     }

@@ -2,7 +2,8 @@ import { preparePipelineLaunch, preparePipelineContinuation } from "@/lib/pipeli
 import { agent, api, errorMessage, onPromptDelivery } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
 import { getDraftRevision, setDraft } from "@/lib/drafts";
-import { addTab, archiveSession, selectSession, upsertSession } from "@/lib/sessions";
+import { addTab, archiveSession, getSessionStore, patchSession, selectSession, upsertSession } from "@/lib/sessions";
+import { setSelectedAgent } from "@/lib/terminal";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
 import type { TabEntry } from "@/types/session";
 import type { ContinuationContext } from "@terminalx/portable/continuation";
@@ -34,6 +35,29 @@ export const IN_INPUT = "The handoff is in the new session's input but has not b
 async function ensureAvailable(harness: string) {
   const providers = await api.listHarnesses();
   if (!providers.some((p) => p.id === harness && p.available)) throw new Error("The selected provider is no longer available on this host.");
+}
+
+/**
+ * A launch request's tab and account (#980): the account goes beside the
+ * tab, as the request takes it, and only when one was chosen, so a start
+ * with one account sends what it always did.
+ */
+function onAccount(settings: LaunchSettings) {
+  const { account, ...tab } = settings;
+  return { tab, ...(account ? { account } : {}) };
+}
+
+/**
+ * Add the handoff's tab to its session. On an account, through the request
+ * that takes one, then shown as the session's `addTab` shows a tab.
+ */
+async function addHandoffTab(sessionId: string, settings: LaunchSettings): Promise<TabEntry> {
+  if (!settings.account) return addTab(sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
+  const tab = await api.addTab(sessionId, { harness: settings.harness, model: settings.model, effort: settings.effort, permissionMode: settings.permissionMode }, settings.account);
+  const session = getSessionStore().sessions.find((x) => x.id === sessionId);
+  if (session) patchSession(sessionId, { tabs: [...session.tabs.filter((t) => t.id !== tab.id), tab], activeTab: tab.id });
+  setSelectedAgent(sessionId, tab.id);
+  return tab;
 }
 
 // A retry retains the same Launched object. Weak ownership survives launch failures
@@ -101,7 +125,7 @@ export async function launchContinuation(
   try {
     await ensureAvailable(settings.harness);
     if (!launched) {
-      const tab = await addTab(context.sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
+      const tab = await addHandoffTab(context.sessionId, settings);
       launched = { sessionId: context.sessionId, tab };
       seedDraft(launched, prompt);
       onCreated(launched);
@@ -145,7 +169,7 @@ export async function moveChatToProject(
   try {
     await ensureAvailable(settings.harness);
     if (!launched) {
-      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings });
+      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), ...onAccount(settings) });
       upsertSession(session);
       selectSession(session.id);
       const tab = session.tabs[0];
@@ -183,8 +207,8 @@ export async function launchContinuationInDestination(
     await ensureAvailable(settings.harness);
     if (!launched) {
       const session = to
-        ? await api.createSession({ projectPath: to.projectPath, title: context.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings })
-        : await api.createQuickChat({ title: context.title, tab: settings });
+        ? await api.createSession({ projectPath: to.projectPath, title: context.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), ...onAccount(settings) })
+        : await api.createQuickChat({ title: context.title, ...onAccount(settings) });
       upsertSession(session);
       selectSession(session.id);
       const tab = session.tabs[0];
