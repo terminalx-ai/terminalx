@@ -36,7 +36,10 @@ impl ManagerHost {
         if !run.state.ended() { return; }
         let host = self.clone();
         let run = run.clone();
-        engine::after_starting(move || host.retire_automatically(&run, true));
+        engine::after_starting(move || {
+            host.retire_automatically(&run, true);
+            prune_base(&run);
+        });
     }
 
     /// Sweep retries never stop final workers or a new turn. Preservation happens
@@ -125,8 +128,91 @@ pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
     activity
 }
 
-/// The commit a worker's branch is cut from: the lead's branch, or the commit
-/// it has checked out when it is on none.
+/// The projects whose base checkout a check or a prune is using, and the signal that one
+/// was let go: one at a time a project, any number of projects at once.
+static BASES_HELD: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+static BASE_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A project's base checkout, held: a command running in it is not switched or removed under it.
+pub(super) struct BaseHeld(String);
+
+impl Drop for BaseHeld {
+    fn drop(&mut self) {
+        BASES_HELD.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.0);
+        BASE_FREED.notify_all();
+    }
+}
+
+/// Waits until no check of `project` holds its base checkout, then holds it.
+fn hold_base(project: &str) -> BaseHeld {
+    let mut held = BASES_HELD.lock().unwrap_or_else(|error| error.into_inner());
+    while held.contains(project) {
+        held = BASE_FREED.wait(held).unwrap_or_else(|error| error.into_inner());
+    }
+    held.insert(project.to_string());
+    BaseHeld(project.to_string())
+}
+
+fn base_dir(root: &Path, project: &str) -> PathBuf {
+    use sha2::Digest;
+    root.join(&format!("{:x}", sha2::Sha256::digest(project.as_bytes()))[..16])
+}
+
+/// The checkout a project's base commits are run in (#1004): one of the
+/// app's own, kept while the project has a run so what a check builds (ignored
+/// files: a `target`) is there for its next one, and removed when its last run
+/// ends ([`prune_base`]). Held while a command runs in it: two checks of one
+/// project take turns, and other projects' checks do not wait. `repo` is any
+/// checkout of the project; `commit` a result that forks from `base`, and it is
+/// the commit where they fork that is checked out.
+fn base_checkout(repo: &Path, root: &Path, project: &str, base: &str, commit: &str) -> anyhow::Result<(PathBuf, BaseHeld)> {
+    let held = hold_base(project);
+    let fork = crate::git::run(repo, &["merge-base", base, commit]).context("find where the result forks from its base")?;
+    let fork = fork.trim();
+    let dir = base_dir(root, project);
+    let ours = crate::git::run(&dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
+    let theirs = crate::git::run(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).context("read the project's repository")?;
+    if ours.as_deref().map(str::trim) != Some(theirs.trim()) {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+        }
+        std::fs::create_dir_all(root)?;
+        let _ = crate::git::run(repo, &["worktree", "prune"]);
+        crate::git::run(repo, &["worktree", "add", "--detach", "--force", &dir.to_string_lossy(), fork]).context("add the base checkout")?;
+    } else {
+        crate::git::run(&dir, &["checkout", "--detach", "--force", fork]).context("check out the base commit")?;
+        // What a command left there before goes; what is ignored (build output) stays.
+        crate::git::run(&dir, &["clean", "-fdq"]).context("clean the base checkout")?;
+    }
+    Ok((dir, held))
+}
+
+/// A run ended: its project's base checkout, and what checks built in it, goes once no
+/// other run of the project is under way. The next run's first base check makes it again.
+fn prune_base(ended: &Run) {
+    let Ok(root) = crate::store::root() else { return };
+    let others = super::store::list().unwrap_or_default().into_iter().any(|run| run.id != ended.id && run.project_path == ended.project_path && run.state.followed());
+    if others {
+        return;
+    }
+    if let Err(error) = drop_base_checkout(Path::new(&ended.project_path), &root.join("run-bases"), &ended.project_path) {
+        log::warn!("remove the base checkout of {} after run {}: {error:#}", ended.project_path, ended.id);
+    }
+}
+
+/// Removes a project's base checkout, once no check is using it, and the repository's
+/// record of it. Nothing to remove is not an error.
+fn drop_base_checkout(repo: &Path, root: &Path, project: &str) -> anyhow::Result<()> {
+    let _held = hold_base(project);
+    let dir = base_dir(root, project);
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+    crate::git::run(repo, &["worktree", "prune"]).context("forget the removed base checkout")?;
+    Ok(())
+}
+
 /// Each file changed from `from` to `to` in the lead's checkout, for a piece it finishes:
 /// every path as it is, never quoted, and both sides of a rename, since what the lead is
 /// held to is checked against the piece's files path by path.
@@ -135,6 +221,8 @@ fn held_changes(cwd: &Path, from: &str, to: &str) -> anyhow::Result<Vec<verify::
     Ok(verify::numstat_z(&numbers))
 }
 
+/// The commit a worker's branch is cut from: the lead's branch, or the commit
+/// it has checked out when it is on none.
 fn lead_base(cwd: &Path) -> anyhow::Result<String> {
     match crate::git::current_branch(cwd) {
         Some(branch) => Ok(branch),
@@ -364,7 +452,7 @@ impl Host for ManagerHost {
         }
     }
 
-    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef) -> Checked {
+    fn check(&self, run: &Run, piece: &Piece, worker: &SessionRef, known: &verify::Known) -> Checked {
         let Ok(session) = index::get(&worker.session_id) else {
             return Checked::unreadable(Gate::Branch, "The worker's session was deleted, so its worktree cannot be checked.");
         };
@@ -377,7 +465,20 @@ impl Host for ManagerHost {
         // The mode the worker was started in decides, with the person's approval, whether its commands are run unasked.
         let commands = verify::may_run_commands(run.approval.is_some(), piece.started_mode.as_deref().unwrap_or_else(|| piece.mode(&run.worker_mode)));
         let marks = crate::store::root().ok().map(|root| root.join("run-checks"));
-        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT)
+        verify::gates(&Checkout { cwd: session.cwd.into(), base, branch: piece.branch.clone(), commands, marks }, piece, project_check.as_deref(), verify::COMMAND_TIMEOUT, known)
+    }
+
+    fn on_base(&self, run: &Run, _piece: &Piece, worker: &SessionRef, base: &str, commit: &str, command: &verify::CommandRun) -> verify::CommandRun {
+        let not_run = |why: String| verify::CommandRun { run: command.run.clone(), project: command.project, exit_code: None, passed: false, millis: 0, output: Some(why), on_base: None };
+        let Ok(session) = index::get(&worker.session_id) else { return not_run("The worker's session was deleted, so the commit its result started from could not be found.".into()) };
+        let root = match crate::store::root() {
+            Ok(root) => root.join("run-bases"),
+            Err(error) => return not_run(format!("The app's own folder could not be read: {error:#}")),
+        };
+        match base_checkout(Path::new(&session.cwd), &root, &run.project_path, base, commit) {
+            Ok((checkout, _held)) => verify::run_command(&checkout, &command.run, command.project, verify::COMMAND_TIMEOUT),
+            Err(error) => not_run(format!("The commit the result started from could not be checked out: {error:#}")),
+        }
     }
 
     fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
@@ -782,7 +883,7 @@ mod tests {
         piece.tries.push(serde_json::from_str(&serde_json::to_string(&attempt).unwrap()).unwrap());
         commit_file(&cwd, "consumer.ts", "import type { Contract } from './contracts';\n");
         let checkout = verify::Checkout { cwd: cwd.clone(), base: "lead".into(), branch: Some("consumer".into()), commands: true, marks: None };
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.passed(), "{:?}", checked.gates);
         assert_eq!(checked.base, base);
         assert_eq!(checked.facts.files, ["consumer.ts"]);
@@ -791,17 +892,17 @@ mod tests {
 
         // Lead conflict checks still use the live lead branch, not the scope baseline.
         commit_file(repo.path(), "consumer.ts", "conflicting lead implementation\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.gates.iter().any(|gate| gate.gate == verify::Gate::Branch && !gate.passed));
         // Inherited files are not exempt from ownership: editing them is still refused.
         commit_file(&cwd, "contracts.ts", "unauthorized change\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (verify::Gate::Scope, false));
         assert!(checked.gates[0].detail.as_ref().unwrap().contains("contracts.ts"));
         // Rewriting history cannot discard the accepted starting code unnoticed.
         git(&cwd, &["reset", "--hard", &lead]);
         commit_file(&cwd, "consumer.ts", "missing dependencies\n");
-        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &piece, None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.gates[0].detail.as_ref().unwrap().contains("starting commit"));
     }
 
@@ -863,5 +964,71 @@ mod tests {
         assert!(activity_of(&building).command_running);
         building.push(event(8, "2026-11-11T10:20:00Z", json!({"type": "background_tasks_changed", "tasks": []})));
         assert!(!activity_of(&building).command_running);
+    }
+
+    /// #1004: a failing check is run again on the commit the result forks from, in a checkout
+    /// of the app's own that is kept between checks: what a command left there goes, and
+    /// what is ignored (build output) stays.
+    #[test]
+    fn a_check_runs_on_the_base_in_a_checkout_of_the_apps_own_kept_between_checks() {
+        let repo = repository();
+        commit_file(repo.path(), ".gitignore", "target/\n");
+        let base = commit_file(repo.path(), "check.sh", "test \"$(cat state)\" = good\n");
+        commit_file(repo.path(), "state", "bad\n");
+        let fork = git(repo.path(), &["rev-parse", "HEAD"]);
+        let worker = worktree(repo.path(), "worker", &fork);
+        let result = commit_file(&worker, "state", "good\n");
+        let root = tempfile::tempdir().unwrap();
+        let (dir, held) = super::base_checkout(&worker, root.path(), "/projects/app", "lead", &result).unwrap();
+        // At the fork, not at the result nor in the worker's worktree.
+        assert!(dir.starts_with(root.path()));
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), fork);
+        let ran = super::verify::run_command(&dir, "sh check.sh", false, std::time::Duration::from_secs(10));
+        assert_eq!((ran.passed, ran.exit_code), (false, Some(1)));
+        assert!(super::verify::run_command(&worker, "sh check.sh", false, std::time::Duration::from_secs(10)).passed);
+        // What a command leaves in it goes before the next check; what is ignored stays.
+        std::fs::write(dir.join("left-over"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/cache"), "built").unwrap();
+        drop(held);
+        let (again, _held) = super::base_checkout(&worker, root.path(), "/projects/app", &base, &result).unwrap();
+        assert_eq!((again.clone(), git(&again, &["rev-parse", "HEAD"])), (dir.clone(), base.clone()));
+        assert!(!again.join("left-over").exists() && again.join("target/cache").exists());
+        // The repository knows it as a worktree of its own, detached: no branch is held.
+        let listed = format!("worktree {}\nHEAD", std::fs::canonicalize(&dir).unwrap().display());
+        assert!(git(repo.path(), &["worktree", "list", "--porcelain"]).contains(&listed));
+        // The project's last run ended: the checkout goes, with what was built in it, and the repository forgets it.
+        drop(_held);
+        super::drop_base_checkout(repo.path(), root.path(), "/projects/app").unwrap();
+        assert!(!dir.exists());
+        assert!(!git(repo.path(), &["worktree", "list", "--porcelain"]).contains(&listed));
+        super::drop_base_checkout(repo.path(), root.path(), "/projects/app").unwrap();
+        // The next check makes it again.
+        let (made, _held) = super::base_checkout(&worker, root.path(), "/projects/app", &base, &result).unwrap();
+        assert_eq!((made, git(&dir, &["rev-parse", "HEAD"])), (dir.clone(), base));
+    }
+
+    #[test]
+    fn checks_of_one_project_take_turns_in_its_base_checkout_and_other_projects_do_not_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let first = super::hold_base("/projects/turns-a");
+        // Another project's check holds its own at once.
+        let other = std::thread::spawn(|| drop(super::hold_base("/projects/turns-b")));
+        other.join().unwrap();
+        // A second check of the same project waits until the first lets go.
+        let got = Arc::new(AtomicBool::new(false));
+        let waiting = {
+            let got = got.clone();
+            std::thread::spawn(move || {
+                let _held = super::hold_base("/projects/turns-a");
+                got.store(true, Ordering::SeqCst);
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!got.load(Ordering::SeqCst), "it waits while the first holds the checkout");
+        drop(first);
+        waiting.join().unwrap();
+        assert!(got.load(Ordering::SeqCst));
     }
 }

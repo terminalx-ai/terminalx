@@ -210,7 +210,7 @@ export function LeadHoverCard({ family, summary, title, children }: { family: Le
           {run ? <>
             {open.map((piece) => {
               const { icon: Icon, className } = PIECE_STATE_STYLE[piece.state];
-              const needsYou = (piece.worker && waiting.has(piece.worker.sessionId)) || piece.state === "blocked";
+              const needsYou = (piece.worker && waiting.has(piece.worker.sessionId)) || (piece.state === "blocked" && !piece.toLead);
               return (
                 <li key={piece.id} className="flex min-w-0 items-center gap-2">
                   <Icon aria-hidden className={cn("size-3.5 shrink-0", className)} />
