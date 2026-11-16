@@ -40,6 +40,12 @@ pub const MACHINE_3: &str = "machine/3";
 /// on the machine (docs/MACHINES.md, "As built (PRO-350): the machine page").
 pub const MACHINE_4: &str = "machine/4";
 
+/// `machine/6` (PRO-351): `machine.browse`, `machine.addProject`,
+/// `machine.removeProject` and the clone calls, a machine's projects from
+/// another computer (docs/MACHINES.md, "As built (PRO-351)";
+/// `machine_projects.rs`). `machine/5` is PRO-357's.
+pub const MACHINE_6: &str = "machine/6";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -139,28 +145,29 @@ fn os_version() -> Option<String> {
     }
 }
 
-fn registered() -> Result<Vec<Project>, RpcError> {
+pub(super) fn registered() -> Result<Vec<Project>, RpcError> {
     crate::store::projects::list().map(|(projects, _)| projects).map_err(RpcError::internal)
 }
 
 /// `machine.projects`: every project the machine knows, archived ones too
 /// (they say so), in the store's order.
 pub fn projects() -> Result<Value, RpcError> {
-    let listed: Vec<Value> = registered()?
-        .into_iter()
-        .map(|project| {
-            let git = project.kind == ProjectKind::Git;
-            json!({
-                "projectId": project_id(&project.path),
-                "name": project.name,
-                "path": project.path,
-                "kind": if git { "git" } else { "folder" },
-                "defaultBranch": if git { crate::git::default_branch(Path::new(&project.path)) } else { None },
-                "archived": project.archived,
-            })
-        })
-        .collect();
+    let listed: Vec<Value> = registered()?.iter().map(project_row).collect();
     Ok(json!({ "projects": listed }))
+}
+
+/// One project as `machine.projects` lists it, and as `machine/6` returns
+/// the one it added.
+pub fn project_row(project: &Project) -> Value {
+    let git = project.kind == ProjectKind::Git;
+    json!({
+        "projectId": project_id(&project.path),
+        "name": project.name,
+        "path": project.path,
+        "kind": if git { "git" } else { "folder" },
+        "defaultBranch": if git { crate::git::default_branch(Path::new(&project.path)) } else { None },
+        "archived": project.archived,
+    })
 }
 
 /// What `machine.changed` compares: the name and the project set.
