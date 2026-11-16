@@ -219,7 +219,8 @@ connection's forwards or switches is sent as the event
   (`cloud_port_forwarding_off`). **Forward new ports automatically** (`auto`,
   off by default) reads `ports.list` every 2 s while connected (request ids
   under `ports-`) and forwards each port that starts listening after it was
-  turned on, outside 32768–60999, on the same local port when free; ports
+  turned on, outside 32768–60999, on the same local port when free (a random
+  one for a port below 1024), at most 16 at once per connection; ports
   already listening when it was turned on are left to the person, and so is
   a port the person unforwarded. Auto-forward sends only `ports.list` and so
   never wakes a stopped workspace.

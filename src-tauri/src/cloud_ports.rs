@@ -66,6 +66,9 @@ pub const AUTO_POLL: Duration = Duration::from_secs(2);
 /// Ports auto-forward leaves alone: the ephemeral range, where clients bind,
 /// not servers (`AUTO_FORWARD_SKIPPED` in src/lib/api.ts).
 pub const AUTO_SKIPPED: std::ops::RangeInclusive<u16> = 32768..=60999;
+/// Auto-forwards one connection keeps at once: a workspace that starts many
+/// listeners does not take as many ports on this Mac.
+pub const MAX_AUTO_FORWARDS: usize = 16;
 
 /// Whether a forward is listening on this Mac now.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -522,9 +525,14 @@ impl PortForwarder {
             let mut fresh: Vec<u16> = ports.iter().copied().filter(|port| !seen.contains(port) && !AUTO_SKIPPED.contains(port) && !state.forwards.contains_key(port)).collect();
             seen.extend(ports);
             fresh.sort_unstable();
+            // Past the cap the rest are left to the person, as already seen.
+            let room = MAX_AUTO_FORWARDS.saturating_sub(state.forwards.values().filter(|listening| listening.forward.auto).count());
+            fresh.truncate(room);
             (fresh, state.auto_scope.clone())
         };
-        let opened: Vec<Forward> = fresh.into_iter().filter_map(|port| self.open(port, Some(port), false, scope.clone(), true).ok()).collect();
+        // The same local number when it is free, except a privileged one
+        // (below 1024), which this Mac's own services may want: a random one.
+        let opened: Vec<Forward> = fresh.into_iter().filter_map(|port| self.open(port, Some(port).filter(|port| *port >= 1024), false, scope.clone(), true).ok()).collect();
         if !opened.is_empty() {
             self.tell(opened);
         }
@@ -1549,6 +1557,31 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         while requests.try_recv().is_ok() {}
         assert!(tokio::time::timeout(AUTO_POLL + Duration::from_millis(500), requests.recv()).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_forward_takes_at_most_its_cap_and_never_a_privileged_local_port() {
+        let (forwarder, mut requests, _changes) = watched(false);
+        forwarder.set_settings(None, Some(true), None);
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": [], "streams": [] } }));
+        // Then 80 and 30 ports start at once.
+        let started: Vec<Value> = std::iter::once(80).chain(20000..20030).map(|port| json!({ "port": port })).collect();
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": started, "streams": [] } }));
+        let mut forwards = Vec::new();
+        for _ in 0..100 {
+            forwards = forwarder.forwards();
+            if !forwards.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(forwards.len(), MAX_AUTO_FORWARDS);
+        let http = forwards.iter().find(|forward| forward.port == 80).expect("the lowest ports first");
+        assert!(http.local_port >= 1024, "{http:?}");
+        // The person may still forward more themselves.
+        assert!(forwarder.forward(20031, None, false, None).await.is_ok());
     }
 
     #[test]
