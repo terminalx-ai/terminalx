@@ -557,6 +557,7 @@ pub fn run() {
             commands::organization_console_open,
             commands::account_sign_out,
             commands::organization_create,
+            commands::organization_computer_save,
             commands::organization_select,
             commands::organization_delete,
             commands::organization_members,
