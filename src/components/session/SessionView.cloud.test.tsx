@@ -127,6 +127,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetPanelTabs } from "@/lib/panelTab";
 import { resetPurged } from "@/lib/cloudLifecycle";
 import { takeAgentLoginsRequest, takeAgentLoginsSignIn, takeOrganizationRequest } from "@/lib/settingsLinks";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
