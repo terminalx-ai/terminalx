@@ -1,10 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
 import { AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, Laptop, Search, X } from "lucide-react-native";
+import { Laptop, Search, X } from "lucide-react-native";
 import { chatRows, filterCounts, LIST_FILTERS, listSections, type ChatRow, type ListFilter } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
-import { connectionUsable, useConnectionState } from "@mobile/state/connection-view";
+import { connectionUsable, connectionWords, useConnectionState } from "@mobile/state/connection-view";
 import { Button, EmptyState } from "@mobile/ui/primitives";
 import { ConnectionLine } from "@mobile/ui/ConnectionLine";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
@@ -69,15 +69,14 @@ export default function SessionsScreen() {
     <View style={styles.header}>
       {/* The Mac these sessions are on. */}
       <View style={styles.topBar}>
-        {/* The Mac's name, and beneath it the connection in the words every screen uses (#983). */}
-        <Pressable accessibilityRole="button" accessibilityHint="Opens device options" onPress={() => menu.open(host)} onLongPress={() => menu.open(host)} style={styles.hostName}>
+        {/* The Mac's name, and beneath it the connection in the words every screen uses (#983). A tap opens its menu; no chevron (22.01, 22.04). */}
+        <Pressable accessibilityRole="button" accessibilityLabel={`Device options for ${menu.nameOf(host)}`} accessibilityValue={{ text: connectionWords(state) ?? undefined }} onPress={() => menu.open(host)} onLongPress={() => menu.open(host)} style={styles.hostName}>
           <Laptop size={21} color={palette.ink} strokeWidth={1.8} />
           <View style={styles.hostTitles}>
             <Text numberOfLines={1} style={[styles.hostText, { color: palette.ink }]}>{menu.nameOf(host)}</Text>
             <ConnectionLine state={state} />
           </View>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel={`Device options for ${menu.nameOf(host)}`} hitSlop={10} onPress={() => menu.open(host)} style={styles.hostChevron}><ChevronDown size={16} color={palette.muted} /></Pressable>
         <View style={styles.flex} />
         {/* Only once the phone has really failed to reach the Mac: it keeps trying by itself meanwhile. */}
         {state === "waiting" ? <Button label="Try again" kind="secondary" onPress={app.retryConnection} style={styles.retry} /> : null}
@@ -132,7 +131,6 @@ const styles = StyleSheet.create({
   hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
   hostTitles: { flexShrink: 1, gap: 1 },
   hostText: { flexShrink: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
-  hostChevron: { height: 44, justifyContent: "center", marginLeft: -6 },
   search: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12 },
   searchInput: { flex: 1, fontSize: 16, paddingVertical: 8 },
   filters: { flexDirection: "row", gap: 8 },

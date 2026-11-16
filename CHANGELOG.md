@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+## 0.2.33
+
+- Orchestration runs (Experimental): the run's own lead can take a blocked
+  piece of an approved plan over itself, held to the files that piece owns,
+  so it no longer waits on a person. Settings → Orchestrator → "Let the
+  lead take over blocked pieces" (on by default) turns it off. A late
+  report from the old worker can no longer undo the lead's finish. (#1007)
+- Orchestration runs decide on their own when a stop needs no person's
+  judgment: a verifier with no verdict is asked again, a check that fails the
+  same way on the base does not fail the piece, a piece goes to the lead when
+  no model is left above its last try, and the run goes on after its usage
+  window resets. Each has a switch in Settings → Orchestrator, on by default,
+  and the Run view shows these events. (#1008)
+- Orchestration runs: queued pieces start on their own once worker slots
+  free up, even after a missed completion event (#977); a planned run in a
+  project with approval off can be started from the Run view, also after
+  editing it (PRO-365, #955); verifier questions and permission requests stay
+  answerable and their later verdict settles the piece, and read-only lookups
+  accept `head` pipelines and `sed -n` line reads with clearer refusals
+  (#971); superseded tries are backed up to a remote branch and archived once
+  the run completes, and cleanup treats them as landed (#974).
+- Pair two computers with a one-time code and a fingerprint both sides
+  confirm, in Settings → Machines (Experimental). (PRO-342, #1002)
+- Machines groundwork: the architecture note (PRO-339, #964); one runtime
+  serves every project of its machine over one connection (PRO-340, #970);
+  send, steer, stop and answer approvals on a machine without the cloud
+  mailbox (PRO-343, #969); the runtime accepts paired operating computers
+  itself, directly and over the relay (PRO-341, #997).
+- Local VM tasks and Linux desktop targets, behind Settings → Experimental →
+  Local VM tasks (off by default): a tab can choose the exact computer its
+  agent controls, Local VM task cards and Settings → Local VMs. (PRO-114,
+  #672) Follow-ups: the guest runtime key reaches only a checked root-owned
+  runtime, abandoned tasks record an unknown outcome, finished tasks leave
+  the journal and one-shot desktop calls share the admission lock. (#999)
+- Phone: answer an agent's question from the phone (#982); the Sessions
+  list shows each session's agent status with a "Needs you" section first
+  (#998); one list of machines with rename and remove for offline ones, and
+  Settings in plain words (#994); one quiet connection state on every screen,
+  with held messages sent on connect (#995); the session screen shows what
+  the agent is doing, with readable tables and commands (#1003); scrolled
+  pages no longer draw under the status bar (#996); the Cloud tab no longer
+  opens blank, hides empty organizations and offers a way on from a stopped
+  workspace (#1006). A research report on the phone connection's keep-alive,
+  reconnect and push notifications is in the repository (#1011).
+- Wide Markdown tables in chat scroll sideways instead of squeezing their
+  columns. (#1012)
+- Show teammates' profiles from their avatars, from a cached organisation
+  roster that respects data privacy settings. (PRO-128, #968)
+- Working marks keep moving when Pixel raccoon is off (only Reduce motion
+  stops them), and draft rows show a pencil instead of "Draft:".
+  (PRO-366, #993)
+- Cloud workspaces that need attention say why and offer the matching
+  recovery on the sidebar row and workspace pane. (#958)
+- Continue in New Session lets you choose the project, including no project
+  (quick chat), and keeps a matching worktree and its changes. (#957)
+- A closed or signed-out conflict resolver no longer leaves its pipeline
+  stuck at Resolve: Restart resolver (and `terminalx pipelines resolve
+  --restart`) picks it up again. (#972)
+- A runtime update that finds the runtime busy retries on its own and says
+  what it is waiting for, instead of staying on the old runtime. (#965)
+- Quitting after dictation no longer crashes in the speech model's teardown.
+  (#966)
+- Startup stall recovery keeps its evidence through permission waits and
+  restarts, and reports one incident per failure. (#973)
+- New sessions no longer show setup details above the composer for an agent
+  that is already ready. (#963)
+- CI runs in about 22 minutes: the macOS Rust build fits the runner and the
+  WebKit checks run in parallel (#956); the editor toolbar WebKit check waits
+  for the disabled Copy button (#991).
+
 ## 0.2.32
 
 - Attach any file to a message (up to 10), and open attached files from the

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Bell, BellOff, ChevronLeft, MessageSquare, Plus, SquareTerminal, X } from "lucide-react-native";
@@ -35,17 +35,35 @@ export function SessionHeader({ title, subtitle, connection, onBack, view, onVie
   onNotifications?(): void;
 }) {
   const { palette } = useTheme();
+  // The session's bell (22.07 frame 5) beside the view switch.
+  const bell = onNotifications ? <GlassIconButton label="Notifications for this session" size={40} icon={muted ? <BellOff size={18} color={palette.ink} strokeWidth={1.9} /> : <Bell size={18} color={palette.ink} strokeWidth={1.9} />} onPress={onNotifications} /> : null;
+  return <ScreenHeader title={title} onBack={onBack}
+    subtitle={connection && connection !== "connected" && connection !== "none" ? <ConnectionLine state={connection} /> : subtitle}
+    trailing={<>{bell}{view ? <GlassIconButton label={view === "chat" ? "Terminal" : "Chat"} size={40} icon={view === "chat" ? <SquareTerminal size={19} color={palette.ink} strokeWidth={1.9} /> : <MessageSquare size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => onView(view === "chat" ? "terminal" : "chat")} /> : null}</>} />;
+}
+
+/**
+ * A conversation's bar (22.03, 22.06): a glass back button, the title over one
+ * quiet line, and at most one glass button on the right. A string subtitle is
+ * drawn as that line; anything else is drawn as it is.
+ */
+export function ScreenHeader({ title, subtitle, onBack, trailing }: { title: string; subtitle?: ReactNode; onBack(): void; trailing?: ReactNode }) {
+  const { palette } = useTheme();
   const insets = useSafeAreaInsets();
   return <View style={[styles.header, { paddingTop: insets.top + 4 }]}>
     <GlassIconButton label="Back" size={40} icon={<ChevronLeft size={24} color={palette.ink} strokeWidth={2.2} style={styles.chevron} />} onPress={onBack} />
     <View style={styles.titles}>
-      <Text numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
-      {connection && connection !== "connected" && connection !== "none" ? <ConnectionLine state={connection} />
-        : subtitle ? <Text numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null}
+      <Text accessibilityRole="header" numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
+      {typeof subtitle === "string" ? subtitle ? <Text numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null : subtitle}
     </View>
-    {onNotifications ? <GlassIconButton label="Notifications for this session" size={40} icon={muted ? <BellOff size={18} color={palette.ink} strokeWidth={1.9} /> : <Bell size={18} color={palette.ink} strokeWidth={1.9} />} onPress={onNotifications} /> : null}
-    {view ? <GlassIconButton label={view === "chat" ? "Terminal" : "Chat"} size={40} icon={view === "chat" ? <SquareTerminal size={19} color={palette.ink} strokeWidth={1.9} /> : <MessageSquare size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => onView(view === "chat" ? "terminal" : "chat")} /> : null}
+    {trailing}
   </View>;
+}
+
+/** The quiet line under a `ScreenHeader` title, for a subtitle that needs its own label or test id. */
+export function HeaderLine({ text, label, testID }: { text: string; label?: string; testID?: string }) {
+  const { palette } = useTheme();
+  return <Text testID={testID} accessibilityLabel={label} numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{text}</Text>;
 }
 
 /**

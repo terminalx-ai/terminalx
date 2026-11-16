@@ -1,0 +1,22 @@
+# 22.02 Scrolled pages and the status bar: Settings at the top and scrolled.
+appId: com.terminalx.phone.fixture
+name: Status bar (22.02)
+---
+- launchApp:
+    arguments: { fixtureScenario: connected }
+- tapOn: "Settings"
+- waitForAnimationToEnd
+- takeScreenshot: 22.02-1-at-the-top
+- swipe:
+    start: 50%, 70%
+    end: 50%, 40%
+    duration: 800
+- waitForAnimationToEnd
+- takeScreenshot: 22.02-2-scrolled
+- tapOn: "Machines"
+- swipe:
+    start: 50%, 70%
+    end: 50%, 55%
+    duration: 800
+- waitForAnimationToEnd
+- takeScreenshot: 22.02-3-machines-scrolled
