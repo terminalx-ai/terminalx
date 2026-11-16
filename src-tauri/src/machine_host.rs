@@ -592,6 +592,23 @@ impl MachineHost {
                 }
                 // A key adopted from the window replaced the one it registered with.
                 None if host_id != HostKeypair::from_secret(secret).host_id() => self.stop_relay("host key changed"),
+                // The link reads the session only when it renews its token,
+                // up to an hour apart: signing out, or another account
+                // signing in, ends the registration at the next read pass.
+                None if read => {
+                    let data_dir = self.data_dir.clone();
+                    let saved = tokio::task::spawn_blocking(move || crate::machine_account::load(&data_dir)).await;
+                    match saved {
+                        Ok(Ok(None)) => {
+                            self.state.lock().unwrap().relay_signed_out = true;
+                            self.stop_relay("signed out");
+                        }
+                        Ok(Ok(Some(session))) if user.as_deref().is_some_and(|user| user != session.cloud.user_id) => {
+                            self.stop_relay("another account signed in");
+                        }
+                        _ => {}
+                    }
+                }
                 None => {}
             }
             return;

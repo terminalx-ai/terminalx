@@ -1325,7 +1325,10 @@ device to the window's phone route, as PRO-341 built. Its link is
   to near expiry, so a fenced process learns it was superseded and stops.
   The direct listener keeps serving: two processes cannot both hold 6768.
 - With no session file (signed out) or a refresh the account service refuses,
-  the registration ends and every connection it carried closes. Paired
+  the registration ends and every connection it carried closes. The runtime
+  rereads the file at least every 15 s while registered, so signing out, or
+  another account signing in, ends it within that, not at the next token
+  renewal. Paired
   computers fall back to their direct routes (`4404` at the relay is "offline",
   so they keep their relay credential for when it is back).
 - Switching off ends it the same way, with a close frame, so the relay lets the
