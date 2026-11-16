@@ -434,13 +434,18 @@ jobs:
   # the pairing check or the project scoping fails these scenarios.
   machines-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || 25 }}
+    # The ten-minute budget is checked at the end, for a run with a warm
+    # cache; a cold one (the first after a Cargo.lock change) gets room to
+    # build and save one.
+    timeout-minutes: 25
     env:
       # As headless-serve: the binary and the tests share one library build.
       CARGO_PROFILE_DEV_OPT_LEVEL: "0"
       # The dev-server container must run here: its absence fails the tests.
       TERMINALX_E2E_REQUIRE_LINUX: "1"
     steps:
+      - name: Note when the job started
+        run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -471,6 +476,19 @@ jobs:
       - name: Two machines end to end (machines_e2e, machine_routes), timed
         if: steps.relevant.outputs.run == 'true'
         run: python3 -I scripts/machine-e2e/run.py tests machines_e2e machine_routes
+      - name: The job's run time, against its ten minutes
+        if: always() && steps.relevant.outputs.run == 'true'
+        env:
+          WARM: ${{ steps.cargo-cache.outputs.cache-matched-key != '' }}
+        run: |
+          seconds=$(( $(date +%s) - JOB_STARTED ))
+          line="machines-e2e took $((seconds / 60)) min $((seconds % 60)) s (cache: $([ "$WARM" = true ] && echo warm || echo cold))"
+          echo "$line"
+          echo "**$line**; the budget is 10 min with a warm cache." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$WARM" = true ] && [ "$seconds" -gt 600 ]; then
+            echo "::error::machines-e2e took over ten minutes with a warm cache"
+            exit 1
+          fi
       # Saved from main, schedule and dispatch runs only: uploading the
       # target directory would eat a pull request's ten minutes.
       - name: Save the cargo cache

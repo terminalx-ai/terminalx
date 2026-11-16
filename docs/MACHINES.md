@@ -1972,15 +1972,31 @@ and the dev-server:
 - revoke (the window's `revoke`; `terminalx-serve devices revoke` on the
   server): the supervisor ends in "access removed" and retries nothing.
 
-**Found by these scenarios (open).** A runtime starts its agents layer
-(`start_cloud_agents` in `src/serve.rs`, which `session.interrupt` and
-`agent-commands/1` need) only with a relay link, and `WorkspaceRpc::set_agents`
-is called only on the relay route (`remote::host::serve_machine`). A machine
-reached only directly (Mac mini without `--relay-link`, a server paired with
-`terminalx-serve pair`) therefore grants no `agent-commands/1`: the
-operating computer can send prompts but cannot stop a turn (`unavailable`) or
-answer an approval (`method_not_found`). The scenarios fail on it until the
-direct route serves the same agents.
+**Found by these scenarios, and fixed with them.**
+
+- *A machine reached only directly served no agent commands.* A runtime
+  started its agents layer (`start_cloud_agents` in `src/serve.rs`, which
+  `session.interrupt` and `agent-commands/1` need) only with a relay link,
+  and only the relay route's RPC got it (`WorkspaceRpc::set_agents` in
+  `remote::host::serve_machine`). A machine with no link (every desktop
+  until PRO-344, a server paired with `terminalx-serve pair`) builds its own
+  RPC in `MachineHost::rpc`, which had none: a computer could send prompts
+  but not stop a turn (`unavailable`) or answer an approval
+  (`method_not_found`). The machine host is now given `Parts::agents`, which
+  opens the agent tabs (no mailbox: live calls with receipts kept here,
+  decision 3) the first time it builds its RPC, so a runtime hosting no one
+  opens nothing more. With a link, the direct listener serves the relay
+  route's RPC as before.
+- *A paired computer was two peers.* The direct route serves a paired
+  computer as its registry id; the relay route served it as its relay device
+  id. After a move from the direct route to the relay, the computer no longer
+  controlled the terminals it had opened (`pty.write` refused
+  `not_controller`, and the desktop never sends `pty.control` after a route
+  change), and its write numbering and command receipts started over, so a
+  resend could be applied twice. The relay route now serves a paired
+  computer under its registry id too (`RelayHost`, `remote/host.rs`);
+  `machine_routes.rs` checks the terminal keeps working through the relay and
+  a resent write is dropped.
 
 **The job.** `machines-e2e` in `.github/workflows/ci.yml`, on ubuntu-latest,
 required by `check`. `check` fails on a skipped job, so it always runs and
@@ -1995,8 +2011,10 @@ checks the binary loads in the image (`ldd`), runs each test on its own and
 writes each test's time, each phase's and the total to the job summary. The
 cargo cache is the job's own (CI's cache policy, `infra/ci-runners`, allows
 no other job's), saved only from main, schedule and dispatch runs; a pull
-request restores main's and has ten minutes, main has 25 so a cold build can
-finish and be saved.
+request restores main's. The job may run 25 minutes, so a cold build (the
+first after a `Cargo.lock` change) can finish and be saved, and its last step
+checks the budget: over ten minutes with a warm cache fails the job, and every
+run writes its time to the summary.
 
 **The break check.** `.github/workflows/machines-e2e-breaks.yml` (nightly and
 by hand) runs `run.py breaks`: for each `scripts/machine-e2e/breaks/*.patch`
