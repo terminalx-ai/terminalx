@@ -1373,7 +1373,7 @@ describe("the session header's New tab menu", () => {
     await openConnected();
     mouseClick(plus());
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByText("New agent tab with")).toBeTruthy();
+    expect(within(menu).getByText("New tab")).toBeTruthy();
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM", "Ports and previewsside panel"]);
     expect(plus().getAttribute("aria-expanded")).toBe("true");
     // The tooltip around it must not mark the open menu's trigger closed.

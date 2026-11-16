@@ -135,7 +135,7 @@ export function DropdownMenuSeparator({ className }: { className?: string }) {
 
 export function MenuShortcut({ keys }: { keys: string[] }) {
   return (
-    <span className="ml-auto flex gap-0.5 pl-4 text-[11px] text-faint">
+    <span className="ml-auto flex gap-0.5 pl-4 text-[12px] text-faint">
       {keys.map((k, i) => (
         <span key={i}>{k}</span>
       ))}

@@ -236,7 +236,7 @@ describe("the page of a session with no tabs", () => {
     await click(sessionRow("Github preparation"));
     const page = screen.getByTestId("empty-session");
     fireEvent.pointerDown(within(page).getByRole("button", { name: "New tab" }), { button: 0, pointerType: "mouse" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(backend.callsOf("pty_spawn")).toHaveLength(1));
     expect(String(backend.callsOf("pty_spawn")[0].id).startsWith("empty:")).toBe(true);
     expect(store().selectedSessionId).toBe("empty");

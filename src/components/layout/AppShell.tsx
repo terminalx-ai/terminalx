@@ -9,6 +9,7 @@ import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import { bootTabDeepLinks } from "@/lib/tabDeepLink";
 import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
 import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
@@ -206,6 +207,8 @@ export function AppShell() {
   useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
   const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
   useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
+  // A link to a chat tab (PRO-381): the tab menu's "Copy link to this tab".
+  useEffect(() => bootTabDeepLinks(), []);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   useEffect(() => onProjectSettingsRequest((projectPath) => {
     setSettingsTab("repositories.scripts");
