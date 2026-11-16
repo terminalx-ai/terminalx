@@ -15,7 +15,7 @@ export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.";
 
 export const MACHINES_DESCRIPTION =
-  "Settings → Machines: let other computers that run TerminalX operate this Mac, and operate others from here.";
+  "Settings → Machines: let other computers that run TerminalX operate this Mac, and operate others from here. While it is on, agents in this Mac’s sessions can operate the paired machines with the terminalx command line.";
 
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run, splitting one goal into pieces for worker sessions. Shows the Run view and Settings → Orchestrator.";

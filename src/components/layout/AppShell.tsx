@@ -9,6 +9,7 @@ import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import { bootTabDeepLinks } from "@/lib/tabDeepLink";
 import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
 import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
@@ -92,6 +93,7 @@ import { MachineApprovalHost } from "@/components/machines/MachineApprovalDialog
 import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
+import { bootMachineControl } from "@/lib/machineControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { onTemplateSettingsRequest, openLocalProject } from "@/lib/projectStart";
@@ -180,6 +182,8 @@ export function AppShell() {
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();
+    // `terminalx … --machine` (PRO-356): native code has checked the switch and the machine first.
+    void bootMachineControl();
     void bootFloating();
     void bootMergedCleanup();
   }, []);
@@ -210,6 +214,8 @@ export function AppShell() {
   useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
   const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
   useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
+  // A link to a chat tab (PRO-381): the tab menu's "Copy link to this tab".
+  useEffect(() => bootTabDeepLinks(), []);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   // Or from a project's menu: its general page (Project settings) or its Scripts (Scripts and actions).
   useEffect(() => onProjectSettingsRequest((projectPath, page) => {

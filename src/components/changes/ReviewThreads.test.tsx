@@ -129,23 +129,22 @@ it("says 'Thread resolved on GitHub' with View on GitHub after resolving, and no
 
 it("replies, refreshes, and keeps a reply being written when the widget is redrawn", async () => {
   const view = render(<><ReviewThreads {...props} />{inline()}</>);
-  fireEvent.click(await screen.findByRole("button", { name: "Reply" }));
-  fireEvent.change(screen.getByLabelText("Reply to review thread"), { target: { value: "Keep my draft" } });
+  // The Reply on GitHub box is always there (PRO-392); Reply posts it.
+  fireEvent.change(await screen.findByLabelText("Reply to review thread"), { target: { value: "Keep my draft" } });
   view.rerender(<ReviewThreads {...props} />);
   view.rerender(<><ReviewThreads {...props} />{inline()}</>);
   expect((screen.getByLabelText("Reply to review thread") as HTMLTextAreaElement).value).toBe("Keep my draft");
-  fireEvent.click(screen.getByRole("button", { name: "Post reply" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reply" }));
   await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   expect(reply).toHaveBeenCalledWith(thread.id, "Keep my draft");
-  expect(screen.queryByLabelText("Reply to review thread")).toBeNull();
+  await waitFor(() => expect((screen.getByLabelText("Reply to review thread") as HTMLTextAreaElement).value).toBe(""));
 });
 
 it("keeps a failed reply editable without retrying it", async () => {
   reply.mockRejectedValue(new Error("Connection lost"));
   render(<><ReviewThreads {...props} />{inline()}</>);
-  fireEvent.click(await screen.findByRole("button", { name: "Reply" }));
-  fireEvent.change(screen.getByLabelText("Reply to review thread"), { target: { value: "Keep this reply" } });
-  fireEvent.click(screen.getByRole("button", { name: "Post reply" }));
+  fireEvent.change(await screen.findByLabelText("Reply to review thread"), { target: { value: "Keep this reply" } });
+  fireEvent.click(screen.getByRole("button", { name: "Reply" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Refresh threads before retrying");
   expect(reply).toHaveBeenCalledTimes(1);
   expect((screen.getByLabelText("Reply to review thread") as HTMLTextAreaElement).value).toBe("Keep this reply");

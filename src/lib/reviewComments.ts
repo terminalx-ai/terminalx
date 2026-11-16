@@ -87,6 +87,12 @@ export function addReviewsToChat(workspace: string, tabId: string, comments: Rev
   pending.set(tabId, { text, entries });
 }
 
+/** How many review comments `text`, a tab's composer draft, still carries (PRO-392's "ready to send" strip). */
+export function pendingReviewCount(tabId: string, text: string): number {
+  const held = pending.get(tabId);
+  return held ? moveReviewRanges(held.text, text, held.entries).length : 0;
+}
+
 /** Capture before the composer clears the draft; failure leaves comments unsent. */
 export function captureReviewSend(tabId: string, text: string): DraftReview[] {
   const held = pending.get(tabId);
