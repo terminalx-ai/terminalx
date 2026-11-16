@@ -307,9 +307,11 @@ pub const METHODS: &[Method] = &[
     method("machine.update", "machine/3", Manage, false),
     // PRO-350: an agent's install or sign-in on the machine runs a command
     // there, so starting one is the manager's, as `pty.create` is. Not
-    // idempotent: a second start is refused while the first runs.
+    // idempotent: a second start is refused while the first runs. Following
+    // one is the manager's too: a sign-in shows a device code, and whoever
+    // completes it chooses the account the machine's CLI signs in to.
     method("machine.agentSetup", "machine/4", Manage, false),
-    method("machine.agentSetupRunning", "machine/4", Participate, false),
+    method("machine.agentSetupRunning", "machine/4", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and

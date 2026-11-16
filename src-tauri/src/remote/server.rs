@@ -2204,6 +2204,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_write(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let seq = params.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0).ok_or_else(|| RpcError::invalid("seq must be a positive integer"))?;
         let data = required_str(&params, "data")?;
         if data.len() > MAX_WRITE_BYTES {
@@ -2320,6 +2321,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_resize(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let (cols, rows) = Self::size_params(&params)?.ok_or_else(|| RpcError::invalid("cols and rows must be between 1 and 1000"))?;
         if let Some((session_id, tab_id)) = self.agent_pty(peer, &params)? {
             if let Some(refusal) = self.agent_input_refusal(peer, &session_id, &tab_id) {
@@ -2341,6 +2343,7 @@ impl WorkspaceRpc {
 
     /// Take over a terminal's input and size, optionally at this client's size.
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let size = Self::size_params(&params)?;
         let scope = self.pty_session_scope(peer);
         let agent = self.agent_pty(peer, &params)?;
@@ -2490,6 +2493,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let since = params.get("sinceOffset").and_then(Value::as_u64);
         if since.is_some() {
             let generation = params.get("runtimeGeneration").and_then(Value::as_u64);
@@ -3382,6 +3386,18 @@ impl WorkspaceRpc {
         }
         let (_, described) = started.ok_or_else(|| RpcError::internal("the setup step did not start"))?;
         Ok(described)
+    }
+
+    /// An agent's setup terminal is the manager's alone (PRO-350): a sign-in
+    /// shows a device code or a login address, and whoever completes it
+    /// decides whose account the machine's CLI signs in to.
+    fn setup_pty_refusal(&self, peer: &Peer, params: &Value) -> Result<(), RpcError> {
+        let Some(pty_id) = params["ptyId"].as_str() else { return Ok(()) };
+        let setup = self.ptys.lock().unwrap().get(pty_id).is_some_and(|pty| pty.setup.is_some());
+        if setup && peer.authority != Authority::Manage {
+            return Err(RpcError::new("forbidden", "only a manager may follow an agent's sign-in or install"));
+        }
+        Ok(())
     }
 
     /// `machine.agentSetupRunning`: the step of `harness` running in a

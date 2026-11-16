@@ -690,8 +690,12 @@ async fn an_agents_setup_runs_in_a_terminal_on_the_machine_one_at_a_time() {
     // Bad input is refused before anything runs; a viewer cannot start one.
     assert_eq!(code(call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "uninstall", "cols": 90, "rows": 20 })).await), "invalid_params");
     let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
-    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/4"] })).await.unwrap();
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/4", "pty/1"] })).await.unwrap();
     assert!(call(&m.rpc, &viewer, "machine.agentSetup", json!({ "harness": "codex", "step": "login", "cols": 90, "rows": 20 })).await.is_err());
+    // Nor follow one: a sign-in's device code chooses whose account the CLI uses.
+    assert!(call(&m.rpc, &viewer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.is_err());
+    assert_eq!(code(call(&m.rpc, &viewer, "pty.attach", json!({ "ptyId": pty_id })).await), "forbidden");
+    assert_eq!(code(call(&m.rpc, &viewer, "pty.write", json!({ "ptyId": pty_id, "data": "eA==", "seq": 1 })).await), "forbidden");
 }
 
 /// The command a machine's page runs: the registry's, and for Codex the

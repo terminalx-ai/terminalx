@@ -832,7 +832,7 @@ the pull request that adds it.
 | `machine.updateStatus` | `machine/3` | Served | The machine's version and what it could update to (PRO-354, [Versions and updates](#versions-and-updates-pro-354)) |
 | `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
 | `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
-| `machine.agentSetupRunning` | `machine/4` | Served | The setup step running there for one agent, if any |
+| `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1372,7 +1372,7 @@ serves its machine grants it.
 | Method | Authority | Params | Result |
 | --- | --- | --- | --- |
 | `machine.agentSetup` | `Manage` | `{ harness, step: "install" \| "login", cols, rows }` | the terminal, as `pty.create` describes one, with `setup: { harness, step }` |
-| `machine.agentSetupRunning` | `Participate` | `{ harness }` | `{ run: { ptyId, step } \| null }` |
+| `machine.agentSetupRunning` | `Manage` | `{ harness }` | `{ run: { ptyId, step } \| null }` |
 
 - The command is the runtime's, made from its harness registry
   (`harness::setup::command`), exactly as a setup pane on that computer runs
@@ -1391,7 +1391,9 @@ serves its machine grants it.
   runs in a terminal of the connection; there is none when the machine's own
   window runs the step in one of its setup panes.
 - The terminal is attached, typed into, sized and killed as any other
-  (`pty.attach`, `pty.write`, `pty.resize`, `pty.kill`), is never in
+  (`pty.attach`, `pty.write`, `pty.resize`, `pty.kill`), by a manager
+  only: a sign-in shows a device code or a login address, and whoever
+  completes it chooses the account the machine's CLI signs in to. It is never in
   `pty.list`, and ends with `pty.exit`; its exit code is the setup wrapper's
   (`harness::setup::exit`, `SETUP_EXIT` in `src/lib/agentSetupFlow.ts`). The
   page then reads `runtime.agents` with `refresh` and says what the probe
@@ -1403,6 +1405,11 @@ serves its machine grants it.
 `usage` (0 to 1) is how busy every core was since the previous call on that
 runtime, null on the first. A Mac machine reports its memory too (it was
 Linux only). The page asks every 5 seconds while it is open.
+
+**Rename** (`machines_rename { machineId, name }`) changes the name this
+computer shows for the machine, on its card, sidebar and page; the record
+keeps `namedHere: true`, so the name the machine gives itself in
+`machine.describe` no longer replaces it. Nothing on the machine changes.
 
 **Remove** is `machines_remove`, as on the card (PRO-349).
 
