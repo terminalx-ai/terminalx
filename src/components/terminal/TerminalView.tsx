@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { TerminalMoveButton } from "./TerminalMoveButton";
 import { TERMINAL_KEYS, TerminalTools, useTerminalKey } from "./TerminalTools";
-import { Terminal as TerminalIcon } from "@/icons";
+import { Eraser, SquareTerminal as TerminalIcon } from "@/icons";
 import { shortPath } from "@/lib/paths";
 import { useSessionStore } from "@/lib/sessions";
 import { EnvironmentNotice } from "./EnvironmentNotice";
@@ -367,15 +367,15 @@ export function TerminalView({
     <div ref={frame} className="group/terminal relative flex h-full w-full flex-col overflow-hidden bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
       {/* A row of its own above the output, so no control is ever drawn over a line of it. */}
       {header && (
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline pr-2 pl-3 text-xs" data-testid="terminal-header">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline pr-2 pl-4 text-xs" data-testid="terminal-header">
           <TerminalTitle id={id} />
-          <div className="ml-auto flex shrink-0 items-center gap-1" data-testid="terminal-toolbar">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5" data-testid="terminal-toolbar">
             {actions}
             {(moveToDock || moveToTab) && <TerminalMoveButton id={id} docked={moveToTab} />}
             {redraw && (
               <button
                 type="button"
-                className="h-6 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+                className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground"
                 onClick={recover}
                 title="Redraw the terminal without restarting its process"
                 tabIndex={visible ? 0 : -1}
@@ -385,13 +385,13 @@ export function TerminalView({
             )}
             <button
               type="button"
-              className="flex h-6 items-center gap-1.5 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+              className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground"
               onClick={clear}
               aria-keyshortcuts={TERMINAL_KEYS.clear.aria}
               title="Clear the terminal's output and scrollback"
               tabIndex={visible ? 0 : -1}
             >
-              Clear <kbd aria-hidden className="rounded-sm bg-veil-strong px-1 font-sans text-[10.5px] font-medium text-foreground/80">{TERMINAL_KEYS.clear.label}</kbd>
+              <Eraser className="size-3.5" aria-hidden />Clear <kbd aria-hidden className="rounded-sm bg-veil-strong px-1 font-sans text-[10.5px] font-medium text-foreground/80">{TERMINAL_KEYS.clear.label}</kbd>
             </button>
           </div>
         </div>

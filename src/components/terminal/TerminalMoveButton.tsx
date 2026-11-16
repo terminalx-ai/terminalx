@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { LayoutPanelBottomDock, LayoutPanelBottomUndock } from "@/icons";
 import { moveTerminal } from "@/lib/terminal";
 import { setPrefs } from "@/lib/prefs";
 
@@ -25,6 +26,6 @@ export function TerminalMoveButton({ id, docked }: { id: string; docked: boolean
   return <>
     {/* Beside the button in its own row, never over the terminal's output. */}
     {error && <span role="alert" title={error} className="min-w-0 max-w-80 truncate text-xs text-destructive">{error}</span>}
-    <button type="button" disabled={pending} onClick={() => void move()} className="h-6 shrink-0 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground disabled:opacity-50">{docked ? "Move to tab" : "Move to dock"}</button>
+    <button type="button" disabled={pending} onClick={() => void move()} className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground disabled:opacity-50">{docked ? <LayoutPanelBottomUndock className="size-3.5" aria-hidden /> : <LayoutPanelBottomDock className="size-3.5" aria-hidden />}{docked ? "Move to tab" : "Move to dock"}</button>
   </>;
 }
