@@ -78,6 +78,7 @@ import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
 import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
+import { MachineApprovalHost } from "@/components/machines/MachineApprovalDialog";
 import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
@@ -324,6 +325,7 @@ export function AppShell() {
       <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <PairPhoneDialogHost />
+      <MachineApprovalHost />
       <ConnectedBar />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (

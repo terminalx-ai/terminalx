@@ -1420,6 +1420,33 @@ pub fn phase2_desktop_contracts_available(state: tauri::State<'_, crate::AppStat
     state.cloud_workspaces.phase2_contracts_available()
 }
 
+// Internal PRO-137 transport only. Native validation and activation hold precede HTTP.
+#[tauri::command]
+pub async fn cloud_workspace_follow_put(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceFollowingResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_follow(&org_id, &workspace_id, true, input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_follow_delete(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceFollowingResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_follow(&org_id, &workspace_id, false, input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_reassign(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceReassignResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_reassign(&org_id, &workspace_id, input))
+}
+
+// Internal transport surface only; the service holds production activation.
+#[tauri::command]
+pub async fn desktop_presence_put(org_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::PresencePutResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.presence_put(&org_id, input))
+}
+
+#[tauri::command]
+pub async fn desktop_presence_read(org_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::PresenceReadResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.presence_read(&org_id, input))
+}
+
 #[tauri::command]
 pub async fn desktop_inbox(after: String, wait_ms: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::desktop_inbox::InboxPage, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.inbox(&after, wait_ms))
@@ -2184,10 +2211,14 @@ pub async fn project_overview(project_path: String) -> CmdResult<crate::project_
         .map_err(err)
 }
 
-/// Take the agent's title for a conversation that still has a made-up one.
+/// Take the agent's title for a conversation that still has a made-up one,
+/// and give its tabs the names made for them.
 #[tauri::command]
 pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
-    if let Some(session) = crate::session_ops::adopt_agent_title(&session_id)? {
+    let named = crate::session_ops::adopt_agent_title(&session_id)?;
+    // Then its tabs, so a lone tab takes the session's new name.
+    let tabs = crate::session_ops::adopt_tab_titles(&session_id)?;
+    if let Some(session) = tabs.or(named) {
         let _ = app.emit("session_updated", &session);
     }
     Ok(())
@@ -5375,7 +5406,13 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Option<bool>, orchestrator_runs: Option<bool>, local_vm_tasks: Option<bool>) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+pub fn set_experimental_settings(
+    native_codex: Option<bool>,
+    session_cost: Option<bool>,
+    orchestrator_runs: Option<bool>,
+    local_vm_tasks: Option<bool>,
+    machines: Option<bool>,
+) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
@@ -5388,6 +5425,9 @@ pub fn set_experimental_settings(native_codex: Option<bool>, session_cost: Optio
     }
     if let Some(on) = local_vm_tasks {
         settings.experimental.local_vm_tasks = on;
+    }
+    if let Some(on) = machines {
+        settings.experimental.machines = on;
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)

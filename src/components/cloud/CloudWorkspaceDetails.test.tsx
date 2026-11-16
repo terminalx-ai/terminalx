@@ -65,9 +65,14 @@ it("discards an outstanding old-generation reading after reconnect", async () =>
   m.resources.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
   render(<CloudWorkspaceDetailsCard item={item} />);
   await screen.findByText("artifact-sha");
+  // Metadata can render before the telemetry effect starts. Establish that
+  // the deferred request belongs to the old generation before reconnecting.
+  await waitFor(() => expect(m.resources).toHaveBeenCalledTimes(1));
   await act(async () => { m.generation++; m.listeners.forEach((cb) => cb()); await Promise.resolve(); });
+  await waitFor(() => expect(m.resources).toHaveBeenCalledTimes(2));
   await act(async () => { resolve({ v: 1, memory: { totalBytes: 8 * 1024 ** 3, availableBytes: 0 }, storage: null, observedAt: Date.now() }); });
   expect(screen.queryByText(/8.0 GB/)).toBeNull();
+  expect(screen.getByText(/512 MB used/)).toBeTruthy();
 });
 
 it("expires the previous reading independently when the next runtime request stalls", async () => {

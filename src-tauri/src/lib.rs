@@ -151,12 +151,16 @@ mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
 mod machine_name;
+mod direct_endpoints;
+mod pairing_fingerprint;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+#[cfg(feature = "desktop")]
+mod machines;
 pub mod power;
 mod project_start;
 mod project_templates;
@@ -328,6 +332,7 @@ pub fn run() {
     data_privacy::initialize();
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    let machines = Arc::new(machines::Machines::default());
     pairing.attach_models(codex_models.clone());
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let paired = pairing.clone();
@@ -401,6 +406,7 @@ pub fn run() {
         .manage(desktop_links::PendingSettingsLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
+        .manage(machines.clone())
         .setup(move |app| {
             #[cfg(unix)]
             match app.path().app_log_dir() {
@@ -428,6 +434,7 @@ pub fn run() {
             account.configure(&app.config().identifier)?;
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
+            machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -642,6 +649,11 @@ pub fn run() {
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
             commands::phase2_desktop_contracts_available,
+            commands::cloud_workspace_follow_put,
+            commands::cloud_workspace_follow_delete,
+            commands::cloud_workspace_reassign,
+            commands::desktop_presence_put,
+            commands::desktop_presence_read,
             commands::desktop_inbox,
             commands::desktop_inbox_stream,
             commands::desktop_inbox_receipts,
@@ -679,6 +691,17 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            machines::machines_host_status,
+            machines::machines_set_allow_operating,
+            machines::machines_create_code,
+            machines::machines_approve,
+            machines::machines_decline,
+            machines::machines_revoke,
+            machines::machines_inspect_code,
+            machines::machines_pair,
+            machines::machines_cancel_pairing,
+            machines::machines_list,
+            machines::machines_set_route,
             commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,

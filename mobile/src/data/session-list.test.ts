@@ -207,4 +207,14 @@ describe("the chats a branch holds", () => {
       { id: "c", name: "Codex", harness: "codex", state: "done", unread: true },
     ]);
   });
+
+  it("names a tab by its generated title, and by its request's first words only until there is one", () => {
+    const names = (tabs: SessionSummary["tabs"]) => branchChats(session("s", { tabs })).map((chat) => chat.name);
+    const prompt = { id: "a", harness: "claude", title: "You are the owner's chief of staff for", status: "idle" as const };
+    expect(names([prompt])).toEqual(["You are the owner's chief of staff for"]);
+    expect(names([{ ...prompt, generatedTitle: "Triage the support inbox" }])).toEqual(["Triage the support inbox"]);
+    // Nothing made yet, or an older Mac: the tab's own title stands.
+    expect(names([{ ...prompt, generatedTitle: null }])).toEqual(["You are the owner's chief of staff for"]);
+    expect(names([{ id: "c", harness: "codex", status: "idle", generatedTitle: "PRO-123 Short generated names" }])).toEqual(["PRO-123 Short generated names"]);
+  });
 });

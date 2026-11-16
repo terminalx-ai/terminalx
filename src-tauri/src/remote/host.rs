@@ -383,7 +383,9 @@ pub trait MachineRoutes: Send + Sync + 'static {
     fn is_computer(&self, relay_device_id: &str) -> bool;
     /// The paired computer with this relay device id, if `token` is its: its
     /// id and its tracked connection, which `cancel` closes on revocation.
-    fn admit_computer(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>>;
+    /// `client_key_b64` is the connection's E2EE client key: a computer is
+    /// admitted only with the key it paired with (docs/MACHINES.md rule 2).
+    fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>>;
     /// The connection ended.
     fn release_computer(&self, computer_id: &str, tracked: u64);
     /// Pass a phone's relay connection to the window. Whether one took it.
@@ -987,7 +989,7 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let (device, computer) = self.admit(&connection.relay_device_id, token, cancel_tx).await?;
+        let (device, computer) = self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await?;
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
@@ -1015,7 +1017,7 @@ impl RelayHost {
     }
 
     /// The device, and the paired computer's tracked connection when it is one.
-    async fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
+    async fn admit(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let attached = self.state.lock().unwrap().devices.contains_key(relay_device_id);
         if let (false, Some(routes)) = (attached, self.routes()) {
@@ -1029,8 +1031,8 @@ impl RelayHost {
                 senders.retain(|sender| !sender.is_closed());
                 senders.push(cancel.clone());
             }
-            let (device_id, token) = (relay_device_id.to_string(), token.to_string());
-            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, cancel))
+            let (device_id, token, key) = (relay_device_id.to_string(), token.to_string(), client_key_b64.to_string());
+            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, &key, cancel))
                 .await??
                 .ok_or_else(|| anyhow!("device token refused"))?;
             let device = Device { collaboration: None, token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
@@ -1476,8 +1478,8 @@ mod tests {
             fn is_computer(&self, relay_device_id: &str) -> bool {
                 relay_device_id == "relay-desk"
             }
-            fn admit_computer(&self, relay_device_id: &str, token: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
-                Ok((relay_device_id == "relay-desk" && token == "desk-token").then(|| ("desk".to_string(), 1)))
+            fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token" && client_key_b64 == "desk-key").then(|| ("desk".to_string(), 1)))
             }
             fn release_computer(&self, _: &str, _: u64) {}
             fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
@@ -1489,17 +1491,19 @@ mod tests {
         let host = RelayHost::new(Arc::new(Link), rpc, None);
         host.set_routes(Arc::new(Routes));
         let (cancel, mut cancelled) = mpsc::unbounded_channel();
-        let (device, computer) = host.admit("relay-desk", "desk-token", cancel).await.unwrap();
+        let (device, computer) = host.admit("relay-desk", "desk-token", "desk-key", cancel).await.unwrap();
         assert_eq!(device.authority, Authority::Manage);
         assert_eq!(computer, Some(("desk".to_string(), 1)));
         let (refused, _) = mpsc::unbounded_channel();
-        assert!(host.admit("relay-desk", "another-token", refused).await.is_err(), "another device's token");
+        assert!(host.admit("relay-desk", "another-token", "desk-key", refused.clone()).await.is_err(), "another device's token");
+        assert!(host.admit("relay-desk", "desk-token", "another-key", refused).await.is_err(), "its token from another key");
         host.close_all_connections();
         assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn phase2_collaboration_v2_refresh_attachment_route_fences_negotiation_generation_and_reconnect() {
+        let client_key = general_purpose::STANDARD.encode([7u8; 32]);
         struct Link {
             session: Mutex<RelaySession>,
             completed: Mutex<Vec<String>>,
@@ -1562,7 +1566,7 @@ mod tests {
         let mut cancellations = Vec::new();
         for scope in ["runtime", "session"] {
             let (cancel, cancelled) = mpsc::unbounded_channel();
-            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.unwrap();
+            let (device, _) = host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", &client_key, cancel).await.unwrap();
             assert_eq!(device.user_id.as_deref(), Some("driver"));
             cancellations.push(cancelled);
         }
@@ -1574,7 +1578,7 @@ mod tests {
         for mut cancelled in cancellations { assert!(cancelled.try_recv().is_ok()); }
         for scope in ["runtime", "session"] {
             let (cancel, _) = mpsc::unbounded_channel();
-            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", cancel).await.is_err());
+            assert!(host.admit(&format!("dev-{scope}-first"), "attachment-token-long-enough", &client_key, cancel).await.is_err());
         }
         let saved = std::fs::read_to_string(&devices_path).unwrap();
         assert!(!saved.contains("-first"));
@@ -1601,12 +1605,13 @@ mod tests {
         pending.await.unwrap().unwrap();
         assert_eq!(link.completed.lock().unwrap().len(), 4);
         let (cancel, _) = mpsc::unbounded_channel();
-        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", cancel).await.is_err());
+        assert!(host.admit("dev-runtime-raced", "attachment-token-long-enough", &client_key, cancel).await.is_err());
         relay.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn phase2_collaboration_v2_rejected_refresh_still_retires_independent_revocations() {
+        let client_key = general_purpose::STANDARD.encode([7u8; 32]);
         use std::sync::atomic::Ordering;
 
         struct Link {
@@ -1664,7 +1669,7 @@ mod tests {
             let mut cancellations = Vec::new();
             for scope in ["runtime", "session"] {
                 let (cancel, cancelled) = mpsc::unbounded_channel();
-                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.unwrap();
+                host.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", &client_key, cancel).await.unwrap();
                 cancellations.push(cancelled);
             }
             {
@@ -1686,7 +1691,7 @@ mod tests {
             for scope in ["runtime", "session"] {
                 for runtime in [&host, &restored] {
                     let (cancel, _) = mpsc::unbounded_channel();
-                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
+                    assert!(runtime.admit(&format!("dev-{scope}-old"), "attachment-token-long-enough", &client_key, cancel).await.is_err(), "revoked token reconnects after rejected policy: {policy}");
                 }
             }
             relay.abort();
