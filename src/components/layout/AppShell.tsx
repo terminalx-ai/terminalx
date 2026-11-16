@@ -28,7 +28,7 @@ import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
-import { isCloudKey } from "@/types/target";
+import { isCloudKey, isMachineKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -52,7 +52,7 @@ import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
-import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
+import { startMachineConnections } from "@/lib/machineConnections";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
@@ -94,7 +94,7 @@ import { ImageViewerHost } from "@/components/ui/ImageViewer";
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
-const DevRuntimeMain = lazy(() => import("@/components/cloud/DevRuntime").then((module) => ({ default: module.DevRuntimeMain })));
+const MachineMain = lazy(() => import("@/components/machines/MachineMain").then((module) => ({ default: module.MachineMain })));
 /** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
 const GENERAL_SETTINGS_TAB: SettingsTab = "account";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
@@ -273,8 +273,13 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
-  // A cloud workspace in the main slot (PRO-23).
-  const cloudWorkspace = store.selectedCloudWorkspace ?? null;
+  // Experimental → Machines: every paired machine stays attached while it is on (PRO-345).
+  const experimentalSwitches = useExperimentalSettings();
+  const machinesOn = experimentalSwitches?.machines === true;
+  useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
+  // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
+  const selectedWorkspace = store.selectedCloudWorkspace ?? null;
+  const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
   const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
   // "New session" from a session: a dialog over it, which goes back to it when closed.
@@ -282,7 +287,7 @@ export function AppShell() {
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
   // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
   // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
-  const orchestrating = useExperimentalSettings()?.orchestratorRuns === true;
+  const orchestrating = experimentalSwitches?.orchestratorRuns === true;
   const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
   useShortcut("app.runView", () => {
     if (!selected || !selectedRun) return;
@@ -383,8 +388,8 @@ export function AppShell() {
             ) : cloudWorkspace ? (
               <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
                 <Suspense fallback={viewFallback}>
-                  {cloudWorkspace === DEV_RUNTIME_KEY ? (
-                    <DevRuntimeMain sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  {isMachineKey(cloudWorkspace) ? (
+                    <MachineMain machineKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                   ) : (
                     <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                   )}

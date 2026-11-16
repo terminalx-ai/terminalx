@@ -187,6 +187,13 @@ export type WorkspaceConnectionState =
       authority: "manage" | "participate";
       /** The person behind this connection; only from a runtime that granted `collab/1`. */
       you?: WorkspaceYou | null;
+      /**
+       * Which link carries the connection (a machine, docs/MACHINES.md "As built
+       * (PRO-345)"). A new number while connected is a new E2EE session, e.g.
+       * the relay handed over to a direct route: every subscription resumes from
+       * its cursor, and requests already sent are still answered on the old one.
+       */
+      link?: number;
     };
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
@@ -1483,14 +1490,19 @@ export class WorkspaceRpcClient {
   }
 
   private changeState(state: WorkspaceConnectionState): void {
-    const wasConnected = this.state.state === "connected";
+    const previous = this.state;
+    const wasConnected = previous.state === "connected";
+    // Connected on another link: the old link's subscriptions are gone, but it
+    // stays open a little to answer what was already sent on it.
+    const newLink = wasConnected && state.state === "connected" && state.link !== undefined && state.link !== previous.link;
     this.state = state;
     if (wasConnected && state.state !== "connected") {
       this.unrouted = [];
       for (const dropped of [...this.dropWaiters]) dropped();
       this.dropWaiters.clear();
     }
-    if (state.state === "connected" && !wasConnected) {
+    if (newLink) this.unrouted = [];
+    if (state.state === "connected" && (!wasConnected || newLink)) {
       // A new E2EE session: every server-side subscription is gone.
       for (const subscription of this.subscriptions.values()) {
         subscription.serverId = undefined;

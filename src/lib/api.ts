@@ -531,7 +531,13 @@ export const api = {
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
-  cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * A paired machine's connection (PRO-345, docs/MACHINES.md "As built
+   * (PRO-345)"): one per machine, so a second call returns the same id. It is
+   * used like a cloud one (`cloudRemoteSend`, `cloudRemoteDetach`, `cloud_remote_event`).
+   * Refused with `machine_unknown` or `machine_token_missing`.
+   */
+  machineRemoteAttach: (machineId: string) => invoke<string>("machine_remote_attach", { machineId }),
   /**
    * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
    * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
@@ -3033,10 +3039,11 @@ export interface CloudProviderResource {
 /**
  * Where a workspace's operations run. Local workspaces keep using the Tauri
  * commands above unchanged; a cloud workspace is reached through its remote
- * runtime over the relay (`terminalx-workspace-rpc/1`), never by forwarding
- * desktop IPC.
+ * runtime over the relay (`terminalx-workspace-rpc/1`), and a paired machine
+ * through its own connection (direct first, relay fallback), never by
+ * forwarding desktop IPC.
  */
-export type WorkspaceTarget = { kind: "local" } | CloudWorkspaceTarget;
+export type WorkspaceTarget = { kind: "local" } | CloudWorkspaceTarget | MachineWorkspaceTarget;
 
 export interface CloudWorkspaceTarget {
   kind: "cloud";
@@ -3046,10 +3053,28 @@ export interface CloudWorkspaceTarget {
   runtimeGeneration?: number;
 }
 
+/**
+ * A machine paired by code (docs/MACHINES.md decision 1). One connection per
+ * machine: `projectId` names a project there (PRO-346) but shares the
+ * machine's connection, so it is not part of the key.
+ */
+export interface MachineWorkspaceTarget {
+  kind: "machine";
+  machineId: string;
+  projectId?: string;
+}
+
 export const LOCAL_WORKSPACE: WorkspaceTarget = { kind: "local" };
 
 export function workspaceTargetKey(target: WorkspaceTarget): string {
-  return target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`;
+  switch (target.kind) {
+    case "local":
+      return "local";
+    case "machine":
+      return `machine:${target.machineId}`;
+    default:
+      return `cloud:${target.organizationId}:${target.workspaceId}`;
+  }
 }
 
 type RemoteEvent =
@@ -3067,6 +3092,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   /** Events that arrive before the attach call returns our id. */
   private early: RemoteEvent[] = [];
   private current: WorkspaceConnectionState["state"] = "idle";
+
+  constructor(private readonly machine = false) {}
 
   /** Listen first, so nothing the native side emits right after attaching is missed. */
   async listen(): Promise<void> {
@@ -3105,6 +3132,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   }
 
   activate(activation: Activation): Promise<void> {
+    // A machine has no compute to wake: its owner reconnects on its own.
+    if (this.machine) return Promise.resolve();
     return this.connectionId ? api.cloudRemoteActivate(this.connectionId, activation) : Promise.resolve();
   }
 
@@ -3149,9 +3178,9 @@ const connections = new Map<string, Promise<CloudWorkspaceConnection>>();
 
 /**
  * The transport for a workspace target: null for a local workspace (use the
- * Tauri commands), a supervised remote connection for a cloud one. One
- * connection per target, even for concurrent callers; `connect` never wakes
- * suspended compute.
+ * Tauri commands), a supervised remote connection for a cloud workspace or a
+ * paired machine. One connection per target (per machine, whatever its
+ * project), even for concurrent callers; `connect` never wakes suspended compute.
  */
 export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect"): Promise<CloudWorkspaceConnection | null> {
   if (target.kind === "local") return null;
@@ -3162,7 +3191,12 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
     if (activation === "wake") await connection.activate("wake");
     return connection;
   }
-  const pending = adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
+  // A machine's connection is the machine's, whatever project asked for it;
+  // it has no compute to wake, so `activation` means nothing to it.
+  const pending =
+    target.kind === "machine"
+      ? adopt(key, { kind: "machine", machineId: target.machineId }, (transport) => api.machineRemoteAttach(target.machineId).then((id) => (transport.bind(id), id)), true)
+      : adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
   connections.set(key, pending);
   pending.catch(() => {
     if (connections.get(key) === pending) connections.delete(key);
@@ -3170,23 +3204,13 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
   return pending;
 }
 
-/** Debug builds: a cloud session from a local runtime's pairing code. */
-export async function devWorkspaceConnection(pairingCode: string): Promise<CloudWorkspaceConnection> {
-  const key = `dev:${crypto.randomUUID()}`;
-  const pending = adopt(key, { kind: "cloud", organizationId: "dev", workspaceId: key }, (transport) =>
-    api.cloudRemoteAttachDev(pairingCode).then((id) => (transport.bind(id), id)),
-  );
-  connections.set(key, pending);
-  pending.catch(() => connections.delete(key));
-  return pending;
-}
-
 async function adopt(
   key: string,
   target: WorkspaceTarget,
   attach: (transport: NativeWorkspaceTransport) => Promise<string>,
+  machine = false,
 ): Promise<CloudWorkspaceConnection> {
-  const transport = new NativeWorkspaceTransport();
+  const transport = new NativeWorkspaceTransport(machine);
   await transport.listen();
   const client = new WorkspaceRpcClient(transport);
   try {
@@ -3209,7 +3233,9 @@ async function adopt(
   self = connections.get(key);
   client.onState((state) => {
     // Stopped for an identity change: drop it so nothing reuses the old one.
-    if (state.state === "stopped") connection.close();
+    // A machine's stop is "access removed": its owner keeps the state and
+    // "Try again" (`machines_reconnect`) resumes the same connection.
+    if (state.state === "stopped" && !machine) connection.close();
   });
   return connection;
 }
@@ -3228,11 +3254,17 @@ export function closeWorkspaceConnection(target: WorkspaceTarget): void {
   void pending.then((connection) => connection.close()).catch(() => undefined);
 }
 
-/** Drop every cloud connection and what it cached, e.g. on sign-out or an organization switch. */
+/**
+ * Drop every cloud connection and what it cached, e.g. on sign-out or an
+ * organization switch. A machine's connection stays: it belongs to the
+ * pairing, not the account (the native side stops using the relay itself).
+ */
 export function closeWorkspaceConnections(): void {
-  const all = [...connections.values()];
-  connections.clear();
-  for (const pending of all) void pending.then((connection) => connection.close()).catch(() => undefined);
+  for (const [key, pending] of [...connections]) {
+    if (key.startsWith("machine:")) continue;
+    connections.delete(key);
+    void pending.then((connection) => connection.close()).catch(() => undefined);
+  }
 }
 
 /** Drop one Organization's cloud connections only: the user left it (CS-18). */

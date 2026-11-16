@@ -7,6 +7,7 @@ import { minutesSeconds, useSecondsLeft } from "@/components/pairing/pairingText
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { bootMachineHost, createMachineCode, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { refreshPairedMachines } from "@/lib/machineConnections";
 import type { MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import { AddMachineDialog } from "./AddMachineDialog";
 import { PlatformIcon, machineSummary, osLabel, shortDate, soft } from "./machineText";
@@ -182,7 +183,11 @@ function YourMachines() {
         </ul>
       )}
       {machines && machines.length === 0 && !error && <p className="mt-3 text-[12.5px] text-faint">No machines yet.</p>}
-      <AddMachineDialog open={adding} onOpenChange={setAdding} onPaired={() => void load()} />
+      <AddMachineDialog open={adding} onOpenChange={setAdding} onPaired={() => {
+        void load();
+        // The sidebar lists it, and attaches it while Machines is on.
+        void refreshPairedMachines();
+      }} />
     </>
   );
 }

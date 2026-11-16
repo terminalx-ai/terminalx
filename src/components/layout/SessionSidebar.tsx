@@ -66,7 +66,7 @@ import { StatusMarkIcon } from "@/components/ui/SessionStatus";
 import { statusText } from "@terminalx/portable/sessionStatus";
 import { useSessionRowStatus } from "@/lib/sessionRowStatus";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
-import { DevelopmentSection } from "@/components/cloud/DevRuntime";
+import { MachinesSection } from "@/components/machines/MachinesSection";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
@@ -357,8 +357,8 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
             )}
           </>
         )}
+        <MachinesSection />
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
-        <DevelopmentSection />
       </nav>
       </ShowAgents.Provider>
       {moving && (
