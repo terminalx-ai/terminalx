@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
-import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+import type { AccountStatus, CloudWorkspaceListItem, CloudWorkspaceQuota } from "@/lib/api";
 
 // CS-13 subset (PRO-61): `+` on a cloud project. Reuse the latest running
 // workspace, else wake a stopped one exactly once, else create one only after
@@ -121,7 +121,7 @@ function signIn() {
   };
 }
 
-async function place(workspaces: CloudWorkspaceListItem[], quota: { used: number; limit: number } | null = { used: workspaces.length, limit: 2 }) {
+async function place(workspaces: CloudWorkspaceListItem[], quota: CloudWorkspaceQuota | null = { used: workspaces.length, limit: 2 }) {
   await catalog.ingestCloudList({ workspaces, quota }, ORG);
 }
 
@@ -424,6 +424,19 @@ describe("new session in a cloud project", () => {
     const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
     await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_workspace_quota_exceeded" });
     expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  it("with no limit, is never refused before the server is asked, however many are in use (PRO-371)", async () => {
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    // The server leaves `limit` out; a null means the same. Compared as numbers, 60 >= null would refuse every create.
+    for (const quota of [{ used: 60, running: { used: 60 }, total: { used: 75 } }, { used: 60, limit: null, running: { used: 60, limit: null } }]) {
+      await place([], quota);
+      const prepared = await flow.prepareCloudCreate(target, request);
+      expect(prepared.quota).toEqual(quota);
+      expect(prepared.quote.activeHourlyMicros).toBe(120_000);
+    }
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledTimes(2);
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 

@@ -580,6 +580,17 @@ describe("saved cache", () => {
     expect(JSON.stringify(written)).not.toContain("error");
   });
 
+  it("reads a saved quota without a limit as no limit, and one it cannot read as none (PRO-371)", () => {
+    const saved = (quota: unknown) => parseCatalog({ version: 1, orgs: { [ORG]: { workspaces: [item("w1")], quota } } })!.orgs[ORG].quota;
+    // As a server since PRO-371 lists an organization with no limit: the key is left out.
+    expect(saved({ used: 60, running: { used: 60 }, total: { used: 75 } })).toEqual({ used: 60 });
+    expect(saved({ used: 60, limit: null })).toEqual({ used: 60 });
+    expect(saved({ used: 1, limit: 2 })).toEqual({ used: 1, limit: 2 });
+    expect(saved({ used: 1, limit: "2" })).toBeNull();
+    expect(saved({ limit: 2 })).toBeNull();
+    expect(saved(undefined)).toBeNull();
+  });
+
   it("reads nothing it cannot trust", () => {
     expect(parseCatalog(null)).toBeNull();
     expect(parseCatalog({ version: 2, orgs: {} })).toBeNull();

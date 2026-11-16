@@ -34,6 +34,7 @@ const view = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<Comput
   canEdit: true,
   counts: { workspaces: 3, running: 2 },
   workspaceCeiling: 10,
+  noLimitAware: false,
   runningWorkspaceCeiling: null,
   createBudgetDefaults: null,
   contextRevision: "rev-1",
@@ -225,7 +226,7 @@ it("shows the running limit in force, never \"no running limit\" (saas PRO-76)",
   expect(field.value).toBe("");
   expect(field.placeholder).toBe("3 (default)");
   fireEvent.change(field, { target: { value: "5" } });
-  expect(screen.getByText(/or 3, the most this TerminalX service allows/)).toBeTruthy();
+  expect(screen.getByText("Running at once must be no larger than 3, the most this TerminalX service allows.")).toBeTruthy();
   expect((screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
@@ -241,9 +242,9 @@ it("sets, clears and validates the running cap per person, where the server has 
   api.updatePolicy.mockResolvedValue(view({}, { version: 4, maxRunningWorkspacesPerMember: 1 }));
   render(<OrganizationCompute contextRevision="account-1" />);
   const field = (await screen.findByLabelText("Maximum running workspaces per person")) as HTMLInputElement;
-  // No cap by default: the organization's limit is the only one.
+  // No limit by default: the organization's limit is the only one.
   expect(field.value).toBe("");
-  expect(field.placeholder).toBe("No cap");
+  expect(field.placeholder).toBe("No limit");
   // More than the organization keeps in total is refused before sending.
   fireEvent.change(field, { target: { value: "9" } });
   expect((screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
@@ -323,4 +324,248 @@ it("shows no Machine0 limits row while the server hides Machine0, unless the pol
   api.policy.mockResolvedValue(view({}, { allowedMachineClasses: { machine0: ["small"] } }));
   render(<OrganizationCompute contextRevision="account-1" />);
   expect(((await screen.findByLabelText("Allowed sizes for Machine0")) as HTMLInputElement).value).toBe("small");
+});
+
+// What a server since PRO-371 sends for an organization that set nothing:
+// every limit null, no ceilings, and no operator create budgets.
+const unlimited = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<ComputePolicyView["policy"]> = {}) =>
+  view(
+    { workspaceCeiling: null, noLimitAware: true, runningWorkspaceCeiling: null, createBudgetDefaults: { perHour: null, perDay: null }, counts: { workspaces: 60, running: 3 }, ...overrides },
+    {
+      maxWorkspaces: null,
+      maxRunningWorkspaces: null,
+      maxRunningWorkspacesPerMember: null,
+      maxCreatesPerMemberPerHour: null,
+      maxCreatesPerMemberPerDay: null,
+      maxIdleSuspendMinutes: null,
+      allowedMachineClasses: {},
+      ...policy,
+    },
+  );
+
+const LIMIT_FIELDS = [
+  "Maximum workspaces",
+  "Maximum running workspaces",
+  "Maximum running workspaces per person",
+  "Maximum workspaces one person may create per hour",
+  "Maximum workspaces one person may create per day",
+];
+const field = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
+const type = (label: string, value: string) => fireEvent.change(field(label), { target: { value } });
+const saveButton = () => screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement;
+
+it("shows every limit of a new organization as \"No limit\" and saves an empty field as none (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  api.updatePolicy.mockResolvedValue(unlimited({}, { version: 4 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  for (const label of LIMIT_FIELDS) expect([label, field(label).value, field(label).placeholder]).toEqual([label, "", "No limit"]);
+  // Past the old 50 and 2, and said without a limit.
+  const status = screen.getByLabelText("Compute status").textContent;
+  expect(status).toContain("Workspaces 60, no limit");
+  expect(status).toContain("Running 3, no limit");
+  expect(status).not.toContain(" of ");
+  // Idle suspend is as it was.
+  expect((screen.getByLabelText("Maximum idle suspend") as HTMLSelectElement).selectedOptions[0].textContent).toBe("No limit");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(saveButton().disabled).toBe(false);
+  fireEvent.click(saveButton());
+  await waitFor(() =>
+    expect(api.updatePolicy).toHaveBeenCalledWith(
+      {
+        expectedVersion: 3,
+        maxWorkspaces: null,
+        maxRunningWorkspaces: null,
+        maxRunningWorkspacesPerMember: null,
+        maxCreatesPerMemberPerHour: null,
+        maxCreatesPerMemberPerDay: null,
+        maxIdleSuspendMinutes: null,
+        allowedMachineClasses: {},
+        allowedLocations: {},
+        noLimitAware: true,
+      },
+      "rev-1",
+    ),
+  );
+});
+
+it("marks a save to a server that takes no limit, so a workspace limit of 1 is kept as typed (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  api.updatePolicy.mockResolvedValue(unlimited({}, { version: 4, maxWorkspaces: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  type("Maximum workspaces", "1");
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ maxWorkspaces: 1, noLimitAware: true }), "rev-1"));
+});
+
+it("sends no marker to a server before PRO-371, which refuses a key it does not know", async () => {
+  // That server always reports a ceiling.
+  api.policy.mockResolvedValue(view({ workspaceCeiling: 50, runningWorkspaceCeiling: 2 }, { maxWorkspaces: 50 }));
+  api.updatePolicy.mockResolvedValue(view({ workspaceCeiling: 50, runningWorkspaceCeiling: 2 }, { version: 4, maxWorkspaces: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  type("Maximum workspaces", "1");
+  type("Maximum running workspaces", "1");
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalled());
+  expect(api.updatePolicy.mock.calls[0][0]).toMatchObject({ maxWorkspaces: 1 });
+  expect(api.updatePolicy.mock.calls[0][0]).not.toHaveProperty("noLimitAware");
+});
+
+it("saves 500 workspaces and 100 running at once, and shows them again (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  api.updatePolicy.mockResolvedValue(unlimited({}, { version: 4, maxWorkspaces: 500, maxRunningWorkspaces: 100, maxCreatesPerMemberPerHour: 600 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  type("Maximum workspaces", "500");
+  type("Maximum running workspaces", "100");
+  // Above the old 500 create budget, too.
+  type("Maximum workspaces one person may create per hour", "600");
+  expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(saveButton());
+  await waitFor(() =>
+    expect(api.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxWorkspaces: 500, maxRunningWorkspaces: 100, maxRunningWorkspacesPerMember: null, maxCreatesPerMemberPerHour: 600, maxCreatesPerMemberPerDay: null }),
+      "rev-1",
+    ),
+  );
+  await waitFor(() => expect(screen.getByLabelText("Compute status").textContent).toContain("Workspaces 60 of 500"));
+  expect(screen.getByLabelText("Compute status").textContent).toContain("Running 3 of 100");
+  expect([field("Maximum workspaces").value, field("Maximum running workspaces").value]).toEqual(["500", "100"]);
+});
+
+it("clears a limit an admin had set: the emptied field is saved as no limit (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited({}, { maxWorkspaces: 500, maxRunningWorkspaces: 100 }));
+  api.updatePolicy.mockResolvedValue(unlimited({}, { version: 4 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  expect(field("Maximum workspaces").value).toBe("500");
+  type("Maximum workspaces", "");
+  type("Maximum running workspaces", "");
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ maxWorkspaces: null, maxRunningWorkspaces: null }), "rev-1"));
+  await waitFor(() => expect(screen.getByLabelText("Compute status").textContent).toContain("Workspaces 60, no limit"));
+});
+
+it("refuses only numbers that are not whole or are below 1, and says which field (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  for (const typed of ["0", "2.5", "-3", "ten"]) {
+    type("Maximum workspaces", typed);
+    expect(screen.getByRole("alert").textContent, typed).toBe("Workspaces must be a whole number of 1 or more, or blank for no limit.");
+    expect(field("Maximum workspaces").getAttribute("aria-invalid")).toBe("true");
+    expect(saveButton().disabled).toBe(true);
+  }
+  // The other fields are not marked for it.
+  expect(field("Maximum running workspaces").getAttribute("aria-invalid")).toBeNull();
+  type("Maximum workspaces", "51");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(field("Maximum workspaces").getAttribute("aria-invalid")).toBeNull();
+  expect(saveButton().disabled).toBe(false);
+  // Only what the server cannot store is too large.
+  type("Maximum workspaces", "2147483647");
+  expect(screen.queryByRole("alert")).toBeNull();
+  type("Maximum workspaces", "2147483648");
+  expect(screen.getByRole("alert").textContent).toBe("Workspaces is too large to store. The most is 2147483647.");
+  // A refused form is not sent, by the button or by Enter.
+  fireEvent.submit(screen.getByRole("form", { name: "Compute limits" }));
+  expect(api.updatePolicy).not.toHaveBeenCalled();
+});
+
+it("compares two limits only when both are set (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  // Running at once, with no workspace limit to be larger than.
+  type("Maximum running workspaces", "100");
+  type("Maximum running workspaces per person", "9");
+  type("Maximum workspaces one person may create per hour", "30");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(saveButton().disabled).toBe(false);
+
+  type("Maximum workspaces", "50");
+  expect(screen.getByRole("alert").textContent).toBe("Running at once must be no larger than the workspace limit.");
+  expect(field("Maximum running workspaces").getAttribute("aria-invalid")).toBe("true");
+  expect(saveButton().disabled).toBe(true);
+  type("Maximum running workspaces", "50");
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  type("Maximum workspaces", "4");
+  type("Maximum running workspaces", "");
+  expect(screen.getByRole("alert").textContent).toBe("Running per person must be no larger than the workspace limit.");
+  type("Maximum workspaces", "");
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  type("Maximum workspaces one person may create per day", "20");
+  expect(screen.getByRole("alert").textContent).toBe("New per person, per hour must be no larger than per day.");
+  expect([field("Maximum workspaces one person may create per hour").getAttribute("aria-invalid"), field("Maximum workspaces one person may create per day").getAttribute("aria-invalid")]).toEqual(["true", "true"]);
+  type("Maximum workspaces one person may create per day", "30");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(saveButton().disabled).toBe(false);
+});
+
+it("keeps the operator's caps where the operator set them (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited({ runningWorkspaceCeiling: 10, createBudgetDefaults: { perHour: 10, perDay: null } }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  // Empty means the operator's number where there is one, and no limit where there is not.
+  expect(field("Maximum workspaces").placeholder).toBe("No limit");
+  expect(field("Maximum running workspaces").placeholder).toBe("10 (default)");
+  expect(field("Maximum workspaces one person may create per hour").placeholder).toBe("10 (default)");
+  expect(field("Maximum workspaces one person may create per day").placeholder).toBe("No limit");
+  const status = screen.getByLabelText("Compute status").textContent;
+  expect(status).toContain("Workspaces 60, no limit");
+  expect(status).toContain("Running 3 of 10");
+  type("Maximum workspaces", "500");
+  type("Maximum running workspaces", "10");
+  expect(screen.queryByRole("alert")).toBeNull();
+  type("Maximum running workspaces", "11");
+  expect(screen.getByRole("alert").textContent).toBe("Running at once must be no larger than 10, the most this TerminalX service allows.");
+  expect(saveButton().disabled).toBe(true);
+});
+
+it("on a server before PRO-371, still needs a workspace limit and offers no \"No limit\" for it", async () => {
+  // As that server answers: 50 workspaces under a ceiling of 50, 2 running, 10 and 20 a person.
+  api.policy.mockResolvedValue(
+    view(
+      { workspaceCeiling: 50, runningWorkspaceCeiling: 2, createBudgetDefaults: { perHour: 10, perDay: 20 } },
+      { maxWorkspaces: 50, maxRunningWorkspaces: null, maxRunningWorkspacesPerMember: null, maxCreatesPerMemberPerHour: null, maxCreatesPerMemberPerDay: null },
+    ),
+  );
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  expect([field("Maximum workspaces").value, field("Maximum workspaces").placeholder]).toEqual(["50", ""]);
+  expect(field("Maximum running workspaces").placeholder).toBe("2 (default)");
+  expect(field("Maximum running workspaces per person").placeholder).toBe("No limit");
+  expect(field("Maximum workspaces one person may create per hour").placeholder).toBe("10 (default)");
+  expect(field("Maximum workspaces one person may create per day").placeholder).toBe("20 (default)");
+  expect(screen.getByLabelText("Compute status").textContent).toContain("Workspaces 3 of 50");
+  expect(screen.getByLabelText("Compute status").textContent).toContain("Running 2 of 2");
+  expect(saveButton().disabled).toBe(false);
+  for (const typed of ["", "51", "500"]) {
+    type("Maximum workspaces", typed);
+    expect(screen.getByRole("alert").textContent, typed).toBe("Workspaces must be a whole number from 1 to 50, the most this TerminalX service allows.");
+    expect(saveButton().disabled).toBe(true);
+  }
+});
+
+it("tells a member only the limits there are (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited({ canEdit: false }));
+  const { unmount } = render(<OrganizationCompute contextRevision="account-1" />);
+  const limits = await screen.findByLabelText("Compute limits");
+  expect(limits.textContent).toBe("Only owners and admins can change compute limits.");
+  expect(screen.getByLabelText("Compute status").textContent).toContain("Workspaces 60, no limit");
+  expect(screen.getByLabelText("Compute status").textContent).toContain("Running 3, no limit");
+  unmount();
+
+  // Only an hour is limited: by the organization, or by the operator where the organization set nothing.
+  api.policy.mockResolvedValue(unlimited({ canEdit: false }, { maxCreatesPerMemberPerHour: 1 }));
+  const second = render(<OrganizationCompute contextRevision="account-1" />);
+  expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can create 1 workspace an hour.");
+  second.unmount();
+  api.policy.mockResolvedValue(unlimited({ canEdit: false, createBudgetDefaults: { perHour: null, perDay: 20 } }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can create 20 workspaces a day.");
 });

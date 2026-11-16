@@ -35,7 +35,8 @@ export interface PreparationOffer {
   quote: CloudWorkspaceQuote;
   idleSuspendMinutes: number;
   running: number;
-  runningLimit: number;
+  /** The running limit in force; null where the organization has none (PRO-371). */
+  runningLimit: number | null;
   /** Agents the organization has a login for; the task needs one. */
   agents: AgentLoginProvider[];
   contextRevision: string;
@@ -61,14 +62,14 @@ const serverCode = (failure: unknown): string => {
 
 /**
  * What starting would cost and whether it may start at all. It prices a
- * machine; it starts none. At the organization's running limit it refuses
- * here, before a quote is asked for.
+ * machine; it starts none. At the organization's running limit, where it has
+ * one, it refuses here, before a quote is asked for.
  */
 export async function offerPreparation(provider: CloudWorkspaceProviderId): Promise<PreparationOffer> {
   const [view, setup, logins] = await Promise.all([organizationCompute.policy(), api.cloudWorkspaceSetup(provider), api.cloudAgentLogins()]);
   const runningLimit = effectiveRunningLimit(view);
   if (view.policy.provisioningPaused) throw new PreparationError("provisioning-paused", "New cloud machines are paused for this organization.");
-  if (view.counts.running >= runningLimit)
+  if (runningLimit !== null && view.counts.running >= runningLimit)
     throw new PreparationError("running-limit", `The organization is at its running limit (${view.counts.running} of ${runningLimit} running). Stop a workspace first.`);
   // A login that was revoked or has stopped working would only fail on the machine, after it was paid for.
   const agents = logins.credentials.filter((login) => (login.state ?? "connected") === "connected").map((login) => login.provider);

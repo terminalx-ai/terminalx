@@ -228,7 +228,9 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
               {stage.offer.quote.pricing === "estimate" ? " (an estimate)" : ""}, plus what the agent's own usage costs.
             </li>
             <li>
-              It counts toward the running limit: {stage.offer.running} of {stage.offer.runningLimit} are running now.
+              {stage.offer.runningLimit === null
+                ? `The organization has no running limit: ${stage.offer.running} ${stage.offer.running === 1 ? "is" : "are"} running now.`
+                : `It counts toward the running limit: ${stage.offer.running} of ${stage.offer.runningLimit} are running now.`}
             </li>
             <li>
               It is stopped when the agent and the checks have finished, when you cancel, or after {PREPARATION_LIMIT_MINUTES} minutes, whichever comes first. The server enforces the {PREPARATION_LIMIT_MINUTES} minutes even if this app is closed.

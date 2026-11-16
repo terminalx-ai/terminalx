@@ -215,7 +215,7 @@ function OrganizationSection({
 
   const actions = (
     <>
-      {/* Stays beside the header's actions: its tooltip says how many run, and the limit. */}
+      {/* Stays beside the header's actions: its tooltip says how many run, and the limit where the organization has one (PRO-371: only the count where it has none). */}
       {usage && (
         <WithTooltip label={usage.card.replace(/\n/g, " · ")}>
           <span
