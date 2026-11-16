@@ -97,6 +97,16 @@ function tabInputs(session: SessionSummary): StatusTab[] {
   return session.tabs.map((tab, index) => sent && sent.length === session.tabs.length ? sent[index] : { status: tab.status });
 }
 
+/**
+ * A tab alone: only its agent's state, as the rules read one tab with nothing
+ * about the branch. A tab whose turn has finished shows Done's tick (22.04),
+ * where the rules, which read the branch for that, would leave it idle.
+ */
+function tabRowStatus(fact: StatusTab): RowStatus {
+  const status = rowStatus(sessionStatus({ tabs: [fact] }));
+  return status.mark === "idle" && fact.status === "completed" ? { ...status, mark: "done" } : status;
+}
+
 function chatRow(session: SessionSummary): ChatRow {
   const status = rowStatus(sessionStatus(statusInput(session)));
   const facts = tabInputs(session);
@@ -104,8 +114,7 @@ function chatRow(session: SessionSummary): ChatRow {
   const tabs = session.tabs.map((tab, index): TabRow => ({
     id: tab.id,
     name: chats[index].name,
-    // A tab alone: only its agent's state, as the rules read one tab with nothing about the branch.
-    status: rowStatus(sessionStatus({ tabs: [facts[index]] })),
+    status: tabRowStatus(facts[index]),
     time: parsedTime(tab.modified),
   }));
   // The tab a tap opens: the most urgent by the same rules, else the first.
@@ -196,6 +205,17 @@ export function shortTime(time: number, now = Date.now()): string {
   if (hours < 24 * 6) return date.toLocaleDateString(undefined, { weekday: "short" });
   if (date.getFullYear() === new Date(now).getFullYear()) return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   return date.toLocaleDateString(undefined, { year: "2-digit", month: "numeric", day: "numeric" });
+}
+
+/**
+ * When, said after a status where there is room (the Cloud list, 22.06):
+ * as `shortTime` within the day, then "2 days ago" for the week, then the date.
+ */
+export function agoTime(time: number, now = Date.now()): string {
+  if (!time) return "";
+  const days = Math.floor((now - time) / 86_400_000);
+  if (days < 1 || days >= 7) return shortTime(time, now);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
 /** When, as VoiceOver should say it: "active now", "active 5 minutes ago", then the day. */

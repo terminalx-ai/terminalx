@@ -79,13 +79,13 @@ export default function SettingsScreen() {
   const machineName = machine?.name ?? (app.activeHost ? hostDisplayName(app.activeHost) : null);
 
   return <Screen title="Settings">
-    <Card style={styles.block}>{user ? <>
-      <View style={styles.accountRow}>
-        <View style={[styles.avatar, { backgroundColor: palette.raised }]}><Text style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>
-        <View style={styles.flex}><Text style={[styles.title, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
-      </View>
-      <Button label="Sign out" kind="secondary" onPress={() => void app.signOut()} />
-    </> : <><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</>}</Card>
+    {user ? <Card>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Account, ${who}`} onPress={() => router.push("/account")} style={({ pressed }) => [styles.accountRow, pressed && { backgroundColor: palette.raised }]}>
+        <View style={[styles.avatar, { backgroundColor: palette.selected }]}><Text style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>
+        <View style={styles.flex}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text numberOfLines={1} style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
+        <ChevronRight size={18} color={palette.faint} />
+      </Pressable>
+    </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</Card>}
 
     <SectionTitle>Notifications</SectionTitle>
     <Card>
@@ -97,9 +97,9 @@ export default function SettingsScreen() {
     <View style={styles.themeGrid}>{THEMES.map((theme) => {
       const colours = themePalette(theme, scheme);
       const selected = theme === name;
-      return <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`${theme} theme`} accessibilityState={{ selected }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: palette.card, borderColor: selected ? palette.accent : palette.border }]}>
+      return <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`${theme} theme`} accessibilityState={{ selected }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: palette.raised, borderColor: selected ? palette.accent : palette.border }]}>
         <View testID={`theme-preview-${theme}`} style={[styles.swatch, { backgroundColor: colours.page, borderColor: palette.border }]}><View style={[styles.swatchAccent, { backgroundColor: colours.accent }]} /></View>
-        <View style={styles.themeName}><Text style={[styles.rowTitle, { color: palette.ink }]}>{theme}</Text>{selected ? <Check size={15} color={palette.accent} /> : null}</View>
+        <View style={styles.themeName}><Text style={[styles.themeLabel, { color: palette.ink }]}>{theme}</Text>{selected ? <Check size={15} color={palette.accent} /> : null}</View>
       </Pressable>;
     })}</View>
 
@@ -112,7 +112,7 @@ export default function SettingsScreen() {
     <Card>
       <LinkRow label="How your data stays on your Mac" onPress={() => router.push("/privacy")} />
       <LinkRow label="Connection log" divided onPress={() => router.push("/connection-log")} />
-      <View style={[styles.linkRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Text style={[styles.rowTitle, styles.flex, { color: palette.ink }]}>Version</Text><Text selectable style={[styles.detail, { color: palette.muted }]}>{appVersion()}</Text></View>
+      <View style={[styles.linkRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><Text style={[styles.linkLabel, styles.flex, { color: palette.ink }]}>Version</Text><Text selectable style={[styles.value, { color: palette.muted }]}>{appVersion()}</Text></View>
     </Card>
   </Screen>;
 }
@@ -120,26 +120,29 @@ export default function SettingsScreen() {
 function LinkRow({ label, divided, onPress }: { label: string; divided?: boolean; onPress(): void }) {
   const { palette } = useTheme();
   return <Pressable accessibilityRole="link" onPress={onPress} style={({ pressed }) => [styles.linkRow, divided && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.raised }]}>
-    <Text style={[styles.rowTitle, styles.flex, { color: palette.ink }]}>{label}</Text><ChevronRight size={18} color={palette.faint} />
+    <Text style={[styles.linkLabel, styles.flex, { color: palette.ink }]}>{label}</Text><ChevronRight size={18} color={palette.faint} />
   </Pressable>;
 }
 
 const styles = StyleSheet.create({
   block: { padding: 16, gap: 10 },
-  accountRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  accountRow: { minHeight: 64, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
   avatar: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
-  avatarText: { fontSize: 18, fontWeight: "600" },
+  avatarText: { fontSize: 17, fontWeight: "600" },
   title: { fontSize: 17, fontWeight: "700" },
-  rowTitle: { fontSize: 15, fontWeight: "600" },
-  detail: { fontSize: 13, lineHeight: 19 },
+  rowTitle: { fontSize: 16, fontWeight: "600" },
+  linkLabel: { fontSize: 16 },
+  themeLabel: { fontSize: 14 },
+  value: { fontSize: 14 },
+  detail: { fontSize: 13, lineHeight: 18 },
   flex: { flex: 1 },
   themeGrid: { flexDirection: "row", gap: 8 },
-  theme: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 7, gap: 7 },
+  theme: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 8, gap: 6 },
   swatch: { height: 34, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, justifyContent: "flex-end", padding: 6 },
-  swatchAccent: { width: 20, height: 4, borderRadius: 2 },
+  swatchAccent: { width: 22, height: 6, borderRadius: 3 },
   themeName: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 2 },
-  settingRow: { minHeight: 72, padding: 15, flexDirection: "row", alignItems: "center", gap: 12 },
-  noteRow: { flexDirection: "row", gap: 10, alignItems: "flex-start", paddingHorizontal: 15, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth },
-  linkRow: { minHeight: 50, paddingHorizontal: 15, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 10 },
+  settingRow: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
+  noteRow: { minHeight: 44, flexDirection: "row", gap: 12, alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  linkRow: { minHeight: 48, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 10 },
   macError: { paddingHorizontal: 15, paddingBottom: 12 },
 });
