@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
-import { branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
+import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
   id, title: `Chat ${id}`, project: "terminalx", worktree: `branch-${id}`, modified: "2026-11-07T10:00:00Z",
@@ -191,6 +191,17 @@ describe("when, as a chat list says it", () => {
     expect(shortTime(now - 3 * 3_600_000, now)).toBe("3h");
     expect(shortTime(now - 3 * 86_400_000, now)).toMatch(/^\p{L}+/u);
     expect(shortTime(0, now)).toBe("");
+  });
+
+  it("says days as days ago where there is room, as the Cloud list does (22.06)", () => {
+    const now = Date.UTC(2026, 10, 16, 10, 25);
+    expect(agoTime(now - 6 * 60_000, now)).toBe("6m");
+    expect(agoTime(now - 5 * 3_600_000, now)).toBe("5h");
+    expect(agoTime(now - 30 * 3_600_000, now)).toBe("1 day ago");
+    expect(agoTime(now - 2 * 86_400_000, now)).toBe("2 days ago");
+    expect(agoTime(now - 3 * 86_400_000 - 60_000, now)).toBe("3 days ago");
+    expect(agoTime(now - 8 * 86_400_000, now)).toBe(shortTime(now - 8 * 86_400_000, now));
+    expect(agoTime(0, now)).toBe("");
   });
 
   it("says the time in words for VoiceOver", () => {

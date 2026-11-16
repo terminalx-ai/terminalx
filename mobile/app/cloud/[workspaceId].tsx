@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { Play, Send, Square, SquareDashed, Users } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
@@ -12,6 +13,8 @@ import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLi
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { GlassIconButton } from "@mobile/ui/glass";
+import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
@@ -109,18 +112,11 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const presence = presenceLine(snapshot.collab.participants, snapshot.collab.userId, (id) => snapshot.tabs.find((entry) => entry.tabId === id)?.title ?? null, nameOf);
 
   return <>
-    <Stack.Screen options={{
-      title,
-      headerTitle: () => <View accessibilityRole="header" style={styles.headerTitle}>
-        <Text numberOfLines={1} style={[styles.headerName, { color: palette.ink }]}>{title}</Text>
-        {/* The state and the role, as plain words: nothing here is a button. */}
-        <View style={styles.headerLine}>
-          <StatusDot color={line.tone === "live" ? palette.success : line.tone === "warn" ? palette.warning : palette.faint} />
-          <Text testID="workspace-state-line" accessibilityLabel={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} numberOfLines={1} style={[styles.headerState, { color: palette.muted }]}>{subtitle}</Text>
-        </View>
-      </View>,
-      headerRight: sharing ? () => <Pressable accessibilityRole="button" accessibilityLabel="Sharing" hitSlop={4} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={({ pressed }) => [styles.sharing, pressed && { opacity: 0.6 }]}><Users size={21} color={palette.ink} strokeWidth={1.8} /></Pressable> : undefined,
-    }} />
+    {/* The bar a session has (22.06): back, the title over its state and the person's role as plain words, and Sharing. */}
+    <Stack.Screen options={{ title, headerShown: false }} />
+    <ScreenHeader title={title} onBack={() => router.back()}
+      subtitle={<HeaderLine testID="workspace-state-line" text={subtitle} label={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} />}
+      trailing={sharing ? <GlassIconButton label="Sharing" size={40} icon={<Users size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} /> : null} />
     {/* A warning says more than fits under the title, here, with what can be done about it. */}
     {line.tone === "warn" ? <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: `${palette.warning}18` }]}>
       <StatusDot color={palette.warning} />
@@ -133,8 +129,8 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} />
       : <View style={styles.flex}>
-        <View style={styles.flex}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
-          : stopped || starting ? <EmptyState icon={(color) => <SquareDashed size={28} color={color} />} title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
+        <View style={[styles.flex, styles.centred]}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
+          : stopped || starting ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
         {startBarShown(listedState, starting) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
@@ -155,6 +151,7 @@ function startBarShown(listedState: string | null, starting: boolean): boolean {
  */
 function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { catalog: CloudCatalog; orgId: string; workspaceId: string; role: CloudRole | null; creatorId: string | null; starting: boolean }) {
   const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
   const nameOf = useNames(catalog);
   const [asking, setAsking] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -172,14 +169,15 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
       }).finally(() => setAsking(false));
     } },
   ]);
-  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
+  // In the composer's place, as a card like it (22.06).
+  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : "This workspace is stopped"}</Text>
       <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
       {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
     </View>
-    {mayStart ? <Button label={changing ? "Starting…" : "Start"} icon={changing ? undefined : (color) => <Play size={16} color={color} />} disabled={changing} onPress={start} style={styles.startButton} /> : null}
+    {mayStart ? <Button label={changing ? "Starting…" : "Start"} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
   </View>;
 }
 
@@ -359,20 +357,15 @@ const CANNOT_ANSWER = "Only someone allowed to approve can answer this question.
 const styles = StyleSheet.create({
   page: { flex: 1 },
   flex: { flex: 1 },
+  centred: { justifyContent: "center" },
   banner: { flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 16, paddingVertical: 10 },
   bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
   // The title and, under it, the state and the role in plain words.
-  headerTitle: { maxWidth: 240, alignItems: "center" },
-  headerName: { fontSize: 16, fontWeight: "600" },
-  headerLine: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 },
-  headerState: { fontSize: 12, lineHeight: 16 },
   // An icon button with a full 44 pt target.
-  sharing: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   reconnectText: { fontSize: 12, fontWeight: "600" },
-  startBar: { flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16 },
+  startBar: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12 },
   startTitle: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
   startDetail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
-  startButton: { minWidth: 88 },
   presence: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
   // Wraps on a narrow phone: the buttons go under the driver's name rather than squeezing it.
   wheel: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4, paddingLeft: 16, paddingRight: 6, borderBottomWidth: StyleSheet.hairlineWidth },

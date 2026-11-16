@@ -207,6 +207,17 @@ export function shortTime(time: number, now = Date.now()): string {
   return date.toLocaleDateString(undefined, { year: "2-digit", month: "numeric", day: "numeric" });
 }
 
+/**
+ * When, said after a status where there is room (the Cloud list, 22.06):
+ * as `shortTime` within the day, then "2 days ago" for the week, then the date.
+ */
+export function agoTime(time: number, now = Date.now()): string {
+  if (!time) return "";
+  const days = Math.floor((now - time) / 86_400_000);
+  if (days < 1 || days >= 7) return shortTime(time, now);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 /** When, as VoiceOver should say it: "active now", "active 5 minutes ago", then the day. */
 export function spokenTime(time: number, now = Date.now()): string {
   if (!time) return "";
