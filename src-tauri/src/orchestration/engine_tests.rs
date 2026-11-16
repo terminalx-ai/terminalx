@@ -88,6 +88,17 @@ struct World {
     /// Done-check commands that fail in the lead's checkout.
     lead_fails: BTreeSet<String>,
     lead_mode: Option<String>,
+    /// #1004: how each done-check command comes out on the commit a result
+    /// started from, by its text; one with no entry passes there. And what
+    /// was run there: the base, the result's commit and the command.
+    on_base: BTreeMap<String, verify::CommandRun>,
+    base_runs: Vec<(String, String, String)>,
+    /// What each check was told it knew already of the commit's commands.
+    known: Vec<verify::Known>,
+    /// Verifier tabs that will not take a message.
+    no_verifier_brief: BTreeSet<String>,
+    /// Claude models that are not installed, by a part of their id.
+    uninstalled: BTreeSet<String>,
 }
 
 struct Fake {
@@ -154,7 +165,8 @@ impl Host for Fake {
     }
 
     fn models(&self) -> Vec<crate::models::Model> {
-        super::routing::tests::installed()
+        let uninstalled = self.world().uninstalled.clone();
+        super::routing::tests::installed().into_iter().filter(|model| !(model.harness == "claude" && uninstalled.iter().any(|name| model.id.contains(name.as_str())))).collect()
     }
 
     fn worker_cost(&self, worker: &SessionRef) -> Cost {
@@ -244,10 +256,30 @@ impl Host for Fake {
         engine::verify(self, run_id).unwrap();
     }
 
-    fn check(&self, _run: &Run, piece: &Piece, _worker: &SessionRef) -> Checked {
+    fn check(&self, _run: &Run, piece: &Piece, _worker: &SessionRef, known: &verify::Known) -> Checked {
         let mut world = self.world();
         world.checked.push(piece.id.clone());
-        world.checks.get(&piece.id).cloned().unwrap_or_else(|| passing(&[], 0))
+        let mut checked = world.checks.get(&piece.id).cloned().unwrap_or_else(|| passing(&[], 0));
+        if !known.runs.is_empty() {
+            world.known.push(known.clone());
+        }
+        // As `verify::commands` does: a command known on this commit is not run again, and one
+        // that fails as it fails on the base is passed over.
+        let commit = checked.facts.commit.clone().unwrap_or_default();
+        if let Some(gate) = checked.gates.iter_mut().find(|gate| gate.gate == Gate::Commands && !gate.passed) {
+            let failing = gate.commands.last().map(|ran| ran.run.clone()).unwrap_or_default();
+            if let Some(ran) = known.runs.iter().find(|ran| known.commit == commit && ran.run == failing && ran.base_failure()) {
+                (gate.passed, gate.commands) = (true, vec![ran.clone()]);
+                gate.detail = Some(format!("`{}` exited {} here and on the commit the result started from alike, so that failure is not the result's.", ran.run, ran.exit_code.unwrap_or_default()));
+            }
+        }
+        checked
+    }
+
+    fn on_base(&self, _run: &Run, _piece: &Piece, _worker: &SessionRef, base: &str, commit: &str, command: &verify::CommandRun) -> verify::CommandRun {
+        let mut world = self.world();
+        world.base_runs.push((base.to_string(), commit.to_string(), command.run.clone()));
+        world.on_base.get(&command.run).cloned().unwrap_or(verify::CommandRun { run: command.run.clone(), project: command.project, exit_code: Some(0), passed: true, millis: 5, output: None, on_base: None })
     }
 
     fn create_verifier(&self, _run: &Run, piece: &Piece, worker: &SessionRef, model: &str, effort: Option<&str>, number: u32) -> anyhow::Result<SessionRef> {
@@ -263,6 +295,9 @@ impl Host for Fake {
     fn brief_verifier(&self, verifier: &SessionRef, prompt: &str) -> anyhow::Result<()> {
         let tab = verifier.tab_id.clone().unwrap();
         let mut world = self.world();
+        if world.no_verifier_brief.contains(&tab) {
+            anyhow::bail!("the agent is not signed in");
+        }
         world.prompts.insert(tab.clone(), prompt.to_string());
         world.verifier_now.insert(tab, VerifierNow::Working);
         Ok(())
@@ -336,7 +371,7 @@ impl Host for Fake {
         let mut ran = Vec::new();
         for command in piece.done_checks.iter().filter_map(|check| match check { super::Check::Command { run } => Some(run.clone()), _ => None }) {
             let passed = !world.lead_fails.contains(&command);
-            ran.push(verify::CommandRun { run: command, project: false, exit_code: Some(if passed { 0 } else { 1 }), passed, millis: 10, output: (!passed).then(|| "1 test failed".to_string()) });
+            ran.push(verify::CommandRun { run: command, project: false, exit_code: Some(if passed { 0 } else { 1 }), passed, millis: 10, output: (!passed).then(|| "1 test failed".to_string()), on_base: None });
             if !passed {
                 break;
             }
@@ -1113,6 +1148,8 @@ fn a_piece_with_no_tier_above_it_is_blocked_after_two_tries() {
     let _home = crate::store::temp_home();
     let host = Fake::new();
     host.settings.lock().unwrap().require_approval = false;
+    // #1004: with the switch off, the run stops for the person as it did before.
+    host.settings.lock().unwrap().lead_when_ladder_ends = false;
     let plan: Plan = serde_json::from_value(json!({"goal": "Reshape", "pieces": [{"id": "shape", "title": "Reshape the store", "kind": "refactor", "doneChecks": [{"type": "command", "run": "cargo t"}]}]})).unwrap();
     let run = engine::create(&host, &plan, "lead", None).unwrap();
     engine::start(&host, &run.id).unwrap();
@@ -1970,7 +2007,7 @@ fn a_gate_that_fails_skips_the_later_ones_feeds_the_ladder_and_a_piece_stops_at_
 
     // Round 2: in scope and clean, and the done-check exits 101.
     let mut failed = passing(&["src/cli.rs"], 20);
-    failed.gates[2] = GateResult { gate: Gate::Commands, passed: false, detail: Some("The done-check `cargo t control` exited 101. The last 100 lines it printed:\ntest control::tests::create_reads_default_mode ... FAILED".into()), commands: vec![verify::CommandRun { run: "cargo t control".into(), project: false, exit_code: Some(101), passed: false, millis: 41_000, output: Some("test control::tests::create_reads_default_mode ... FAILED".into()) }] };
+    failed.gates[2] = GateResult { gate: Gate::Commands, passed: false, detail: Some("The done-check `cargo t control` exited 101. The last 100 lines it printed:\ntest control::tests::create_reads_default_mode ... FAILED".into()), commands: vec![verify::CommandRun { run: "cargo t control".into(), project: false, exit_code: Some(101), passed: false, millis: 41_000, output: Some("test control::tests::create_reads_default_mode ... FAILED".into()), on_base: None }] };
     host.finds("cli", failed);
     host.reports("cli", Status::Done, "Moved, within my files.");
     let run = engine::refreshed(&host, id).unwrap();
@@ -2214,6 +2251,8 @@ fn a_review_nobody_can_answer_blocks_the_piece_without_calling_the_result_wrong(
     // The verifier ends without a verdict block, and with a fail that names no place.
     for reply in ["It looks fine to me.".to_string(), verdict_block(r#"{"verdict": "fail", "evidence": ["I do not like it."]}"#)] {
         let (host, id) = run_of(&format!("lead-{}", reply.len()), pieces.clone());
+        // #1004: with the switch off, the run stops for the person as it did before.
+        host.settings.lock().unwrap().reask_verifier = false;
         host.reports("guide", Status::Done, "Written.");
         engine::refreshed(&host, &id).unwrap();
         host.verifier_replies("guide", 1, &reply, 900);
@@ -2229,6 +2268,7 @@ fn a_review_nobody_can_answer_blocks_the_piece_without_calling_the_result_wrong(
     }
     // A verifier that cannot be started at all is the same: said, and left to the lead.
     let (host, id) = run_of("lead-none", pieces);
+    host.settings.lock().unwrap().reask_verifier = false;
     host.world().no_verifier.insert("guide".into());
     host.reports("guide", Status::Done, "Written.");
     let run = engine::refreshed(&host, &id).unwrap();
@@ -2337,6 +2377,8 @@ fn a_lead_waiting_on_its_run_is_woken_by_a_piece_settled_not_by_each_turn_that_e
     assert_eq!(woken["pieces"][0]["changed"], false);
     // The same for a review nobody could answer.
     let (unread, unread_id) = run_of("lead-unread", json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+    // With the switch off (#1004): a stop that waits for the person.
+    unread.settings.lock().unwrap().reask_verifier = false;
     unread.reports("guide", Status::Done, "Written.");
     engine::refreshed(&unread, &unread_id).unwrap();
     unread.verifier_replies("guide", 1, "No verdict here.", 10);
@@ -2432,7 +2474,7 @@ fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trust
             Ok(())
         }).unwrap();
         let checkout = verify::Checkout { cwd: worker.clone(), base: "lead".into(), branch: Some("worker".into()), commands: true, marks: None };
-        let checked = verify::gates(&checkout, &store::get(&id).unwrap().pieces[0], None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &store::get(&id).unwrap().pieces[0], None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.passed(), "{:?}", checked.gates);
         host.finds("cli", checked);
         host.reports("cli", Status::Done, "done");
@@ -2455,7 +2497,7 @@ fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trust
                 let merge = run.pieces[0].merge.as_mut().unwrap();
                 merge.state = super::MergeState::IntegrationFailed;
                 merge.by_hand = by_hand;
-                merge.check = Some(verify::CommandRun { run: "integration check".into(), project: true, exit_code: Some(1), passed: false, millis: 1, output: Some("fix the integration".into()) });
+                merge.check = Some(verify::CommandRun { run: "integration check".into(), project: true, exit_code: Some(1), passed: false, millis: 1, output: Some("fix the integration".into()), on_base: None });
                 Ok(())
             }).unwrap();
         }
@@ -2482,14 +2524,14 @@ fn sent_back_workers_rebase_from_synthetic_dependencies_and_verify_against_trust
             commit(&worker, "src/cli.rs", "consumer adjusted to pass integration\n");
         }
         git(&worker, &["merge-base", "--is-ancestor", &accepted_dependency, "HEAD"]);
-        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert!(checked.passed(), "{:?}", checked.gates);
         assert_eq!(checked.facts.files, ["src/cli.rs"]);
         assert!(!checked.diff.contains("diff --git a/trusted.ts"));
         assert_eq!(checked.base, base);
         // Trusted inherited files remain protected against edits by this worker.
         commit(&worker, "trusted.ts", "worker changed an unowned file\n");
-        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10));
+        let checked = verify::gates(&checkout, &sent.run.pieces[0], None, std::time::Duration::from_secs(10), &verify::Known::default());
         assert_eq!((checked.gates[0].gate, checked.gates[0].passed), (Gate::Scope, false));
         assert!(checked.gates[0].detail.as_ref().unwrap().contains("trusted.ts"));
     }
@@ -3249,6 +3291,29 @@ fn the_runs_own_lead_takes_a_blocked_piece_of_an_approved_plan_over_itself_and_f
 }
 
 #[test]
+fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_as_their_widening() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_blocked_cli("lead");
+    engine::take_over(&host, &id, "cli", engine::By::Cli, true).unwrap();
+    // The piece needs a file another piece does not own: the lead may not finish it so.
+    let outside = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: outside, uncommitted: Vec::new() });
+    host.world().lead_mode = Some("default".into());
+    let error = engine::finish(&host, &id, "cli", engine::By::Cli, true).unwrap_err();
+    assert_eq!(error.code, "person_only");
+    assert!(error.message.contains("Check and finish in the session's Run view accepts them as theirs"), "{}", error.message);
+    assert!(error.recovery.as_deref().unwrap().contains("Check and finish in the Run view accepts them as their widening"), "{:?}", error.recovery);
+    // The person saw it and finishes it from the Run view: that is their widening, recorded on the piece.
+    let finished = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap();
+    let piece = finished.run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.owns.clone()), (PieceState::Done, vec!["src/cli.rs".to_string(), "src/store/projects.rs".to_string()]));
+    assert_eq!(piece.note.as_deref(), Some("Finished by the lead in its own checkout, at 4c1d0e2; its checks passed there. The person widened it to src/store/projects.rs."));
+    let told = host.world().told.last().cloned().unwrap();
+    assert!(told.starts_with("The person checked piece cli") && told.contains("They accepted its change outside the piece's files as theirs: it owns src/store/projects.rs now."), "{told}");
+    assert_eq!(finished.run.ready().iter().map(|piece| piece.id.as_str()).collect::<Vec<_>>(), vec!["docs"]);
+}
+
+#[test]
 fn a_piece_a_person_has_the_lead_take_over_is_not_held_to_its_files() {
     let _home = crate::store::temp_home();
     let (host, id) = approved_blocked_cli("lead");
@@ -3613,6 +3678,8 @@ fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invali
     let _home = crate::store::temp_home();
     for (number, terminal) in [VerifierNow::Gone, VerifierNow::Stuck("The agent terminated.".into()), VerifierNow::Replied("No verdict.".into())].into_iter().enumerate() {
         let (host, id) = run_of(&format!("lead-terminal-{number}"), json!([{"id": "guide", "title": "Guide", "kind": "scoped-code", "owns": ["docs/"], "reviewOnly": true, "reviewOnlyReason": "Prose.", "doneChecks": [{"type": "review", "text": "Reads well."}]}]));
+        // With the switch off (#1004): the verifier is not asked again, and the piece waits.
+        host.settings.lock().unwrap().reask_verifier = false;
         host.reports("guide", Status::Done, "Written.");
         engine::refreshed(&host, &id).unwrap();
         let session = host.world().verifiers[0].session.clone();
@@ -3629,4 +3696,418 @@ fn waiting_verifiers_still_fail_meaningfully_when_they_terminate_or_reply_invali
         assert_eq!(engine::refreshed(&host, &id).unwrap(), ended);
         assert_eq!(host.world().verifiers.len(), 1);
     }
+}
+
+// ---- a run decides a stop that needs no person's judgment (#1004) ------------
+
+/// What a run did by itself, in order: the step, the piece, and what it said.
+fn events(run: &Run) -> Vec<(super::AutoStep, Option<String>, String)> {
+    run.events.iter().map(|event| (event.step, event.piece.clone(), event.message.clone())).collect()
+}
+
+fn steps(run: &Run) -> Vec<super::AutoStep> {
+    run.events.iter().map(|event| event.step).collect()
+}
+
+/// A started run of `pieces` whose plan a person approved, led by `lead`: the
+/// lead's CLI may not take its pieces over, skip or widen them (`person_only`).
+fn approved_run(lead: &str, pieces: serde_json::Value) -> (Fake, String) {
+    let host = Fake::new();
+    host.settings.lock().unwrap().workers_per_run = 8;
+    host.world().lead_head = Some("lead-head".into());
+    let plan: Plan = serde_json::from_value(json!({"goal": "Measure the phone's connection", "pieces": pieces})).unwrap();
+    let run = engine::create(&host, &plan, lead, Some(format!("{lead}-tab"))).unwrap();
+    engine::approve(&host, &run.id).unwrap();
+    (host, run.id)
+}
+
+/// A piece only a review can check, as the #990 run's `phone-model` was.
+fn review_piece(id: &str) -> serde_json::Value {
+    json!({"id": id, "title": "Phone connection model", "kind": "scoped-code", "owns": ["mobile/src/connection/"], "reviewOnly": true, "reviewOnlyReason": "A state model is read, not run.", "doneChecks": [{"type": "review", "text": "Each connection state has one owner."}]})
+}
+
+#[test]
+fn a_missing_verdict_is_asked_for_twice_in_the_verifiers_own_conversation_then_the_lead_reviews_the_diff() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_run("lead", json!([review_piece("phone-model")]));
+    let id = id.as_str();
+    host.finds("phone-model", passing(&["mobile/src/connection/state.ts"], 40));
+    host.reports("phone-model", Status::Done, "One state model.");
+    engine::refreshed(&host, id).unwrap();
+    let tab = host.world().verifiers[0].session.clone();
+    let review_prompt = host.world().prompts[&tab].clone();
+    let replies = ["It reads well; every state has one owner.", "Yes, it is right.", "Fine by me."];
+    for asked in 1..=2u32 {
+        host.verifier_replies("phone-model", 1, replies[asked as usize - 1], 1_200);
+        let run = engine::refreshed(&host, id).unwrap();
+        let piece = run.piece("phone-model").unwrap();
+        assert_eq!(piece.state, PieceState::Verifying, "asked again, not blocked");
+        let verifier = &piece.tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0];
+        assert_eq!((verifier.asked_again, verifier.settled(), verifier.ask_again.is_none()), (asked, false, true));
+        assert_eq!(piece.note.as_deref(), Some(format!("Its verifier gave no verdict, and is asked again for one ({asked} of 2).").as_str()));
+        // In its own conversation: no second verifier, and the ask says what was wrong and gives the block again.
+        assert_eq!(host.world().verifiers.len(), 1);
+        let prompt = host.world().prompts[&tab].clone();
+        assert!(prompt.starts_with("TerminalX could not read a verdict from your last reply: The reply has no `terminalx-verdict` block.") && prompt.contains(&format!("This is ask {asked} of 2.")) && prompt.contains("```terminalx-verdict"), "{prompt}");
+        assert_ne!(prompt, review_prompt);
+        assert_eq!(events(&run).last().unwrap(), &(super::AutoStep::AskedVerifierAgain, Some("phone-model".into()), format!("Asked phone-model's verifier again for its verdict ({asked} of 2).")));
+        assert!(host.world().told.last().unwrap().contains(&format!("Asked phone-model's verifier again for its verdict ({asked} of 2).")));
+        // Its new turn has not shown yet, and the reply it was asked about is read again: not its answer.
+        host.world().verifier_now.insert(tab.clone(), VerifierNow::Replied(replies[asked as usize - 1].into()));
+        let read_again = engine::refreshed(&host, id).unwrap();
+        assert_eq!((read_again.events.len(), read_again.piece("phone-model").unwrap().state), (run.events.len(), PieceState::Verifying));
+        host.world().verifier_now.insert(tab.clone(), VerifierNow::Working);
+    }
+    // Still none after two asks: the lead reviews the diff, with no person asked, though a person approved the plan.
+    host.verifier_replies("phone-model", 1, replies[2], 300);
+    let run = engine::refreshed(&host, id).unwrap();
+    let piece = run.piece("phone-model").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[1].step, piece.to_lead.is_none()), (PieceState::Lead, 2, Step::Lead, true));
+    assert_eq!((piece.tries[0].outcome, piece.tries[0].verification.as_ref().unwrap().outcome), (Some(Outcome::Done), Some(verify::Outcome::Inconclusive)));
+    assert_eq!(run.merge.as_ref().unwrap().resolving.as_ref().unwrap().piece, "phone-model");
+    assert_eq!(events(&run).last().unwrap(), &(super::AutoStep::HandedToLead, Some("phone-model".into()), "Handed phone-model to the lead to review: its result passed every gate before review, and no verifier gave a verdict on it, asked 2 more times.".to_string()));
+    let told = host.world().told.last().unwrap().clone();
+    assert!(told.starts_with(&format!("TerminalX handed you piece phone-model (\"Phone connection model\") of run {id} by itself:")) && told.contains("Review the diff yourself") && told.contains("Read it with `git diff fixture-base...c0ffee1`.") && told.contains("Nobody asked the person"), "{told}");
+    assert!(engine::wake(&run, &run, false).is_none_or(|woken| !woken["why"].to_string().contains("the person decides")));
+    // `person_only` still guards what changes the approved scope: the lead may not leave the piece out.
+    assert_eq!(engine::skip(&host, id, "phone-model", By::Cli).unwrap_err().code, "person_only");
+}
+
+#[test]
+fn a_verdict_given_when_asked_again_settles_the_review_as_any_verdict_does() {
+    let _home = crate::store::temp_home();
+    let (host, id) = run_of("lead", json!([review_piece("phone-model")]));
+    host.reports("phone-model", Status::Done, "One state model.");
+    engine::refreshed(&host, &id).unwrap();
+    host.verifier_replies("phone-model", 1, "Looks right.", 900);
+    assert_eq!(engine::refreshed(&host, &id).unwrap().piece("phone-model").unwrap().state, PieceState::Verifying);
+    host.verifier_replies("phone-model", 1, &verdict_block(PASS), 100);
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("phone-model").unwrap();
+    assert_eq!((piece.state, piece.tries.len()), (PieceState::Done, 1));
+    assert_eq!(steps(&run), vec![super::AutoStep::AskedVerifierAgain]);
+}
+
+#[test]
+fn a_verifier_that_cannot_be_asked_again_hands_the_review_to_the_lead() {
+    let _home = crate::store::temp_home();
+    let (host, id) = run_of("lead", json!([review_piece("phone-model")]));
+    host.world().lead_head = Some("lead-head".into());
+    host.reports("phone-model", Status::Done, "One state model.");
+    engine::refreshed(&host, &id).unwrap();
+    let tab = host.world().verifiers[0].session.clone();
+    host.world().no_verifier_brief.insert(tab);
+    host.verifier_replies("phone-model", 1, "Looks right.", 900);
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("phone-model").unwrap();
+    assert_eq!(piece.state, PieceState::Lead);
+    let verifier = &piece.tries[0].verification.as_ref().unwrap().review.as_ref().unwrap().verifiers[0];
+    assert!(verifier.problem.as_deref().unwrap().contains("It was asked again, and did not take the message: the agent is not signed in"), "{:?}", verifier.problem);
+    assert_eq!(steps(&run), vec![super::AutoStep::AskedVerifierAgain, super::AutoStep::HandedToLead]);
+}
+
+/// The #990 run's `mac`: its done check exits 101 on a macOS-only test that fails on the base too.
+const MAC_FAILURE: &str = "running 212 tests\ntest computer::permissions::tests::probe_reports_screen_recording ... FAILED\n\nfailures:\n\n---- computer::permissions::tests::probe_reports_screen_recording stdout ----\nassertion failed: granted\n\nfailures:\n    computer::permissions::tests::probe_reports_screen_recording\n\ntest result: FAILED. 211 passed; 1 failed; 0 ignored; 0 measured; finished in 41.20s\nerror: test failed, to rerun pass `--lib`";
+
+fn mac_piece() -> serde_json::Value {
+    json!([{"id": "mac", "title": "Mac permissions", "kind": "scoped-code", "owns": ["src-tauri/src/computer/"], "doneChecks": [{"type": "command", "run": "cargo t computer"}]}])
+}
+
+/// Gates 2 to 4 with `cargo t computer` failing as it printed `output`, on a diff of `lines` lines.
+fn mac_fails(output: &str, lines: u32) -> Checked {
+    let mut checked = passing(&["src-tauri/src/computer/permissions.rs"], lines);
+    checked.gates[2] = GateResult { gate: Gate::Commands, passed: false, detail: Some(format!("The done-check `cargo t computer` exited 101. The last 100 lines it printed:\n{output}")), commands: vec![verify::CommandRun { run: "cargo t computer".into(), project: false, exit_code: Some(101), passed: false, millis: 61_000, output: Some(output.into()), on_base: None }] };
+    checked
+}
+
+fn on_base(output: Option<&str>) -> verify::CommandRun {
+    verify::CommandRun { run: "cargo t computer".into(), project: false, exit_code: Some(if output.is_some() { 101 } else { 0 }), passed: output.is_none(), millis: 58_000, output: output.map(str::to_owned), on_base: None }
+}
+
+#[test]
+fn a_done_check_that_fails_on_the_base_as_well_uses_no_try_and_a_reader_judges_what_it_did_not_run() {
+    let _home = crate::store::temp_home();
+    let (host, id) = run_of("lead", mac_piece());
+    host.finds("mac", mac_fails(MAC_FAILURE, 30));
+    // The same test fails on the commit the try started from, in another time.
+    host.world().on_base.insert("cargo t computer".into(), on_base(Some(&MAC_FAILURE.replace("41.20s", "39.87s"))));
+    host.reports("mac", Status::Done, "Permissions are read once.");
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("mac").unwrap();
+    // Not the piece's failure: no try is used and nothing is retried. But the command stopped at
+    // that failure, so what it did not get to is read by a verifier: a small diff that needed none.
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].outcome), (PieceState::Verifying, 1, Some(Outcome::Done)));
+    assert_eq!(host.world().base_runs, vec![("fixture-base".to_string(), "c0ffee1".to_string(), "cargo t computer".to_string())]);
+    assert!(host.world().retries.is_empty() && host.made() == vec!["mac"], "no retry, no try used");
+    assert_eq!(host.world().verifiers.len(), 1);
+    // The checks were run once more on the same commit, told what is known of it: the command is not run a third time.
+    let known = host.world().known.clone();
+    assert_eq!((known.len(), known[0].commit.as_str(), known[0].runs.len()), (1, "c0ffee1", 1));
+    let check = piece.tries[0].verification.as_ref().unwrap();
+    let commands = check.gates.iter().find(|gate| gate.gate == Gate::Commands).unwrap();
+    assert!(commands.passed && commands.commands[0].base_failure() && commands.commands[0].on_base.as_ref().unwrap().exit_code == Some(101));
+    let reasons = &check.review.as_ref().unwrap().reasons;
+    assert_eq!(reasons, &vec!["`cargo t computer` failed here as on the commit the result started from, so that failure was passed over. A command stops at its first failure (a test binary, the part after `&&`): judge from the diff that what it did not get to run would pass.".to_string()]);
+    let tab = host.world().verifiers[0].session.clone();
+    assert!(host.world().prompts[&tab].contains("judge from the diff that what it did not get to run would pass"), "the reader is told why it reads");
+    assert_eq!(events(&run), vec![(super::AutoStep::AcceptedBaseFailure, Some("mac".into()), "Passed over mac's failing check, `cargo t computer`: it also fails on the base. A verifier reads the result next.".to_string())]);
+    assert_eq!(run.events[0].stuck.as_deref(), Some("`cargo t computer` failed on its result (computer::permissions::tests::probe_reports_screen_recording)."));
+    assert!(host.world().told.iter().any(|told| told.contains("Passed over mac's failing check") && told.contains("nothing is asked of you or the person")));
+    // Its verdict settles the piece, still on its one try.
+    host.verifier_replies("mac", 1, &verdict_block(PASS), 2_000);
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("mac").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[0].verification.as_ref().unwrap().outcome), (PieceState::Done, 1, Some(verify::Outcome::Passed)));
+}
+
+#[test]
+fn a_base_failure_on_a_result_that_needs_a_reader_is_passed_over_and_the_reader_decides() {
+    let _home = crate::store::temp_home();
+    let (host, id) = run_of("lead", mac_piece());
+    host.finds("mac", mac_fails(MAC_FAILURE, 2_000));
+    host.world().on_base.insert("cargo t computer".into(), on_base(Some(MAC_FAILURE)));
+    host.reports("mac", Status::Done, "Permissions are read once.");
+    let run = engine::refreshed(&host, &id).unwrap();
+    assert_eq!((run.piece("mac").unwrap().state, host.world().verifiers.len()), (PieceState::Verifying, 1));
+    assert_eq!(events(&run)[0].2, "Passed over mac's failing check, `cargo t computer`: it also fails on the base. A verifier reads the result next.");
+}
+
+#[test]
+fn a_done_check_that_passes_or_fails_otherwise_on_the_base_is_the_results_own_failure() {
+    let _home = crate::store::temp_home();
+    // It passes on the base: the change broke it, and the next try is told so.
+    let (host, id) = run_of("lead-passes", mac_piece());
+    host.finds("mac", mac_fails(MAC_FAILURE, 30));
+    host.reports("mac", Status::Done, "Permissions are read once.");
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("mac").unwrap();
+    assert_eq!((piece.state, piece.tries[0].outcome, piece.tries.len()), (PieceState::Queued, Some(Outcome::CheckFailed), 2));
+    assert!(piece.tries[0].detail.as_deref().unwrap().contains("TerminalX ran it on the commit this result started from (`fixture-base`) as well: it passes there. The failure is this result's."), "{:?}", piece.tries[0].detail);
+    assert!(run.events.is_empty());
+    // Another test fails on the base: not the same failure.
+    let (host, id) = run_of("lead-other", mac_piece());
+    host.finds("mac", mac_fails(MAC_FAILURE, 30));
+    host.world().on_base.insert("cargo t computer".into(), on_base(Some(&MAC_FAILURE.replace("probe_reports_screen_recording", "probe_reports_accessibility"))));
+    host.reports("mac", Status::Done, "Permissions are read once.");
+    let run = engine::refreshed(&host, &id).unwrap();
+    assert_eq!(run.piece("mac").unwrap().tries[0].outcome, Some(Outcome::CheckFailed));
+    assert!(run.piece("mac").unwrap().tries[0].detail.as_deref().unwrap().contains("it exits 101 there too, but not with the same failures"));
+    // The switch off: the base is not run, and the failure takes a try as before.
+    let (host, id) = run_of("lead-off", mac_piece());
+    host.settings.lock().unwrap().accept_base_failures = false;
+    host.finds("mac", mac_fails(MAC_FAILURE, 30));
+    host.world().on_base.insert("cargo t computer".into(), on_base(Some(MAC_FAILURE)));
+    host.reports("mac", Status::Done, "Permissions are read once.");
+    let run = engine::refreshed(&host, &id).unwrap();
+    assert_eq!((run.piece("mac").unwrap().tries[0].outcome, host.world().base_runs.len(), run.events.len()), (Some(Outcome::CheckFailed), 0, 0));
+}
+
+/// The #985 run's `titles`: opus at medium, then opus at high, and no fable installed above it.
+fn titles_piece(id: &str) -> serde_json::Value {
+    json!({"id": id, "title": format!("Session {id}"), "kind": "code", "owns": [format!("src/{id}/")], "doneChecks": [{"type": "command", "run": format!("cargo t {id}")}]})
+}
+
+fn run_out_of_models(host: &Fake, id: &str, piece: &str) {
+    host.reports(piece, Status::Partial, "Titles are generated; two edge cases are left.");
+    engine::worker_turn_ended(host, &host.session_of(piece));
+    engine::start_retries(host, id).unwrap();
+    host.reports(piece, Status::Partial, "One edge case is left: titles of resumed sessions.");
+    engine::worker_turn_ended(host, &host.session_of(piece));
+}
+
+#[test]
+fn a_ladder_with_no_model_above_hands_the_piece_to_the_lead_with_the_workers_partial_report() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_run("lead", json!([titles_piece("titles"), titles_piece("icons")]));
+    let id = id.as_str();
+    host.world().uninstalled.insert("fable".into());
+    run_out_of_models(&host, id, "titles");
+    let run = store::get(id).unwrap();
+    let piece = run.piece("titles").unwrap();
+    assert_eq!(tried(&run, "titles"), vec![(Step::First, "opus".to_string(), Some("medium".to_string()), Some(Outcome::Partial)), (Step::Effort, "opus".into(), Some("high".into()), Some(Outcome::Partial)), (Step::Lead, "fable".into(), None, None)]);
+    assert_eq!(piece.state, PieceState::Lead);
+    let (step, on, message) = events(&run).last().unwrap().clone();
+    assert_eq!((step, on.as_deref()), (super::AutoStep::HandedToLead, Some("titles")));
+    assert!(message.starts_with("Handed titles to the lead to finish: its try on opus at high fell short, and no top model of"), "{message}");
+    let told = host.world().told.last().unwrap().clone();
+    assert!(told.starts_with(&format!("TerminalX handed you piece titles (\"Session titles\") of run {id} by itself:")) && told.contains("One edge case is left: titles of resumed sessions."), "{told}");
+    // Nobody widened it: a person approved its files, and the lead the run handed it to is held to them.
+    assert!(told.contains("You are held to the files it owns") && !told.contains("You are not held"), "{told}");
+    assert!(store::get(id).unwrap().piece("titles").unwrap().tries.last().unwrap().held_to_owns);
+
+    // A second piece that runs out while the lead has the first waits for it, and says so.
+    run_out_of_models(&host, id, "icons");
+    let run = store::get(id).unwrap();
+    let icons = run.piece("icons").unwrap();
+    assert_eq!((icons.state, icons.to_lead.as_ref().and_then(|to_lead| to_lead.waits.as_deref())), (PieceState::Blocked, Some("It goes to the lead once the lead is done with piece titles.")));
+    assert!(icons.note.as_deref().unwrap().contains("It goes to the lead."), "{:?}", icons.note);
+    // A finish that changes another piece's files would widen this one: the person's, so refused.
+    host.world().lead_work = Some(engine::LeadWork { head: "4d1c0e7aa".into(), changes: vec![verify::FileChange { path: "src/titles/mod.rs".into(), added: Some(30), removed: Some(4) }, verify::FileChange { path: "src/icons/mod.rs".into(), added: Some(2), removed: Some(0) }], uncommitted: Vec::new() });
+    let error = engine::finish(&host, id, "titles", By::Cli, true).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("person_only", json!(["src/icons/mod.rs"])));
+    assert_eq!(store::get(id).unwrap().piece("titles").unwrap().state, PieceState::Lead);
+    // The lead finishes the first within its files: the second goes to it at once.
+    host.world().lead_work = Some(engine::LeadWork { head: "4d1c0e7aa".into(), changes: vec![verify::FileChange { path: "src/titles/mod.rs".into(), added: Some(30), removed: Some(4) }], uncommitted: Vec::new() });
+    engine::finish(&host, id, "titles", By::Cli, true).unwrap();
+    let run = store::get(id).unwrap();
+    assert_eq!((run.piece("titles").unwrap().state, run.piece("icons").unwrap().state), (PieceState::Done, PieceState::Lead));
+    assert_eq!(steps(&run), vec![super::AutoStep::HandedToLead, super::AutoStep::HandedToLead]);
+}
+
+#[test]
+fn a_ladder_that_used_all_its_tries_still_waits_for_the_person() {
+    let _home = crate::store::temp_home();
+    let (stuck, stuck_id) = one_piece_for("lead-stuck");
+    stuck.world().lead_head = Some("lead-head".into());
+    for _ in 0..3 {
+        stuck.reports("cli", Status::Failed, "A test fails.");
+        engine::refreshed(&stuck, &stuck_id).unwrap();
+        engine::start_retries(&stuck, &stuck_id).unwrap();
+    }
+    let run = store::get(&stuck_id).unwrap();
+    let piece = run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.to_lead.is_none(), run.events.len()), (PieceState::Blocked, true, 0), "its tries ran out, not its models: the person decides");
+}
+
+#[test]
+fn with_its_switch_off_a_ladder_with_no_model_above_blocks_the_piece_for_the_person() {
+    let _home = crate::store::temp_home();
+    let (host, id) = approved_run("lead", json!([titles_piece("titles")]));
+    host.settings.lock().unwrap().lead_when_ladder_ends = false;
+    host.world().uninstalled.insert("fable".into());
+    run_out_of_models(&host, &id, "titles");
+    let run = store::get(&id).unwrap();
+    let piece = run.piece("titles").unwrap();
+    assert_eq!((piece.state, piece.to_lead.is_none(), run.events.len()), (PieceState::Blocked, true, 0));
+    assert!(!piece.note.as_deref().unwrap().contains("It goes to the lead"));
+    // On an approved plan, no session but the run's own lead takes it over from the CLI.
+    assert_eq!(engine::take_over(&host, &id, "titles", By::Cli, false).unwrap_err().code, "person_only");
+}
+
+/// The #980 run: a budget of 25 points of the 5h window, used up; the window then resets.
+fn paused_on_points(host: &Fake, lead: &str, now: i64, resets: i64) -> String {
+    host.world().clock = now;
+    host.world().windows = vec![window("five_hour", "5h", 10.0, resets)];
+    let run = engine::create(host, &flat_plan(2, "claude"), lead, None).unwrap();
+    engine::start(host, &run.id).unwrap();
+    host.world().windows[0].used_percent = 36.0;
+    host.reports("p1", Status::Done, "done");
+    engine::worker_turn_ended(host, &host.session_of("p1"));
+    run.id
+}
+
+#[test]
+fn a_run_paused_on_its_points_of_a_window_goes_on_by_itself_when_the_window_resets() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let resets = now + 3_600_000;
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    let id = paused_on_points(&host, "lead", now, resets);
+    let run = store::get(&id).unwrap();
+    let pause = run.pause.clone().unwrap();
+    assert_eq!((run.state, pause.kind, pause.resume_at, pause.by_itself), (RunState::NeedsYou, PauseKind::Points, Some(resets), true));
+    let at = super::budget::reset_time(resets, now);
+    assert_eq!(events(&run), vec![(super::AutoStep::WaitsForReset, None, format!("It goes on by itself when the usage window resets at {at}."))]);
+    let told = host.world().told.last().unwrap().clone();
+    assert!(told.contains(&format!("It goes on by itself when the usage window resets at {at}.")) && told.contains("Nothing is asked of the person") && !told.contains("The person decides"), "{told}");
+    assert!(engine::watch(&host), "the reset to come is something to watch");
+
+    // The window resets and is read afresh: the run goes on with no click.
+    {
+        let mut world = host.world();
+        world.clock = resets + 120_000;
+        world.windows = vec![UsageWindow { updated_at: resets + 90_000, ..window("five_hour", "5h", 2.0, resets + 5 * 3_600_000) }];
+    }
+    engine::watch(&host);
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.state, run.pause.is_none()), (RunState::Running, true));
+    assert_eq!(host.made(), vec!["p1", "p2"]);
+    assert_eq!(events(&run)[1], (super::AutoStep::WentOnAfterReset, None, format!("Gone on: the usage window reset at {}.", super::budget::reset_time(resets, resets + 120_000))));
+    assert!(host.world().told.last().unwrap().contains("Its usage window reset, so the run went on by itself: nothing was asked of the person."));
+}
+
+#[test]
+fn a_run_paused_on_its_points_before_it_could_go_on_by_itself_does_once_the_switch_is_on() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let resets = now + 3_600_000;
+    // The switch off: today's stop, the person decides.
+    let host = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.resume_after_reset = false;
+    });
+    let id = paused_on_points(&host, "lead", now, resets);
+    let run = store::get(&id).unwrap();
+    assert_eq!((run.state, run.pause.as_ref().unwrap().resume_at, run.events.len()), (RunState::NeedsYou, None, 0));
+    assert!(host.world().told.last().unwrap().contains("The person decides what happens next"));
+    assert_eq!(engine::refreshed(&host, &id).unwrap().pause.unwrap().resume_at, None);
+    // Turned on, as #980's run was found waiting after its reset: the next read sets it to go on.
+    host.settings.lock().unwrap().resume_after_reset = true;
+    let run = engine::refreshed(&host, &id).unwrap();
+    assert_eq!((run.pause.as_ref().unwrap().resume_at, steps(&run)), (Some(resets), vec![super::AutoStep::WaitsForReset]));
+    // A reset already past is not one to wait for: the person decides, as `watch` says when it cannot go on.
+    let late = free_host(|settings| {
+        settings.workers_per_run = 1;
+        settings.resume_after_reset = false;
+    });
+    let late_run = paused_on_points(&late, "lead-late", now, resets);
+    late.world().clock = resets + 1;
+    late.settings.lock().unwrap().resume_after_reset = true;
+    assert_eq!(engine::refreshed(&late, &late_run).unwrap().pause.unwrap().resume_at, None);
+}
+
+#[test]
+fn a_run_past_the_apps_window_ceiling_still_waits_for_the_person() {
+    let _home = crate::store::temp_home();
+    let now = chrono::Utc::now().timestamp_millis();
+    let host = free_host(|settings| settings.workers_per_run = 1);
+    host.world().clock = now;
+    host.world().windows = vec![window("five_hour", "5h", 90.0, now + 3_600_000)];
+    let run = engine::create(&host, &flat_plan(2, "claude"), "lead", None).unwrap();
+    let start = engine::start(&host, &run.id).unwrap();
+    let pause = start.run.pause.clone().unwrap();
+    assert_eq!((start.run.state, pause.kind, pause.resume_at), (RunState::NeedsYou, PauseKind::Window, None));
+    assert!(engine::refreshed(&host, &run.id).unwrap().events.is_empty());
+}
+
+#[test]
+fn a_late_report_from_a_worker_the_piece_no_longer_belongs_to_changes_nothing_and_is_logged() {
+    let _home = crate::store::temp_home();
+    // The #989 run's `device-measurements`: its last worker reported partial, and is still in a turn.
+    let (host, id) = blocked_cli();
+    let id = id.as_str();
+    host.world().lead_head = Some("lead-head".into());
+    host.world().running.insert("w3-cli".into());
+    let run = engine::take_over(&host, id, "cli", By::Person, false).unwrap();
+    // The take-over stops it: it would only report over the lead's work.
+    assert_eq!(run.piece("cli").unwrap().state, PieceState::Lead);
+    assert_eq!(host.world().stopped, vec!["w3-cli"]);
+    assert_eq!(events(&run), vec![(super::AutoStep::StoppedOldWorker, Some("cli".into()), "Stopped the earlier worker of cli: the lead has the piece now, and it would only report over the lead's work.".to_string())]);
+    // It ended its turn with a report all the same: read, and passed over.
+    host.world().now.insert("w3-cli".into(), WorkerNow::Reported { status: Status::Partial, result: "Both tests pass now, but the fixture is still flaky.".into(), report: TryReport { result: "Both tests pass now, but the fixture is still flaky.".into(), ..TryReport::default() } });
+    let after = engine::refreshed(&host, id).unwrap();
+    let piece = after.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.last().unwrap().step, piece.tries.last().unwrap().outcome), (PieceState::Lead, Step::Lead, None));
+    assert_eq!(after.merge.as_ref().unwrap().resolving.as_ref().unwrap().piece, "cli");
+    assert_eq!(after.events[1].step, super::AutoStep::IgnoredStaleReport);
+    assert_eq!(after.events[1].message, "Ignored a late report from an earlier worker of cli: the lead has the piece now, so it changed nothing.");
+    assert_eq!(after.events[1].stuck.as_deref(), Some("partial: Both tests pass now, but the fixture is still flaky."));
+    // Logged once, however often it is read.
+    assert_eq!(engine::refreshed(&host, id).unwrap().events.len(), 2);
+}
+
+#[test]
+fn a_late_report_from_an_earlier_tries_worker_does_not_move_the_newer_try() {
+    let _home = crate::store::temp_home();
+    let (host, id) = one_piece_for("lead");
+    host.reports("cli", Status::Failed, "2 tests fail.");
+    engine::worker_turn_ended(&host, "w1-cli");
+    engine::start_retries(&host, &id).unwrap();
+    // Try 2 runs; try 1's worker, still alive, reports again.
+    host.world().now.insert("w1-cli".into(), WorkerNow::Reported { status: Status::Done, result: "Fixed after all.".into(), report: TryReport { result: "Fixed after all.".into(), ..TryReport::default() } });
+    let run = engine::refreshed(&host, &id).unwrap();
+    let piece = run.piece("cli").unwrap();
+    assert_eq!((piece.state, piece.tries.len(), piece.tries[1].outcome), (PieceState::Running, 2, None));
+    assert!(host.world().checked.is_empty(), "nothing of try 1's late result is checked");
+    assert_eq!(events(&run), vec![(super::AutoStep::IgnoredStaleReport, Some("cli".into()), "Ignored a late report from an earlier worker of cli: a newer try has the piece now, so it changed nothing.".to_string())]);
 }

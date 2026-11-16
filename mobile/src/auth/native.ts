@@ -1,7 +1,7 @@
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
-import { AUTH_CONFIG, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, refreshSession, revokeSession, type CloudSession } from "./protocol";
+import { AUTH_CONFIG, authSessionFailure, buildAuthorizeUrl, exchangeAuthorizationCode, parseStoredSession, refreshSession, revokeSession, type CloudSession } from "./protocol";
 
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const SESSION_KEY = "terminalx.cloud.session.v1";
@@ -28,7 +28,10 @@ export async function beginSignIn(): Promise<CloudSession | null> {
     SecureStore.setItemAsync(NONCE_KEY, nonce, OPTIONS),
   ]);
   const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce), "terminalx://auth/callback");
-  return result.type === "success" ? finishSignIn(result.url) : null;
+  if (result.type === "success") return finishSignIn(result.url);
+  const failure = authSessionFailure(result as { type: string; error?: string | null });
+  if (failure) throw new Error(failure);
+  return null;
 }
 
 export async function finishSignIn(callbackUrl: string): Promise<CloudSession> {

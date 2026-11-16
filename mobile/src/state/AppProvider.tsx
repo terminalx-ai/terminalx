@@ -402,6 +402,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       const signedIn = await beginSignIn();
       if (signedIn) setSession(signedIn);
     } catch (cause) {
+      // A Release build logs only errors, so a failed sign-in is still in the device log.
+      console.error("[auth] sign-in failed:", readableError(cause));
       setError(readableError(cause));
     }
   }, []);

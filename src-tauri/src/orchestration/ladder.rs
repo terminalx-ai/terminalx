@@ -97,8 +97,12 @@ pub struct Next {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Again(Next),
-    /// No further try, and why, in a sentence.
+    /// No further try, and why, in a sentence: the piece used the tries the run gives it.
     Blocked(String),
+    /// No further try because there is no model above the last one to move
+    /// to, and why, in a sentence. Not a judgment on the piece: the lead may
+    /// finish it (#1004).
+    NoneAbove(String),
 }
 
 fn level(effort: &str) -> Option<usize> {
@@ -154,14 +158,14 @@ pub fn next(agent: &str, tries: usize, rules: &Rules, model: &str, effort: Optio
     }
     // Step 3: the next tier up.
     let Some(now) = tier else {
-        return Verdict::Blocked(format!("{} is not a model of a known tier, so there is no tier above it to move to.", if model.is_empty() { "The agent's default model" } else { model }));
+        return Verdict::NoneAbove(format!("{} is not a model of a known tier, so there is no tier above it to move to.", if model.is_empty() { "The agent's default model" } else { model }));
     };
     let Some(above) = now.above() else {
-        return Verdict::Blocked("It already ran on the top tier: there is no model above it.".into());
+        return Verdict::NoneAbove("It already ran on the top tier: there is no model above it.".into());
     };
     match routing::model_for(agent, above, models) {
         Some(up) => Verdict::Again(Next { step: Step::Tier, model: up.id.clone(), effort: lowered(effective(effort, entry).as_deref(), up), tier: Some(above) }),
-        None => Verdict::Blocked(format!("No {} model of {} is installed ({}), so there is no model above it to move to.", above.name(), routing::agent_name(agent), above.family(agent).unwrap_or_default())),
+        None => Verdict::NoneAbove(format!("No {} model of {} is installed ({}), so there is no model above it to move to.", above.name(), routing::agent_name(agent), above.family(agent).unwrap_or_default())),
     }
 }
 
@@ -185,14 +189,22 @@ mod tests {
     fn again(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> Next {
         match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
             Verdict::Again(next) => next,
-            Verdict::Blocked(why) => panic!("expected another try, got blocked: {why}"),
+            Verdict::Blocked(why) | Verdict::NoneAbove(why) => panic!("expected another try, got blocked: {why}"),
         }
     }
 
     fn blocked(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> String {
         match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
             Verdict::Blocked(why) => why,
-            Verdict::Again(next) => panic!("expected blocked, got {next:?}"),
+            other => panic!("expected blocked, got {other:?}"),
+        }
+    }
+
+    /// The ladder ends for want of a model above, not of tries.
+    fn none_above(agent: &str, tries: usize, model: &str, effort: Option<&str>, tier: Option<Tier>) -> String {
+        match next(agent, tries, &Rules::default(), model, effort, tier, &installed()) {
+            Verdict::NoneAbove(why) => why,
+            other => panic!("expected no model above, got {other:?}"),
         }
     }
 
@@ -264,14 +276,14 @@ mod tests {
 
     #[test]
     fn a_piece_with_no_model_above_it_is_blocked_after_two_tries() {
-        assert_eq!(blocked("claude", 2, "fable", Some("high"), Some(Tier::Top)), "It already ran on the top tier: there is no model above it.");
+        assert_eq!(none_above("claude", 2, "fable", Some("high"), Some(Tier::Top)), "It already ran on the top tier: there is no model above it.");
         // A model of no family (the plan named it) has no tier to move up from.
-        assert!(blocked("codex", 2, "gpt-5.5", Some("high"), None).starts_with("gpt-5.5 is not a model of a known tier"));
-        assert!(blocked("codex", 2, "", None, None).starts_with("The agent's default model is not a model of a known tier"));
+        assert!(none_above("codex", 2, "gpt-5.5", Some("high"), None).starts_with("gpt-5.5 is not a model of a known tier"));
+        assert!(none_above("codex", 2, "", None, None).starts_with("The agent's default model is not a model of a known tier"));
         // The tier above is not installed: what Codex lists today has no Astra.
         let mut models = crate::models::claude_fallback();
         models.extend(crate::harness::codex::models::fallback());
-        assert_eq!(next("codex", 2, &Rules::default(), "gpt-5.6-sol", Some("high"), Some(Tier::Large), &models), Verdict::Blocked("No top model of Codex is installed (astra), so there is no model above it to move to.".into()));
+        assert_eq!(next("codex", 2, &Rules::default(), "gpt-5.6-sol", Some("high"), Some(Tier::Large), &models), Verdict::NoneAbove("No top model of Codex is installed (astra), so there is no model above it to move to.".into()));
         // The second try is still made for each of them.
         assert_eq!(again("claude", 1, "fable", Some("medium"), Some(Tier::Top)).step, Step::Effort);
     }
@@ -316,7 +328,7 @@ mod tests {
         assert_eq!(under(&rules, "claude", 6, &last), Verdict::Blocked("It used all 6 tries.".into()));
         // A move up from the top tier still ends the climb before the tries run out.
         let fable = Next { step: Step::Effort, model: "fable".into(), effort: Some("high".into()), tier: Some(Tier::Top) };
-        assert_eq!(under(&rules, "claude", 4, &fable), Verdict::Blocked("It already ran on the top tier: there is no model above it.".into()));
+        assert_eq!(under(&rules, "claude", 4, &fable), Verdict::NoneAbove("It already ran on the top tier: there is no model above it.".into()));
     }
 
     #[test]
