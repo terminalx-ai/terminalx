@@ -50,6 +50,14 @@ export function environmentNameProblem(name: string): string | null {
   return null;
 }
 
+/**
+ * The name of a skipped line as the sheet may show it: only one that reads as
+ * an identifier, in one case (BAD_NAME, 2FA_SEED, lower_case). A mixed-case
+ * run such as a padded base64 token's body ("dGVzdA==" splits at the first
+ * "=") may be a secret, so it is not shown.
+ */
+const shownName = (name: string) => name.length <= 64 && (/^[A-Z0-9_]+$/.test(name) || /^[a-z_][a-z0-9_]*$/.test(name)) ? name : "";
+
 /** A pasted line that is not imported: its 1-based line number, the name (never the value) and why. */
 export interface SkippedLine { line: number; name: string; reason: string }
 
@@ -81,7 +89,7 @@ export function parseLocalEnv(text: string, existing: string[] = []) {
       value = value.replace(/\s+#.*$/, "").trimEnd();
     }
     if (!reason && (value.includes("\0") || new TextEncoder().encode(value).length > 64 * 1024)) reason = "value has a NUL or is over 64 KiB";
-    if (reason) skipped.push({ line: i + 1, name: name.slice(0, 128), reason });
+    if (reason) skipped.push({ line: i + 1, name: shownName(name), reason });
     else { inputs.push({ name, value }); lines.push(i + 1); names.add(name); }
   }
   return { inputs, skipped, lines };

@@ -239,8 +239,19 @@ function KeychainCheckbox({ checked, disabled, onChange, className = "mt-3" }: {
   </div>;
 }
 
-/** Where a row's value comes from: a chip for an override or a repository file, plain text otherwise. */
+/**
+ * Where a row's value comes from, and an Overridden chip when another source
+ * sets the same name (settings.local.json or managed policy over a project's
+ * value, the project over the shared file): editing it then changes nothing.
+ */
 function AppliesTo({ row, label }: { row: EnvironmentRow; label: string }): ReactNode {
+  const source = <Source row={row} label={label} />;
+  if (!row.overridden) return source;
+  return <span className="flex min-w-0 items-center gap-1.5">{source}<span title="Another source sets this name, so this value is not used." className="shrink-0 rounded-md bg-warning/12 px-1.5 py-0.5 text-[11px] text-warning">Overridden</span></span>;
+}
+
+/** A chip for an override or a repository file, plain text otherwise. */
+function Source({ row, label }: { row: EnvironmentRow; label: string }): ReactNode {
   if (row.scope === "repositoryShared" || row.scope === "repositoryLocal") return <span title={label} className="inline-flex max-w-full items-center gap-1 rounded-md bg-info/12 px-1.5 py-0.5 text-[11px] text-info"><FileText aria-hidden className="size-3 shrink-0" /><span className="truncate">{label}</span></span>;
   if (/overrid/.test(label)) return <span title={label} className="inline-flex max-w-full rounded-md border border-hairline-strong px-1.5 py-0.5 text-[11px] text-muted-foreground"><span className="truncate">{label}</span></span>;
   return <span title={label} className="block truncate">{label}</span>;
@@ -261,7 +272,7 @@ function VariableRow({ row, label, project, editable, disabled, reset, run, edit
   return <tr className="h-10 border-b border-hairline last:border-0">
     <td className="px-3 py-1.5 align-middle">
       <span className="flex min-w-0 items-center gap-1.5"><span className="truncate font-mono" title={row.name}>{row.name}</span>{own && secret && <Lock role="img" aria-label="Kept in the Keychain" className="size-3 shrink-0 text-faint" />}</span>
-      <span aria-hidden className="block truncate text-[11px] text-muted-foreground @xl:hidden">{label}</span>
+      <span aria-hidden className="block truncate text-[11px] text-muted-foreground @xl:hidden">{label}{row.overridden && " · Overridden"}</span>
     </td>
     <td className={`truncate px-3 py-1.5 align-middle ${own ? "font-mono" : "text-muted-foreground"}`} title={own && !secret ? row.value : undefined}>{shown}</td>
     <td className="hidden px-3 py-1.5 align-middle text-muted-foreground @xl:table-cell"><AppliesTo row={row} label={label} /></td>

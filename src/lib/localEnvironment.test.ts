@@ -21,6 +21,11 @@ describe("local environment paste", () => {
       { line: 9, name: "2FA_SEED", reason: "starts with a digit" },
     ]);
     expect(JSON.stringify(skipped)).not.toMatch(/sensitive|duplicate|secret|NO_EQUALS/);
+    // A bare base64 token splits at its padding: its body is not shown as a name.
+    expect(parseLocalEnv("dGhpcyBpcyBhIHNlY3JldA==\nsk-Live9xQ=abc").skipped).toEqual([
+      { line: 1, name: "", reason: "has lowercase letters" },
+      { line: 2, name: "", reason: "only A-Z, 0-9 and _ allowed" },
+    ]);
   });
   it("accepts comments, export, CRLF, quoted whitespace and literal substitutions", () => {
     expect(parseLocalEnv("export A=' a b ' # note\r\nB=\"$HOME\"\nC=$(touch something)\nD=hello # comment\nE=url#fragment")).toEqual({ inputs: [

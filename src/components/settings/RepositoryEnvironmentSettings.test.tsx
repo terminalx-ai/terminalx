@@ -14,6 +14,8 @@ const rows = [
   { name: "DATABASE_URL", scope: "repository", overridden: false, secret: false, value: "postgres://localhost/terminalx_dev" },
   { name: "STRIPE_SECRET_KEY", scope: "repository", overridden: false },
   { name: "VITE_RELAY_URL", scope: "repositoryShared", overridden: false, secret: false },
+  { name: "SENTRY_DSN", scope: "repository", overridden: true },
+  { name: "SENTRY_DSN", scope: "repositoryLocal", overridden: false, secret: false },
 ];
 beforeEach(() => {
   vi.clearAllMocks();
@@ -40,6 +42,8 @@ describe("repository environment page", () => {
     // A Personal value this project overrides is listed once, as the project's row.
     expect(cellsOf("DATABASE_URL").map((cells) => cells.slice(1, 3))).toEqual([["postgres://localhost/terminalx_dev", "overrides Personal"]]);
     expect(cellsOf("STRIPE_SECRET_KEY")[0][2]).toBe("This project");
+    // A project value another source overrides stays listed, marked Overridden.
+    expect(cellsOf("SENTRY_DSN").map((cells) => cells[2])).toEqual(["This projectOverridden", ".terminalx/settings.local.json"]);
     expect(cellsOf("NODE_OPTIONS")[0].slice(1, 3)).toEqual(["--max-old-space-size=8192", "from Personal"]);
     expect(cellsOf("VITE_RELAY_URL")[0].slice(1, 3)).toEqual(["Set in file", ".terminalx/settings.json"]);
     // Only this repository's own rows are editable; file rows have no actions.
@@ -57,7 +61,7 @@ describe("repository environment page", () => {
     expect(status("ANTHROPIC_API_KEY")).toMatch(/instead of your Claude login.*Set in Personal$/);
     expect(status("OPENAI_API_KEY")).toMatch(/Not set$/);
     expect(status("VITE_RELAY_URL")).toMatch(/settings file\.Set in \.terminalx\/settings\.json$/);
-    expect(screen.getByText(/^Documented variables/).textContent).toBe("Documented variables (13)");
+    expect(screen.getByText(/^Documented variables/).textContent).toBe("Documented variables (14)");
   });
 
   it("adds a documented variable from its + button", async () => {
