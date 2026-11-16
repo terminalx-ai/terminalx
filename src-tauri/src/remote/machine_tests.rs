@@ -585,3 +585,125 @@ async fn each_connection_is_told_of_changes_without_itself_as_another_computer()
     .await
     .is_err(), "a connection without machine/3 is not told");
 }
+
+/// PRO-350: the machine's page reads each agent's version and login there,
+/// and the agents with no CLI there, from `runtime.agents`.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
+    use crate::harness::readiness::State;
+    let m = machine_rpc();
+    // A path of this test's own: kept logins are per agent and path.
+    m.rpc.set_offered_for_tests(
+        crate::harness::catalog()
+            .into_iter()
+            .map(|mut agent| {
+                agent.available = agent.id == "claude";
+                agent.path = agent.available.then(|| format!("/opt/pro-350/{}", agent.binary));
+                agent
+            })
+            .collect(),
+    );
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::Ready, Some("2.4.1".to_string())))]));
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let listed = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    let claude = &listed["agents"][0];
+    assert_eq!(claude["id"], "claude");
+    assert_eq!(claude["signIn"], "signedIn");
+    assert_eq!(claude["version"], "2.4.1");
+    assert!(claude["signInCheckedAt"].as_u64().unwrap() > 0);
+    let missing = listed["missing"].as_array().unwrap();
+    let codex = missing.iter().find(|agent| agent["id"] == "codex").expect("codex has no CLI there");
+    assert_eq!(codex["name"], "Codex");
+    assert_eq!(codex["installable"], cfg!(unix));
+    assert!(missing.iter().all(|agent| agent["id"] != "claude"), "an installed agent is not missing");
+
+    // Signed out since: a kept answer is used for a minute, `refresh` asks again.
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::SignedOut, Some("2.4.1".to_string())))]));
+    let kept = call(&m.rpc, &peer, "runtime.agents", json!({})).await.unwrap();
+    assert_eq!(kept["agents"][0]["signIn"], "signedIn");
+    let asked = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(asked["agents"][0]["signIn"], "signedOut");
+
+    // A probe that cannot tell is unknown, never signed out.
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::Unknown, None))]));
+    let unknown = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(unknown["agents"][0]["signIn"], "unknown");
+    assert_eq!(unknown["agents"][0]["version"], Value::Null);
+}
+
+/// A runtime serving one workspace starts no login probe and lists nothing
+/// missing: its agents are shown as an older runtime's are, without a state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_root_runtime_reports_agents_without_sign_in() {
+    let _home = crate::store::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
+    rpc.set_offered_for_tests(crate::harness::catalog().into_iter().map(|mut agent| { agent.available = agent.id == "claude"; agent }).collect());
+    rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (crate::harness::readiness::State::Ready, None))]));
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["agents/1"] })).await.unwrap();
+    let listed = call(&rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(listed["agents"][0]["id"], "claude");
+    assert!(listed["agents"][0].get("signIn").is_none() && listed["agents"][0].get("version").is_none());
+    assert!(listed.get("missing").is_none());
+    terminals.kill_all();
+}
+
+/// PRO-350: Sign in and Install run in a terminal on the machine, one step at
+/// a time per agent; the terminal is not a shell of `pty.list`, and its exit
+/// code is the setup wrapper's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_setup_runs_in_a_terminal_on_the_machine_one_at_a_time() {
+    let m = machine_rpc();
+    // Stands in for `codex login --device-auth`, which would wait for a person.
+    m.rpc.set_setup_command_for_tests("sh -c 'sleep 2; exit 74'");
+    let (peer, mut events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/4")), "{hello}");
+
+    let started = call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "login", "cols": 90, "rows": 20 })).await.unwrap();
+    let pty_id = started["ptyId"].as_str().unwrap().to_string();
+    assert_eq!(started["setup"], json!({ "harness": "codex", "step": "login" }));
+    assert_eq!(started["cols"], 90);
+
+    // Another start of the same agent follows the one that runs.
+    let busy = call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "install", "cols": 90, "rows": 20 })).await;
+    assert_eq!(code(busy), "setup_busy");
+    let running = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.unwrap();
+    assert_eq!(running["run"], json!({ "ptyId": pty_id, "step": "login" }));
+    let other = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "claude" })).await.unwrap();
+    assert_eq!(other["run"], Value::Null);
+
+    // Not one of the machine's shells.
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"].as_array().unwrap().iter().all(|pty| pty["ptyId"] != pty_id.as_str()));
+
+    // Attached as any terminal; its exit says how the step ended.
+    call(&m.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    let exit = next_event(&mut events, "pty.exit").await;
+    assert_eq!(exit["ptyId"], pty_id.as_str());
+    assert_eq!(exit["code"], 74);
+    let after = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.unwrap();
+    assert_eq!(after["run"], Value::Null);
+
+    // Bad input is refused before anything runs; a viewer cannot start one.
+    assert_eq!(code(call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "uninstall", "cols": 90, "rows": 20 })).await), "invalid_params");
+    let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/4"] })).await.unwrap();
+    assert!(call(&m.rpc, &viewer, "machine.agentSetup", json!({ "harness": "codex", "step": "login", "cols": 90, "rows": 20 })).await.is_err());
+}
+
+/// The command a machine's page runs: the registry's, and for Codex the
+/// sign-in that needs no browser on the machine.
+#[test]
+fn a_sign_in_started_from_another_computer_uses_the_device_code_where_there_is_one() {
+    if cfg!(windows) || crate::binpath::resolve("codex").is_none() {
+        return;
+    }
+    let step = crate::harness::setup::Step::Login;
+    let here = crate::harness::setup::command("codex", step).unwrap();
+    let elsewhere = crate::harness::setup::command_elsewhere("codex", step).unwrap();
+    assert!(!here.contains("--device-auth"));
+    assert!(elsewhere.ends_with("'login' '--device-auth'"), "{elsewhere}");
+}

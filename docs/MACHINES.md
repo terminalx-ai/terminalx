@@ -1386,8 +1386,10 @@ serves its machine grants it.
   (no key, token, file or environment) is sent: the terminal starts with
   the machine's own environment, in the machine user's home.
 - One step at a time per agent, whichever computer or the machine's own
-  window asks: a second start is refused with `setup_busy`, `data` the run
-  (`{ ptyId, step }`), which the caller attaches to instead.
+  window asks: a second start is refused with `setup_busy`. Its `data` is
+  the run (`{ ptyId, step }`), which the caller attaches to instead, when it
+  runs in a terminal of the connection; there is none when the machine's own
+  window runs the step in one of its setup panes.
 - The terminal is attached, typed into, sized and killed as any other
   (`pty.attach`, `pty.write`, `pty.resize`, `pty.kill`), is never in
   `pty.list`, and ends with `pty.exit`; its exit code is the setup wrapper's

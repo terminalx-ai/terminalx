@@ -1433,8 +1433,10 @@ export class WorkspaceRpcClient {
    * machine (PRO-350). The command is the runtime's own; the terminal is
    * attached and typed into as any other (`attachPty`, `write`), and ends
    * with `pty.exit`, whose code says how (`SETUP_EXIT` in
-   * `src/lib/agentSetupFlow.ts`). Refused with `setup_busy` (data: a
-   * {@link MachineAgentSetupRun}) while a step of that agent runs there.
+   * `src/lib/agentSetupFlow.ts`). Refused with `setup_busy` while a step of
+   * that agent runs there; its data is that {@link MachineAgentSetupRun}
+   * when the step runs in a terminal to attach to, absent when the machine's
+   * own window runs it.
    */
   async startAgentSetup(params: { harness: string; step: MachineAgentSetupStep; cols: number; rows: number }): Promise<PtyInfo> {
     // Not resent after a drop: a second start would only be refused as busy.

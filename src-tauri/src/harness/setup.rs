@@ -120,6 +120,17 @@ const PROTOCOLS: &str = "=https";
 
 /// The command a setup pane runs for this step, made from the registry.
 pub fn command(harness: &str, step: Step) -> Result<String> {
+    command_for(harness, step, false)
+}
+
+/// The command for a step that a person at another computer started and
+/// watches (a machine's page, PRO-350): the same installer, and the CLI's
+/// sign-in that needs no browser here where it has one.
+pub fn command_elsewhere(harness: &str, step: Step) -> Result<String> {
+    command_for(harness, step, true)
+}
+
+fn command_for(harness: &str, step: Step, elsewhere: bool) -> Result<String> {
     let spec = super::REGISTRY.iter().find(|spec| spec.id == harness && super::visible(spec.id)).context("unknown agent")?;
     let Some(setup) = spec.setup.as_ref() else { bail!("{} cannot be installed from TerminalX. Follow its setup guide.", spec.name) };
     if cfg!(windows) {
@@ -132,7 +143,11 @@ pub fn command(harness: &str, step: Step) -> Result<String> {
             // Just installed: the miss from before must not be believed.
             crate::binpath::invalidate();
             let Some(binary) = crate::binpath::resolve(spec.binary) else { bail!("{} is not installed.", spec.name) };
-            login_line(spec.name, setup.probe, PROTOCOLS, &binary, setup.login)
+            let login = match setup.login_elsewhere {
+                Some(login) if elsewhere => login,
+                _ => setup.login,
+            };
+            login_line(spec.name, setup.probe, PROTOCOLS, &binary, login)
         }
     })
 }

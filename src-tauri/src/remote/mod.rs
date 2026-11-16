@@ -24,6 +24,7 @@ pub mod files;
 pub mod git;
 pub mod host;
 pub mod machine;
+pub(crate) mod machine_agents;
 pub mod machine_client;
 pub mod machine_update;
 pub mod mirror;
