@@ -38,8 +38,8 @@ import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
-import { isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
-import { EditorSplit } from "@/components/editor/EditorSplit";
+import { isFileTab, isTabEditor, setLastFocused, useEditors } from "@/lib/editors";
+import { EditorSplit, useFileTabShortcuts } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -488,7 +488,7 @@ export function SessionView({
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
-    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id) : [],
+    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isTabEditor(e)).map((e) => e.id) : [],
   });
   // The asked-for tab is restored across reloads, before its shell or page has loaded. Until it is the
   // tab shown, the fallback on screen is no request: following it would rewrite the panes' saved tabs.
@@ -540,7 +540,12 @@ export function SessionView({
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
-  const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
+  // A local session's files are tabs in its panes, beside the chat (PRO-402). A cloud session's, and the
+  // floating window's (it has no panes), are the editor pane's.
+  const tabsInPanes = !cloud && !compact;
+  const hasEditors = !tabsInPanes && ed.editors.some((e) => e.sessionId === session.id);
+  const shownFile = tabsInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
+  useFileTabShortcuts(session.id, shownFile, tabsInPanes);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
 
@@ -868,7 +873,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
+              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -976,7 +981,7 @@ export function SessionView({
               )}
               </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} reviewsInPanes={!cloud && !compact} />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
           </div>
         </section>
       </div>
