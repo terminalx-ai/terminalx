@@ -5,6 +5,8 @@ import { SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { getCloudCatalog } from "@/lib/cloudCatalog";
 import { api } from "@/lib/api";
+import { onOpenCloudSetup } from "@/lib/cloudSetupFlow";
+import { newSetup, saveSetup } from "@/lib/organizationSetup";
 
 const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn(), refreshAccount: vi.fn(), signIn: vi.fn() }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: () => () => {}, useAccount: () => ({ status: mocks.status, ready: true, busy: false }), refreshAccount: mocks.refreshAccount, signIn: mocks.signIn }));
@@ -32,32 +34,28 @@ afterEach(cleanup);
 const mount = () => render(<SettingsPage initialTab="organizations" onBack={vi.fn()} />);
 
 describe("organization Settings", () => {
-  it.each([false, true])("creates from the empty state and continues setup (existing organization: %s)", async (existing) => {
-    mocks.status = {
-      ...mocks.status,
-      identity: { name: "Ada", email: "ada@example.com", organization: existing ? "Existing" : null, organizationId: existing ? "old" : null },
-      organizations: existing ? [{ id: "old", name: "Existing", role: "owner", cloud: { enabled: false, flags: {} } }] : [],
-    };
-    const created = { id: "new", name: "New team", role: "owner", cloud: { enabled: true, flags: {} } };
-    vi.mocked(api.organizationCreate).mockResolvedValue(created);
-    const view = mount();
-    expect(screen.getByText("No cloud-enabled organizations.")).toBeTruthy();
+  it.each([false, true])("opens the full-window setup to create an organization, whatever the person belongs to (existing organizations: %s)", (existing) => {
+    if (!existing) mocks.status = { ...mocks.status, identity: { name: "Ada", email: "ada@example.com", organization: null, organizationId: null }, organizations: [] };
+    const opened: unknown[] = [];
+    const stop = onOpenCloudSetup((target) => opened.push(target));
+    mount();
+    expect(screen.queryByText("No cloud-enabled organizations.") === null).toBe(existing);
     fireEvent.click(screen.getByRole("button", { name: "Create organization" }));
-    const name = screen.getByRole("textbox", { name: "Organization name" });
-    fireEvent.change(name, { target: { value: "  New team  " } });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(mocks.refreshAccount).toHaveBeenCalledOnce());
-    expect(api.organizationCreate).toHaveBeenCalledExactlyOnceWith("New team", expect.any(String));
+    stop();
+    expect(opened).toEqual([{ kind: "create" }]);
+    expect(api.organizationCreate).not.toHaveBeenCalled();
+  });
 
-    mocks.status = {
-      ...mocks.status,
-      identity: { ...mocks.status.identity!, organization: created.name, organizationId: created.id },
-      organizations: [...mocks.status.organizations!, created],
-    };
-    view.rerender(<SettingsPage initialTab="organizations" onBack={vi.fn()} />);
-    expect(screen.queryByText("No cloud-enabled organizations.")).toBeNull();
-    expect(screen.getByTestId("setup-organization").textContent).toBe(created.id);
-    expect(screen.getByText("Provider setup")).toBeTruthy();
+  it("offers Finish setting up on an organization whose setup was left unfinished, and resumes it", () => {
+    saveSetup("ada@example.com", { ...newSetup("Beta", "request-b"), organizationId: "b", step: "compute", flow: { step: "environment", passed: ["organization", "github"], finishedAt: null } });
+    saveSetup("ada@example.com", { ...newSetup("Acme", "request-a"), organizationId: "a", step: "done", flow: { step: "invite", passed: [], finishedAt: 1 } });
+    const opened: unknown[] = [];
+    const stop = onOpenCloudSetup((target) => opened.push(target));
+    mount();
+    expect(screen.queryByRole("button", { name: "Finish setting up Acme" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Finish setting up Beta" }));
+    stop();
+    expect(opened).toEqual([{ kind: "resume", organizationId: "b" }]);
   });
 
   it("offers sign-in before organization creation when signed out", () => {
