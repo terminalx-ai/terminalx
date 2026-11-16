@@ -175,7 +175,7 @@ function AlmostSet({
       .cloudProviders()
       .then(async (response) => {
         if (!alive.current) return;
-        const listed = listedProviders(response.providers, organizationId);
+        const listed = listedProviders(response.providers);
         const chosen = wanted.current?.provider;
         const summary = (chosen ? listed.find((option) => option.id === chosen) : undefined) ?? listed.find((option) => option.connection !== null);
         if (!summary || !summary.connection) {

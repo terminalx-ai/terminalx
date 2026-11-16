@@ -575,10 +575,58 @@ fn provider_key_prompt(provider: &str, organization: &str) -> String {
     format!("Enter the {provider} provider key for organization {organization}. The key is sent to the account service only for validation and secure storage.")
 }
 
+/// The dialog text for one credential field of a described provider
+/// (PRO-415): a provider with one field keeps the provider-key wording; one
+/// with several names the field. A help link the server gives is shown when
+/// it is an https URL.
+fn credential_field_prompt(provider: &str, organization: &str, field: &crate::cloud_workspaces::CloudProviderCredentialField, only: bool) -> String {
+    let label = dialog_text(&field.label);
+    let mut text = if only || label.is_empty() {
+        provider_key_prompt(provider, organization)
+    } else {
+        format!("Enter the {label} for {provider} in organization {organization}. It is sent to the account service only for validation and secure storage.")
+    };
+    if let Some(url) = field.help_url.as_deref().map(dialog_text).filter(|url| url.starts_with("https://")) {
+        text.push_str(&format!(" Where to get it: {url}"));
+    }
+    text
+}
+
+/// What is sent as the credential: one field's value as typed, or several
+/// as a JSON object keyed by field name. The object is written into a buffer
+/// sized up front for the worst case (every character escaped as `\uXXXX`,
+/// six bytes for at most four), so it never grows: a growing `String` would
+/// free earlier partial copies of the secret without zeroing them. The only
+/// copy is the zeroized one.
+fn combined_credential(values: &[(String, zeroize::Zeroizing<String>)]) -> zeroize::Zeroizing<String> {
+    if let [(_, only)] = values {
+        return only.clone();
+    }
+    let fields: std::collections::BTreeMap<&str, &str> = values.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    // `{}` plus, per field, two quoted strings, a colon and a comma.
+    let capacity = 2 + fields.iter().map(|(name, value)| 6 * (name.len() + value.len()) + 6).sum::<usize>();
+    let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
+    let reserved = buffer.capacity();
+    serde_json::to_writer(&mut *buffer, &fields).expect("serialize credential fields");
+    debug_assert_eq!(buffer.capacity(), reserved, "the credential buffer grew");
+    // The bytes move into the String without a copy; the emptied Vec left behind holds nothing.
+    let bytes = std::mem::take(&mut *buffer);
+    zeroize::Zeroizing::new(String::from_utf8(bytes).expect("JSON is UTF-8"))
+}
+
 /// A key typed into a native secure field: it never passes through the
 /// webview, and the field is emptied whichever way the dialog ends.
 #[cfg(target_os = "macos")]
 fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    field_prompt(title, text, placeholder, true)
+}
+
+/// A value typed into a native field: a secure one for a secret, a plain one
+/// for a provider's non-secret credential field (PRO-415). Either way it
+/// never passes through the webview, and the field is emptied whichever way
+/// the dialog ends.
+#[cfg(target_os = "macos")]
+fn field_prompt(title: &str, text: &str, placeholder: &str, secure: bool) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -586,7 +634,12 @@ fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(text));
-    let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
+    let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.));
+    let field: objc2::rc::Retained<objc2_app_kit::NSTextField> = if secure {
+        objc2::rc::Retained::into_super(NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), frame))
+    } else {
+        objc2_app_kit::NSTextField::initWithFrame(objc2_app_kit::NSTextField::alloc(mtm), frame)
+    };
     field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     alert.setAccessoryView(Some(&field));
     alert.addButtonWithTitle(&NSString::from_str("Validate"));
@@ -613,25 +666,37 @@ pub async fn cloud_provider_connect(
     static PROMPT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _prompt_guard = PROMPT_GUARD.try_lock().map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
     let service = state.cloud_workspaces.clone();
-    let (authorization, provider_name) = tauri::async_runtime::spawn_blocking(move || {
+    let (authorization, summary) = tauri::async_runtime::spawn_blocking(move || {
         let authorization = service.authorize_connect(provider)?;
-        let provider_name = service.provider_display_name(&authorization);
-        Ok::<_, crate::cloud_workspaces::CloudWorkspaceClientError>((authorization, provider_name))
+        let summary = service.provider_summary(&authorization);
+        Ok::<_, crate::cloud_workspaces::CloudWorkspaceClientError>((authorization, summary))
     })
     .await
     .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Read))??;
-    let text = provider_key_prompt(
-        &dialog_name(provider_name, provider.label()),
-        &dialog_name(state.account.organization_name(authorization.organization_id()), authorization.organization_id()),
-    );
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    app.run_on_main_thread(move || { let _ = sender.send(secure_prompt("Provider connection", &text, "Provider key")); })
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
-    let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
-        .await
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
-    let credential = prompt_result.map_err(ProviderPromptError::client_error)?;
+    // What to call the provider and what to ask for come from its descriptor
+    // (PRO-415); the provider's id stands in for a name the list does not give.
+    let provider_name = dialog_name(summary.as_ref().map(|summary| summary.label()), authorization.provider().as_str());
+    let organization = dialog_name(state.account.organization_name(authorization.organization_id()), authorization.organization_id());
+    let fields = summary.map(|summary| summary.credential_fields()).unwrap_or_else(|| {
+        vec![crate::cloud_workspaces::CloudProviderCredentialField { name: "credential".into(), kind: "secret".into(), label: "provider key".into(), help_url: None }]
+    });
+    let only = fields.len() == 1;
+    let mut values = Vec::with_capacity(fields.len());
+    for field in fields {
+        let text = credential_field_prompt(&provider_name, &organization, &field, only);
+        let placeholder = if only { "Provider key".to_owned() } else { dialog_name(Some(field.label.clone()), "Provider key") };
+        let secret = field.secret();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || { let _ = sender.send(field_prompt("Provider connection", &text, &placeholder, secret)); })
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+        let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+        values.push((field.name, prompt_result.map_err(ProviderPromptError::client_error)?));
+    }
+    let credential = combined_credential(&values);
+    drop(values);
     let service = state.cloud_workspaces.clone();
     tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
         .await
@@ -640,6 +705,11 @@ pub async fn cloud_provider_connect(
 
 #[cfg(not(target_os = "macos"))]
 fn secure_prompt(_title: &str, _text: &str, _placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn field_prompt(_title: &str, _text: &str, _placeholder: &str, _secure: bool) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     Err(ProviderPromptError::Unavailable)
 }
 
@@ -4652,7 +4722,6 @@ mod command_tests {
     // PRO-111: the provider key dialog names the provider and the organization, not their ids.
     #[test]
     fn the_provider_key_prompt_names_the_provider_and_the_organization() {
-        use crate::cloud_workspaces::CloudWorkspaceProviderId;
         assert_eq!(
             super::provider_key_prompt("Local Docker (development)", "Org B"),
             "Enter the Local Docker (development) provider key for organization Org B. The key is sent to the account service only for validation and secure storage."
@@ -4661,8 +4730,33 @@ mod command_tests {
         assert_eq!(super::dialog_name(Some(" Org\u{202E} B\n".into()), "08c6afb1"), "Org B");
         assert_eq!(super::dialog_name(Some("\u{200B} ".into()), "08c6afb1"), "08c6afb1");
         assert_eq!(super::dialog_name(None, "08c6afb1"), "08c6afb1");
-        assert_eq!(super::dialog_name(None, CloudWorkspaceProviderId::Box.label()), "Boat");
-        assert_eq!(CloudWorkspaceProviderId::LocalDocker.label(), "Local Docker");
+        assert_eq!(super::dialog_name(None, "acme-cloud"), "acme-cloud");
+    }
+
+    // PRO-415: a described provider's credential fields drive the dialog; one
+    // field keeps the provider-key wording, several name each field and are
+    // sent as one JSON object keyed by field name.
+    #[test]
+    fn credential_fields_come_from_the_descriptor() {
+        use crate::cloud_workspaces::CloudProviderCredentialField;
+        let field = |name: &str, label: &str, help_url: Option<&str>| CloudProviderCredentialField { name: name.into(), kind: "secret".into(), label: label.into(), help_url: help_url.map(Into::into) };
+        assert_eq!(
+            super::credential_field_prompt("Acme Cloud", "Org B", &field("token", "Acme token", Some("https://acme.example/tokens")), true),
+            "Enter the Acme Cloud provider key for organization Org B. The key is sent to the account service only for validation and secure storage. Where to get it: https://acme.example/tokens"
+        );
+        assert_eq!(
+            super::credential_field_prompt("Acme Cloud", "Org B", &field("account", "Account\u{202E} id", Some("javascript:alert(1)")), false),
+            "Enter the Account id for Acme Cloud in organization Org B. It is sent to the account service only for validation and secure storage."
+        );
+        let one = super::combined_credential(&[("token".into(), zeroize::Zeroizing::new("abc".into()))]);
+        assert_eq!(one.as_str(), "abc");
+        let several = super::combined_credential(&[("secret".into(), zeroize::Zeroizing::new("s\"1".into())), ("account".into(), zeroize::Zeroizing::new("a1".into()))]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&several).unwrap(), serde_json::json!({ "account": "a1", "secret": "s\"1" }));
+        // The worst case (every character escaped) fits the buffer sized up front, so it never grew.
+        let controls = "\u{1}".repeat(40);
+        let escaped = super::combined_credential(&[("a".into(), zeroize::Zeroizing::new(controls.clone())), ("b".into(), zeroize::Zeroizing::new(controls.clone()))]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&escaped).unwrap(), serde_json::json!({ "a": controls, "b": controls }));
+        assert!(escaped.capacity() <= 2 + 2 * (6 * 41 + 6));
     }
     use crate::session_ops::{
         create_session_entry, new_tab_entry, notify_workspace_deleted,

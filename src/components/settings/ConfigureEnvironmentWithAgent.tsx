@@ -7,6 +7,7 @@ import { observationsBody, preparationPrompt, type BuildFailureContext, type Pre
 import { PREPARATION_LIMIT_MINUTES, PreparationError, machineSentence, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
 import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, retryEnvironmentRun, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
 import { formatMicros, providerLabel } from "@/lib/organizationCompute";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { checkSummary, environmentErrorMessage, organizationEnvironment, type EnvironmentStatus } from "@/lib/organizationEnvironment";
 import { RecipeDetails } from "./EnvironmentRecipes";
 
@@ -69,6 +70,8 @@ export function ConfigureEnvironmentWithAgent({
   /** Go straight to the price and the confirm, as when a button elsewhere asked for this run. */
   autoBegin?: boolean;
 }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const provider = status.provider as CloudWorkspaceProviderId;
   const [local, setStage] = useState<Stage>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);

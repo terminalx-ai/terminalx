@@ -594,7 +594,7 @@ export function EnvironmentStep(props: StepProps) {
       .cloudProviders()
       .then((response) => {
         if (!alive.current) return;
-        const listed = listedProviders(response.providers, organization.id);
+        const listed = listedProviders(response.providers);
         const wanted = machine.current?.provider;
         const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null);
         const id = wanted ?? summary?.id ?? null;

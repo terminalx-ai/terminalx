@@ -63,11 +63,28 @@ const answers = ({ environment, failed, read }) => {
   const answers = window.__PW_STUB__.answers;
   answers.status_bar_settings = { visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 };
   const capabilities = { suspend: true, resume: true, releaseDisposition: "retain", locationSelection: "required", sourceSelection: "none", pricing: "provider-rate" };
+  // The descriptors the server's provider registry publishes (PRO-415): the app names no provider.
+  const offering = { locations: "required", sources: "none", machineClasses: "catalog", pricingSource: "provider-rate", suspendedBilling: "none" };
+  const descriptor = (id, label, icon, order, description, billing, billedByProvider, credentialFields) => ({
+    id, label, icon, order, description, billing, billedByProvider, listed: true, credentialFields, offering,
+    capabilities: { pauseResumeWithMemory: false, stopStart: true, snapshots: false, exec: false, computeRunsUntilStopped: false },
+    allowedIdleSuspendMinutes: [5, 10, 15, 30, 60, 0],
+    allowedRetentionDays: [7, 30],
+  });
   answers.cloud_providers = {
     providers: [
-      { id: "hetzner", displayName: "Hetzner Cloud", availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: "abcd1234" }, capabilities },
-      { id: "box", displayName: "Boat", availability: "not-connected", canManage: true, connection: null, capabilities },
-      { id: "local-docker", displayName: "Local Docker", availability: "not-connected", canManage: true, connection: null, capabilities },
+      {
+        id: "hetzner", displayName: "Hetzner Cloud", availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: "abcd1234" }, capabilities,
+        descriptor: descriptor("hetzner", "Hetzner Cloud", "server", 20, "Machines in Falkenstein, Nuremberg, Helsinki, Ashburn and Hillsboro.", "Hourly, billed by Hetzner", true, [{ name: "credential", kind: "secret", label: "Hetzner API token", helpUrl: "https://docs.hetzner.com/cloud/api/getting-started/generating-api-token" }]),
+      },
+      {
+        id: "box", displayName: "Boat", availability: "not-connected", canManage: true, connection: null, capabilities,
+        descriptor: descriptor("box", "Boat", "ship", 10, "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume.", "Per second, billed by Boat", true, [{ name: "credential", kind: "secret", label: "Boat API token", helpUrl: null }]),
+      },
+      {
+        id: "local-docker", displayName: "Local Docker", availability: "not-connected", canManage: true, connection: null, capabilities,
+        descriptor: descriptor("local-docker", "Local Docker (development)", "container", 90, "Containers on a machine you run. Good for trying cloud workspaces out.", "Your own hardware", false, [{ name: "credential", kind: "text", label: "Connection marker", helpUrl: null }]),
+      },
     ],
   };
   answers.cloud_provider = { provider: "hetzner", state: "connected", canManage: true, credentialFingerprint: "abcd1234", connectedAt: 1, lastValidatedAt: 1, providerAccount: "project 4471" };
@@ -156,7 +173,8 @@ try {
         "Replace key shares the token field's label line": replaceBox !== null && replaceBox.bottom <= tokenBox.top,
         "no provider card adds a Connected line": cards.length > 0 && cards.every((card) => !/Connected/.test(card)),
         "no repeated helper line under the computer name": !/Everyone in the organization sees the cloud computer/.test(text),
-        "the size hint says Hetzner, without VAT": /prices from Hetzner, without VAT/.test(text),
+        // The provider is named by its descriptor (PRO-415); a VAT note needs a descriptor field the server does not send yet.
+        "the size hint names whose prices they are": /Machine size · prices from Hetzner Cloud/.test(text),
       }, { replaceBox, tokenBox, cards, titleLine, kbd });
       await page.close();
     }

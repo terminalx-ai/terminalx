@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
-import { CircleCheck, Cloud, Container, Loader2, Server, Ship, TriangleAlert } from "@/icons";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { CircleCheck, Loader2, TriangleAlert } from "@/icons";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudProviderConnection, type CloudProviderSummary, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
 import { refreshAccount } from "@/lib/account";
 import { COMPUTER_COLORS, COMPUTER_NAME, computerColorCss, computerNameOf, saveComputerIdentity, type ComputerColor } from "@/lib/computerIdentity";
 import { listedProviders, pausedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderBilled, cloudProviderIcon, cloudProviderLabel } from "@/lib/cloudProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { cn } from "@/lib/cn";
 import { providerActionMessage } from "@/components/settings/ProviderControls";
@@ -12,14 +14,6 @@ import { FieldLabel, PrimaryButton, StepActions, StepError, StepPage } from "./F
 import type { StepProps } from "./stepProps";
 
 const DISCLOSURE_VERSION = "cloud-provider-connections-2026-08-13";
-
-/** What each provider is, for the cards (12.03). A provider not named here shows its name alone. */
-const PROVIDER_COPY: Partial<Record<CloudWorkspaceProviderId, { icon: ComponentType<{ className?: string }>; description: string; billing: string; key: string; prices?: string }>> = {
-  hetzner: { icon: Server, description: "Machines in Falkenstein, Nuremberg, Helsinki, Ashburn and Hillsboro.", billing: "Hourly, billed by Hetzner", key: "Hetzner API token", prices: "Hetzner, without VAT" },
-  box: { icon: Ship, description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume.", billing: "Per second, billed by Boat", key: "Boat API token" },
-  "local-docker": { icon: Container, description: "Containers on a machine you run. Good for trying cloud workspaces out.", billing: "Your own hardware", key: "Local Docker connection" },
-  machine0: { icon: Cloud, description: "Cloud machines in your Machine0 account.", billing: "Billed by Machine0", key: "Machine0 API token" },
-};
 
 const NAME_RULE = "Use 1–40 lowercase letters, digits and hyphens, starting and ending with a letter or digit.";
 
@@ -97,7 +91,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
     try {
       const result = await api.cloudProviders();
       if (!mounted.current || current !== providersSeq.current) return null;
-      const listed = listedProviders(result.providers, organization.id);
+      const listed = listedProviders(result.providers);
       setProviders(listed);
       setProvidersError(null);
       setSelected((shown) => {
@@ -196,7 +190,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
   const paused = provider?.availability === "disabled-for-create";
   const disconnecting = Boolean(connection?.disconnectDisposition || connection?.disconnectRetention === "archive");
   const entering = manage && !disconnecting && (!connection || connection.state === "not-connected" || replacing);
-  const copy = provider ? PROVIDER_COPY[provider.id] : undefined;
+  const copy = provider?.descriptor ?? null;
 
   const connect = async () => {
     if (!provider || busy || !consented) return;
@@ -236,7 +230,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
       if (!mounted.current) return;
       setReload((count) => count + 1);
       // Allowed for the organization, and still not offered: the server is not taking new machines there.
-      if (found && pausedProviders(found, organization.id).some((other) => other.id === provider.id))
+      if (found && pausedProviders(found).some((other) => other.id === provider.id))
         setError(`New machines are allowed for ${organization.name}, but ${provider.displayName} isn't offered for new workspaces right now. Check again later.`);
       else setNotice("New machines are allowed again.");
     } catch (failure) {
@@ -271,7 +265,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
 
   const shownCss = computerColorCss(color);
   const idleMinutes = offered?.defaults.idleSuspendMinutes ?? 0;
-  const billed = provider?.capabilities.pricing !== "unavailable" && provider?.id !== "local-docker";
+  const billed = provider ? cloudProviderBilled(provider) : false;
 
   return (
     <StepPage
@@ -297,8 +291,8 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         <div role="radiogroup" aria-label="Compute provider" className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
           {providers.map((item) => {
             const current = item.id === selected;
-            const itemCopy = PROVIDER_COPY[item.id];
-            const Icon = itemCopy?.icon ?? Cloud;
+            const itemCopy = item.descriptor;
+            const Icon = cloudProviderIcon(item);
             const state =
               item.availability === "disabled-for-create"
                 ? { label: "New machines paused", tone: "text-warning" }
@@ -317,7 +311,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 <input type="radio" name="cloud-setup-provider" className="sr-only" checked={current} onChange={() => choose(item.id)} />
                 <span className="flex items-center gap-2">
                   <Icon className={cn("size-4 shrink-0", current ? "text-accent" : "text-muted-foreground")} />
-                  <span className="min-w-0 truncate text-[13px] font-medium">{item.displayName}</span>
+                  <span className="min-w-0 truncate text-[13px] font-medium">{cloudProviderLabel(item)}</span>
                   <span aria-hidden className={cn("ml-auto grid size-4 shrink-0 place-items-center rounded-full border", current ? "border-accent" : "border-hairline")}>
                     {current && <span className="size-2 rounded-full bg-accent" />}
                   </span>
@@ -343,7 +337,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
           <div className="mt-4 grid grid-cols-[1fr_200px] gap-3 max-sm:grid-cols-1">
             <div className="min-w-0">
               <div className="mb-1.5 flex items-baseline justify-between gap-2">
-                <span className="text-[12.5px] font-medium">{copy?.key ?? `${provider.displayName} API token`}</span>
+                <span className="text-[12.5px] font-medium">{copy?.credentialFields.map((field) => field.label).join(" · ") || `${cloudProviderLabel(provider)} API token`}</span>
                 {/* Replacing the key is a link on the field's own line, not a row of its own (12.03). */}
                 {manage && connection && !entering && !disconnecting && (
                   <button type="button" className="text-[12px] text-muted-foreground hover:text-foreground hover:underline disabled:opacity-60" disabled={Boolean(busy)} onClick={() => setReplacing(true)}>
@@ -351,6 +345,13 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                   </button>
                 )}
               </div>
+              {copy?.credentialFields
+                .filter((field) => field.helpUrl?.startsWith("https://"))
+                .map((field) => (
+                  <button key={field.name} type="button" className="mb-1 text-[12px] text-accent hover:underline" onClick={() => void openUrl(field.helpUrl!).catch(() => undefined)}>
+                    Where to get the {field.label}
+                  </button>
+                ))}
               <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-hairline bg-card px-3 text-[12.5px]" data-testid="cloud-setup-provider-connection">
                 {detailLoading && !connection ? (
                   <span className="flex items-center gap-2 text-muted-foreground">
@@ -463,7 +464,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
 
           <div className="mt-4 mb-1.5 text-[12.5px] font-medium">
             Machine size
-            {offered && <span className="font-normal text-faint"> · {offered.pricing === "provider-rate" ? `prices from ${copy?.prices ?? provider.displayName}` : "estimated prices"}</span>}
+            {offered && <span className="font-normal text-faint"> · {offered.pricing === "provider-rate" ? `prices from ${provider.displayName}` : "estimated prices"}</span>}
           </div>
           {offered ? (
             offered.machineClasses.length ? (

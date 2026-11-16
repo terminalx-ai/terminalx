@@ -1,4 +1,4 @@
-import { Columns2, Copy, EllipsisVertical, Rows2, Trash2 } from "@/icons";
+import { Columns2, Copy, EllipsisVertical, EyeOff, Rows2, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -48,4 +48,14 @@ export function DiffViewOptionsMenu({ fileKey, onCopy, onDiscard, discardLabel }
       {onDiscard && <DropdownMenuItem className={item} destructive onSelect={onDiscard} aria-label={discardLabel}><Trash2 /> Discard changes…</DropdownMenuItem>}
     </DropdownMenuContent>
   </DropdownMenu>;
+}
+
+/** The review tab's one toolbar (PRO-392): Unified | Split and Hide whitespace, the same global defaults. */
+export function DiffViewToggles() {
+  const { mode, hideWhitespace } = useDiffOptions();
+  return <div aria-label="Diff options" role="group" className="flex shrink-0 items-center gap-1">
+    <Button size="sm" variant={mode === "unified" ? "secondary" : "ghost"} aria-pressed={mode === "unified"} onClick={() => setPrefs({ diffMode: "unified" })}>Unified</Button>
+    <Button size="sm" variant={mode === "split" ? "secondary" : "ghost"} aria-pressed={mode === "split"} onClick={() => setPrefs({ diffMode: "split" })}>Split</Button>
+    <Button size="sm" variant={hideWhitespace ? "secondary" : "ghost"} aria-pressed={hideWhitespace} onClick={() => setPrefs({ diffHideWhitespace: !hideWhitespace })}><EyeOff />Hide whitespace</Button>
+  </div>;
 }
