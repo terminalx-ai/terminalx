@@ -70,7 +70,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     // The server's own values are placeholders; the asking line names this Mac by its real name.
     await within(dialog).findByText(/Paresh’s MacBook Pro asks to operate this server/);
     expect(lines(dialog)).toEqual([
-      "$ terminalx-serve pair",
+      "you@server ~ $ terminalx-serve pair",
       "TerminalX <version> · <OS> <arch>",
       "Name        <server name>",
       "Machine ID  <machine ID>",
@@ -84,7 +84,9 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     ]);
     expect(within(dialog).getByRole("region", { name: "On the server" })).toBeTruthy();
 
-    expect(within(dialog).getByText("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.")).toBeTruthy();
+    const note = within(dialog).getByTestId("headless-agents-note");
+    expect(note.textContent).toBe("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.");
+    expect([...note.querySelectorAll("code")].map((code) => code.textContent)).toEqual(["claude", "codex login --device-auth"]);
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeTruthy();
     expect((within(dialog).getByRole("button", { name: "Continue" }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command !== "machines_account_list")).toEqual(["machine_name"]);

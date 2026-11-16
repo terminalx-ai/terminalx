@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronRight, Copy, Ellipsis, Info, Loader2, Plus, Trash2 } from "@/icons";
+import { Check, ChevronRight, Copy, Ellipsis, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -75,13 +75,6 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
       <div className="border-b border-hairline py-1.5">
         <ThisMac machineId={view?.status?.machineId ?? null} />
       </div>
-      {allow && (
-        <RegisteredSetting setting="machines.pairingCode">
-          <section className="border-b border-hairline py-3.5">
-            <PairingCode />
-          </section>
-        </RegisteredSetting>
-      )}
       <RegisteredSetting setting="machines.yours">
         <section className="mt-6">
           <YourMachines onOpen={onOpen} />
@@ -91,6 +84,14 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
         <section className="mt-6">
           <h3 className={heading}>Computers that can operate this Mac</h3>
           <p className={cn(soft, "mt-0.5")}>Each has its own credential. Revoking one closes its connection at once.</p>
+          {/* A code is how a computer joins this list, so it is made here: nothing sits between This Mac and Your machines (21.02, PRO-398). */}
+          {allow && (
+            <RegisteredSetting setting="machines.pairingCode">
+              <div className="mt-2.5">
+                <PairingCode />
+              </div>
+            </RegisteredSetting>
+          )}
           <ComputerList computers={view?.status?.computers ?? []} busy={host.busy} />
         </section>
       </RegisteredSetting>
@@ -165,7 +166,7 @@ function ThisMac({ machineId }: { machineId: string | null }) {
           className="h-7 w-64 min-w-0 rounded-md border border-hairline bg-background px-2 text-[12.5px] outline-none focus:border-border"
         />
         <Button type="submit" size="sm" variant="secondary" disabled={saving || !typed || typed === name?.name}>
-          {saving ? <Loader2 className="animate-spin" /> : null} Save
+          {saving ? <LoaderCircle className="animate-spin" /> : null} Save
         </Button>
         <Button type="button" size="sm" variant="ghost" disabled={saving} onClick={() => setDraft(null)}>
           Cancel
@@ -228,12 +229,9 @@ function PairingCode() {
   return (
     <div className="grid gap-2">
       <div className="flex items-center gap-6">
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium">Pairing code</div>
-          <p className={cn(soft, "mt-0.5")}>On the other computer, open Add a machine and paste this code. Allow it here only if both screens show the same fingerprint.</p>
-        </div>
+        <p className={cn(soft, "min-w-0 flex-1")}>To add a computer, create a pairing code and paste it in Add a machine there. Allow it here only if both screens show the same fingerprint.</p>
         <Button className="shrink-0" size="sm" variant="outline" disabled={busy || paused || !status} onClick={() => void create()}>
-          {busy ? <Loader2 className="animate-spin" /> : null} {live ? "Create a new code" : "Create pairing code"}
+          {busy ? <LoaderCircle className="animate-spin" /> : null} {live ? "Create a new code" : "Create pairing code"}
         </Button>
       </div>
       {live && left > 0 && (
@@ -241,7 +239,7 @@ function PairingCode() {
           <code className="block break-all rounded-lg border border-hairline-strong bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px]">{live.code}</code>
           <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
             <span aria-live="polite">Expires in {minutesSeconds(left)} · works once</span>
-            <Button variant="ghost" size="xs" className="ml-auto" onClick={() => void copy()}>
+            <Button variant="ghost" size="sm" className="ml-auto" onClick={() => void copy()}>
               {copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy code"}
             </Button>
           </div>
@@ -429,7 +427,7 @@ function RemoveMachineDialog({ machine, onClose }: { machine: PairedMachine | nu
         <div className="flex justify-end gap-2">
           <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
           <Button variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
-            {busy ? <Loader2 className="animate-spin" /> : null} Remove
+            {busy ? <LoaderCircle className="animate-spin" /> : null} Remove
           </Button>
         </div>
       </DialogContent>
@@ -481,13 +479,13 @@ function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boole
           <span className="mr-auto min-w-0 text-[12.5px] text-muted-foreground">
             Ends {computer.label}’s credential and closes its connection. It does not undo what it already did on this Mac.
           </span>
-          <Button size="xs" variant="outline" onClick={() => setConfirming(false)}>Keep</Button>
-          <Button size="xs" variant="destructive" disabled={busy} onClick={() => void revokeComputer(computer.id).then(() => setConfirming(false))}>
+          <Button size="sm" variant="outline" onClick={() => setConfirming(false)}>Keep</Button>
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => void revokeComputer(computer.id).then(() => setConfirming(false))}>
             Revoke
           </Button>
         </div>
       ) : (
-        <Button size="xs" variant="ghost" className="ml-1 shrink-0 text-[12.5px] text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
+        <Button size="sm" variant="ghost" className="ml-1 shrink-0 text-[13px] text-destructive hover:text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
           Revoke
         </Button>
       )}

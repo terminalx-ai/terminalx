@@ -1,4 +1,4 @@
-import { Laptop, Server } from "@/icons";
+import { Monitor, Server } from "@/icons";
 import { cn } from "@/lib/cn";
 import type { MachineOs } from "@/types/machines";
 
@@ -41,10 +41,14 @@ export function machineSummary(os: MachineOs, version: string): string {
   return `${osLabel(os)} · TerminalX ${version}`;
 }
 
-/** A laptop for a Mac, a server for anything else. */
+/**
+ * A server for Linux, a monitor for a Mac: the one icon a computer has in
+ * Settings, the dialogs, the sidebar and the machine's view (21.01, 21.02).
+ */
 export function PlatformIcon({ platform, className }: { platform: string | null; className?: string }) {
-  const Icon = platform === "linux" ? Server : Laptop;
-  return <Icon className={className} aria-hidden />;
+  const linux = platform === "linux";
+  const Icon = linux ? Server : Monitor;
+  return <Icon className={className} aria-hidden data-icon={linux ? "server" : "monitor"} />;
 }
 
 /** "Nov 3" in the reader's locale. */

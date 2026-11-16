@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { api, type CloudPortForward } from "@/lib/api";
 import { MachineFeatureNotice } from "@/components/machines/MachineFeatureNotice";
 import { isMachineKey } from "@/types/target";
+import { useMachinePlace, type MachinePlace } from "./workspacePlace";
 
 /**
  * How often the list is read while the panel is on screen, so an application
@@ -14,6 +15,9 @@ import { isMachineKey } from "@/types/target";
  * own, so the list is never empty to wait on: it is read at one steady pace.
  */
 export const POLL_MS = 2_000;
+
+/** The checkbox that keeps the remote port's number on this Mac. */
+const samePortLabel = (machine: MachinePlace | null) => (machine ? `Same port number as on ${machine.name}` : "Same port number as the workspace");
 
 const STOPPED = "Previews work while the workspace is running. Looking here never starts it.";
 /** Said beside a state with no connection when previews were open here: they ended with it. */
@@ -40,21 +44,21 @@ export function connectionText(state: WorkspaceConnectionState): { text: string;
   }
 }
 
-/** What a refused forward means, in words. `port` is the workspace's port. */
-export function portErrorMessage(error: unknown, port: number): string {
+/** What a refused forward means, in words. `port` is the workspace's port; on a paired machine the words name it. */
+export function portErrorMessage(error: unknown, port: number, machine: MachinePlace | null = null): string {
   const code = typeof error === "string" ? error : error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : String(error);
   switch (code) {
     case "cloud_port_in_use":
-      return `Port ${port} is already in use on this Mac. Untick "Same port number as the workspace" to use a free one.`;
+      return `Port ${port} is already in use on this Mac. Untick "${samePortLabel(machine)}" to use a free one.`;
     case "cloud_port_not_connected":
-      return STOPPED;
+      return machine ? `Previews work while ${machine.name} is connected.` : STOPPED;
     case "cloud_port_invalid":
       return "Enter a port between 1 and 65535.";
     case "forbidden":
-      return "You do not have access to this workspace's ports.";
+      return machine ? `You do not have access to ${machine.name}’s ports.` : "You do not have access to this workspace's ports.";
     case "cloud_remote_identity_changed":
     case "cloud_remote_connection_unknown":
-      return "The connection to this workspace changed. Open the workspace again.";
+      return machine ? `The connection to ${machine.name} changed. Open ${machine.name} again.` : "The connection to this workspace changed. Open the workspace again.";
     default:
       return "The preview could not be opened. Try again.";
   }
@@ -113,6 +117,10 @@ export function CloudPortsView({
   active: boolean;
 }) {
   const connected = state.state === "connected";
+  // On a paired machine the panel names it and speaks from its own state.
+  const machine = useMachinePlace();
+  const where = machine ? machine.name : "the workspace";
+  const there = machine ? `on ${machine.name}` : "in the workspace";
   const supported = connected && state.capabilities.includes("ports/1");
   const usable = supported && mayOpen && !!connectionId && !!client;
   // Null until the first answer: until then the panel is looking, and never says nothing listens.
@@ -205,7 +213,7 @@ export function CloudPortsView({
       setForwards(next);
       setExpired((current) => current.filter((entry) => entry.port !== port));
     } catch (failure) {
-      if (mounted.current) setError(portErrorMessage(failure, port));
+      if (mounted.current) setError(portErrorMessage(failure, port, machine));
     } finally {
       if (mounted.current) setBusy(null);
     }
@@ -222,7 +230,7 @@ export function CloudPortsView({
       seen.current = seen.current.filter((other) => other.port !== port);
       setForwards(seen.current);
     } catch (failure) {
-      if (mounted.current) setError(portErrorMessage(failure, port));
+      if (mounted.current) setError(portErrorMessage(failure, port, machine));
     } finally {
       if (mounted.current) setBusy(null);
     }
@@ -236,7 +244,7 @@ export function CloudPortsView({
   };
 
   if (!connected) {
-    const { text, restarting } = connectionText(state);
+    const { text, restarting } = machine ? { text: machine.status, restarting: connectionText(state).restarting } : connectionText(state);
     return (
       <div className="px-3 py-2 text-xs text-muted-foreground" data-testid={restarting ? "cloud-ports-restarting" : "cloud-ports-stopped"}>
         <p className="flex items-center gap-1.5">
@@ -253,14 +261,18 @@ export function CloudPortsView({
   if (!supported) {
     return (
       <p className="px-3 py-2 text-xs text-muted-foreground" data-testid="cloud-ports-unsupported">
-        This workspace's runtime does not offer previews yet. It will after the workspace's next runtime update.
+        {machine
+          ? `The TerminalX on ${machine.name} does not offer previews yet. It will after ${machine.name} is updated.`
+          : "This workspace's runtime does not offer previews yet. It will after the workspace's next runtime update."}
       </p>
     );
   }
   if (!mayOpen) {
     return (
       <p className="px-3 py-2 text-xs text-muted-foreground" data-testid="cloud-ports-forbidden">
-        Opening a preview needs the right to approve permissions, or to manage the workspace: a preview reaches whatever listens on the workspace's local ports, as a terminal does. Ask an admin.
+        {machine
+          ? `Opening a preview needs the right to manage ${machine.name}: a preview reaches whatever listens on its local ports, as a terminal does.`
+          : "Opening a preview needs the right to approve permissions, or to manage the workspace: a preview reaches whatever listens on the workspace's local ports, as a terminal does. Ask an admin."}
       </p>
     );
   }
@@ -275,7 +287,7 @@ export function CloudPortsView({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto text-xs" data-testid="cloud-ports">
       <p className="border-b border-hairline px-3 py-2 text-muted-foreground">
-        A preview opens a workspace port at <span className="text-foreground">127.0.0.1</span> on this Mac, over your encrypted connection to the workspace. It has no public address, and it closes when the workspace stops or your access does. While it is open, other programs on this Mac can connect to it, and it shares cookies with anything else you use at 127.0.0.1.
+        A preview opens {machine ? `a port of ${machine.name}` : "a workspace port"} at <span className="text-foreground">127.0.0.1</span> on this Mac, over your encrypted connection to {where}. It has no public address, and it closes when {machine ? "that connection ends" : "the workspace stops"} or your access does. While it is open, other programs on this Mac can connect to it, and it shares cookies with anything else you use at 127.0.0.1.
       </p>
       {error && (
         <p className="px-3 py-1 text-red-500" role="alert">
@@ -300,7 +312,7 @@ export function CloudPortsView({
                   >
                     {previewUrl(forward)}
                   </button>
-                  {gone && detected && <span className="text-muted-foreground">nothing is listening in the workspace now</span>}
+                  {gone && detected && <span className="text-muted-foreground">nothing is listening {there} now</span>}
                   <span className="ml-auto flex items-center gap-1">
                     <Button size="xs" variant="ghost" aria-label={`Copy ${previewUrl(forward)}`} onClick={() => copy(forward)}>
                       <Copy /> {copied === port ? "Copied" : "Copy"}
@@ -317,7 +329,7 @@ export function CloudPortsView({
                 <>
                   {lapsed && (
                     <span className="text-muted-foreground" data-testid="cloud-port-expired">
-                      <span className="font-mono line-through">{previewUrl(lapsed)}</span> closed when the connection to the workspace ended. A new preview gets a new address.
+                      <span className="font-mono line-through">{previewUrl(lapsed)}</span> closed when the connection to {where} ended. A new preview gets a new address.
                     </span>
                   )}
                   <Button className="ml-auto" size="xs" variant="outline" disabled={busy !== null} onClick={() => void open(port)}>
@@ -333,11 +345,13 @@ export function CloudPortsView({
         (listening === null ? (
           <p className="flex items-center gap-1.5 px-3 py-2 text-muted-foreground" data-testid="cloud-ports-looking">
             <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
-            Looking for ports that listen in the workspace…
+            Looking for ports that listen {there}…
           </p>
         ) : (
           <p className="px-3 py-2 text-muted-foreground" data-testid="cloud-ports-empty">
-            {detected ? "Nothing is listening in the workspace yet. Start your application there, or enter its port below." : "This workspace cannot list its listening ports. Enter the port your application uses."}
+            {detected
+              ? `Nothing is listening ${there} yet. Start your application there, or enter its port below.`
+              : `${machine ? machine.name : "This workspace"} cannot list its listening ports. Enter the port your application uses.`}
           </p>
         ))}
       <form
@@ -353,7 +367,7 @@ export function CloudPortsView({
         </Button>
         <label className="ml-auto flex items-center gap-1 text-muted-foreground">
           <input type="checkbox" checked={sameNumber} onChange={(event) => setSameNumber(event.target.checked)} />
-          Same port number as the workspace
+          {samePortLabel(machine)}
         </label>
       </form>
     </div>

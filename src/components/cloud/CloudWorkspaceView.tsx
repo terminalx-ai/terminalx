@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlus, X } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
@@ -30,6 +30,9 @@ import { rememberPeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
 import { cloudProviderName } from "@/lib/cloudSession";
+import { MachineIcon } from "@/components/machines/connectionStatus";
+import type { PairedMachine } from "@/types/machines";
+import { WorkspacePlaceProvider, type MachinePlace } from "./workspacePlace";
 
 /**
  * The view of one cloud workspace (its terminals, agent tab, files and Git)
@@ -46,6 +49,13 @@ export interface OpenedWorkspace {
   workspaceState: string | null;
   /** A resume of it is under way (asked for, or running by the list): its stopped state is on its way out. */
   waking?: boolean;
+  /**
+   * Set for a paired machine: its record, and what its own connection says
+   * while the view is not connected (a sentence, and a word for a chip). Every
+   * tab then names the machine and never shows the transport's words for a
+   * cloud workspace.
+   */
+  machine?: { record: PairedMachine; status: string; label: string };
 }
 
 /** A cloud provider's display name. */
@@ -105,7 +115,7 @@ export function ExecutionLocation({ provider, name }: { provider: string | null;
 
 type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" } | { kind: "ports" };
 
-export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = false, focusAgent = null, agentProjects = null }: {
+type WorkspaceViewProps = {
   opened: OpenedWorkspace;
   state: WorkspaceConnectionState;
   agentRequest?: number;
@@ -114,7 +124,22 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
   focusAgent?: AgentFocus | null;
   /** A paired machine's projects, which a new agent tab is created in (PRO-346). */
   agentProjects?: AgentProjects | null;
-}) {
+};
+
+/** The view, with the machine it runs on (if it is one) known to every tab. */
+export function WorkspaceView(props: WorkspaceViewProps) {
+  const { name } = props.opened;
+  const status = props.opened.machine?.status;
+  const label = props.opened.machine?.label;
+  const place = useMemo<MachinePlace | null>(() => (status === undefined || label === undefined ? null : { name, status, label }), [name, status, label]);
+  return (
+    <WorkspacePlaceProvider value={place}>
+      <WorkspaceViewBody {...props} />
+    </WorkspacePlaceProvider>
+  );
+}
+
+function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = false, focusAgent = null, agentProjects = null }: WorkspaceViewProps) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
@@ -301,13 +326,13 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
               role="tab"
               aria-selected={view.kind === "terminal" && terminal.id === selected}
               variant={view.kind === "terminal" && terminal.id === selected ? "secondary" : "ghost"}
-              title={`${terminal.title} runs in the cloud workspace ${opened.name}`}
+              title={opened.machine ? `${terminal.title} runs on ${opened.name}` : `${terminal.title} runs in the cloud workspace ${opened.name}`}
               onClick={() => {
                 selectCloudTerminal(key, terminal.id);
                 setView({ kind: "terminal" });
               }}
             >
-              <Cloud className="size-3.5" /> {terminal.title}
+              {opened.machine ? <MachineIcon machine={opened.machine.record} className="size-3.5" /> : <Cloud className="size-3.5" />} {terminal.title}
               {terminal.gone ? " (ended)" : terminal.exited ? " (exited)" : ""}
             </Button>
             {(manage || terminal.gone) && (
@@ -318,7 +343,7 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
           </div>
         ))}
         {manage && (
-          <Button size="icon" variant="ghost" className="size-7" aria-label="New cloud terminal" onClick={() => void newTerminal()}>
+          <Button size="icon" variant="ghost" className="size-7" aria-label={opened.machine ? `New terminal on ${opened.name}` : "New cloud terminal"} onClick={() => void newTerminal()}>
             <Plus className="size-3.5" />
           </Button>
         )}
@@ -361,7 +386,11 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
           </Button>
         )}
       </div>
-      {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
+      {!connected && (
+        <div className="px-4 py-1 text-xs text-muted-foreground" data-testid="workspace-connection-status">
+          {opened.machine ? opened.machine.status : describe(state)}
+        </div>
+      )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
       {/* Terminal views and the agent tab stay mounted across reconnects and
           view switches: they live on the runtime, and their streams resume
@@ -380,9 +409,15 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
             base={base}
           />
         ) : (
-          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+          <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground" data-testid="workspace-no-terminals">
             <TerminalSquare className="mr-2 size-4" />
-            {connected ? "No terminals in this workspace." : "Terminals appear once the workspace is connected."}
+            {opened.machine
+              ? connected
+                ? `No terminals on ${opened.name}.`
+                : `Terminals appear once ${opened.name} is connected.`
+              : connected
+                ? "No terminals in this workspace."
+                : "Terminals appear once the workspace is connected."}
           </div>
         )}
       </div>
