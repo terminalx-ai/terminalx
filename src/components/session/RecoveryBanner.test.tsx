@@ -359,7 +359,7 @@ describe("continuing on another account", () => {
     const before = screen.getAllByRole("button").map((button) => button.textContent);
     rerender(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }} accounts={{ choices: [], switching: null, onSwitch: vi.fn() }} />);
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(before);
-    rerender(<RecoveryBanner {...props()} kind="crashed" accounts={{ choices: [spare], switching: null, onSwitch: vi.fn() }} />);
+    rerender(<RecoveryBanner {...props()} kind="failed" accounts={{ choices: [spare], switching: null, onSwitch: vi.fn() }} />);
     expect(screen.queryByTestId("continue-with-account")).toBeNull();
   });
 
