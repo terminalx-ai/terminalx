@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepositoryAction } from "@/lib/repositoryActions";
 import type { Project, ProjectPatch } from "@/types/session";
@@ -25,6 +25,10 @@ describe("repository settings pages", () => {
   it("lists saved actions and saves a deletion through update_project", async () => {
     mock.update.mockResolvedValue(undefined);
     render(<RepositoryActionsPage projectPath="/repo" />);
+    expect(screen.getByRole("heading", { name: "Actions" })).toBeTruthy();
+    expect(screen.getByText("Commands for this project's Run menu.")).toBeTruthy();
+    expect(screen.queryByText("/repo")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [] } satisfies ProjectPatch));
     expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
@@ -33,16 +37,21 @@ describe("repository settings pages", () => {
   it("shows a failed save inline and as a toast, keeping the stored list", async () => {
     mock.update.mockRejectedValue(new Error("disk full"));
     render(<RepositoryActionsPage projectPath="/repo" />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     expect((await screen.findByRole("alert")).textContent).toContain("disk full");
     expect(mock.toast).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Edit Dev" })).toBeTruthy();
+    // The dialog stays open on the stored list; closing it shows Dev still there.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: "Edit Dev" })).toBeTruthy();
   });
 
   it("resets to the repository file only where one supplies actions", async () => {
     mock.update.mockResolvedValue(undefined);
     const file = { ...dev, id: "f", name: "From file" };
     const { unmount } = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={async () => [file]} />);
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
     fireEvent.click(await screen.findByRole("button", { name: "Reset to terminalx.json" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [file] }));
     unmount();
@@ -50,6 +59,7 @@ describe("repository settings pages", () => {
       const view = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={none} />);
       await screen.findByRole("button", { name: "Edit Dev" });
       await new Promise((resolve) => setTimeout(resolve, 0));
+      fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
       expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
       view.unmount();
     }

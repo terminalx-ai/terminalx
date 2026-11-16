@@ -49,12 +49,19 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/diff-test`);
   const choose = async (name) => { await page.getByRole("button", { name: new RegExp(name.replaceAll(".", "\\.")) }).click(); };
+  // Wrap and whitespace live in the diff's ⋮ View options (PRO-393).
+  const option = async (name, on) => {
+    await page.getByRole("button", { name: "View options" }).click();
+    const item = page.getByRole("menuitemcheckbox", { name });
+    if ((await item.getAttribute("aria-checked")) !== String(on)) await item.click();
+    await page.keyboard.press("Escape");
+  };
   await choose("long.ts");
   await page.locator(".cm-lineWrapping").waitFor();
   for (const mode of ["Unified", "Split"]) {
-    await page.getByRole("button", { name: mode, exact: true }).click();
+    await page.getByRole("radio", { name: mode, exact: true }).click();
     for (const wrap of [false, true]) {
-      await page.getByLabel("Wrap lines by default").setChecked(wrap);
+      await option("Wrap lines", wrap);
       await page.waitForFunction((wrap) => [...document.querySelectorAll('.cm-content')].every(el => el.classList.contains('cm-lineWrapping') === wrap), wrap);
       await page.waitForTimeout(100); // CodeMirror measures on animation frames.
       const sizes = await page.locator(".cm-editor").evaluateAll((editors) => editors.map(editor => {
@@ -65,18 +72,19 @@ try {
       console.log(`ok ${mode}: wrap ${wrap ? "on" : "off"}, measured line height and horizontal scrolling`);
     }
   }
-  await page.getByLabel("Wrap lines by default").uncheck();
-  await page.getByLabel("Wrap lines for this file").selectOption("true");
+  await option("Wrap lines", false);
   await page.reload();
-  assert.equal(await page.getByRole("button", { name: "Split", exact: true }).getAttribute("aria-pressed"), "true");
-  assert.equal(await page.getByLabel("Wrap lines by default").isChecked(), false);
   await choose("long.ts");
-  await page.locator(".cm-lineWrapping").first().waitFor();
-  assert.equal(await page.getByLabel("Wrap lines for this file").inputValue(), "true");
-  console.log("ok reload restores global wrap, file override and split mode");
+  await page.locator(".cm-content").first().waitFor();
+  assert.equal(await page.getByRole("radio", { name: "Split", exact: true }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.locator(".cm-lineWrapping").count(), 0);
+  await page.getByRole("button", { name: "View options" }).click();
+  assert.equal(await page.getByRole("menuitemcheckbox", { name: "Wrap lines" }).getAttribute("aria-checked"), "false");
+  await page.keyboard.press("Escape");
+  console.log("ok reload restores wrap and split mode");
   await choose("space.ts");
   await page.locator(".cm-changedLine").first().waitFor();
-  await page.getByLabel("Hide whitespace changes").check();
+  await option("Hide whitespace changes", true);
   await page.waitForFunction(() => document.querySelectorAll('.cm-changedLine,.cm-deletedChunk').length === 0);
   console.log("ok whitespace-only file has no changed lines");
   await choose("image.png");

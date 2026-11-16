@@ -823,7 +823,7 @@ describe("the right panel of a cloud session", () => {
     const picker = (await screen.findByRole("combobox", { name: "Repository" })) as HTMLSelectElement;
     expect([...picker.options].map((option) => option.value)).toEqual(["api", "web"]);
     await waitFor(() => expect(runtime.methods("git.status").some((frame) => (frame.params as { repo: string }).repo === "api")).toBe(true));
-    expect(await screen.findByText("All changes · 1 file")).toBeTruthy();
+    expect(await screen.findByText("0 of 1 viewed")).toBeTruthy();
     expect(await screen.findByRole("button", { name: /login\.ts/ })).toBeTruthy();
     expect(runtime.methods("git.reviewRange").map((frame) => (frame.params as { repo: string }).repo)).toContain("api");
 

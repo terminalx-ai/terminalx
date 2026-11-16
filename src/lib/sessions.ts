@@ -368,7 +368,10 @@ export function openTarget(target: OpenTarget) {
 async function refreshProjects() {
   try {
     const projects = await api.listProjects();
-    set({ projects: projects.projects });
+    // A project removed outside this window (`terminalx projects remove`) is
+    // no longer the one New Session starts in: take the store's choice.
+    const gone = state.lastProject !== null && !projects.projects.some((project) => project.path === state.lastProject);
+    set(gone ? { projects: projects.projects, lastProject: projects.lastSelected ?? projects.projects[0]?.path ?? null } : { projects: projects.projects });
   } catch {
     /* keep what is listed; the next change tries again */
   }
@@ -490,6 +493,12 @@ export function selectProjectInSidebar(path: string | null) {
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
   focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+}
+
+/** New session in a project, opened on Start from a branch, issue or PR (the project menu's ⌘⇧N item). */
+export function startFromIn(projectPath: string) {
+  startSessionIn(projectPath, null);
+  set({ startFromRequest: state.startFromRequest + 1 });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -623,8 +632,9 @@ export async function removeWorkspace(projectPath: string, path: string, options
 }
 
 /** Reopen the retained tabs after the owner has restored their checkout. */
-export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) {
-  const restored = await api.restoreWorkspace(sessionId, expected, newBranch);
+/** Restore a removed workspace: on its branch, a new branch (`newBranch`), or detached at its recorded commit. */
+export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null, detached = false) {
+  const restored = await api.restoreWorkspace(sessionId, expected, newBranch, detached);
   for (const session of restored) upsertSession(session);
   await refreshWorkspaces(expected.projectPath);
   selectSession(sessionId);

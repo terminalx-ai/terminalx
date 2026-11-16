@@ -1,4 +1,5 @@
 import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import { StatusBadge, SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "@/icons";
@@ -169,7 +170,7 @@ export function AgentCard({
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+        <DropdownMenuItem onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(() => {})}>
           <Archive /> {session.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
       </DropdownMenuContent>

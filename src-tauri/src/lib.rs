@@ -160,6 +160,12 @@ mod names;
 mod pairing;
 #[cfg(feature = "desktop")]
 mod machines;
+/// The operating computer's side of pairing by code (`machines/pair.rs`),
+/// outside the desktop feature: it needs only `machine_wire` and
+/// `relay_e2ee`, and the two-machine tests (PRO-358) pair with it against
+/// real runtimes. The desktop reaches it as `machines::pair`.
+#[path = "machines/pair.rs"]
+pub mod machine_pair;
 pub mod power;
 mod project_start;
 mod project_templates;
@@ -672,6 +678,8 @@ pub fn run() {
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
+            commands::cloud_workspace_idle_suspend,
+            commands::cloud_workspace_set_idle_suspend,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
@@ -686,6 +694,8 @@ pub fn run() {
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,
+            cloud_remote::cloud_port_settings,
+            cloud_remote::cloud_port_set_settings,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
@@ -713,6 +723,9 @@ pub fn run() {
             machines::machines_approve,
             machines::machines_decline,
             machines::machines_revoke,
+            machines::machines_disconnect,
+            machines::machines_let_back,
+            machines::machines_activity,
             machines::machines_inspect_code,
             machines::machines_pair,
             machines::machines_cancel_pairing,
@@ -978,6 +991,7 @@ pub fn run() {
             commands::read_whole_text_file,
             commands::export_file,
             commands::write_text_file,
+            commands::create_text_file,
             commands::file_mtime,
             commands::inspect_local_path,
             commands::open_local_path,

@@ -1,14 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
-import { cn } from "@/lib/cn";
+import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { TerminalMoveButton } from "./TerminalMoveButton";
-import { TerminalTools } from "./TerminalTools";
+import { TERMINAL_KEYS, TerminalTools, useTerminalKey } from "./TerminalTools";
+import { Eraser, SquareTerminal as TerminalIcon } from "@/icons";
+import { shortPath } from "@/lib/paths";
+import { useSessionStore } from "@/lib/sessions";
 import { EnvironmentNotice } from "./EnvironmentNotice";
 import { LocalTerminalLinks } from "./LocalTerminalLinks";
 import { pty } from "@/lib/api";
-import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, registerTerminalFactory, subscribeTerminals, trimTerminalInstances, useTerminals, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { terminalInput } from "@/lib/terminalInput";
 import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
@@ -216,8 +218,9 @@ export function TerminalView({
   dropRefusal,
   redraw = true,
   moveToDock = false,
+  moveToTab = false,
+  shell = moveToDock || moveToTab,
   actions,
-  pinned = false,
 }: {
   id: string;
   visible: boolean;
@@ -225,13 +228,21 @@ export function TerminalView({
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
   dropRefusal?: TerminalDropRefusal;
-  /** The "Redraw terminal" control above it; a compact view leaves it out. */
+  /** The "Redraw terminal" control in its header; a compact view leaves it out. */
   redraw?: boolean;
   /** A standalone local shell can move into the session dock. */
   moveToDock?: boolean;
-  /** More controls for the same corner toolbar, beside Redraw. */
+  /** A shell in the dock can move back to a tab: its header offers "Move to tab". */
+  moveToTab?: boolean;
+  /**
+   * A plain local shell: its header offers Clear and the terminal takes ⌘K for it. An agent's
+   * TUI, a cloud terminal, a setup or archive log are not: clearing them would drop a live
+   * screen, and ⌘K stays the command palette there. Defaults to the views that can move.
+   */
+  shell?: boolean;
+  /** More controls for the header row, beside Move and Redraw. */
   actions?: ReactNode;
-  /** Keep the toolbar on screen; otherwise it shows only while the pointer or focus is on the terminal. */
+  /** @deprecated The header row is always on screen now; kept so existing callers compile. */
   pinned?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -350,37 +361,67 @@ export function TerminalView({
     return () => cancelAnimationFrame(frame);
   }, [id, shown, fit, focused]);
 
+  const clear = useCallback(() => {
+    const term = peekInstance(id)?.term;
+    if (!term) return;
+    term.clear();
+    term.focus();
+  }, [id]);
+  useTerminalKey(TERMINAL_KEYS.clear.chord, frame, clear, shown && shell);
+  const header = redraw || !!actions || moveToDock || moveToTab;
+
   return (
-    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
+    <div ref={frame} className="group/terminal relative flex h-full w-full flex-col overflow-hidden bg-terminal" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      {/* A row of its own above the output, so no control is ever drawn over a line of it. */}
+      {header && (
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline pr-2 pl-4 text-xs" data-testid="terminal-header">
+          <TerminalTitle id={id} />
+          <div className="ml-auto flex shrink-0 items-center gap-1.5" data-testid="terminal-toolbar">
+            {actions}
+            {(moveToDock || moveToTab) && <TerminalMoveButton id={id} docked={moveToTab} />}
+            {redraw && (
+              <button
+                type="button"
+                className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+                onClick={recover}
+                title="Redraw the terminal without restarting its process"
+                tabIndex={visible ? 0 : -1}
+              >
+                Redraw terminal
+              </button>
+            )}
+            {shell && <button
+              type="button"
+              className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+              onClick={clear}
+              aria-keyshortcuts={TERMINAL_KEYS.clear.aria}
+              title="Clear the terminal's output and scrollback"
+              tabIndex={visible ? 0 : -1}
+            >
+              <Eraser className="size-3.5" aria-hidden />Clear <kbd aria-hidden className="rounded-sm bg-veil-strong px-1 font-sans text-[10.5px] font-medium text-foreground/80">{TERMINAL_KEYS.clear.label}</kbd>
+            </button>}
+          </div>
+        </div>
+      )}
       <TerminalTools id={id} shown={shown} frame={frame} />
       <EnvironmentNotice id={id} active={visible && !create} />
       {!create && <LocalTerminalLinks id={id} active={shown} />}
-      {(redraw || actions || moveToDock) && (
-        // Floats over the terminal's corner rather than taking a row: nothing is drawn until it is wanted.
-        <div
-          className={cn(
-            "absolute top-1.5 right-3 z-10 flex items-center gap-1 rounded-md border border-hairline bg-terminal p-0.5 shadow-sm transition-opacity duration-150",
-            pinned ? "opacity-100" : "pointer-events-none opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100",
-          )}
-          data-testid="terminal-toolbar"
-        >
-          {actions}
-          {moveToDock && <TerminalMoveButton id={id} docked={false} />}
-          {redraw && (
-            <button
-              type="button"
-              className="h-6 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground"
-              onClick={recover}
-              title="Redraw the terminal without restarting its process"
-              tabIndex={visible ? 0 : -1}
-            >
-              Redraw terminal
-            </button>
-          )}
-        </div>
-      )}
-      <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
+      {/* Clipped: until it is fitted again, a grid taller than its new box must not scroll the view and hide the rows above it. */}
+      <div ref={host} className="terminal-host min-h-0 w-full flex-1 overflow-hidden px-2 pt-1" />
       <TerminalDropHint drop={drop} />
+    </div>
+  );
+}
+
+/** The shell's icon, its name and the folder it was opened in. */
+function TerminalTitle({ id }: { id: string }) {
+  const pane = useTerminals().panes.find((entry) => entry.id === id);
+  const cwd = useSessionStore().sessions.find((session) => session.id === pane?.sessionId)?.cwd;
+  return (
+    <div className="flex min-w-0 items-center gap-2" data-testid="terminal-title">
+      <TerminalIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="shrink-0 font-medium text-foreground">{pane?.title ?? "Terminal"}</span>
+      {cwd && <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground" title={cwd}>{shortPath(cwd)}</span>}
     </div>
   );
 }

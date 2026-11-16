@@ -45,3 +45,17 @@ it("restores a checkpoint identity without persisting its trees or crossing work
   expect(readChangesChoice("repo")).toEqual(choice);
   expect(readChangesChoice("another").scope).toBe("all");
 });
+
+it("numbers turns, names them by their prompt cut at a word, and keeps when each was taken (PRO-393)", async () => {
+  const { checkpointChoices, turnName } = await import("./changesScope");
+  const ev = (seq: number, payload: object, ts = "") => ({ id: `e${seq}`, sessionId: "s", tabId: "t", harness: "codex", seq, ts, payload }) as never;
+  const choices = checkpointChoices([
+    ev(1, { type: "user_message", text: "Publish   the layouts", queued: false }), ev(2, { type: "turn_checkpoint", seq: 1, base: "b1", head: "h1" }, "2026-11-16T10:00:00Z"),
+    ev(3, { type: "user_message", text: "Group the overview table by status and let people sort by any column. Remember the sort.", queued: false }), ev(4, { type: "turn_checkpoint", seq: 3, base: "b2", head: "h2" }, "2026-11-16T10:20:00Z"),
+    ev(5, { type: "user_message", text: "Hide the Agent column", queued: false }), ev(6, { type: "turn_checkpoint", seq: 5, base: "b3", head: "h3" }),
+  ]);
+  expect(choices.map((c) => c.label)).toEqual(["Latest turn · Hide the Agent column", "Turn 2 · Group the overview table by status and let…", "Turn 1 · Publish the layouts"]);
+  expect(choices.map((c) => c.at)).toEqual([null, "2026-11-16T10:20:00Z", "2026-11-16T10:00:00Z"]);
+  expect(choices[1].prompt).toBe("Group the overview table by status and let people sort by any column. Remember the sort.");
+  expect(turnName("a".repeat(60))).toBe(`${"a".repeat(48)}…`);
+});

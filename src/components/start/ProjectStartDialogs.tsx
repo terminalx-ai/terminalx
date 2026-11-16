@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { homeShort, useHome } from "@/lib/homePath";
 import type { LucideIcon } from "lucide-react";
 import { Atom, Bot, Check, File, Folder, FolderGit2, GitBranch, Loader2, Lock, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -375,23 +376,6 @@ const TEMPLATE_ICONS: Record<string, LucideIcon> = { empty: File, "vite-react": 
 /** Marked new in the Template row until the app has had it for a while. */
 const NEW_TEMPLATES = new Set(["agent-starter"]);
 
-/** The home directory written as `~`, the way the design shows paths. */
-function homeShort(path: string, home: string | null): string {
-  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
-}
-
-/** The reader's home directory, so paths under it can be written with `~`. Null until known, or outside the app. */
-function useHome(): string | null {
-  const [home, setHome] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    void import("@tauri-apps/api/path").then((paths) => paths.homeDir()).then((dir) => live && setHome(dir.replace(/\/+$/, ""))).catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, []);
-  return home;
-}
 
 function TemplateCard({ template, selected, disabled, home, onSelect }: { template: ProjectTemplate; selected: boolean; disabled: boolean; home: string | null; onSelect: () => void }) {
   const Icon = TEMPLATE_ICONS[template.id] ?? Folder;

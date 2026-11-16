@@ -14,7 +14,7 @@ import { DisclosureMemory, SearchDisclosures, type Disclosures } from "./disclos
 import { useChatFind } from "./ChatFind";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
-import { turnDivider } from "@/lib/turnDivider";
+import { turnFileChanges } from "@/lib/turnChanges";
 import { GoalBanner } from "./GoalBanner";
 
 const NEAR_BOTTOM_PX = 40;
@@ -109,6 +109,8 @@ export function Chat({
   onSendAgain,
   onSecondOpinion,
   onReset,
+  onRetryInNewChat,
+  onRetry,
 }: {
   sessionId: string;
   checkpointTabId?: string;
@@ -141,7 +143,15 @@ export function Chat({
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
-  onReset?: (endSeq: number) => void;
+  /** Reset to the end of a turn: which turn it is, which go, and how many files changed since, for the dialog to say. */
+  onReset?: (endSeq: number, target: ResetTarget) => void;
+  /** Take a failed turn's prompt to a new chat. */
+  onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Send a failed turn's prompt again, as a new message. Not tied to `live`: a turn that failed with no recovery
+   * standing leaves the tab idle, and sending wakes the agent as the composer would.
+   */
+  onRetry?: (seq: number) => void;
 }) {
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
@@ -466,8 +476,11 @@ export function Chat({
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
                 onSecondOpinion={onSecondOpinion}
-                onReset={!isLast && !live && !sending ? onReset : undefined}
-                divider={turnDivider(turns[start + i - 1], t)}
+                onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
+                workingSince={isLast ? transcript.workingSince : undefined}
+                // A failed last turn can go again: its prompt, sent as a new message.
+                onRetry={isLast && !t.live && !sending ? onRetry : undefined}
+                onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
               />
             );
           })}
@@ -532,4 +545,17 @@ export function Chat({
       </div>
     </div>
   );
+}
+
+/** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+export interface ResetTarget {
+  turn: number;
+  removed: number[];
+  files: number;
+}
+
+export function resetTarget(turns: Turn[], index: number): ResetTarget {
+  const later = turns.slice(index + 1);
+  const files = new Set(later.flatMap((t) => (t.completed ? turnFileChanges(t).map((change) => change.path) : [])));
+  return { turn: index + 1, removed: later.map((_, i) => index + 2 + i), files: files.size };
 }
