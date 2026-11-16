@@ -153,6 +153,8 @@ enum Answer {
 struct Script {
     answers: Mutex<HashMap<String, Answer>>,
     delay: Duration,
+    /// Routes slower than `delay`.
+    slow: Mutex<HashMap<String, Duration>>,
     in_flight: AtomicUsize,
     most_at_once: AtomicUsize,
     dials: Mutex<Vec<(u64, Route)>>,
@@ -178,6 +180,7 @@ impl Script {
             me: me.clone(),
             answers: Mutex::new(answers.iter().map(|(route, answer)| (route.to_string(), answer.clone())).collect()),
             delay,
+            slow: Mutex::new(HashMap::new()),
             in_flight: AtomicUsize::new(0),
             most_at_once: AtomicUsize::new(0),
             dials: Mutex::new(Vec::new()),
@@ -189,6 +192,10 @@ impl Script {
 
     fn answer(&self, route: &str, answer: Answer) {
         self.answers.lock().unwrap().insert(route.into(), answer);
+    }
+
+    fn slow(&self, route: &str, delay: Duration) {
+        self.slow.lock().unwrap().insert(route.into(), delay);
     }
 
     fn dialed(&self) -> Vec<Route> {
@@ -207,9 +214,20 @@ impl Script {
         let _ = self.links.lock().unwrap()[&link].send((link, LinkEvent::Closed(Closed { code: None, reason: "gone".into() })));
     }
 
-    fn begin(&self) {
+    /// One attempt under way until the guard drops: when it ends, and when
+    /// it is cancelled.
+    fn begin(self: &Arc<Self>) -> InFlight {
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.most_at_once.fetch_max(now, Ordering::SeqCst);
+        InFlight(self.clone())
+    }
+}
+
+struct InFlight(Arc<Script>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -219,14 +237,14 @@ fn hello() -> Value {
 
 impl Dialer for Script {
     fn dial(&self, _target: Arc<Target>, route: Route, _relay_access: bool, link: u64, events: LinkEvents) -> BoxFuture<Result<Established, DialFailure>> {
-        self.begin();
+        let script = self.me.upgrade().expect("the test holds the script");
+        let in_flight = script.begin();
         self.dials.lock().unwrap().push((link, route.clone()));
         let answer = self.answers.lock().unwrap().get(&key(&route)).cloned().unwrap_or(Answer::Fail(DialFailure::unreachable("not scripted")));
-        let delay = self.delay;
-        let script = self.me.upgrade().expect("the test holds the script");
+        let delay = self.slow.lock().unwrap().get(&key(&route)).copied().unwrap_or(self.delay);
         Box::pin(async move {
             tokio::time::sleep(delay).await;
-            script.in_flight.fetch_sub(1, Ordering::SeqCst);
+            drop(in_flight);
             match answer {
                 Answer::Fail(failure) => Err(failure),
                 Answer::Connect => {
@@ -250,13 +268,13 @@ impl Dialer for Script {
     }
 
     fn provision(&self, _target: Arc<Target>, _access: RelayAccess, _user_id: String) -> BoxFuture<Result<RelayCredential>> {
-        self.begin();
-        self.provisions.fetch_add(1, Ordering::SeqCst);
         let script = self.me.upgrade().expect("the test holds the script");
+        let in_flight = script.begin();
+        self.provisions.fetch_add(1, Ordering::SeqCst);
         let delay = self.delay;
         Box::pin(async move {
             tokio::time::sleep(delay).await;
-            script.in_flight.fetch_sub(1, Ordering::SeqCst);
+            drop(in_flight);
             Err(anyhow!("no relay in this test"))
         })
     }
@@ -401,7 +419,7 @@ fn concurrent_attaches_start_one_owner_per_machine() {
             std::thread::spawn(move || {
                 let _entered = handle.enter();
                 owners
-                    .attach(MACHINE, || {
+                    .attach(MACHINE, "main", || {
                         started.fetch_add(1, Ordering::SeqCst);
                         std::thread::sleep(Duration::from_millis(20));
                         let (events, _) = mpsc::unbounded_channel();
@@ -419,7 +437,7 @@ fn concurrent_attaches_start_one_owner_per_machine() {
     let id = ids.into_iter().next().unwrap();
     owners.get(MACHINE).unwrap().stop();
     let _entered = runtime.handle().enter();
-    let again = owners.attach(MACHINE, || {
+    let again = owners.attach(MACHINE, "main", || {
         let (events, _) = mpsc::unbounded_channel();
         Ok(("machine-again".into(), MachineSupervisor::start(MACHINE, env.clone(), script.clone(), events, Arc::new(|_: &MachineConnectionView| {}))))
     });
@@ -445,7 +463,7 @@ async fn wakes_network_changes_and_try_again_never_run_two_attempts_for_one_mach
                     match (n + i) % 3 {
                         0 => supervisor.nudge(),
                         1 => supervisor.try_again(),
-                        _ => supervisor.identity_changed(),
+                        _ => supervisor.relay_rules_changed(),
                     }
                     tokio::time::sleep(Duration::from_millis(7)).await;
                 }
@@ -467,8 +485,8 @@ async fn wakes_network_changes_and_try_again_never_run_two_attempts_for_one_mach
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(script.dialed().len() > before, "nudges on the relay probe the direct routes");
-    // The relay link drops while a probe is still dialing: the next round
-    // waits for the probe instead of dialing beside it.
+    // The relay link drops while a probe is still dialing: the probe is
+    // cancelled before the next round dials, never run beside it.
     supervisor.nudge();
     tokio::time::sleep(Duration::from_millis(5)).await;
     script.close(script.link_of(&Route::Relay));
@@ -491,7 +509,7 @@ async fn a_refused_credential_ends_in_access_removed_and_nothing_retries_until_t
 
     // Wakes and network changes do not retry; time does not either.
     supervisor.nudge();
-    supervisor.identity_changed();
+    supervisor.relay_rules_changed();
     let quiet = watch.quiet(Duration::from_millis(1_500)).await;
     assert!(quiet.is_empty(), "{quiet:?}");
     assert_eq!(script.dialed().len(), 1, "nothing retried");
@@ -591,5 +609,111 @@ async fn the_machine_refusing_the_device_token_on_the_relay_link_is_access_remov
     supervisor.nudge();
     assert!(watch.quiet(Duration::from_millis(1_000)).await.is_empty());
     assert_eq!(script.dialed().len(), 2, "nothing retried");
+    supervisor.stop();
+}
+
+// ------------------------------------------------------------------ review of PR #1020
+
+#[tokio::test]
+async fn a_web_view_attaching_to_a_live_owner_hears_its_state_and_the_owner_stops_only_when_the_last_lets_go() {
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Connect)]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    let owners = Owners::default();
+    let mut watch = None;
+    let mut start_owner = || {
+        let (events, client) = mpsc::unbounded_channel();
+        let (states, machine) = mpsc::unbounded_channel();
+        let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
+            let _ = states.send(view.state.clone());
+        });
+        watch = Some(Watch { client, machine });
+        Ok(("machine-1".to_string(), MachineSupervisor::start(MACHINE, env.clone(), script.clone(), events, on_state)))
+    };
+    assert_eq!(owners.attach(MACHINE, "main", &mut start_owner).unwrap(), "machine-1");
+    let mut watch = watch.take().unwrap();
+    let said = watch.until("connected", |said| matches!(said, Said::Web(ClientState::Connected { .. }))).await;
+    let link = said.iter().rev().find_map(link_of).unwrap();
+    watch.until("direct", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+
+    // A second window, or the same one after a reload: the same owner, and
+    // the web views are told `connected` on the same link at once.
+    for holder in ["second", "main"] {
+        let again = owners.attach(MACHINE, holder, || panic!("a second owner started")).unwrap();
+        assert_eq!(again, "machine-1");
+        let replayed = watch.until("the current state again", |said| matches!(said, Said::Web(ClientState::Connected { .. }))).await;
+        assert_eq!(replayed.iter().rev().find_map(link_of), Some(link), "the same link, so nothing resubscribes");
+    }
+    assert_eq!(script.dialed().len(), 1, "nothing dialed again");
+
+    // One window lets go: the other keeps the connection.
+    let owner = owners.get(MACHINE).unwrap();
+    assert!(!owner.release(Some("second")));
+    assert!(!owner.is_stopped());
+    assert!(owner.send(json!({ "id": "web-1", "method": "session.list", "params": {} })));
+    // A window that never held it lets go of nothing.
+    assert!(!owner.release(Some("never-held")));
+    // The last one lets go: the owner stops, and the next attach starts another.
+    assert!(owner.release(Some("main")));
+    assert!(owner.is_stopped());
+    watch.until("idle", |said| machine_state(said, |state| *state == MachineConnectionState::Idle)).await;
+    let mut started = false;
+    let next = owners.attach(MACHINE, "main", || {
+        started = true;
+        let (events, _) = mpsc::unbounded_channel();
+        Ok(("machine-2".into(), MachineSupervisor::start(MACHINE, env.clone(), script.clone(), events, Arc::new(|_: &MachineConnectionView| {}))))
+    });
+    assert_eq!(next.unwrap(), "machine-2");
+    assert!(started);
+    owners.get(MACHINE).unwrap().stop();
+}
+
+#[tokio::test]
+async fn losing_the_relay_while_a_probe_dials_dead_direct_routes_reconnects_at_once() {
+    // Two direct addresses that take their whole time to fail, and a relay that answers.
+    let script = Script::new(Duration::from_millis(1), &[("relay", Answer::Connect)]);
+    script.slow(LAN, Duration::from_secs(3));
+    script.slow(TAILSCALE_IP, Duration::from_secs(3));
+    let env = Env::new(target(&[LAN, TAILSCALE_IP], MachineRoute::RelayAndNearby, Some(RouteUsed { kind: RouteKind::Relay, endpoint: None }), Some("user-1")), Some("user-1"));
+    let (supervisor, mut watch) = start(env, script.clone());
+    watch.until("the relay", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Relay { .. }))).await;
+    let relay_link = script.link_of(&Route::Relay);
+
+    // A wake: the probe starts on the dead direct routes, and then the relay link drops.
+    supervisor.nudge();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(script.dialed().last(), Some(&direct(LAN)), "the probe is dialing");
+    let lost = Instant::now();
+    script.close(relay_link);
+    watch.until("reconnecting", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Reconnecting { .. }))).await;
+    assert!(lost.elapsed() < Duration::from_millis(500), "the state says the link is gone at once, not after the probe: {:?}", lost.elapsed());
+    let said = watch.until("the relay again", |said| matches!(said, Said::Web(ClientState::Connected { .. }))).await;
+    assert!(said.iter().rev().find_map(link_of).unwrap() != relay_link);
+    assert!(lost.elapsed() < Duration::from_secs(1), "reconnected without waiting for the probe: {:?}", lost.elapsed());
+    assert_eq!(script.most_at_once.load(Ordering::SeqCst), 1, "the probe was cancelled before the round dialed");
+    supervisor.stop();
+}
+
+#[tokio::test]
+async fn choosing_only_this_network_closes_a_relay_link_at_once() {
+    let script = Script::new(Duration::from_millis(1), &[("relay", Answer::Connect)]);
+    let env = Env::new(target(&[LAN], MachineRoute::RelayAndNearby, None, Some("user-1")), Some("user-1"));
+    let (supervisor, mut watch) = start(env.clone(), script.clone());
+    watch.until("the relay", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Relay { .. }))).await;
+    let dialed = script.dialed().len();
+
+    // "Only this network": the record changes, and the owner is told.
+    env.target.lock().unwrap().route = MachineRoute::ThisNetwork;
+    supervisor.relay_rules_changed();
+    watch.until("the relay link closed", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Reconnecting { .. }))).await;
+    assert!(!supervisor.send(json!({ "id": "web-1", "method": "session.list", "params": {} })), "nothing goes through the relay any more");
+    watch.until("the next round's wait", |said| matches!(said, Said::Web(ClientState::Reconnecting { .. })) && script.dialed().len() > dialed).await;
+    assert!(script.dialed()[dialed..].iter().all(|route| *route != Route::Relay), "only this network is tried: {:?}", &script.dialed()[dialed..]);
+
+    // A direct link is left alone.
+    script.answer(LAN, Answer::Connect);
+    supervisor.try_again();
+    watch.until("direct", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    supervisor.relay_rules_changed();
+    assert!(watch.quiet(Duration::from_millis(300)).await.iter().all(|said| !matches!(said, Said::Machine(MachineConnectionState::Reconnecting { .. }))));
     supervisor.stop();
 }

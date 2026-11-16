@@ -115,8 +115,8 @@ pub struct CloudRemote {
 
 enum Outgoing {
     Frame { connection_id: String, frame: Value },
-    /// After every frame sent before it.
-    Detach { connection_id: String, done: tokio::sync::oneshot::Sender<()> },
+    /// After every frame sent before it. `holder` is the web view letting go.
+    Detach { connection_id: String, holder: Option<String>, done: tokio::sync::oneshot::Sender<()> },
 }
 
 /// Request ids the desktop itself sends; their answers never reach the web view.
@@ -156,15 +156,27 @@ impl CloudRemote {
                     supervisor.send(frame);
                 }
             }
-            Outgoing::Detach { connection_id, done } => {
-                self.detach(&connection_id);
+            Outgoing::Detach { connection_id, holder, done } => {
+                self.detach(&connection_id, holder.as_deref());
                 let _ = done.send(());
             }
         }
     }
 
-    fn detach(&self, connection_id: &str) {
-        let attached = self.connections.lock().unwrap().remove(connection_id);
+    /// A machine's connection is shared by every web view that attached it,
+    /// and ends when the last of them (`holder`) lets go; `None` ends it.
+    fn detach(&self, connection_id: &str, holder: Option<&str>) {
+        let attached = {
+            let mut connections = self.connections.lock().unwrap();
+            let last = match connections.get(connection_id).map(|attached| &attached.supervisor) {
+                Some(Handle::Machine(supervisor)) => supervisor.release(holder),
+                _ => true,
+            };
+            if !last {
+                return;
+            }
+            connections.remove(connection_id)
+        };
         if let Some(attached) = attached {
             attached.ports.shutdown();
             attached.supervisor.stop();
@@ -495,11 +507,12 @@ pub async fn cloud_remote_activate(remote: tauri::State<'_, Arc<CloudRemote>>, c
 }
 
 #[tauri::command]
-pub async fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
+pub async fn cloud_remote_detach(webview: tauri::Webview, remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
     // Behind the frames already handed over, so none of them is lost.
+    let holder = webview.label().to_string();
     let (done, detached) = tokio::sync::oneshot::channel();
-    if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), done }).is_err() || detached.await.is_err() {
-        remote.detach(&connection_id);
+    if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), holder: Some(holder.clone()), done }).is_err() || detached.await.is_err() {
+        remote.detach(&connection_id, Some(&holder));
     }
     Ok(())
 }

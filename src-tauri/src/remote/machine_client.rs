@@ -20,7 +20,7 @@
 //! and the account, and [`Dialer`] makes connections, so tests stand in for
 //! both and the serve tests drive it against a real runtime.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::pin::Pin;
@@ -675,8 +675,9 @@ enum Command {
     Nudge,
     /// "Try again": a nudge that also leaves `accessRemoved` and `needsUpdate`.
     TryAgain,
-    /// The signed-in account changed: the relay may no longer be used.
-    IdentityChanged,
+    /// The signed-in account or the machine's route setting changed: the
+    /// relay may no longer be used.
+    RelayRulesChanged,
 }
 
 struct Shared {
@@ -686,6 +687,22 @@ struct Shared {
     commands: mpsc::UnboundedSender<Command>,
     stopped: watch::Sender<bool>,
     state: Mutex<MachineConnectionState>,
+    /// To the web views: states and messages.
+    events: mpsc::UnboundedSender<ClientEvent>,
+    /// The last state the web views were told. Held while one is sent, so a
+    /// replay never lands after a newer state.
+    told: Mutex<Option<ClientState>>,
+    /// The web views holding this connection, by label. A reload holds again
+    /// under the same label; the owner stops when the last lets go.
+    holders: Mutex<HashSet<String>>,
+}
+
+impl Shared {
+    fn tell(&self, state: ClientState) {
+        let mut told = self.told.lock().unwrap();
+        *told = Some(state.clone());
+        let _ = self.events.send(ClientEvent::State(state));
+    }
 }
 
 /// Called with each new state.
@@ -703,7 +720,16 @@ impl MachineSupervisor {
     pub fn start(machine_id: &str, env: Arc<dyn MachineEnv>, dialer: Arc<dyn Dialer>, events: mpsc::UnboundedSender<ClientEvent>, on_state: OnState) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (stopped, _) = watch::channel(false);
-        let shared = Arc::new(Shared { machine_id: machine_id.to_string(), outbound: Mutex::new(None), commands, stopped, state: Mutex::new(MachineConnectionState::Idle) });
+        let shared = Arc::new(Shared {
+            machine_id: machine_id.to_string(),
+            outbound: Mutex::new(None),
+            commands,
+            stopped,
+            state: Mutex::new(MachineConnectionState::Idle),
+            events: events.clone(),
+            told: Mutex::new(None),
+            holders: Mutex::new(HashSet::new()),
+        });
         let run = Run::new(shared.clone(), env, dialer, events, on_state);
         tokio::spawn(run.run(receiver));
         Self { shared }
@@ -727,8 +753,50 @@ impl MachineSupervisor {
         let _ = self.shared.commands.send(Command::TryAgain);
     }
 
-    pub fn identity_changed(&self) {
-        let _ = self.shared.commands.send(Command::IdentityChanged);
+    /// The signed-in account or the machine's route setting changed: a relay
+    /// link the rules no longer allow is closed.
+    pub fn relay_rules_changed(&self) {
+        let _ = self.shared.commands.send(Command::RelayRulesChanged);
+    }
+
+    /// Hold the connection for the web view `holder` and tell it the current
+    /// state at once. False when the owner has stopped: start another.
+    pub fn hold(&self, holder: &str) -> bool {
+        let mut holders = self.shared.holders.lock().unwrap();
+        if self.is_stopped() {
+            return false;
+        }
+        holders.insert(holder.to_string());
+        drop(holders);
+        self.replay();
+        true
+    }
+
+    /// Let go for `holder` (every holder when `None`). Stops the owner when
+    /// nobody holds it any more, and says whether it did.
+    pub fn release(&self, holder: Option<&str>) -> bool {
+        let mut holders = self.shared.holders.lock().unwrap();
+        match holder {
+            Some(holder) => {
+                holders.remove(holder);
+            }
+            None => holders.clear(),
+        }
+        if holders.is_empty() {
+            self.stop();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Tell the web views the current state again: a web view that attached
+    /// to a live connection heard nothing of what came before.
+    pub fn replay(&self) {
+        let told = self.shared.told.lock().unwrap();
+        if let Some(state) = told.as_ref() {
+            let _ = self.shared.events.send(ClientEvent::State(state.clone()));
+        }
     }
 
     pub fn stop(&self) {
@@ -763,6 +831,34 @@ enum Background {
     Provision(Result<RelayCredential>),
 }
 
+/// A background attempt under way. Dropping it cancels the attempt.
+struct BackgroundTask {
+    task: tokio::task::JoinHandle<()>,
+    done: tokio::sync::oneshot::Receiver<Background>,
+}
+
+impl BackgroundTask {
+    fn spawn(attempt: impl Future<Output = Background> + Send + 'static) -> Self {
+        let (sender, done) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = sender.send(attempt.await);
+        });
+        Self { task, done }
+    }
+
+    /// Cancel it, and wait until it has let go of what it was dialing.
+    async fn cancel(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for BackgroundTask {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// How a round ended.
 enum RoundEnd {
     Connected(Route, u64, Box<Established>),
@@ -790,7 +886,7 @@ struct Run {
     lost_instant: Option<Instant>,
     last_seen_at: Option<i64>,
     local_network_denied: bool,
-    background: Option<tokio::sync::oneshot::Receiver<Background>>,
+    background: Option<BackgroundTask>,
     own_requests: u64,
     /// The route kinds of the last round, for the waiting states.
     trying: Vec<RouteKind>,
@@ -835,7 +931,7 @@ impl Run {
     }
 
     fn emit(&self, state: ClientState) {
-        let _ = self.events.send(ClientEvent::State(state));
+        self.shared.tell(state);
     }
 
     fn stopped(&self) -> bool {
@@ -852,19 +948,19 @@ impl Run {
             if self.stopped() {
                 break;
             }
-            // A background attempt finishes before a round starts, so two
-            // attempts never run for one machine at once.
+            // The link was lost while a background attempt ran. The round
+            // starts now: a direct link the probe already found is used, a
+            // relay credential already got is kept, and what is still under
+            // way is cancelled first, so two attempts never run for one
+            // machine at once and nobody waits for a probe of dead routes.
             let mut ready = None;
-            if let Some(background) = self.background.take() {
-                let finished = tokio::select! {
-                    finished = background => finished.ok(),
-                    _ = self.stopped.changed() => break 'own,
-                };
-                match finished {
-                    Some(Background::Probe(Some(found))) => ready = Some(found),
-                    Some(Background::Provision(result)) => self.keep_credential(result).await,
+            if let Some(mut background) = self.background.take() {
+                match background.done.try_recv() {
+                    Ok(Background::Probe(Some(found))) => ready = Some(found),
+                    Ok(Background::Provision(result)) => self.keep_credential(result).await,
                     _ => {}
                 }
+                background.cancel().await;
             }
             let end = match ready {
                 Some((route, link, established)) => RoundEnd::Connected(route, link, Box::new(established)),
@@ -922,7 +1018,7 @@ impl Run {
                                     self.attempt = 0;
                                     break;
                                 }
-                                Some(Command::IdentityChanged) => {}
+                                Some(Command::RelayRulesChanged) => {}
                                 None => break 'own,
                             },
                             // A link that ended before it was ours: nothing to do.
@@ -1052,16 +1148,14 @@ impl Run {
         }
         let Some(user) = self.env.signed_in_user() else { return };
         let (dialer, env) = (self.dialer.clone(), self.env.clone());
-        let (done, receiver) = tokio::sync::oneshot::channel();
-        self.background = Some(receiver);
-        tokio::spawn(async move {
+        self.background = Some(BackgroundTask::spawn(async move {
             let result = async {
                 let target = Arc::new(tokio::task::spawn_blocking(move || env.target()).await??);
                 tokio::time::timeout(RELAY_TIMEOUT + CALL_TIMEOUT, dialer.provision(target, access, user)).await.map_err(|_| anyhow!("relay invite timed out"))?
             }
             .await;
-            let _ = done.send(Background::Provision(result));
-        });
+            Background::Provision(result)
+        }));
     }
 
     async fn keep_credential(&self, result: Result<RelayCredential>) {
@@ -1095,9 +1189,7 @@ impl Run {
         let first = self.next_link;
         self.next_link += routes.len() as u64;
         let (dialer, links) = (self.dialer.clone(), self.links_tx.clone());
-        let (done, receiver) = tokio::sync::oneshot::channel();
-        self.background = Some(receiver);
-        tokio::spawn(async move {
+        self.background = Some(BackgroundTask::spawn(async move {
             let mut found = None;
             for (offset, route) in routes.into_iter().enumerate() {
                 let link = first + offset as u64;
@@ -1107,8 +1199,8 @@ impl Run {
                     break;
                 }
             }
-            let _ = done.send(Background::Probe(found));
-        });
+            Background::Probe(found)
+        }));
     }
 
     fn own_request(&mut self, live: &Live) -> String {
@@ -1187,7 +1279,7 @@ impl Run {
                             }
                             None
                         }
-                        Some(Command::IdentityChanged) => {
+                        Some(Command::RelayRulesChanged) => {
                             let user = self.env.signed_in_user();
                             let still = self.target().await.map(|target| relay_allowed(target.route, target.relay.as_ref().map(|relay| &relay.info), user.as_deref())).unwrap_or(false);
                             if live.route == Route::Relay && !still {
@@ -1247,9 +1339,9 @@ impl Run {
 }
 
 /// The background attempt's result, once it has one; never without one.
-async fn finish(slot: &mut Option<tokio::sync::oneshot::Receiver<Background>>) -> Option<Background> {
-    let Some(receiver) = slot.as_mut() else { return std::future::pending().await };
-    let finished = receiver.await.ok();
+async fn finish(slot: &mut Option<BackgroundTask>) -> Option<Background> {
+    let Some(background) = slot.as_mut() else { return std::future::pending().await };
+    let finished = (&mut background.done).await.ok();
     *slot = None;
     finished
 }
@@ -1264,16 +1356,18 @@ pub struct Owners {
 }
 
 impl Owners {
-    /// The machine's connection id: the live owner's, or one `start` makes
-    /// now. Concurrent calls for one machine never start two.
-    pub fn attach(&self, machine_id: &str, start: impl FnOnce() -> Result<(String, MachineSupervisor)>) -> Result<String> {
+    /// The machine's connection id for the web view `holder`: the live
+    /// owner's, which tells it the current state at once, or one `start`
+    /// makes now. Concurrent calls for one machine never start two.
+    pub fn attach(&self, machine_id: &str, holder: &str, start: impl FnOnce() -> Result<(String, MachineSupervisor)>) -> Result<String> {
         let mut owners = self.owners.lock().unwrap();
         if let Some((connection_id, supervisor)) = owners.get(machine_id) {
-            if !supervisor.is_stopped() {
+            if supervisor.hold(holder) {
                 return Ok(connection_id.clone());
             }
         }
         let (connection_id, supervisor) = start()?;
+        supervisor.hold(holder);
         owners.insert(machine_id.to_string(), (connection_id.clone(), supervisor));
         Ok(connection_id)
     }

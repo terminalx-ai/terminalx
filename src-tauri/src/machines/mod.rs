@@ -342,9 +342,18 @@ pub async fn machines_list(machines: tauri::State<'_, Arc<Machines>>) -> CmdResu
 }
 
 #[tauri::command]
-pub async fn machines_set_route(machine_id: String, route: MachineRoute, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<PairedMachine> {
+pub async fn machines_set_route(
+    machine_id: String,
+    route: MachineRoute,
+    machines: tauri::State<'_, Arc<Machines>>,
+    connections: tauri::State<'_, Arc<connect::MachineConnections>>,
+) -> CmdResult<PairedMachine> {
     let machines = machines.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machines.set_route(&machine_id, route)).await.map_err(err)?.map_err(err)
+    let id = machine_id.clone();
+    let updated = tauri::async_runtime::spawn_blocking(move || machines.set_route(&id, route)).await.map_err(err)?.map_err(err)?;
+    // A relay link "Only this network" no longer allows closes now.
+    connections.route_changed(&machine_id);
+    Ok(updated)
 }
 
 #[cfg(test)]

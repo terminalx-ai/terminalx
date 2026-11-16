@@ -83,7 +83,7 @@ impl MachineConnections {
                 if signed_in != user {
                     user = signed_in;
                     for owner in connections.owners.all() {
-                        owner.identity_changed();
+                        owner.relay_rules_changed();
                     }
                 }
             }
@@ -98,7 +98,7 @@ impl MachineConnections {
 
     /// The machine's one connection id. Refused with `machine_unknown` or
     /// `machine_token_missing`. Blocking reads happen before, off the runtime.
-    async fn attach(self: &Arc<Self>, app: &AppHandle, remote: &Arc<CloudRemote>, machine_id: String) -> Result<String, String> {
+    async fn attach(self: &Arc<Self>, app: &AppHandle, remote: &Arc<CloudRemote>, machine_id: String, holder: String) -> Result<String, String> {
         let check = (self.machines.clone(), machine_id.clone());
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
             let (machines, machine_id) = check;
@@ -114,7 +114,7 @@ impl MachineConnections {
         .map_err(super::err)??;
         let connections = self.clone();
         self.owners
-            .attach(&machine_id, || {
+            .attach(&machine_id, &holder, || {
                 let env = Arc::new(StoreEnv { machine_id: machine_id.clone(), machines: connections.machines.clone(), account: connections.account.clone() });
                 let weak = Arc::downgrade(&connections);
                 let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
@@ -125,6 +125,14 @@ impl MachineConnections {
                 Ok(remote.start_machine(app, &machine_id, env, on_state))
             })
             .map_err(super::err)
+    }
+
+    /// The machine's route setting changed: a relay link it no longer allows
+    /// is closed now, not when it happens to drop.
+    pub fn route_changed(&self, machine_id: &str) {
+        if let Some(owner) = self.owners.get(machine_id) {
+            owner.relay_rules_changed();
+        }
     }
 
     /// One view per paired machine, `idle` when not attached.
@@ -247,13 +255,14 @@ pub(crate) fn apply_described(machine: &mut super::store::PairedMachine, describ
 #[tauri::command]
 pub async fn machine_remote_attach(
     app: AppHandle,
+    webview: tauri::Webview,
     machine_id: String,
     remote: tauri::State<'_, Arc<CloudRemote>>,
     connections: tauri::State<'_, Arc<MachineConnections>>,
 ) -> Result<String, String> {
     crate::data_privacy::require_network().map_err(|error| error.to_string())?;
     let (connections, remote) = (connections.inner().clone(), remote.inner().clone());
-    connections.attach(&app, &remote, machine_id).await
+    connections.attach(&app, &remote, machine_id, webview.label().to_string()).await
 }
 
 /// One `MachineConnectionView` per paired machine.

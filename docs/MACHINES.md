@@ -1086,7 +1086,9 @@ round tries, in order: the route that last worked, every `lan` endpoint, every
 finish the handshake, the relay 15 s. The relay is tried only when the record's
 route is `relayAndNearby`, this computer holds a relay credential for the
 machine, and the account that obtained it is signed in. "Only this network"
-(`thisNetwork`) never uses the relay.
+(`thisNetwork`) never uses the relay. Choosing it (`machines_set_route`) tells
+the owner at once: a relay link it no longer allows is closed then, not when
+it happens to drop, and the next round tries only the direct routes.
 
 **Relay credential.** After a direct connection is established, while signed
 in, with `relayAndNearby` and no credential, the operating computer calls
@@ -1106,7 +1108,12 @@ round moves on, and the next round tries the relay again.
 
 **One owner per machine.** The desktop holds at most one supervisor per
 `machineId`; `machine_remote_attach` returns the existing connection id when
-there is one. Sleep, wake, a network change, a route probe and "Try again"
+there is one, and sends `cloud_remote_event` with the current state at once, so
+a web view that attaches to a live connection (a second window, or the same
+one after a reload) is not left waiting for the next change. Every web view
+that attached it holds the connection, by its webview label (a reload holds
+again under the same label). `cloud_remote_detach` lets go for the calling web
+view, and the owner stops when the last holder lets go. Sleep, wake, a network change, a route probe and "Try again"
 only nudge that owner. Wake is a wall-clock jump of more than 3 s against the
 monotonic clock (checked every second); a network change is a change in the
 set of interface addresses (checked every 2 s). A nudge while connected checks
@@ -1127,7 +1134,11 @@ the record's name, os, version, `directEndpoints`, `lastSeenAt` and
 measures `rttMs` end to end.
 
 **Moving to a direct route.** While on the relay, the owner tries the direct
-routes every 30 s and on every nudge. When one is established it becomes the
+routes every 30 s and on every nudge. At most one such probe, or one use of a
+relay invite, runs at a time, and never beside a round: when the link is lost
+while one runs, the round starts at once. A direct link the probe already
+found is used, a relay credential already obtained is kept, and an attempt
+still under way is cancelled first. When one is established it becomes the
 link: frames from the web view go to it from then on, and the web view is told
 `connected` again with a new `link` number. The relay connection stays open
 for 10 s more so answers to requests already sent on it still arrive; its
