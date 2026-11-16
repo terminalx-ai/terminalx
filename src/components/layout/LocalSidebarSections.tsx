@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronDown, Ellipsis, FolderPlus, Plus } from "@/icons";
+import { ChevronDown, Ellipsis, FolderPlus, Layers, Plus } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { ContextMenuItem, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -31,6 +31,32 @@ export function MoveToLocalSectionItems({ sessionIds, contextMenu = false }: { s
   </Sub>;
 }
 
+/**
+ * A group's header in the session list (02.14): its icon, name and count, then its actions on hover and its fold
+ * at the end. A section, the Pinned group.
+ */
+export function GroupHeader({ icon, name, count, open, onToggle, handle, actions, surface, headerRef, className }: {
+  icon: ReactNode; name: string; count: number; open: boolean; onToggle: () => void; actions?: ReactNode;
+  /** A keyboard grip that drags the group: always reachable, drawn on hover or focus by itself. */
+  handle?: ReactNode;
+  surface?: Record<string, unknown>; headerRef?: (node: HTMLElement | null) => void; className?: string;
+}) {
+  return (
+    <div ref={headerRef} className={cn("group/row relative mt-2 flex h-7 min-w-0 items-center gap-0.5 rounded-md pr-1 hover:bg-selected/50", className)} {...surface}>
+      <button type="button" aria-expanded={open} aria-label={`${name} ${count}`} onClick={onToggle} className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2.5 text-left text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+        <span aria-hidden className="flex size-3.5 shrink-0 items-center justify-center">{icon}</span>
+        <span className="min-w-0 truncate text-[12.5px] font-medium">{name}</span>
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">{count}</span>
+      </button>
+      {handle}
+      {actions && <span className="hidden shrink-0 items-center gap-0.5 group-hover/row:flex group-focus-within/row:flex group-has-[[data-state=open]]/row:flex">{actions}</span>}
+      <button type="button" aria-hidden tabIndex={-1} onClick={onToggle} className={cn("flex size-5 shrink-0 items-center justify-center rounded-sm text-faint outline-none hover:text-muted-foreground", open && "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100")}>
+        <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
+      </button>
+    </div>
+  );
+}
+
 export function LocalSidebarSections({ groups, filtered, groupByStatus = false, renderSession }: {
   groups: { section: LocalSection; items: SessionEntry[] }[];
   filtered: boolean;
@@ -59,17 +85,24 @@ function Section({ section, sessions, index, count, filtered, groupByStatus, ren
   const menu = useRowMenu();
   const open = expanded || filtered;
   const drag = useSidebarSectionDrag(section, count > 1);
+  // The section's emoji is its icon; one with none has a line icon in the accent colour (02.14).
+  const icon = section.emoji ? <span className="max-w-6 truncate text-[13px] leading-none">{section.emoji}</span> : <Layers className="size-3.5 text-accent" />;
   return <section ref={drag.ref} style={drag.style} aria-label={`${section.name} section`} className={cn("mb-2 rounded-md", drag.over && "bg-info/10 ring-1 ring-inset ring-info/45")} data-local-section={section.id} data-drop-over={drag.over || undefined}>
     <DropdownMenu {...menu.root}>
-      <div ref={drag.headerRef} className="group/section flex h-7 items-center gap-1" {...menu.surface}>
-        <button type="button" aria-expanded={open} onClick={toggle} className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 text-left text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-          <ChevronDown className={cn("size-3 shrink-0", !open && "-rotate-90")} />
-          {section.emoji && <span aria-hidden className="max-w-6 shrink-0 truncate">{section.emoji}</span>}<span className="truncate">{section.name}</span>
-        </button>
-        {drag.handle}
-        <Button variant="ghost" size="icon-xs" aria-label={`New session in ${section.name}`} onClick={() => startSessionInSection(section.id)}><Plus /></Button>
-        <DropdownMenuTrigger asChild {...menu.trigger}><Button variant="ghost" size="icon-xs" aria-label={`Menu for section ${section.name}`}><Ellipsis /></Button></DropdownMenuTrigger>
-      </div>
+      <GroupHeader
+        headerRef={drag.headerRef}
+        surface={menu.surface}
+        icon={icon}
+        name={section.name}
+        count={sessions.length}
+        open={open}
+        onToggle={toggle}
+        handle={drag.handle}
+        actions={<>
+          <Button variant="ghost" size="icon-xs" aria-label={`New session in ${section.name}`} onClick={() => startSessionInSection(section.id)}><Plus /></Button>
+          <DropdownMenuTrigger asChild {...menu.trigger}><Button variant="ghost" size="icon-xs" aria-label={`Menu for section ${section.name}`}><Ellipsis /></Button></DropdownMenuTrigger>
+        </>}
+      />
       <DropdownMenuContent align="end" onCloseAutoFocus={keepFocusForNameField}>
         <DropdownMenuItem onSelect={() => { holdMenuFocus(); startSessionInSection(section.id); }}>New session in section</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => openDialog({ kind: "rename", section })}>Rename section…</DropdownMenuItem>
@@ -81,6 +114,6 @@ function Section({ section, sessions, index, count, filtered, groupByStatus, ren
         <DropdownMenuItem destructive onSelect={() => openDialog({ kind: "delete", section })}>Delete section…</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-    {open && <SidebarSection id={section.id} name={section.name}>{sessions.length ? <ul className="flex flex-col gap-px">{groupByStatus ? <SortableStatusGroups sessions={sessions} scope={`local-section:${section.id}`}>{renderSession}</SortableStatusGroups> : <SidebarSortList items={sessions.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{sessions.map(renderSession)}</SidebarSortList>}</ul> : <p className={cn("mx-2 grid h-8 place-items-center rounded-md border border-dashed border-border text-[12px] text-faint", drag.over && "border-info/60 text-foreground")}>Drag sessions here</p>}</SidebarSection>}
+    {open && <SidebarSection id={section.id} name={section.name}>{sessions.length ? <ul className="flex flex-col [--indent:10px]">{groupByStatus ? <SortableStatusGroups sessions={sessions} scope={`local-section:${section.id}`} onAdd={() => startSessionInSection(section.id)}>{renderSession}</SortableStatusGroups> : <SidebarSortList items={sessions.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{sessions.map(renderSession)}</SidebarSortList>}</ul> : <p className={cn("mx-2 grid h-8 place-items-center rounded-md border border-dashed border-border text-[12px] text-faint", drag.over && "border-info/60 text-foreground")}>Drag sessions here</p>}</SidebarSection>}
   </section>;
 }

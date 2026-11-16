@@ -1172,7 +1172,14 @@ impl Run {
         if self.updating.as_ref().is_some_and(|(_, _, heard)| heard.elapsed() >= UPDATING_FOR) {
             self.updating = None;
         }
-        let state = if let Some((version, since, _)) = self.updating.as_ref().filter(|_| self.lost_at.is_some()) {
+        let updating = self.updating.as_ref().filter(|_| self.lost_at.is_some()).cloned();
+        // A round starting (`retry` zero) past the offline mark has no next
+        // try to name yet: the state already shown stays, with its real
+        // retry time, rather than an `offline` that says it retries in 0 ms.
+        if retry.is_zero() && updating.is_none() && since.elapsed() >= OFFLINE_AFTER {
+            return;
+        }
+        let state = if let Some((version, since, _)) = updating.as_ref() {
             MachineConnectionState::Updating { version: version.clone(), since: *since }
         } else if since.elapsed() >= OFFLINE_AFTER {
             MachineConnectionState::Offline { last_seen_at: self.last_seen_at, retry_in_ms, local_network_denied: self.local_network_denied }

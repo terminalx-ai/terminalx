@@ -100,7 +100,7 @@ for (const width of [200, 268, 420]) {
     const orgB = page.locator('[data-testid="cloud-org-list"][data-org="org-b"]');
     const orgBHeader = orgB.locator("section > div").first();
     await orgB.locator("#list-org\\:org-b").hover();
-    const orgBName = orgB.locator("#list-org\\:org-b > span");
+    const orgBName = orgB.locator("#list-org\\:org-b > [data-list-name]");
     const orgBMenu = rect(await orgB.getByRole("button", { name: /^Menu for / }).boundingBox());
     const orgBAdd = rect(await orgB.getByRole("button", { name: /^Add project to / }).boundingBox());
     const orgBNameBox = rect(await orgBName.boundingBox());
@@ -143,7 +143,7 @@ for (const width of [200, 268, 420]) {
       "nothing in the list is wider than it": overflowing.length === 0,
       "every titlebar button is inside the sidebar": titlebar.every((button) => button.left >= box.left - SLACK && button.right <= box.right + SLACK),
       "a long organization name truncates where it does not fit": orgBTruncated || width > 268,
-      "a long organization name ends before its chip and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
+      "a long organization name ends before its note and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
       "the organization's + and menu are inside the sidebar": inside(orgBAdd, box) && inside(orgBMenu, box),
       "sections come first, then the projects in none": JSON.stringify(order) === JSON.stringify(["section:Active", "cloud:org-a:blank/accone", "cloud:org-a:github.com/acme/api", "section:Parked until the quarterly release review is done", "cloud:org-a:blank/acctwo"]),
       "a long section name truncates where it does not fit": truncated || width > 268,
