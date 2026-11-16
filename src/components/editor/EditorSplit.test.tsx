@@ -159,9 +159,18 @@ it("does not compare a large-file placeholder with working-file contents", async
   vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "<file too large to show>" });
   openDiff("split", "/workspace", "large.ts", { scope: "turn", range: { base: "before", head: "after" } });
   render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("radio", { name: "Edit" });
+  // An expected limit, drawn as a calm empty state with the file to open: no red text, no Retry, no Edit of a placeholder.
+  const state = await screen.findByTestId("changes-empty-state");
+  expect(state.textContent).toContain("No diff to show");
+  expect(state.textContent).toContain("large.ts is over the text preview limit, so the diff isn't drawn.");
+  expect(within(state).queryByRole("button", { name: "Retry" })).toBeNull();
+  expect(state.querySelector(".text-destructive")).toBeNull();
+  expect(screen.queryByText(/exceeds the text preview limit/)).toBeNull();
+  expect(screen.queryByRole("radio", { name: "Edit" })).toBeNull();
   expect(screen.queryByText(/differs from this snapshot/)).toBeNull();
   expect(fs.readText).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(getEditors().editors.some((e) => e.kind !== "diff" && e.rel === "large.ts")).toBe(true);
 });
 
 
@@ -188,16 +197,17 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "  const x = 1;\n", after: "const x=1;\n" });
   openDiff("split", "/workspace", "options.ts", { scope: "turn", range: { base: "before", head: "after" } });
   const first = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("button", { name: "Copy file" });
+  await screen.findByRole("button", { name: "Copy file contents" });
   // The button commits with the diff; CodeMirror is built in DiffPane's effect after it.
   await waitFor(() => expect(first.container.querySelector(".cm-changedLine")).not.toBeNull());
-  fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
+  fireEvent.click(within(openViewOptions()).getByRole("menuitemcheckbox", { name: "Hide whitespace changes" }));
   expect(first.container.querySelector(".cm-changedLine")).toBeNull();
-  fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "false" } });
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Wrap lines" }));
   expect(first.container.querySelector(".cm-lineWrapping")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Split" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  fireEvent.click(screen.getByRole("radio", { name: "Split" }));
   expect(first.container.querySelectorAll(".cm-content")).toHaveLength(2);
-  fireEvent.click(screen.getByRole("button", { name: "Copy file" }));
+  fireEvent.click(screen.getByRole("button", { name: "Copy file contents" }));
   await screen.findByText("Copied file");
   expect(copyText).toHaveBeenCalledWith("const x=1;\n");
   expect(api.fileContentsAt).toHaveBeenCalledTimes(1);
@@ -208,9 +218,9 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   fireEvent.click(screen.getByRole("radio", { name: "Diff" }));
   first.unmount();
   const second = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("button", { name: "Copy file" });
-  expect(screen.getByRole("button", { name: "Split" }).getAttribute("aria-pressed")).toBe("true");
-  expect((screen.getByLabelText("Hide whitespace changes") as HTMLInputElement).checked).toBe(true);
+  await screen.findByRole("button", { name: "Copy file contents" });
+  expect(screen.getByRole("radio", { name: "Split" }).getAttribute("aria-checked")).toBe("true");
+  expect(within(openViewOptions()).getByRole("menuitemcheckbox", { name: "Hide whitespace changes" }).getAttribute("aria-checked")).toBe("true");
   await waitFor(() => expect(second.container.querySelectorAll(".cm-content")).toHaveLength(2));
   expect(second.container.querySelector(".cm-lineWrapping")).toBeNull();
 });
@@ -220,7 +230,8 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   vi.mocked(api.reviewRange).mockResolvedValue({ base: "merge-base", head: "fresh", target: "main" });
   const id = openDiff("split", "/workspace", "live.ts", { scope: "all", range: { base: "merge-base", head: "snapshot" }, target: "main" });
   const view = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  fireEvent.click(await screen.findByRole("button", { name: "Discard changes to live.ts" }));
+  await screen.findByRole("button", { name: "Copy file contents" });
+  fireEvent.click(within(openViewOptions()).getByRole("menuitem", { name: "Discard changes to live.ts" }));
   expect(git.discard).not.toHaveBeenCalled();
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(git.discard).toHaveBeenCalledWith("/workspace", "live.ts", "merge-base", undefined));
@@ -231,7 +242,7 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   expect(getEditors().editors.find((e) => e.id === fixed)?.name).toBe("fixed.ts · Commit 5be01f4");
   render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
   await screen.findByRole("radio", { name: "Edit" });
-  expect(screen.queryByRole("button", { name: "Discard changes to fixed.ts" })).toBeNull();
+  expect(within(openViewOptions()).queryByRole("menuitem", { name: "Discard changes to fixed.ts" })).toBeNull();
 });
 
 it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in a centre diff", async (ext) => {
@@ -261,6 +272,11 @@ it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in 
     expect(screen.queryByRole("radio", { name: "Edit" })).toBeNull();
   }
 });
+
+function openViewOptions() {
+  fireEvent.pointerDown(screen.getByRole("button", { name: "View options" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  return screen.getByRole("menu");
+}
 
 const emptyTranscript = buildTranscript([], false);
 function SearchableChat({ label }: { label: string }) {

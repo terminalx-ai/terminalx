@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Switch as SwitchPrimitive } from "radix-ui";
+import { Check } from "@/icons";
 import { cn } from "@/lib/cn";
 
 export const Switch = React.forwardRef<
@@ -152,4 +153,24 @@ export function SettingRow({
       </div>
     </div>
   );
+}
+
+/** The app's own checkbox: amber when on, as in the menus (never the system's blue). `label` names it for screen readers. */
+export function Checkbox({ checked, disabled, onChange, label, title, className, children }: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  title?: string;
+  className?: string;
+  children?: React.ReactNode;
+}) {
+  return <label className={cn("flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground", disabled ? "cursor-not-allowed" : "cursor-pointer", className)} title={title}>
+    <span className="relative grid size-3.5 shrink-0 place-items-center">
+      <input type="checkbox" aria-label={label} checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)}
+        className="peer size-3.5 appearance-none rounded-[4px] border border-muted-foreground/60 outline-none checked:border-transparent checked:bg-accent focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50" />
+      <Check aria-hidden className="pointer-events-none absolute size-2.5 text-accent-foreground opacity-0 peer-checked:opacity-100" />
+    </span>
+    {children}
+  </label>;
 }
