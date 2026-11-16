@@ -82,7 +82,7 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
             <DropdownMenuSeparator />
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                <span>Account</span>
+                <span className="flex-1">Account</span>
                 <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{account.label}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="min-w-[14rem]">
@@ -97,7 +97,7 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
             <DropdownMenuSeparator />
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                <span>Model</span>
+                <span className="flex-1">Model</span>
                 <span className="ml-auto max-w-[10rem] truncate pl-3 text-[11px] text-faint">{modelText}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="min-w-[12rem] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
@@ -140,7 +140,7 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
         <DropdownMenuSeparator />
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
-            <span>Permissions</span>
+            <span className="flex-1">Permissions</span>
             <span className="ml-auto pl-3 text-[11px] text-faint">{permission?.label ?? mode}</span>
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent className="min-w-[14rem]">
