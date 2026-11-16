@@ -29,6 +29,12 @@ vi.mock("expo-notifications", () => ({
   setNotificationCategoryAsync: async () => ({}),
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => fake.app }));
+// The muted mark is a struck-through bell; it draws as its label here, every other icon as nothing.
+vi.mock("lucide-react-native", () => new Proxy({}, {
+  get: (_target, name) => (name === "then" || typeof name === "symbol" ? undefined : name === "__esModule" ? true
+    : name === "BellOff" ? ({ accessibilityLabel }: { accessibilityLabel?: string }) => <i role="img" aria-label={accessibilityLabel} /> : () => null),
+  has: (_target, name) => name !== "then",
+}));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ name: "Ember", palette: {}, setName: vi.fn() }) }));
 vi.mock("./ui/theme", () => ({ useTheme: () => ({ name: "Ember", palette: {}, setName: vi.fn() }) }));
 vi.mock("@mobile/ui/primitives", () => primitives());
@@ -57,7 +63,7 @@ function primitives() {
 }
 
 import { NotificationsPage, DELIVERY_NOTE } from "./ui/notifications/NotificationsPage";
-import { SessionNotificationsSheet } from "./ui/notifications/SessionNotifications";
+import { MutedMark, SessionNotificationsSheet } from "./ui/notifications/SessionNotifications";
 import { loadNotificationSettings, resetNotificationSettingsForTests, SETTINGS_KEY } from "./notifications/store";
 import { defaultSettings } from "./notifications/model";
 
@@ -172,5 +178,20 @@ describe("one session's notifications (22.07 frame 5)", () => {
     await click(button("Use my settings"));
     await settle();
     expect(saved().perSession).toEqual({});
+  });
+});
+
+describe("the muted mark in the sessions list (22.07, #990)", () => {
+  it("marks a muted session only, on its own Mac, and goes when the session is unmuted", async () => {
+    store({ allow: true, perSession: { mbp: { s1: "mute", s2: "everything" }, mini: { s3: "mute" } } });
+    const marks = () => [...container.querySelectorAll("[role=img][aria-label=Muted]")].length;
+    await render(<><MutedMark hostId="mbp" sessionId="s1" /><MutedMark hostId="mbp" sessionId="s2" /><MutedMark hostId="mbp" sessionId="s3" /><MutedMark hostId="mbp" sessionId="s4" /></>);
+    await settle();
+    expect(marks()).toBe(1);
+    await render(<SessionNotificationsSheet visible hostId="mbp" sessionId="s1" name="Review and merge" onClose={vi.fn()} />);
+    await click(button("Use my settings"));
+    await render(<MutedMark hostId="mbp" sessionId="s1" />);
+    await settle();
+    expect(marks()).toBe(0);
   });
 });

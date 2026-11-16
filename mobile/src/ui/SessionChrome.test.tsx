@@ -7,7 +7,12 @@ import { ChatTabs, NewChatSheet, SessionHeader } from "./SessionChrome";
 const mocks = vi.hoisted(() => ({ app: {} as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("./theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("./glass", () => ({ GlassIconButton: ({ label, onPress }: any) => <button aria-label={label} onClick={onPress} /> }));
+vi.mock("./glass", () => ({ GlassIconButton: ({ label, onPress, icon }: any) => <button aria-label={label} onClick={onPress}>{icon}</button> }));
+// Icons draw as their name, so a test can tell the bell from the struck-through bell.
+vi.mock("lucide-react-native", () => new Proxy({}, {
+  get: (_target, name) => (name === "then" || typeof name === "symbol" ? undefined : name === "__esModule" ? true : () => <i data-icon={String(name)} />),
+  has: (_target, name) => name !== "then",
+}));
 vi.mock("./primitives", () => ({ Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button> }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("react-native", () => {
@@ -97,6 +102,21 @@ describe("the session's bar", () => {
     // No terminal on this Mac: no switch.
     await render(<SessionHeader title="develop-widget" onBack={vi.fn()} onView={onView} />);
     expect(button("Chat") ?? button("Terminal")).toBeUndefined();
+  });
+
+  // #990, design 22.07 frame 5: the session's menu opens "Notifications for this session".
+  it("has a bell that opens this session's notifications, struck through while the session is muted", async () => {
+    const onNotifications = vi.fn();
+    await render(<SessionHeader title="Review and merge" onBack={vi.fn()} onView={vi.fn()} onNotifications={onNotifications} />);
+    const bell = button("Notifications for this session")!;
+    expect(bell.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("Bell");
+    await act(async () => bell.click());
+    expect(onNotifications).toHaveBeenCalledTimes(1);
+    await render(<SessionHeader title="Review and merge" onBack={vi.fn()} onView={vi.fn()} muted onNotifications={onNotifications} />);
+    expect(button("Notifications for this session")!.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("BellOff");
+    // Without a way to open the sheet, no bell.
+    await render(<SessionHeader title="Review and merge" onBack={vi.fn()} onView={vi.fn()} />);
+    expect(button("Notifications for this session")).toBeUndefined();
   });
 });
 
