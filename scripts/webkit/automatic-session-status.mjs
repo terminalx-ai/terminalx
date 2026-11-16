@@ -90,7 +90,7 @@ try {
     }
     if (screenshots && width === 1360) await sidebar.screenshot({ path: join(screenshots, `sidebar-${colorScheme}.png`) });
 
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
+    await page.getByRole("button", { name: /^Overview/ }).click();
     await showView(page, "Table");
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     for (const row of rows) {

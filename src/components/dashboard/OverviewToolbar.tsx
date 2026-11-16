@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode, type RefObject } from "react";
 import { Popover } from "radix-ui";
-import { Archive, ArrowDownWideNarrow, ArrowUpNarrowWide, CalendarClock, Check, ChevronDown, Cloud, Laptop, ListFilter, Plus, Search, SlidersHorizontal, UserRound, Users, X } from "@/icons";
+import { Archive, ArrowDownWideNarrow, ArrowUpNarrowWide, CalendarClock, Check, ChevronDown, ListFilter, Plus, Search, SlidersHorizontal, UserRound, Users, X } from "@/icons";
 import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -9,7 +9,7 @@ import { initials } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import { keycaps, useKeymap } from "@/lib/shortcuts";
-import { TABLE_COLUMNS, REQUIRED_COLUMN, type DashboardPreferences, type DashboardSort, type Inclusion, type TableColumnId } from "@terminalx/portable/dashboard";
+import { TABLE_COLUMNS, REQUIRED_COLUMN, type DashboardPreferences, type DashboardSort, type Inclusion, type TableColumn, type TableColumnId } from "@terminalx/portable/dashboard";
 
 /** Someone who owns a session on the overview, with how recently they worked. */
 export interface OverviewPerson {
@@ -164,7 +164,8 @@ export function InclusionChip({ kind, value, onChange }: { kind: keyof typeof IN
 const menuName = (id: TableColumnId) => TABLE_COLUMNS.find((column) => column.id === id)!.menu;
 
 /** The order: which column, and which way. */
-export function SortChip({ sort, onChange }: { sort: DashboardSort; onChange: (sort: DashboardSort) => void }) {
+/** `columns`: the ones the table offers (Where only with Machines on and a machine paired). */
+export function SortChip({ sort, onChange, columns = TABLE_COLUMNS }: { sort: DashboardSort; onChange: (sort: DashboardSort) => void; columns?: readonly TableColumn[] }) {
   const Icon = sort.direction === "desc" ? ArrowDownWideNarrow : ArrowUpNarrowWide;
   return (
     <DropdownMenu>
@@ -172,7 +173,7 @@ export function SortChip({ sort, onChange }: { sort: DashboardSort; onChange: (s
       <DropdownMenuContent align="start">
         <DropdownMenuLabel>Sort by</DropdownMenuLabel>
         <DropdownMenuRadioGroup value={sort.column} onValueChange={(column) => onChange({ ...sort, column: column as TableColumnId })}>
-          {TABLE_COLUMNS.map(({ id, menu }) => <DropdownMenuRadioItem key={id} value={id}>{menu}</DropdownMenuRadioItem>)}
+          {columns.map(({ id, menu }) => <DropdownMenuRadioItem key={id} value={id}>{menu}</DropdownMenuRadioItem>)}
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuRadioGroup value={sort.direction} onValueChange={(direction) => onChange({ ...sort, direction: direction as DashboardSort["direction"] })}>
@@ -185,7 +186,7 @@ export function SortChip({ sort, onChange }: { sort: DashboardSort; onChange: (s
 }
 
 /** Display (02.15): Table or Board, the table's columns, and row density. */
-export function DisplayMenu({ preferences, onChange }: { preferences: DashboardPreferences; onChange: (preferences: DashboardPreferences) => void }) {
+export function DisplayMenu({ preferences, onChange, columns = TABLE_COLUMNS }: { preferences: DashboardPreferences; onChange: (preferences: DashboardPreferences) => void; columns?: readonly TableColumn[] }) {
   const table = preferences.view === "table";
   return (
     <DropdownMenu>
@@ -205,7 +206,7 @@ export function DisplayMenu({ preferences, onChange }: { preferences: DashboardP
         </div>
         {table && <>
           <DropdownMenuLabel className="pt-2">Columns</DropdownMenuLabel>
-          {TABLE_COLUMNS.filter(({ id }) => id !== REQUIRED_COLUMN).map(({ id, menu }) => (
+          {columns.filter(({ id }) => id !== REQUIRED_COLUMN).map(({ id, menu }) => (
             <DropdownMenuCheckboxItem key={id} indicator="box" className="h-8 text-[12.5px]"
               checked={!preferences.hiddenColumns.includes(id)}
               onSelect={(e) => e.preventDefault()}
@@ -264,10 +265,4 @@ export function NewSessionButton({ onClick }: { onClick: () => void }) {
       {binding && <kbd aria-hidden className="ml-1 rounded border border-background/20 px-1 font-sans text-[11px] leading-4 text-background/70">{keycaps(binding).join("")}</kbd>}
     </button>
   );
-}
-
-/** Where a session runs: this Mac, or a cloud workspace. */
-export function WhereCell({ cloud }: { cloud: boolean }) {
-  const Icon = cloud ? Cloud : Laptop;
-  return <span className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground"><Icon aria-hidden className={cn("size-[13px] shrink-0", cloud && "text-info")} />{cloud ? "Cloud" : "Local"}</span>;
 }

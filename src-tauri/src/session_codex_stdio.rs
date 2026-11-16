@@ -536,6 +536,12 @@ impl SessionManager {
         let entry = index::get(session).ok();
         let asked = entry.as_ref().and_then(|entry| entry.tab(tab)).and_then(crate::session_ops::tab_account).map(str::to_owned);
         let project = entry.as_ref().and_then(crate::session_ops::project_key).map(str::to_owned);
+        // Another account when automatic switching finds this one full (#981).
+        let title = entry.as_ref().map(|entry| entry.title.clone()).unwrap_or_default();
+        let (asked, moved) = self.launch_account(session, tab, "codex", project.as_deref(), &title, asked);
+        if let Some(text) = moved {
+            self.publish(&mut rt_arc.lock().unwrap(), Payload::Status { text }, None);
+        }
         let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
         // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`).

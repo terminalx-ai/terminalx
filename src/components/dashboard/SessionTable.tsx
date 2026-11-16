@@ -1,22 +1,26 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
-import { ArrowDown, ArrowUp } from "@/icons";
+import { ArrowDown, ArrowUp, Cloud, Laptop } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
-import { TABLE_COLUMNS, type DashboardSort, type DashboardTableRow, type TableColumnId } from "@/lib/dashboard";
+import { tableColumns, type DashboardSort, type DashboardTableRow, type TableColumnId } from "@/lib/dashboard";
+import { MachineIcon } from "@/components/machines/connectionStatus";
+import type { PairedMachine } from "@/types/machines";
 import type { PrAssociation } from "@/lib/api";
 import { SessionStatus } from "@/components/ui/SessionStatus";
 import type { StatusSession } from "@/lib/sessionRowStatus";
 import { AgentMark } from "@/components/AgentMark";
-import { PersonFace, WhereCell } from "./OverviewToolbar";
+import { PersonFace } from "./OverviewToolbar";
+
+/** Where a row's session runs, for the Where column's icon (PRO-346). */
+export type SessionPlace = { kind: "local" } | { kind: "cloud" } | { kind: "machine"; machine: PairedMachine | null };
 
 export interface SessionTableRow extends DashboardTableRow {
   session?: StatusSession;
+  place?: SessionPlace;
   prs: readonly PrAssociation[];
   additions: number | null;
   deletions: number | null;
-  /** A cloud workspace's session, not this Mac's. */
-  cloud?: boolean;
   /** The harness of the session's first tab, for the agent's mark. */
   agentId?: string | null;
 }
@@ -34,7 +38,7 @@ const WIDTHS: Record<Exclude<TableColumnId, "name">, number> = { project: 120, w
 const NAME_MIN = 220;
 const width = (id: TableColumnId) => id === "name" ? undefined : WIDTHS[id];
 
-export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns, sort, onSort, selectedId, onFocus, onOpen, loading, compact = false }: {
+export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns, sort, onSort, selectedId, onFocus, onOpen, loading, compact = false, where = false }: {
   containerRef: RefObject<HTMLDivElement | null>;
   navigationRef?: Ref<SessionTableHandle>;
   rows: SessionTableRow[];
@@ -46,9 +50,11 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
   onOpen: (id: string) => void;
   loading: boolean;
   compact?: boolean;
+  /** Offer the Where column: a machine is paired and Experimental → Machines is on. */
+  where?: boolean;
 }) {
   const rowHeight = compact ? COMPACT_ROW_HEIGHT : ROW_HEIGHT;
-  const columns = useMemo(() => TABLE_COLUMNS.filter(({ id }) => !hiddenColumns.includes(id)), [hiddenColumns]);
+  const columns = useMemo(() => tableColumns(where).filter(({ id }) => !hiddenColumns.includes(id)), [hiddenColumns, where]);
   const [viewport, setViewport] = useState({ top: 0, height: 480 });
   const [focusRequest, requestFocus] = useState(0);
   const pendingFocus = useRef<string | null>(null);
@@ -140,7 +146,6 @@ function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): R
   // The session's own status, icon and label ('Checks failing · PR #781'). The
   // badge mounts only for visible rows, sharing the sidebar's cached status polling.
   if (column === "status") return row.session ? <SessionStatus session={row.session} className="max-w-full text-[12.5px] text-foreground" /> : row.status ?? <span className="text-faint">—</span>;
-  if (column === "where") return <WhereCell cloud={!!row.cloud} />;
   if (column === "agent" && row.agent) return <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground" title={String(row.agent)}>
     {row.agentId && <AgentMark id={row.agentId} decorative className="size-[13px]" />}<span className="truncate">{row.agent}</span>
   </span>;
@@ -154,6 +159,13 @@ function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): R
       }}
     >{index > 0 ? "· " : ""}#{pr.number}</button>
   )) : <span className="text-faint">—</span>;
+  if (column === "where") {
+    if (!row.where) return <span className="text-faint">—</span>;
+    const icon = row.place?.kind === "machine" ? <MachineIcon machine={row.place.machine} className="size-[13px] shrink-0" />
+      : row.place?.kind === "cloud" ? <Cloud aria-hidden className="size-[13px] shrink-0 text-info" />
+      : <Laptop aria-hidden className="size-[13px] shrink-0" />;
+    return <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">{icon}<span className="min-w-0 truncate">{row.where}</span></span>;
+  }
   if (column === "changes" && row.changes !== null) return <span title="Workspace changes"><span className="text-add">+{row.additions}</span> <span className="text-del">−{row.deletions}</span></span>;
   if (column === "updated" || column === "created") {
     // Active is when the session last saw a message (else its last change).

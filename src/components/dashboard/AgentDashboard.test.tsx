@@ -150,7 +150,8 @@ it("shows the designed default columns, people and the toolbar", async () => {
   expect(screen.getByRole("textbox", { name: "Search sessions" }).getAttribute("placeholder")).toBe("Search sessions, branches, PRs");
   await showView("Table");
   const headers = within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("columnheader").map((header) => header.textContent);
-  expect(headers).toEqual(["Session", "Project", "Where", "Branch", "Changes", "Status", "Agent", "Owner", "Active"]);
+  // Where joins after Project only with Machines on and a machine paired (PRO-346).
+  expect(headers).toEqual(["Session", "Project", "Branch", "Changes", "Status", "Agent", "Owner", "Active"]);
   expect(screen.getByRole("img", { name: "You" })).toBeDefined();
   fireEvent.keyDown(window, { key: "/" });
   expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search sessions" }));

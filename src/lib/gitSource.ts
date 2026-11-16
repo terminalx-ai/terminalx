@@ -1,5 +1,5 @@
 import { reviewFileReader } from "./reviewThreads";
-import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey, parseMachineKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type CheckAuthority, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
@@ -168,7 +168,20 @@ export class MissingIdentityError extends Error {
 }
 
 /**
- * One repository of a cloud workspace. `author` is read when committing
+ * The runtime's own id of a session, when `sessionKey` names one of
+ * `workspaceKey`'s: a cloud session of that workspace, or a machine session
+ * of that machine project (`machine:<m>:<p>`, PRO-347). Null otherwise.
+ */
+export function runtimeSessionIn(workspaceKey: string, sessionKey: string): string | null {
+  const machine = parseMachineKey(sessionKey);
+  if (machine) return machine.sessionId && machine.projectId && machineProjectKey(machine.machineId, machine.projectId) === workspaceKey ? machine.sessionId : null;
+  const parsed = parseCloudWorkspaceKey(sessionKey);
+  return parsed?.sessionId && cloudWorkspaceKey(parsed.orgId, parsed.workspaceId) === workspaceKey ? parsed.sessionId : null;
+}
+
+/**
+ * One repository of a cloud workspace, or of a machine project (its
+ * `workspaceKey` is then `machine:<m>:<p>`). `author` is read when committing
  * (the person's own Git identity from this computer); the workspace's GitHub
  * credentials never leave the runtime.
  */
@@ -228,10 +241,10 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     ghAvailable: () => Promise.resolve(true),
     prs: (branch) => remote.prs(branch).then((answer) => answer.prs),
     prAssociations: async (sessionId) => {
-      const parsed = parseCloudWorkspaceKey(sessionId);
-      if (!parsed?.sessionId || cloudWorkspaceKey(parsed.orgId, parsed.workspaceId) !== input.workspaceKey) throw new Error("This session belongs to a different cloud workspace.");
+      const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
+      if (!runtimeId) throw new Error("This session belongs to a different workspace.");
       let response;
-      try { response = await remote.prAssociations(parsed.sessionId); }
+      try { response = await remote.prAssociations(runtimeId); }
       catch (error) {
         if (!(error instanceof WorkspaceRpcError) || error.code !== "method_not_found") throw error;
         // Older git/1 runtimes can list branch PRs but cannot prove session

@@ -26,7 +26,7 @@ try {
       for (const entry of Object.values(answers.cloud_catalog_load.orgs["org-a"].sessions)) entry.sessions = entry.sessions.slice(0, 2);
     `);
     await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
+    await page.getByRole("button", { name: /^Overview/ }).click();
     const search = page.getByRole("textbox", { name: "Search sessions" });
     await search.fill("Local working");
     await showView(page, "Table");
@@ -60,7 +60,7 @@ try {
     assert.equal(await search.inputValue(), "Local working");
     await showView(page, "Table");
     await page.reload();
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
+    await page.getByRole("button", { name: /^Overview/ }).click();
     await table.waitFor();
     assert.equal(await table.getByRole("columnheader", { name: "Branch", exact: true }).count(), 0, "hidden column survives reload");
     assert.equal(await table.getByRole("columnheader", { name: "Session", exact: true }).getAttribute("aria-sort"), "descending");

@@ -48,6 +48,8 @@ static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(No
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_account_switch.rs"]
+pub(crate) mod account_switch;
 #[path = "session_row_status.rs"]
 pub(crate) mod row_status;
 #[path = "session_held.rs"]
@@ -1287,6 +1289,8 @@ pub struct SessionManager {
     follow: Arc<follow::Following>,
     /// New tabs whose agent's first start is still told apart (PRO-291).
     first_starts: Arc<FirstStarts>,
+    /// What automatic account switching remembers between decisions (#981).
+    account_switch: Arc<Mutex<crate::agent_accounts::auto_switch::Memory>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1742,6 +1746,7 @@ impl SessionManager {
             stopping_ptys: Arc::default(),
             follow: Arc::default(),
             first_starts: Arc::default(),
+            account_switch: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -4808,6 +4813,16 @@ impl SessionManager {
     /// to resume on its next prompt); `false` when only the account was
     /// recorded.
     pub fn switch_account(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
+        let restarted = self.switch_account_on(session_id, tab_id, account)?;
+        // The person's own move: automatic switching leaves it there until
+        // that account is full (#981).
+        self.account_moved_by_hand(session_id, tab_id, account);
+        Ok(restarted)
+    }
+
+    /// [`Self::switch_account`]'s restart and resume, which automatic
+    /// switching (#981) makes too.
+    fn switch_account_on(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
         let account = crate::session_ops::requested_account(Some(account)).map_err(|error| anyhow!(error))?.context("Choose an account to switch to.")?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -5267,6 +5282,11 @@ impl SessionManager {
         // agent's CLAUDE_CONFIG_DIR or CODEX_HOME. With This Mac's login
         // alone the grant is the one above, word for word.
         let asked = crate::session_ops::tab_account(tab).map(str::to_owned);
+        // Another account when automatic switching finds this one full (#981).
+        let (asked, moved) = self.launch_account(&rt.session_id, &rt.tab_id, &tab.harness, crate::session_ops::project_key(entry), &entry.title, asked);
+        if let Some(text) = moved {
+            self.publish(rt, Payload::Status { text }, None);
+        }
         let grant = crate::agent_keys::launch_grant_on(&tab.harness, Path::new(&entry.cwd), crate::agent_keys::Choice { account: asked.as_deref(), project: crate::session_ops::project_key(entry) })?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
@@ -7725,6 +7745,7 @@ impl SessionManager {
                 rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
                 self.needs_recovery(rt, kind, crate::recovery_log::source_of(&payload));
             }
+            self.account_switch_observe(rt, &payload);
         }
         match &payload {
             Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
@@ -7797,6 +7818,10 @@ impl SessionManager {
         let sign_in_refused = main && matches!(&payload, Payload::TurnCompleted { auth_failed: true, .. });
         let worked = main && matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Ok, auth_failed: false, .. });
         self.publish(rt, payload, subagent);
+        if main && is_boundary {
+            // Whether it moves to another account before its next prompt (#981).
+            self.account_switch_after_turn(rt);
+        }
         if sign_in_refused {
             // A reply drawn after the refusal may have taken the recovery back.
             if rt.recovery != Some(RecoveryKind::SignedOut) {

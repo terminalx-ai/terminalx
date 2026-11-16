@@ -163,7 +163,20 @@ export const TABLE_COLUMNS = [
   { id: "updated", label: "Active", menu: "Last active" },
   { id: "created", label: "Created", menu: "Created" },
 ] as const;
+/**
+ * Where a session runs: This Mac, a paired machine's name, or Cloud (PRO-346).
+ * The table offers it only while a machine is paired and Experimental →
+ * Machines is on, right after Project; otherwise the table is
+ * {@link TABLE_COLUMNS} without it.
+ */
 export type TableColumnId = typeof TABLE_COLUMNS[number]["id"];
+export type TableColumn = typeof TABLE_COLUMNS[number];
+export const WHERE_COLUMN = TABLE_COLUMNS.find((column) => column.id === "where")!;
+const WITHOUT_WHERE: readonly TableColumn[] = TABLE_COLUMNS.filter((column) => column.id !== "where");
+/** The columns the table offers: with Where only when `where` (a machine paired, Machines on). */
+export function tableColumns(where: boolean): readonly TableColumn[] {
+  return where ? TABLE_COLUMNS : WITHOUT_WHERE;
+}
 /** The session name is the row; it cannot be hidden. */
 export const REQUIRED_COLUMN: TableColumnId = "name";
 /** Off until chosen, so the default set fits a 1440-wide window: the status already names the PR. */
@@ -203,8 +216,10 @@ export function dashboardPreferences(value: unknown): DashboardPreferences {
   };
 }
 
-export function toggleTableColumn(hidden: TableColumnId[], column: TableColumnId): TableColumnId[] {
+/** Hide or show a column; the session column stays, and so does the last one shown among `columns` (the ones offered). */
+export function toggleTableColumn(hidden: TableColumnId[], column: TableColumnId, columns: readonly TableColumn[] = TABLE_COLUMNS): TableColumnId[] {
   if (column === REQUIRED_COLUMN) return hidden.filter((id) => id !== column);
+  if (!hidden.includes(column) && columns.every(({ id }) => id === column || hidden.includes(id))) return hidden;
   return toggleFilter(hidden, column);
 }
 
@@ -216,12 +231,12 @@ export function nextDashboardSort(current: DashboardSort, column: TableColumnId)
 const STATUS_ORDER = ["Needs approval", "Needs you", "Working", "Checks failing", "Draft PR", "In review", "Ready to merge", "Uncommitted", "Not started", "No changes", "Merged"];
 
 /** Values used for ordering are the same values rendered by the view. Unknowns sort last in either direction. */
-export type DashboardTableRow = { id: string } & Record<TableColumnId, string | number | null>;
+export type DashboardTableRow = { id: string } & Record<Exclude<TableColumnId, "where">, string | number | null> & { where?: string | null };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 export function sortDashboardRows<T extends DashboardTableRow>(rows: readonly T[], sort: DashboardSort): T[] {
   const value = (row: T): string | number | null => {
     const raw = row[sort.column];
-    if (raw === null || raw === "") return null;
+    if (raw === null || raw === undefined || raw === "") return null;
     if (sort.column === "updated" || sort.column === "created") {
       const date = Date.parse(String(raw));
       return Number.isFinite(date) ? date : null;

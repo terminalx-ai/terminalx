@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // PRO-331: a session whose Reviewer or Conflict resolver tab is in front keeps its own title on
-// its row in One list of chats, and never renames a row in Group by project, light and dark. Three pipeline sessions
-// with an active helper tab show three distinct titles; One list names what the helper is doing
-// on the second line, and folds a legacy separate reviewer session into its author's row.
+// its row in one list (Group by Sections) and in Group by project, light and dark. Three pipeline sessions
+// with an active helper tab show three distinct titles; a row's tooltip says what the helper is doing (rows are one
+// line since PRO-384), and one list folds a legacy separate reviewer session into its author's row.
 // Synthetic sessions and pipelines; nothing is contacted.
 // pnpm build && node scripts/webkit/helper-titles.mjs
 // Set HELPER_TITLES_SHOTS to a directory to also save screenshots.
@@ -59,10 +59,8 @@ try {
       page.setDefaultTimeout(30_000);
       const rail = await sidebar(page);
       const list = rail.locator('[data-testid="conversation-list"]');
-      // One list names a row by its session; Group by project names a row on a real branch by that branch, as before.
-      const names = layout === "list"
-        ? ["PRO-274 Create an orchestration run", "PRO-280 Show tokens and cost per session", "PRO-282 Keep the Linux checks on our runners"]
-        : ["pro 274", "pro 280", "pro 282"];
+      // A row is named by its session, never its branch (PRO-384), in either layout.
+      const names = ["PRO-274 Create an orchestration run", "PRO-280 Show tokens and cost per session", "PRO-282 Keep the Linux checks on our runners"];
       for (const name of names) {
         await list.getByText(name, { exact: true }).first().waitFor();
         assert.equal(await list.getByText(name, { exact: true }).count(), 1, `${layout}/${colorScheme}: one row for ${name}`);
@@ -70,13 +68,14 @@ try {
       const text = await list.innerText();
       assert.equal(/Conflict resolver|Reviewer/.test(text), false, `${layout}/${colorScheme}: a helper tab's name reached a row\n${text}`);
       if (layout === "list") {
-        assert.equal(await list.locator('[data-testid="chat-preview"]').filter({ hasText: "Review 2 of 3 running" }).count(), 1);
-        assert.equal(await list.locator('[data-testid="chat-preview"]').filter({ hasText: "Resolving conflicts with main" }).count(), 1);
-        assert.equal(await list.locator('[data-testid="chat-preview"]').filter({ hasText: "Waiting for checks" }).count(), 1);
+        const tooltips = await list.locator("[data-row-sessions][title]").evaluateAll((rows) => rows.map((row) => row.getAttribute("title")));
+        for (const line of ["Review 2 of 3 running", "Resolving conflicts with main", "Waiting for checks"]) {
+          assert.equal(tooltips.filter((title) => title.includes(line)).length, 1, `${layout}/${colorScheme}: one tooltip says ${line}\n${tooltips.join("\n")}`);
+        }
         assert.equal(await list.getByRole("button").filter({ hasText: /PRO-/ }).count(), 3, "legacy reviewer session added a row");
       }
       if (shots) await page.screenshot({ path: join(shots, `helper-titles-${layout === "list" ? "one-list" : "by-project"}-${colorScheme}.png`) });
-      console.log(`PASS: ${layout} / ${colorScheme}: three distinct rows, no helper names${layout === "list" ? ", helper lines, legacy reviewer folded" : ""}`);
+      console.log(`PASS: ${layout} / ${colorScheme}: three distinct rows, no helper names${layout === "list" ? ", helper activity on hover, legacy reviewer folded" : ""}`);
       await page.close();
     }
   }

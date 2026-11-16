@@ -9,11 +9,12 @@ import { useSessionStore } from "@/lib/sessions";
 import { errorMessage } from "@/lib/api";
 import { showError } from "@/lib/errorToasts";
 import { TERMINALX_VARIABLES, appliesTo, environment, environmentNameError, isPrivateRow, isSecretRow, looksSecret, parseLocalEnv, withStorage, type EnvironmentInput, type EnvironmentRow } from "@/lib/localEnvironment";
+import { isLocalKey } from "@/types/target";
 
 const inputClass = "w-full rounded-md border border-hairline bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40";
 
 /** Local projects whose variables can be set: Git repositories on this Mac. */
-export const environmentProjects = <P extends { kind?: string; path: string }>(projects: P[]) => projects.filter((p) => p.kind !== "folder" && !p.path.startsWith("cloud:"));
+export const environmentProjects = <P extends { kind?: string; path: string }>(projects: P[]) => projects.filter((p) => p.kind !== "folder" && isLocalKey(p.path));
 
 /** Settings › Environment: Personal variables, applied to every project. */
 export function EnvironmentSettings() {

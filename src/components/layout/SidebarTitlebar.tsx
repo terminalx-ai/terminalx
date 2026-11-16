@@ -3,7 +3,7 @@ import { useRef, useState, type PointerEvent } from "react";
 import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
-import { Archive, Check, CircleDot, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
+import { Check, ChevronDown, CircleDot, Folder, Layers, ListFilter, PanelLeft } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -11,33 +11,14 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
 import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { setShowArchived, startSessionIn, useSessionStore } from "@/lib/sessions";
-import type { Project } from "@/types/session";
-import { ProjectGlyph } from "./ProjectRail";
+import { setShowArchived, useSessionStore } from "@/lib/sessions";
 import { TITLEBAR_INSET } from "./AppShell";
 
 /**
- * The sidebar's titlebar, the same in both layouts: after the window's own
- * controls, Hide sidebar; at the right, the View menu (conversations grouped
- * by project or one flat list, which sessions show: all, Unread or Needs
- * you, and whether the archived ones are listed too), then Search and New
- * chat, all plain icon buttons like the one that hides the sidebar.
+ * The sidebar's titlebar, the same in every layout: after the window's own controls, Hide sidebar. New session and
+ * Search are destinations under it, and the View menu heads the session list (02.01).
  */
-export function SidebarTitlebar({
-  onHide,
-  onSearch,
-  onNewChat,
-  onAddProject,
-  projects,
-}: {
-  onHide: () => void;
-  onSearch: () => void;
-  onNewChat: () => void;
-  onAddProject: () => void;
-  /** The projects a new chat may start in, as the menu lists them. */
-  projects: Project[];
-}) {
-  const grouped = usePrefs().sidebarLayout === "simple";
+export function SidebarTitlebar({ onHide }: { onHide: () => void }) {
   return (
     <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pr-2" style={{ paddingLeft: TITLEBAR_INSET }} data-testid="sidebar-titlebar">
       <WithTooltip label="Hide sidebar" shortcut="app.toggleSidebar">
@@ -45,117 +26,80 @@ export function SidebarTitlebar({
           <PanelLeft />
         </Button>
       </WithTooltip>
-      <div className="flex-1" />
-      <ViewMenu grouped={grouped} />
-      <WithTooltip label="Search" shortcut="app.commandPalette">
-        <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" aria-label="Search" onClick={onSearch}>
-          <Search />
-        </Button>
-      </WithTooltip>
-      <DropdownMenu>
-        <WithTooltip label="New chat">
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" aria-label="New chat">
-              <Plus />
-            </Button>
-          </DropdownMenuTrigger>
-        </WithTooltip>
-        <DropdownMenuContent align="end" className="w-60">
-          <DropdownMenuItem onSelect={onNewChat}>
-            <SquarePen /> New chat
-          </DropdownMenuItem>
-          {projects.length > 0 && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>In a project</DropdownMenuLabel>
-              {projects.map((project) => (
-                <DropdownMenuItem key={project.path} onSelect={() => startSessionIn(project.path, null)}>
-                  <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
-                </DropdownMenuItem>
-              ))}
-            </>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={onAddProject}>
-            <FolderPlus /> Add a project…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
     </div>
   );
 }
 
 /**
- * How the list is drawn and what it shows. The icon is the layout's; while a
- * filter narrows the list, or the archived conversations are shown, the
- * button looks pressed and says so. The filter covers local and cloud
- * sessions alike (`useSidebarFilter`) and opens on a click, an accessibility
- * press and the keyboard (`useRowMenu`). Show archived (#718) lists each
- * project's archived conversations, and the chats', under a fold of their own.
+ * How the list is drawn and what it shows, as 02.18 lays it out: GROUP BY Project, Status or Sections (sections, then
+ * one list); SORT BY Updated or Created; Filter by project; Custom order and Show archived as checkboxes; then which
+ * sessions show. While a filter narrows the list, or the archived conversations are shown, the button looks
+ * pressed and says so. The filter covers local and cloud sessions alike (`useSidebarFilter`) and opens on a click,
+ * an accessibility press and the keyboard (`useRowMenu`). Show archived (#718) lists each project's archived
+ * conversations, and the chats', under a fold of their own.
  */
-function ViewMenu({ grouped }: { grouped: boolean }) {
+export function ViewMenu() {
   const filter = useSidebarFilter();
   const prefs = usePrefs();
-  const statusGrouped = prefs.sidebarLayout === "status";
+  const layout = prefs.sidebarLayout;
   const { showArchived } = useSessionStore();
   const order = useSidebarOrder();
-  const sort = order.custom ? "custom" : prefs.sidebarSort === "created" ? "created" : "updated";
-  const sortLabels = { updated: "Updated", created: "Created", custom: "Custom" };
+  const sort = prefs.sidebarSort === "created" ? "created" : "updated";
   const menu = useRowMenu();
   const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const label = filter.filter !== "all" ? `View: showing ${showing}` : prefs.sidebarProject ? "View: filtered by project" : showArchived ? "View: showing archived" : "View";
-  const tooltip = filter.filter !== "all" ? `Showing: ${showing}` : prefs.sidebarProject ? "Filtered by project" : showArchived ? "Showing archived" : statusGrouped ? "Grouped by status" : grouped ? "Grouped by project" : "One list of chats";
+  const groups = [
+    { id: "simple", label: "Project", icon: <Folder /> },
+    { id: "status", label: "Status", icon: <CircleDot /> },
+    { id: "list", label: "Sections", icon: <Layers /> },
+  ] as const;
+  const busy = !order.loaded || order.pending;
+  const check = (on: boolean) => <span aria-hidden className={cn("ml-auto grid size-3.5 shrink-0 place-items-center rounded-[4px] border border-border", on && "border-transparent bg-foreground text-background")}>{on && <Check className="size-3" />}</span>;
   return (
     <DropdownMenu {...menu.root}>
-      <WithTooltip label={tooltip}>
-        <DropdownMenuTrigger asChild {...menu.trigger}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={label}
-            className={cn(filter.active || showArchived ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
-            data-testid="sidebar-filter"
-            data-filter={filter.filter}
-          >
-            {statusGrouped ? <CircleDot /> : grouped ? <FolderTree /> : <LayoutList />}
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
-      <DropdownMenuContent align="end" className="w-52">
-        <DropdownMenuItem role="menuitemradio" aria-checked={grouped} onSelect={() => setPrefs({ sidebarLayout: "simple" })}>
-          <FolderTree /> Group by project
-          {grouped && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuItem role="menuitemradio" aria-checked={!grouped && !statusGrouped} onSelect={() => setPrefs({ sidebarLayout: "list" })}>
-          <LayoutList /> One list of chats
-          {!grouped && !statusGrouped && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuItem role="menuitemradio" aria-checked={statusGrouped} onSelect={() => setPrefs({ sidebarLayout: "status" })}>
-          <CircleDot /> Group by status
-          {statusGrouped && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Sort by: {sortLabels[sort]}</DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            {(["updated", "created", "custom"] as const).map((choice) => <DropdownMenuItem key={choice} role="menuitemradio" aria-checked={sort === choice} disabled={!order.loaded || order.pending} onSelect={() => void selectSidebarSort(choice)}>
-              {sort === choice ? <Check /> : <span className="size-4" />}{sortLabels[choice]}
-            </DropdownMenuItem>)}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <ProjectFilterMenu />
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Show</DropdownMenuLabel>
-        {SIDEBAR_FILTERS.map((entry) => (
-          <DropdownMenuItem key={entry.id} role="menuitemradio" aria-checked={filter.filter === entry.id} onSelect={() => setSidebarFilter(entry.id)}>
-            {filter.filter === entry.id ? <Check /> : <span aria-hidden className="size-4 shrink-0" />}
-            {entry.label}
+      <DropdownMenuTrigger asChild {...menu.trigger}>
+        <Button
+          variant="ghost"
+          size="xs"
+          aria-label={label}
+          className={cn("h-6 gap-1 px-1.5 text-[12px] font-normal normal-case tracking-normal", filter.active || showArchived ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
+          data-testid="sidebar-filter"
+          data-filter={filter.filter}
+        >
+          <ListFilter className="size-3.5" /> View <ChevronDown className="size-3" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuLabel className="text-[11px] font-normal uppercase tracking-[.08em] text-faint">Group by</DropdownMenuLabel>
+        {groups.map((group) => (
+          <DropdownMenuItem key={group.id} role="menuitemradio" aria-checked={layout === group.id} onSelect={() => setPrefs({ sidebarLayout: group.id })}>
+            {group.icon} {group.label}
+            {layout === group.id && <Check className="ml-auto" />}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuLabel className="text-[11px] font-normal uppercase tracking-[.08em] text-faint">Sort by</DropdownMenuLabel>
+        {(["updated", "created"] as const).map((choice) => (
+          <DropdownMenuItem key={choice} role="menuitemradio" aria-checked={!order.custom && sort === choice} disabled={busy} onSelect={() => void selectSidebarSort(choice)}>
+            {choice === "updated" ? "Updated" : "Created"}
+            {!order.custom && sort === choice && <Check className="ml-auto" />}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
-        <DropdownMenuItem role="menuitemcheckbox" aria-checked={showArchived} onSelect={() => setShowArchived(!showArchived)}>
-          {showArchived ? <Check /> : <Archive />} Show archived
+        <ProjectFilterMenu />
+        <DropdownMenuItem role="menuitemcheckbox" aria-checked={order.custom} disabled={busy} onSelect={() => void selectSidebarSort(order.custom ? sort : "custom")}>
+          Custom order{check(order.custom)}
         </DropdownMenuItem>
+        <DropdownMenuItem role="menuitemcheckbox" aria-checked={showArchived} onSelect={() => setShowArchived(!showArchived)}>
+          Show archived{check(showArchived)}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-[11px] font-normal uppercase tracking-[.08em] text-faint">Show</DropdownMenuLabel>
+        {SIDEBAR_FILTERS.map((entry) => (
+          <DropdownMenuItem key={entry.id} role="menuitemradio" aria-checked={filter.filter === entry.id} onSelect={() => setSidebarFilter(entry.id)}>
+            {entry.label}
+            {filter.filter === entry.id && <Check className="ml-auto" />}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -193,7 +137,7 @@ function ProjectFilterMenu() {
     // Radix's submenu autofocus runs during mount; focus the editable field afterwards.
     if (open) window.setTimeout(() => search.current?.focus(), 0);
   }}>
-    <DropdownMenuSubTrigger><Search /> Filter by project{sidebarProject && <Check className="ml-auto" />}</DropdownMenuSubTrigger>
+    <DropdownMenuSubTrigger><ListFilter /> Filter by project<span className="min-w-0 flex-1 truncate pl-2 text-right text-[12px] text-muted-foreground">{sidebarProject ? choices.get(sidebarProject) ?? "1 project" : "All"}</span></DropdownMenuSubTrigger>
     <DropdownMenuSubContent ref={content} className="w-64" onPointerMoveCapture={keepSearchFocus} onKeyDown={(event) => {
       if (event.key === "ArrowUp" && event.target === content.current?.querySelector('[role="menuitemradio"]')) {
         event.preventDefault(); search.current?.focus();

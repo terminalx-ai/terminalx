@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dashboardPreferences, DEFAULT_DASHBOARD_PREFERENCES, filterSessions, nextDashboardSort, NO_FILTERS, sortDashboardRows, TABLE_COLUMNS, toggleTableColumn, type DashboardSession, type DashboardTableRow } from "./dashboard";
+import { dashboardPreferences, DEFAULT_DASHBOARD_PREFERENCES, filterSessions, nextDashboardSort, NO_FILTERS, sortDashboardRows, TABLE_COLUMNS, tableColumns, toggleTableColumn, WHERE_COLUMN, type DashboardSession, type DashboardTableRow } from "./dashboard";
 
 const row = (id: string, patch: Partial<DashboardTableRow> = {}): DashboardTableRow => ({
   id, status: "Needs you", name: "Task 2", project: "Api", where: "Cloud", branch: "feature/2", agent: "Claude", pr: 2, changes: 9, owner: "Amy",
@@ -68,4 +68,25 @@ it("shares archive, automation, owner, agent, project and search filters across 
   expect(filterSessions([session, { ...session, id: "plain", automation: null }], { ...options, filters: { ...options.filters, automations: "show" } }).map((s) => s.id)).toEqual(["live", "plain"]);
   expect(filterSessions([{ ...session, automation: null }, { ...session, ownerId: "zoe" }, { ...session, tabs: [] }], options)).toEqual([]);
   expect(filterSessions([session], { ...options, query: "nothing" })).toEqual([]);
+});
+
+describe("the Where column (PRO-346)", () => {
+  it("is offered after Project only when asked, leaving the usual columns as they were", () => {
+    expect(tableColumns(true)).toBe(TABLE_COLUMNS);
+    expect(tableColumns(false).map((c) => c.id)).toEqual(TABLE_COLUMNS.map((c) => c.id).filter((id) => id !== "where"));
+    expect(tableColumns(true).map((c) => c.id).indexOf("where")).toBe(tableColumns(true).map((c) => c.id).indexOf("project") + 1);
+    expect(WHERE_COLUMN.label).toBe("Where");
+  });
+  it("sorts by where a session runs, rows without it last", () => {
+    const rows = [row("a", { where: "This Mac" }), row("b", { where: "Cloud" }), row("c"), row("d", { where: "Mac mini" })];
+    expect(sortDashboardRows(rows, { column: "where", direction: "asc" }).map((r) => r.id)).toEqual(["b", "d", "a", "c"]);
+    expect(sortDashboardRows(rows, { column: "where", direction: "desc" }).map((r) => r.id)).toEqual(["a", "d", "b", "c"]);
+  });
+  it("keeps a saved Where choice, and the last column offered stays shown", () => {
+    expect(dashboardPreferences({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"] })).toMatchObject({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"] });
+    const allButWhere = tableColumns(true).filter((c) => c.id !== "where").map((c) => c.id);
+    expect(toggleTableColumn(allButWhere, "where", tableColumns(true))).toEqual(allButWhere);
+    // Where hidden too still leaves Name, as Where is not always offered.
+    expect(dashboardPreferences({ hiddenColumns: [...allButWhere, "where"] }).hiddenColumns).not.toContain("name");
+  });
 });
