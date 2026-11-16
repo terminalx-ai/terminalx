@@ -1352,10 +1352,35 @@ impl WorkspaceRpc {
         }
     }
 
+    /// Run an admitted call. On a machine, a session made, a terminal opened
+    /// or an update asked for goes in the machine's activity log (PRO-357),
+    /// with the project's name or the version and nothing else.
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        let noted = self.is_machine() && matches!(method, "session.create" | "pty.create" | "machine.update");
+        let asked_project = params["projectId"].as_str().map(str::to_string);
+        let asked_version = params["version"].as_str().filter(|_| method == "machine.update").map(str::to_string);
+        let result = self.run_method(peer, method, params, ticket).await;
+        if let (true, Ok(value), Some(access)) = (noted, &result, self.machine_access.get()) {
+            let project = value["projectId"].as_str().or(value["session"]["projectId"].as_str()).map(str::to_string).or(asked_project);
+            access.note(&peer.device_id, method, project.as_deref(), asked_version.as_deref());
+        }
+        result
+    }
+
+    async fn run_method(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
+        }
+        // A fresh device token for the paired computer that asks (`machine/4`, PRO-357).
+        if method == "machine.rotateCredential" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.rotate_credential(&peer.device_id).await,
+                None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
+            };
         }
         // A round trip to the relay, for a paired computer only (`machine/2`).
         if method == "machine.relayAccess" {

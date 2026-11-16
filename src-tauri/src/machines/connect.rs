@@ -216,6 +216,10 @@ impl MachineEnv for StoreEnv {
         Ok(())
     }
 
+    fn save_token(&self, token: &str) -> Result<()> {
+        self.machines.secrets.save_token(&self.machine_id, token)
+    }
+
     fn drop_relay(&self) {
         if let Err(error) = self.forget_relay() {
             log::warn!("machines: forget the relay credential of machine {}: {error:#}", self.machine_id);

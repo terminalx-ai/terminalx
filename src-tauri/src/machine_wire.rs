@@ -35,7 +35,7 @@ pub const PORT_ENV: &str = "TERMINALX_MACHINE_HOST_PORT";
 /// payload is the new [`Status`].
 pub const CHANGED_EVENT: &str = "machine_host_changed";
 
-/// Runtime IPC commands. Every one but [`STATUS`] names the window's
+/// Runtime IPC commands. Every one but [`STATUS`] and [`ACTIVITY`] names the window's
 /// attachment (`epoch` and `lease`) and is refused once it is no longer current.
 pub const STATUS: &str = "runtime.machineHost.status";
 pub const ADOPT_KEY: &str = "runtime.machineHost.adoptKey";
@@ -48,6 +48,14 @@ pub const CREATE_CODE: &str = "runtime.machineHost.createCode";
 pub const APPROVE: &str = "runtime.machineHost.approve";
 /// Don't allow it ([`Answer`]): `{ declined: true }`.
 pub const DECLINE: &str = "runtime.machineHost.decline";
+/// The activity log (PRO-357): `{ entries: [...] }`, the last 200, newest first.
+pub const ACTIVITY: &str = "runtime.machineHost.activity";
+/// "Disconnect" ([`ForComputer`]): close the computer's connections and
+/// refuse it until the person lets it back. `{ disconnected: bool }`.
+pub const DISCONNECT: &str = "runtime.machineHost.disconnect";
+/// Let a disconnected computer connect again ([`ForComputer`]). Like
+/// [`APPROVE`], only a person may (`serve_cli::consent`). `{ letBack: bool }`.
+pub const LET_BACK: &str = "runtime.machineHost.letBack";
 
 /// A pairing code: `txm2.` and base64url, unpadded, of a [`MachineCode`].
 pub const CODE_PREFIX: &str = "txm2.";
@@ -67,6 +75,8 @@ pub const REFUSED_NOT_APPROVED: &str = "not-approved";
 pub const REFUSED_CODE_INACTIVE: &str = "code-inactive";
 pub const REFUSED_ANOTHER_COMPUTER: &str = "another-computer";
 pub const REFUSED_PAIRING_PAUSED: &str = "pairing-paused";
+/// A paired computer the person disconnected, until they let it back (PRO-357).
+pub const REFUSED_DISCONNECTED: &str = "disconnected";
 
 /// The most a header line may take, newline included.
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -94,6 +104,12 @@ pub struct ComputerSummary {
     pub approved_at: i64,
     pub last_seen_at: Option<i64>,
     pub connected: bool,
+    /// When the person pressed Disconnect; refused until they let it back.
+    #[serde(default)]
+    pub disconnected_at: Option<i64>,
+    /// How it is connected now: `direct` or `relay` (both while moving).
+    #[serde(default)]
+    pub routes: Vec<String>,
 }
 
 /// The answer to [`STATUS`], and the payload of [`CHANGED_EVENT`].
@@ -194,6 +210,15 @@ pub struct PhoneRoute {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Revoke {
+    pub epoch: String,
+    pub lease: String,
+    pub id: String,
+}
+
+/// Params of [`DISCONNECT`] and [`LET_BACK`]: the paired computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForComputer {
     pub epoch: String,
     pub lease: String,
     pub id: String,

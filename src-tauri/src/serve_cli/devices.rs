@@ -76,6 +76,8 @@ fn list(data: &Path) -> Result<(Option<bool>, Vec<ComputerSummary>)> {
             approved_at: computer.approved_at,
             last_seen_at: computer.last_seen_at,
             connected: false,
+            disconnected_at: computer.disconnected_at,
+            routes: Vec::new(),
         })
         .collect();
     Ok((None, computers))
@@ -159,7 +161,7 @@ mod tests {
     use crate::machine_host::registry::{token_hash, PairedComputer};
 
     fn computer(id: &str, label: &str, connected: bool) -> ComputerSummary {
-        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected }
+        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected, disconnected_at: None, routes: Vec::new() }
     }
 
     #[test]
@@ -188,6 +190,8 @@ mod tests {
                 approved_at: 1,
                 last_seen_at: Some(2),
                 relay_device_id: None,
+                next_token_hash: None,
+                disconnected_at: None,
                 other: Default::default(),
             })
             .unwrap();

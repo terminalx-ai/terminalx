@@ -98,7 +98,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -305,6 +305,10 @@ pub const METHODS: &[Method] = &[
     // (blockers, other computers, one already under way).
     method("machine.updateStatus", "machine/3", Participate, false),
     method("machine.update", "machine/3", Manage, false),
+    // PRO-357: a fresh device token for the paired computer that asks, kept
+    // beside the current one until it connects with it. Not idempotent: a
+    // repeat makes another token, and the computer keeps the last it saved.
+    method("machine.rotateCredential", "machine/4", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -332,6 +336,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/1" => &["machine."],
         "machine/2" => &["machine.relayAccess"],
         "machine/3" => &["machine.updateStatus", "machine.update"],
+        "machine/4" => &["machine.rotateCredential"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }

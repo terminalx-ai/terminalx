@@ -229,10 +229,13 @@ pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
     // Admitted before it is told it is in, so turning the switch off or a
     // revocation meanwhile either refuses it here or finds it and closes it.
+    // An expired credential or a computer the person disconnected is
+    // refused with its reason (PRO-357).
     let admit = host.clone();
-    let id = computer.id.clone();
-    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&id, cancel_tx)).await? {
-        Ok(tracked) => tracked,
+    let admitted = computer.clone();
+    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&admitted, &token, "direct", cancel_tx)).await? {
+        Ok(Ok(tracked)) => tracked,
+        Ok(Err(reason)) => return refuse_pairing(&mut socket, &mut session, reason).await,
         Err(error) => {
             refuse(&mut socket).await;
             return Err(error);
@@ -241,9 +244,6 @@ pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<
     let result = async {
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         crate::remote::host::send_sealed(&mut socket, &mut session, &authenticated).await?;
-        let touch = host.clone();
-        let id = computer.id.clone();
-        let _ = tokio::task::spawn_blocking(move || touch.registry.touch(&id, chrono::Utc::now().timestamp_millis())).await;
         log::info!("machine host: computer {} connected directly", computer.id);
         let (peer, notifications) = Peer::for_installation(computer.id.clone(), Authority::Manage, None, None);
         crate::remote::host::serve_rpc(&mut socket, &mut session, &rpc, &peer, notifications, &mut cancel, |_| None).await
