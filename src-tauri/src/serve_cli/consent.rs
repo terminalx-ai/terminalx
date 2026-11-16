@@ -11,16 +11,19 @@
 //! and names it, with a secret nonce, in the request's `consent` parameter.
 //! The runtime connects to that socket, reads the listening process's pid as
 //! the kernel records it (`LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux),
-//! and takes the nonce the socket answers with: only the process that sent the
-//! request knows it, so no caller can name another process's socket. The
-//! window's client ([`crate::local_runtime::client`]) and `terminalx-serve
-//! pair` both send one; the window is not the runtime's descendant, so it
-//! keeps working.
+//! and sends the request's nonce; the witness answers `ok` only to its own
+//! nonce, once. The witness never tells anyone the nonce, so a process that
+//! connects to another's witness learns nothing, and a request that names
+//! another process's witness cannot answer its challenge. The window's client
+//! ([`crate::local_runtime::client`]) and `terminalx-serve pair` both send
+//! one; the window is not the runtime's descendant, so it keeps working.
 //!
-//! What it cannot stop: a process that detaches itself from the runtime
-//! (double fork and `setsid`) is no longer its descendant and has no
-//! terminal. `terminalx-serve pair` therefore also needs a terminal for its
-//! input and output, and a person's "y" typed into it.
+//! A process that detaches itself from the runtime (double fork and
+//! `setsid`) is no longer its descendant, and has no terminal. A headless
+//! runtime, which has no window, therefore also refuses a caller with no
+//! controlling terminal: there, only `pair` in a person's terminal answers.
+//! What no check here can tell from a person: a process of the same user that
+//! detaches and opens a new pseudo-terminal of its own to run `pair` in.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -66,6 +69,9 @@ pub enum Refusal {
     /// A process whose controlling terminal is one of the runtime's
     /// terminals, or whose session one of them leads.
     RuntimeTerminal,
+    /// A process with no controlling terminal, asking a runtime with no
+    /// window: on a headless server a person answers only in a terminal.
+    NoTerminal,
 }
 
 impl Refusal {
@@ -74,6 +80,7 @@ impl Refusal {
             Self::Runtime => "the runtime itself asked",
             Self::Descendant => "it was asked by a process this runtime started (an agent, or a terminal it runs)",
             Self::RuntimeTerminal => "it was asked from a terminal this runtime runs",
+            Self::NoTerminal => "it was asked by a process with no terminal, on a server with no window",
         }
     }
 }
@@ -102,8 +109,21 @@ pub fn judge(peer: libc::pid_t, runtime: libc::pid_t, ptys: &HashSet<Device>) ->
     None
 }
 
+/// For a runtime with no window (`headless`), a caller with no controlling
+/// terminal is refused: the window is the only person without one.
+pub fn terminal_rule(headless: bool, has_terminal: bool) -> Option<Refusal> {
+    (headless && !has_terminal).then_some(Refusal::NoTerminal)
+}
+
+/// Whether this runtime has no window: one the desktop started says so in
+/// `TERMINALX_LOCAL_DESKTOP`.
+fn headless() -> bool {
+    std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() != Ok("1")
+}
+
 /// The caller's side: a private socket in the runtime's `run` directory that
-/// answers every connection with this request's nonce, until dropped.
+/// answers `ok` to the first connection that sends this request's nonce, and
+/// nothing to any other, until dropped.
 pub struct Witness {
     path: PathBuf,
     nonce: zeroize::Zeroizing<String>,
@@ -124,16 +144,20 @@ impl Witness {
         listener.set_nonblocking(true)?;
         let nonce = zeroize::Zeroizing::new(crate::relay_e2ee::random_token());
         let stop = Arc::new(AtomicBool::new(false));
-        let answer = format!("{}\n", nonce.as_str());
+        let expected = Arc::new(zeroize::Zeroizing::new(nonce.as_str().to_owned()));
         let stopping = stop.clone();
         let thread = std::thread::Builder::new().name("consent-witness".into()).spawn(move || {
-            let answer = zeroize::Zeroizing::new(answer);
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_write_timeout(Some(ANSWER_WITHIN));
-                        let _ = stream.write_all(answer.as_bytes());
+                    Ok((stream, _)) => {
+                        // Each on its own thread: a connection that sends
+                        // nothing must not keep the runtime's waiting.
+                        let (expected, answered) = (expected.clone(), stopping.clone());
+                        let _ = std::thread::Builder::new().name("consent-challenge".into()).spawn(move || {
+                            if challenge(stream, &expected) {
+                                answered.store(true, Ordering::Relaxed);
+                            }
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(10)),
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -142,6 +166,11 @@ impl Witness {
             }
         })?;
         Ok(Self { path, nonce, stop, thread: Some(thread) })
+    }
+
+    /// Whether the runtime has asked, and been answered.
+    pub fn answered(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// The request's `consent` parameter.
@@ -158,6 +187,24 @@ impl Drop for Witness {
         }
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Answer one challenge on `stream`: `ok` if it sends `expected`, nothing
+/// otherwise. Whether it did.
+fn challenge(mut stream: UnixStream, expected: &str) -> bool {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(ANSWER_WITHIN));
+    let _ = stream.set_write_timeout(Some(ANSWER_WITHIN));
+    let Ok(reader) = stream.try_clone() else { return false };
+    let mut line = zeroize::Zeroizing::new(String::new());
+    if BufReader::new(reader).take(MAX_NONCE).read_line(&mut line).is_err() {
+        return false;
+    }
+    let sent = line.trim_end_matches('\n');
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(sent.as_bytes(), expected.as_bytes())) {
+        return false;
+    }
+    stream.write_all(b"ok\n").is_ok()
 }
 
 /// `params` with a witness's `consent` parameter added, for a command that
@@ -193,7 +240,8 @@ pub fn verify(run: &Path, params: &mut Value) -> Result<(), ControlError> {
     let peer = witness_pid(run, &socket, nonce).map_err(|error| refused(format!("Could not tell who sent this request ({error:#}), so it is refused.")))?;
     // SAFETY: getpid has no preconditions.
     let runtime = unsafe { libc::getpid() };
-    if let Some(refusal) = judge(peer, runtime, &runtime_terminals(runtime)) {
+    let refusal = judge(peer, runtime, &runtime_terminals(runtime)).or_else(|| terminal_rule(headless(), controlling_terminal(peer).is_some()));
+    if let Some(refusal) = refusal {
         log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }
@@ -201,17 +249,18 @@ pub fn verify(run: &Path, params: &mut Value) -> Result<(), ControlError> {
 }
 
 /// The pid of the process listening on `socket`, a private socket in `run`
-/// that answers with `nonce`.
+/// that confirms `nonce` is its request's.
 fn witness_pid(run: &Path, socket: &Path, nonce: &str) -> Result<libc::pid_t> {
     private_socket(run, socket)?;
-    let stream = UnixStream::connect(socket).context("the witness does not answer")?;
+    let mut stream = UnixStream::connect(socket).context("the witness does not answer")?;
     let pid = peer_pid(&stream)?;
     stream.set_read_timeout(Some(ANSWER_WITHIN))?;
+    stream.set_write_timeout(Some(ANSWER_WITHIN))?;
+    stream.write_all(format!("{nonce}\n").as_bytes()).context("the witness does not answer")?;
     let mut line = String::new();
-    BufReader::new(stream).take(MAX_NONCE).read_line(&mut line).context("the witness does not answer")?;
-    let answered = line.trim_end_matches('\n');
-    if !bool::from(subtle::ConstantTimeEq::ct_eq(answered.as_bytes(), nonce.as_bytes())) {
-        bail!("the witness answers for another request");
+    BufReader::new(stream).take(16).read_line(&mut line).context("the witness does not answer")?;
+    if line != "ok\n" {
+        bail!("the witness is not this request's");
     }
     Ok(pid)
 }
@@ -498,24 +547,42 @@ mod tests {
         std::fs::create_dir(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        // This process's own witness: the pid is this process's, which the
-        // "runtime" (this process too) refuses as itself.
+        // A stranger who connects to a witness learns nothing: it is told
+        // nothing until it sends the nonce, and nothing after a wrong one.
         let mut params = json!({ "epoch": "e", "lease": "l" });
         let witness = witness_for(machine_wire::APPROVE, &run, &mut params).unwrap().expect("approve is guarded");
         let socket = PathBuf::from(params[PARAM]["socket"].as_str().unwrap());
+        let nonce = params[PARAM]["nonce"].as_str().unwrap().to_string();
         assert!(socket.file_name().unwrap().len() <= "hooks-4194304.sock".len(), "fits where the runtime's sockets fit");
-        assert_eq!(witness_pid(&run, &socket, params[PARAM]["nonce"].as_str().unwrap()).unwrap(), me());
-        let error = verify(&run, &mut params.clone()).unwrap_err();
+        let mut stranger = UnixStream::connect(&socket).unwrap();
+        stranger.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut heard = Vec::new();
+        assert!(stranger.read_to_end(&mut heard).is_err() || heard.is_empty(), "a witness says nothing first");
+        stranger.write_all(b"guess\n").unwrap();
+        stranger.set_read_timeout(Some(ANSWER_WITHIN * 2)).unwrap();
+        let mut heard = Vec::new();
+        let _ = stranger.read_to_end(&mut heard);
+        assert!(heard.is_empty(), "nothing after a wrong nonce: {heard:?}");
+        assert!(!String::from_utf8_lossy(&heard).contains(&nonce));
+        // A request that names this witness without its nonce is refused,
+        // and does not use the witness up.
+        assert!(witness_pid(&run, &socket, "another-nonce").is_err());
+        assert!(!witness.answered());
+        // The runtime, with the nonce: the pid is this process's.
+        assert_eq!(witness_pid(&run, &socket, &nonce).unwrap(), me());
+        wait_for(|| witness.answered().then_some(())).expect("the witness knows it was answered");
+        drop(witness);
+        assert!(!socket.exists(), "a witness removes its socket");
+
+        // Through `verify`: this process is the "runtime" too, refused as itself.
+        let mut params = json!({ "epoch": "e", "lease": "l" });
+        let witness = witness_for(machine_wire::APPROVE, &run, &mut params).unwrap().unwrap();
+        let error = verify(&run, &mut params).unwrap_err();
         assert_eq!(error.code, "person_required", "{error:?}");
         assert!(error.message.contains("the runtime itself"), "{}", error.message);
-        // The parameter is taken out whatever the outcome, so the machine host
-        // never sees a field it does not know.
-        let mut taken = params.clone();
-        let _ = verify(&run, &mut taken);
-        assert!(taken.get(PARAM).is_none());
+        assert!(params.get(PARAM).is_none(), "the machine host never sees a field it does not know");
+        drop(witness);
 
-        // Another request cannot borrow the witness: it does not know the nonce.
-        assert!(witness_pid(&run, &socket, "another-nonce").is_err());
         // Nor name a socket outside the runtime's directory.
         let outside = dir.path().join("cw-outside.sock");
         let _listener = UnixListener::bind(&outside).unwrap();
@@ -524,10 +591,15 @@ mod tests {
         // Nor leave it out.
         let error = verify(&run, &mut json!({ "epoch": "e", "lease": "l", "requestId": "r" })).unwrap_err();
         assert_eq!(error.code, "person_required");
-        drop(witness);
-        assert!(!socket.exists(), "a witness removes its socket");
         assert!(witness_for(machine_wire::DECLINE, &run, &mut json!({})).unwrap().is_none(), "anyone may decline");
         assert!(witness_for(machine_wire::REVOKE, &run, &mut json!({})).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_headless_runtime_refuses_a_caller_with_no_terminal() {
+        assert_eq!(terminal_rule(true, false), Some(Refusal::NoTerminal), "a detached agent on a server");
+        assert_eq!(terminal_rule(true, true), None, "pair in a person's terminal");
+        assert_eq!(terminal_rule(false, false), None, "the window, beside a runtime it started");
     }
 
     #[test]
