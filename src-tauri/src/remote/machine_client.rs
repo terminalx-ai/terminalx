@@ -63,8 +63,6 @@ pub const OFFLINE_AFTER: Duration = Duration::from_secs(30);
 const OWN_REQUEST_PREFIX: &str = "machine-supervisor-";
 /// The close code of a refused credential.
 const CREDENTIAL_REFUSED: u16 = 4401;
-/// `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the `machine.updateChanged` notification.
-pub const MACHINE_3: &str = "machine/3";
 /// A link lost while the machine hands over to a new version is `updating`, not `reconnecting`, for at most this long.
 pub const UPDATING_FOR: Duration = Duration::from_secs(180);
 /// This desktop's TerminalX version, compared with a machine's to say which side updates.
@@ -651,7 +649,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.

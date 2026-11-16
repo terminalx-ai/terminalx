@@ -244,7 +244,7 @@ export function updateTarget(status: MachineUpdateStatus | null, ours: string | 
 
 /** `machines_app_update_report`: forwarded to this Mac's runtime as `runtime.machineUpdate.report`. */
 export function reportAppUpdate(report: MachineAppUpdateReport): Promise<void> {
-  return invoke<unknown>("machines_app_update_report", { phase: report.phase, step: report.step ?? null, message: report.message ?? null }).then(
+  return invoke<unknown>("machines_app_update_report", { phase: report.phase, step: report.step ?? null, message: report.message ?? null, available: report.available ?? null }).then(
     () => undefined,
     (error: unknown) => console.warn(`TerminalX machine update report: ${errorMessage(error)}`),
   );
@@ -273,10 +273,10 @@ export async function answerAppUpdateRequest(): Promise<void> {
     const found = await checkForUpdate();
     if (found.kind === "none") return void (await reportAppUpdate({ phase: "upToDate" }));
     if (found.kind === "error") return void (await reportAppUpdate({ phase: "failed", message: found.message }));
-    if (found.kind === "installing") return void (await reportAppUpdate({ phase: "installing", step: found.version }));
-    if (found.kind === "choosing") return void (await reportAppUpdate({ phase: "installing", step: found.update.version, message: "Waiting for someone at this Mac: updating now would stop work that is running." }));
+    if (found.kind === "installing") return void (await reportAppUpdate({ phase: "installing", step: found.version, available: found.version }));
+    if (found.kind === "choosing") return void (await reportAppUpdate({ phase: "installing", step: found.update.version, available: found.update.version, message: "Waiting for someone at this Mac: updating now would stop work that is running." }));
     if (found.kind !== "available") return void (await reportAppUpdate({ phase: "failed", message: "This Mac could not check for an update." }));
-    await reportAppUpdate({ phase: "downloading", step: found.update.version });
+    await reportAppUpdate({ phase: "downloading", step: found.update.version, available: found.update.version });
     await installUpdate();
     const after = getUpdateState();
     if (after.kind === "error") await reportAppUpdate({ phase: "failed", message: after.message });

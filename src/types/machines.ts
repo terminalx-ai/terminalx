@@ -248,6 +248,8 @@ export interface MachineAppUpdateReport {
   phase: "checking" | "downloading" | "installing" | "restarting" | "upToDate" | "failed";
   step?: string | null;
   message?: string | null;
+  /** The version this Mac's updater found: the machine's `available` for an app machine. */
+  available?: string | null;
 }
 
 /** The Tauri event the desktop re-emits when another computer asks this Mac's app to update. */

@@ -128,9 +128,9 @@ describe("another computer asks this Mac to update its app", () => {
     expect(mocks.checkForUpdate).toHaveBeenCalledTimes(1);
     expect(mocks.installUpdate).toHaveBeenCalledTimes(1);
     expect(reports()).toEqual([
-      { phase: "checking", step: null, message: null },
-      { phase: "downloading", step: "0.2.34", message: null },
-      { phase: "restarting", step: "0.2.34", message: null },
+      { phase: "checking", step: null, message: null, available: null },
+      { phase: "downloading", step: "0.2.34", message: null, available: "0.2.34" },
+      { phase: "restarting", step: "0.2.34", message: null, available: null },
     ]);
   });
 
@@ -141,10 +141,10 @@ describe("another computer asks this Mac to update its app", () => {
     await update.answerAppUpdateRequest();
     expect(mocks.installUpdate).not.toHaveBeenCalled();
     expect(reports()).toEqual([
-      { phase: "checking", step: null, message: null },
-      { phase: "upToDate", step: null, message: null },
-      { phase: "checking", step: null, message: null },
-      { phase: "failed", step: null, message: "offline" },
+      { phase: "checking", step: null, message: null, available: null },
+      { phase: "upToDate", step: null, message: null, available: null },
+      { phase: "checking", step: null, message: null, available: null },
+      { phase: "failed", step: null, message: "offline", available: null },
     ]);
   });
 });

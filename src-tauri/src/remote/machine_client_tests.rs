@@ -778,7 +778,7 @@ fn update_required_carries_the_runtime_version_and_what_it_offers() {
     assert_eq!(update_required_failure(&refused), DialFailure::NeedsUpdate { version: Some("0.2.40".into()), offered: vec!["machine/4".into(), "session/9".into()] });
     // An older runtime sends no data.
     assert_eq!(update_required_failure(&json!({ "code": "update_required" })), DialFailure::NeedsUpdate { version: None, offered: vec![] });
-    assert!(wanted_capabilities().contains(&MACHINE_3), "this desktop asks for machine/3");
+    assert!(wanted_capabilities().contains(&crate::remote::machine::MACHINE_3), "this desktop asks for machine/3");
 }
 
 #[test]
