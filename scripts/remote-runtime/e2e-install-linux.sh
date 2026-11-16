@@ -64,7 +64,7 @@ fi
 docker run --rm --init --cpus="${CPUS:-2}" "${mounts[@]}" -e CARGO_TARGET_DIR=/target -w /src/src-tauri/serve "$build_image" bash -c '
 set -euo pipefail
 cargo build --locked --bin terminalx-serve
-client=$(cargo test --locked --no-run --test install_e2e 2>&1 | tee /dev/stderr | sed -n "s#.*(\(/target/debug/deps/install_e2e-[0-9a-f]*\)).*#\1#p" | tail -n 1)
+client=$(cargo test --locked --no-run --test install_e2e 2>&1 | tee /dev/stderr | sed -n "s#.*Executable tests/install_e2e.rs (\(.*\))\$#\1#p" | tail -n 1)
 [ -n "$client" ] || { echo "no install_e2e test binary was built" >&2; exit 1; }
 install -m 0755 /target/debug/terminalx-serve /out/terminalx-serve
 install -m 0755 "$client" /out/install_e2e

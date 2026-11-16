@@ -186,7 +186,9 @@ main() {
 
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/terminalx-install.XXXXXX") || fail "cannot create a temporary directory"
   SIGNERS="$TMP_DIR/allowed_signers"
+  SIGNER_LABEL="TerminalX release key"
   if [ -n "${TERMINALX_INSTALL_ALLOWED_SIGNERS:-}" ]; then
+    SIGNER_LABEL="test signing key"
     warn "trusting the test signing key in $TERMINALX_INSTALL_ALLOWED_SIGNERS instead of the TerminalX release key"
     cp "$TERMINALX_INSTALL_ALLOWED_SIGNERS" "$SIGNERS" || fail "cannot read $TERMINALX_INSTALL_ALLOWED_SIGNERS"
   else
@@ -215,7 +217,7 @@ main() {
     cat "$TMP_DIR/verify.log" >&2
     fail "the signature of $TAG does not verify against the TerminalX release key; the download was refused and nothing was installed"
   fi
-  say "Signature of SHA256SUMS: good (TerminalX release key)."
+  say "Signature of SHA256SUMS: good ($SIGNER_LABEL)."
 
   fetch "$url/terminalx-serve.json" "$TMP_DIR/terminalx-serve.json" || fail "cannot download terminalx-serve.json of $TAG"
   verify_listed terminalx-serve.json "$TMP_DIR/terminalx-serve.json" "$TMP_DIR/SHA256SUMS"
