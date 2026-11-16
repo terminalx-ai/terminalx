@@ -1,27 +1,27 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AccountStatus } from "@/lib/api";
+import type { AccountStatus, CloudWorkspaceListItem, PresenceReadResponse } from "@/lib/api";
 import type { CloudCatalogState } from "@/lib/cloudCatalog";
 import type { OrganizationMember, OrganizationRoster } from "@/lib/organizationMembers";
 const f = vi.hoisted(() => ({
   status: {} as AccountStatus,
-  presence: { state: "unavailable", activeMembers: [], workspaces: [] } as { state: string; activeMembers: []; workspaces: [] },
+  presence: { state: "unavailable", activeMembers: [], workspaces: [] } as { state: string; activeMembers: PresenceReadResponse["activeMembers"]; workspaces: PresenceReadResponse["workspaces"] },
   catalog: {} as CloudCatalogState,
   load: vi.fn<() => Promise<OrganizationMember[]>>(),
   roster: { roster: null, loading: false, error: null } as { roster: OrganizationRoster | null; loading: boolean; error: unknown },
 }));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: f.status }) }));
 vi.mock("@/lib/cloudCatalog", () => ({ useCloudCatalog: () => f.catalog }));
-vi.mock("@/lib/cloudPresence", () => ({ useCloudPresence: () => f.presence, useCloudPresenceVersion: () => 0, cloudPresence: { snapshot: () => ({ state: "unavailable" }) } }));
+vi.mock("@/lib/cloudPresence", () => ({ useCloudPresence: () => f.presence, useCloudPresenceVersion: () => 0, cloudPresence: { snapshot: () => f.presence } }));
 vi.mock("@/lib/cloudPeople", () => ({ loadRosterIn: f.load }));
 vi.mock("@/lib/organizationRoster", () => ({ useOrganizationRoster: () => f.roster }));
 vi.mock("@/lib/dataPrivacy", () => ({ useDataPrivacy: () => ({ enabled: false }) }));
 vi.mock("@/components/people/MemberProfile", () => ({ MemberProfile: () => null }));
-import { ownerStorageKey, useTeamOverview, PresenceFaces } from "./TeamOverview";
+import { ownerStorageKey, useTeamOverview, PresenceFaces, type TeamRow } from "./TeamOverview";
 import { OrganizationPresenceCount } from "@/components/layout/WorkspaceFollowingSection";
 vi.mock("@/lib/sessions", () => ({ selectCloudWorkspace: vi.fn() }));
-function Overview({ org = "org" }: { org?: string }) {
-  const team = useTeamOverview([{ id: "local", ownerId: "me" }], org, new Map([["me", "You"]]));
+function Overview({ org = "org", rows = [{ id: "local", ownerId: "me" }] }: { org?: string; rows?: TeamRow[] }) {
+  const team = useTeamOverview(rows, org, new Map([["me", "You"]]));
   return <>{team.controls}{team.views}<output aria-label="Visible rows">{team.rows.map((row) => row.id).join(",")}</output></>;
 }
 beforeEach(() => {
@@ -89,4 +89,59 @@ it("keeps organization presence labels truthful in compact quota and action rows
   f.presence = { state: "live", activeMembers: [], workspaces: [] };
   view.rerender(<OrganizationPresenceCount orgId="org" />);
   expect(screen.getByLabelText("cloud · 0 online").textContent).toBe("cloud · 0 online");
+});
+
+const cloudRows: TeamRow[] = [{ id: "cloud-one", orgId: "org", workspaceId: "one" }];
+function catalogWorkspace(createdBy?: string): CloudWorkspaceListItem {
+  return { workspace: { id: "one", orgId: "org", name: "One", provider: "machine0", state: "ready", accessMode: "organization", createdAt: 1, updatedAt: 1,
+    createdBy }, latestOperation: null } as CloudWorkspaceListItem;
+}
+it("keeps Mine unavailable until current authorized ownership is known, then distinguishes own from other", () => {
+  f.catalog.orgs.org.workspaces = [catalogWorkspace()];
+  const view = render(<Overview rows={cloudRows} />);
+  const mine = () => screen.getByRole("button", { name: /^Mine/ }) as HTMLButtonElement;
+  expect(mine().disabled).toBe(true);
+  expect(mine().textContent).toBe("Mine—");
+  f.catalog.orgs.org.workspaces = [catalogWorkspace("me")];
+  view.rerender(<Overview rows={cloudRows} />);
+  expect(mine().disabled).toBe(false);
+  expect(mine().textContent).toBe("Mine1");
+  f.catalog.orgs.org.workspaces = [catalogWorkspace("other")];
+  view.rerender(<Overview rows={cloudRows} />);
+  expect(mine().disabled).toBe(false);
+  expect(mine().textContent).toBe("Mine0");
+});
+it("does not count cached, errored or omitted ownership as known Mine data", () => {
+  f.catalog.orgs.org.workspaces = [catalogWorkspace("me")];
+  f.catalog.orgs.org.source = "cache";
+  const view = render(<Overview rows={cloudRows} />);
+  const unknown = () => {
+    const button = screen.getByRole("button", { name: /^Mine/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Mine—");
+  };
+  unknown();
+  f.catalog.orgs.org.source = "live"; f.catalog.orgs.org.error = "refresh failed";
+  view.rerender(<Overview rows={cloudRows} />); unknown();
+  f.catalog.orgs.org.error = null; f.catalog.orgs.org.workspaces = [];
+  view.rerender(<Overview rows={cloudRows} />); unknown();
+});
+it("requires workspace presence coverage before Active now can report authoritative zero or active rows", () => {
+  f.catalog.orgs.org.workspaces = [catalogWorkspace("me")];
+  const bob = { userId: "bob", displayName: "Bob", photoUrl: null };
+  f.presence = { state: "live", activeMembers: [bob], workspaces: [] };
+  const view = render(<Overview rows={cloudRows} />);
+  const active = () => screen.getByRole("button", { name: /^Active now/ }) as HTMLButtonElement;
+  expect(active().disabled).toBe(true);
+  expect(active().textContent).toBe("Active now—");
+  f.presence.workspaces = [{ workspaceId: "one", owner: { userId: "me", displayName: "Me", photoUrl: null }, activeMembers: [] }];
+  view.rerender(<Overview rows={cloudRows} />);
+  expect(active().disabled).toBe(false);
+  expect(active().textContent).toBe("Active now0");
+  fireEvent.click(active());
+  expect(screen.getByLabelText("Visible rows").textContent).toBe("");
+  f.presence.workspaces[0].activeMembers = [bob];
+  view.rerender(<Overview rows={cloudRows} />);
+  expect(active().textContent).toBe("Active now1");
+  expect(screen.getByLabelText("Visible rows").textContent).toBe("cloud-one");
 });

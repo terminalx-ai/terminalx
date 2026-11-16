@@ -88,10 +88,16 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
   };
   const known: Record<TeamView, boolean> = {
     everyone: true,
-    mine: !cloudRows.length || !!catalog.viewerUserId,
+    mine: !cloudRows.length || (!!catalog.viewerUserId && cloudRows.every((row) => {
+      const owner = fact(row)?.workspace.createdBy;
+      return typeof owner === "string" && owner.length > 0;
+    })),
     shared: !cloudRows.length || (!!catalog.viewerUserId && cloudRows.every((row) => { const item = fact(row); return !!item && (item.workspace.createdBy === catalog.viewerUserId || !!item.workspace.you); })),
     following: cloudRows.every((row) => typeof fact(row)?.following === "boolean"),
-    active: cloudRows.every((row) => cloudPresence.snapshot(row.orgId!).state === "live"),
+    active: cloudRows.every((row) => {
+      const presence = cloudPresence.snapshot(row.orgId!);
+      return !!fact(row) && presence.state === "live" && presence.workspaces.some((workspace) => workspace.workspaceId === row.workspaceId);
+    }),
   };
   const controls = <>
     <DropdownMenu onOpenChange={(open) => { if (!open) setPeopleQuery(""); }}><DropdownMenuTrigger asChild><Button variant={selected.length ? "secondary" : "ghost"} size="sm">{selected.length ? `By ${selected.length} ${selected.length === 1 ? "person" : "people"}` : "By Anyone"}</Button></DropdownMenuTrigger>
