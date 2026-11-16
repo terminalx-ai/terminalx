@@ -6,9 +6,9 @@ import type { SettingRegistration } from "@/components/settings/settingsRegistry
 // Integrations, Devices, Agents, Environment), each page the design does not draw after the one it sits with
 // in Settings. The names are the ones Settings gives its pages, so a row here and the page it opens read the same.
 export const SETTINGS_SECTIONS = [
-  { id: "general", title: "General", description: "Data privacy, website links, sounds, chat and worktree defaults", terms: ["browser link actions command line cli pixel raccoon fold tool calls files changed prompt map autocorrect quick chat floating window cloud control user settings file json config preferences reload layered configuration trust managed locked branch prefix"] },
+  { id: "general", title: "General", description: "Data privacy, website links, text size, tab bar, status bar, sounds, chat and worktree defaults", terms: ["text size font transcript layout tab bar branches usage resources refresh percent custom order drag reorder sidebar sessions projects status bar browser link actions command line cli pixel raccoon fold tool calls files changed prompt map autocorrect quick chat floating window cloud control user settings file json config preferences reload layered configuration trust managed locked branch prefix"] },
   { id: "account", title: "Account", description: "Sign in, profile and account diagnostics", terms: ["login email subscription"] },
-  { id: "appearance", title: "Appearance", description: "Themes, font size, transcript layout and status bar", terms: ["text size light dark mode tabs branches usage resources refresh percent custom order drag reorder sidebar sessions projects"] },
+  { id: "appearance", title: "Appearance", description: "Theme, light or dark mode and colored sidebar diffs", terms: ["light dark mode theme colors colours sidebar diffs line counts"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },

@@ -2416,6 +2416,12 @@ pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readin
     tauri::async_runtime::spawn_blocking(move || harness::readiness::check(&harness)).await.map_err(err)
 }
 
+/// The latest published release of an agent's CLI, or `None` when it cannot be told (PRO-377).
+#[tauri::command]
+pub async fn agent_latest_version(harness: String) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || harness::readiness::latest_version(&harness)).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ skills
 
 #[tauri::command]

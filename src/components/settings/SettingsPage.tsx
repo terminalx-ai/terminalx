@@ -234,7 +234,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             }}
             className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint"
           />
-          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-[10px] text-faint">⌘F</kbd>}
+          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-xs text-faint">⌘F</kbd>}
           {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" className="-mr-1.5 size-6" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
           </div>
         <nav aria-label="Settings sections" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-2 scrollbar-thin">

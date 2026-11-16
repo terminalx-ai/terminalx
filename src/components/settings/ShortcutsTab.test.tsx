@@ -145,7 +145,7 @@ describe("Settings → Shortcuts", () => {
     setPrefs({ shortcuts: { "app.toggleSidebar": ["mod+shift+v"], "app.issues": [] } });
     render(<ShortcutsTab />);
     // Reset is offered only on a row that was changed.
-    expect(within(row("app.newSession")).getByRole("button", { name: "Reset New session", hidden: true }).hasAttribute("disabled")).toBe(true);
+    expect(within(row("app.newSession")).queryByRole("button", { name: "Reset New session" })).toBeNull();
     fireEvent.click(within(row("app.toggleSidebar")).getByRole("button", { name: "Reset Toggle sidebar" }));
     expect(getPrefs().shortcuts).toEqual({ "app.issues": [] });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+b"]);

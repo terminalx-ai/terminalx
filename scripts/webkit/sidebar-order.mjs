@@ -158,7 +158,7 @@ try {
   await settings.getByRole("button", { name: "Appearance", exact: true }).click();
   const custom = settings.getByRole("switch", { name: "Custom order" });
   assert.equal(await custom.getAttribute("aria-checked"), "true");
-  assert.equal(await settings.locator('[data-setting-id="appearance.customOrder"]').count(), 1);
+  assert.equal(await settings.locator('[data-setting-id="general.customOrder"]').count(), 1);
   await custom.click();
   await folded.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.custom === false);
   await custom.click();

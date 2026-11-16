@@ -805,6 +805,7 @@ pub fn run() {
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_latest_version,
             commands::agent_setup_start,
             commands::agent_setup_running,
             commands::list_skills,
