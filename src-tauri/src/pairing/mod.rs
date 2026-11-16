@@ -14,7 +14,9 @@ mod machine_grants;
 mod machine_route;
 use crate::phone::rpc as mobile;
 use crate::local_runtime::mobile::model;
-use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+use crate::machine_name::{computer_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+#[cfg(test)]
+use crate::machine_name::presentable_name;
 #[cfg(test)]
 use crate::machine_name::{COMPUTER_NAME_MAX_CHARS, UNNAMED_HOST};
 mod registry;
@@ -206,7 +208,7 @@ impl PairingManager {
             account,
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
-            registry: DeviceRegistry::default(),
+            registry: DeviceRegistry,
             direct_port: direct::PORT,
             sink: OnceLock::new(),
             sessions: OnceLock::new(),
@@ -1792,15 +1794,8 @@ impl PairingManager {
     /// `device.describe`: what the phone calls itself, cleaned as a name
     /// shown on another device is.
     fn describe_device(&self, device: &DeviceEntry, params: Option<&serde_json::Value>) -> Result<serde_json::Value> {
-        let params: DeviceDescribeParams =
-            serde_json::from_value(params.cloned().unwrap_or_else(|| serde_json::json!({})))
-                .context("invalid device.describe params")?;
-        let label = presentable_name(&params.label)
-            .ok_or_else(|| anyhow!("device.describe label must contain 1 to 64 visible characters"))?;
-        if !matches!(params.platform.as_str(), "ios" | "android") {
-            bail!("device.describe platform must be \"ios\" or \"android\"");
-        }
-        self.registry.describe(&device.id, &label, &params.platform)?;
+        let (label, platform) = crate::phone::device_description(params)?;
+        self.registry.describe(&device.id, &label, &platform)?;
         self.emit();
         Ok(serde_json::json!({ "ok": true }))
     }
@@ -1816,13 +1811,6 @@ impl PairingManager {
 
 }
 
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceDescribeParams {
-    label: String,
-    platform: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

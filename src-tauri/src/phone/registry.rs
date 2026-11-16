@@ -8,7 +8,7 @@
 //! one cross-process lock (`devices.lock`), so neither process undoes the
 //! other's change.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -26,20 +26,23 @@ const LOCK_WAIT: Duration = Duration::from_secs(10);
 #[derive(Default)]
 pub struct DeviceRegistry;
 
-fn path() -> Result<PathBuf> {
-    Ok(crate::store::root()?.join(FILE))
+fn root() -> Result<PathBuf> {
+    crate::store::root()
 }
 
-fn read() -> Result<DeviceFile> {
-    Ok(crate::store::read_json(&path()?)?.unwrap_or_default())
+fn read_in(root: &Path) -> Result<DeviceFile> {
+    Ok(crate::store::read_json(&root.join(FILE))?.unwrap_or_default())
 }
 
 /// Read, change and write the file under the cross-process lock. `change`
 /// says whether it changed anything; an unchanged file is not written.
 fn rewrite<T>(change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Result<T> {
-    let root = crate::store::root()?;
+    rewrite_in(&root()?, change)
+}
+
+fn rewrite_in<T>(root: &Path, change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Result<T> {
     crate::store::transaction::run(&root.join(LOCK), LOCK_WAIT, || {
-        let mut file = read()?;
+        let mut file = read_in(root)?;
         let (result, changed) = change(&mut file)?;
         if changed {
             crate::store::write_json(&root.join(FILE), &file)?;
@@ -50,7 +53,7 @@ fn rewrite<T>(change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Resu
 
 impl DeviceRegistry {
     pub fn list(&self) -> Result<Vec<DeviceEntry>> {
-        Ok(read()?.devices.into_iter().filter(|device| device.revoked_at.is_none()).collect())
+        list_in(&root()?)
     }
 
     pub fn add(&self, mut entry: DeviceEntry) -> Result<()> {
@@ -151,13 +154,7 @@ impl DeviceRegistry {
     }
 
     pub fn revoke(&self, device_id: &str) -> Result<Option<DeviceEntry>> {
-        rewrite(|file| {
-            let Some(entry) = file.devices.iter_mut().find(|device| device.id == device_id && device.revoked_at.is_none()) else {
-                return Ok((None, false));
-            };
-            entry.revoked_at = Some(Utc::now().to_rfc3339());
-            Ok((Some(entry.clone()), true))
-        })
+        revoke_in(&root()?, device_id)
     }
 
     pub fn revoke_automatic_for_user(&self, user_id: &str) -> Result<Vec<DeviceEntry>> {
@@ -189,6 +186,22 @@ impl DeviceRegistry {
             None => Ok(None),
         }
     }
+}
+
+/// The paired phones in the store at `root` (`terminalx-serve devices --data-dir`).
+pub fn list_in(root: &Path) -> Result<Vec<DeviceEntry>> {
+    Ok(read_in(root)?.devices.into_iter().filter(|device| device.revoked_at.is_none()).collect())
+}
+
+/// Revoke a paired phone in the store at `root`: the revoked record, if it was paired.
+pub fn revoke_in(root: &Path, device_id: &str) -> Result<Option<DeviceEntry>> {
+    rewrite_in(root, |file| {
+        let Some(entry) = file.devices.iter_mut().find(|device| device.id == device_id && device.revoked_at.is_none()) else {
+            return Ok((None, false));
+        };
+        entry.revoked_at = Some(Utc::now().to_rfc3339());
+        Ok((Some(entry.clone()), true))
+    })
 }
 
 pub fn load_account_mirror() -> Result<Option<AccountMirror>> {
@@ -230,7 +243,7 @@ mod tests {
     #[test]
     fn binding_generation_fences_only_account_pairings() {
         let _home = crate::store::temp_home();
-        let registry = DeviceRegistry::default();
+        let registry = DeviceRegistry;
         registry
             .add(device("automatic", "auto", DeviceProvenance::Automatic))
             .unwrap();
@@ -246,7 +259,7 @@ mod tests {
     #[test]
     fn sign_out_removes_only_automatic_devices() {
         let _home = crate::store::temp_home();
-        let registry = DeviceRegistry::default();
+        let registry = DeviceRegistry;
         registry
             .add(device("a", "a", DeviceProvenance::Automatic))
             .unwrap();
@@ -262,7 +275,7 @@ mod tests {
     #[test]
     fn startup_removes_only_credentials_that_never_authenticated() {
         let _home = crate::store::temp_home();
-        let registry = DeviceRegistry::default();
+        let registry = DeviceRegistry;
         let mut connected = device("connected", "one", DeviceProvenance::Explicit);
         connected.last_seen_at = Some(Utc::now().to_rfc3339());
         registry.add(connected).unwrap();
@@ -277,7 +290,7 @@ mod tests {
     #[test]
     fn failed_pairing_discards_only_an_unclaimed_device() {
         let _home = crate::store::temp_home();
-        let registry = DeviceRegistry::default();
+        let registry = DeviceRegistry;
         let mut connected = device("connected", "one", DeviceProvenance::Explicit);
         connected.last_seen_at = Some(Utc::now().to_rfc3339());
         registry.add(connected).unwrap();

@@ -12,6 +12,8 @@ pub(crate) mod activity;
 pub(crate) mod direct;
 pub(crate) mod key;
 pub(crate) mod pairing;
+#[cfg(unix)]
+pub(crate) mod phones;
 pub mod registry;
 #[cfg(all(test, feature = "desktop"))]
 mod pairing_tests;
@@ -174,6 +176,10 @@ pub struct MachineHost {
     /// The machine's relay registration, when it serves with `--relay-link`
     /// (PRO-345): paired computers get relay access through it.
     relay: Mutex<Option<std::sync::Weak<crate::remote::host::RelayHost>>>,
+    /// Phones it serves itself while no window takes them (PRO-359). Only a
+    /// runtime with an owner lifetime serves them.
+    #[cfg(unix)]
+    phones: OnceLock<Arc<phones::Phones>>,
 }
 
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();
@@ -207,6 +213,8 @@ impl MachineHost {
         link_secret: Option<[u8; 32]>,
     ) -> Arc<Self> {
         let sink = parts.sink.clone();
+        #[cfg(unix)]
+        let sessions = parts.sessions.clone();
         let host = Arc::new(Self {
             data_dir: data_dir.to_path_buf(),
             keys: key::KeyStore::for_runtime(data_dir),
@@ -221,6 +229,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            #[cfg(unix)]
+            phones: OnceLock::new(),
         });
         let weak = Arc::downgrade(&host);
         sink.listen(
@@ -246,6 +256,20 @@ impl MachineHost {
                 log::warn!("machine host: keep the relay link's host key: {error:#}");
             }
         }
+        #[cfg(unix)]
+        if let Some(lifetime) = host.lifetime.clone() {
+            let weak = Arc::downgrade(&host);
+            match phones::Phones::new(sessions, sink.clone(), lifetime, move || {
+                if let Some(host) = weak.upgrade() {
+                    host.wake.notify_one();
+                }
+            }) {
+                Ok(phones) => {
+                    let _ = host.phones.set(phones);
+                }
+                Err(error) => log::warn!("machine host: phones cannot be served here: {error:#}"),
+            }
+        }
         if INSTALLED.set(host.clone()).is_err() {
             log::warn!("machine host: a host was already installed in this process");
         }
@@ -269,6 +293,11 @@ impl MachineHost {
 
     fn relay(&self) -> Option<Arc<crate::remote::host::RelayHost>> {
         self.relay.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
+    }
+
+    /// The direct listener's port, while it listens.
+    pub(crate) fn listening_port(&self) -> Option<u16> {
+        self.state.lock().unwrap().listening.as_ref().map(|listening| listening.address.port())
     }
 
     /// The direct listener's addresses (`machine/2` `directEndpoints`).
@@ -409,7 +438,24 @@ impl MachineHost {
             pending,
             code,
             paused_until,
+            phones: self.phone_status(),
         }
+    }
+
+    #[cfg(unix)]
+    fn phone_status(&self) -> wire::PhoneStatus {
+        self.phones.get().map(|phones| phones.status()).unwrap_or_default()
+    }
+
+    #[cfg(not(unix))]
+    fn phone_status(&self) -> wire::PhoneStatus {
+        wire::PhoneStatus::default()
+    }
+
+    /// The phones served here, while no window takes them.
+    #[cfg(unix)]
+    pub(crate) fn phones(&self) -> Option<&Arc<phones::Phones>> {
+        self.phones.get()
     }
 
     /// Tell the window and stdout when the status changed.
@@ -469,6 +515,10 @@ impl MachineHost {
         let (was, enabled) = was;
         if was && !enabled {
             self.stop_serving();
+        }
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get().cloned() {
+            let _ = tokio::task::spawn_blocking(move || phones.tick(now_ms())).await;
         }
         if read {
             let host = self.clone();
@@ -571,6 +621,11 @@ impl MachineHost {
         // A connection on the port keeps the window from binding it again.
         for (_, cancel) in state.phones.drain() {
             let _ = cancel.send(());
+        }
+        drop(state);
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get().cloned() {
+            Self::off_task(move || phones.stop());
         }
         log::info!("machine host: off; no listener, every computer disconnected");
     }
@@ -944,6 +999,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            #[cfg(unix)]
+            phones: OnceLock::new(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         let listening = direct::listen(host.clone(), rpc, 0)?;
@@ -969,6 +1026,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            #[cfg(unix)]
+            phones: OnceLock::new(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         host
@@ -1130,6 +1189,33 @@ impl MachineHost {
     }
 
     /// A runtime IPC command (`machine_wire`).
+    #[cfg(unix)]
+    fn served_phones(&self) -> Result<&Arc<phones::Phones>, ControlError> {
+        self.phones.get().ok_or_else(|| ControlError::new("unsupported", "This runtime does not serve phones.", None::<String>))
+    }
+
+    /// A phone pairing code (`terminalx-serve pair --phone`), on a machine
+    /// that is listening and whose phones no window takes.
+    #[cfg(unix)]
+    fn phone_code(&self) -> Result<Value, ControlError> {
+        let phones = self.served_phones()?.clone();
+        if self.phone_route().is_some() {
+            return Err(ControlError::new(
+                "window_takes_phones",
+                "TerminalX is open on this Mac, so its window pairs phones.",
+                Some("Pair the phone in TerminalX: Settings → Devices.".into()),
+            ));
+        }
+        let (keypair, port) = {
+            let state = self.state.lock().unwrap();
+            (state.keypair.clone(), state.listening.as_ref().map(|listening| listening.address.port()))
+        };
+        let (Some(keypair), Some(port)) = (keypair, port) else {
+            return Err(ControlError::new("not_enabled", "This machine is not reachable yet: turn on \"Let other computers operate this machine\" and wait for it to listen.", None::<String>));
+        };
+        phones.create_code(&keypair, port).map(|created| serde_json::to_value(created).expect("a code serialises"))
+    }
+
     pub fn execute(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         let result = match command {
             wire::STATUS => Ok(serde_json::to_value(self.status()).map_err(ControlError::internal)?),
@@ -1158,6 +1244,13 @@ impl MachineHost {
                     return Err(ControlError::new("busy", "Another window takes this machine's phones.", None::<String>));
                 }
                 state.phone_route = Some(PhoneRoute { attachment, lease: route.lease, socket: route.socket });
+                drop(state);
+                // A window takes phones now: the ones served here reconnect
+                // and reach it, and a phone code made here ends (PRO-359).
+                #[cfg(unix)]
+                if let Some(phones) = self.phones.get().cloned() {
+                    Self::off_task(move || phones.stop());
+                }
                 Ok(json!({ "registered": true }))
             }
             wire::REVOKE => {
@@ -1204,6 +1297,32 @@ impl MachineHost {
                 self.attachment(&answer.epoch, &answer.lease)?;
                 self.decline(&answer.request_id);
                 Ok(json!({ "declined": true }))
+            }
+            #[cfg(unix)]
+            wire::PHONE_CODE => {
+                let create: wire::PhoneCode = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch and lease are required"))?;
+                self.attachment(&create.epoch, &create.lease)?;
+                self.phone_code()
+            }
+            #[cfg(unix)]
+            wire::PHONE_APPROVE => {
+                let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
+                self.attachment(&answer.epoch, &answer.lease)?;
+                self.served_phones()?.approve(&answer.request_id).map(|()| json!({ "approved": true }))
+            }
+            #[cfg(unix)]
+            wire::PHONE_DECLINE => {
+                let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
+                self.attachment(&answer.epoch, &answer.lease)?;
+                self.served_phones()?.decline(&answer.request_id);
+                Ok(json!({ "declined": true }))
+            }
+            #[cfg(unix)]
+            wire::PHONE_REVOKE => {
+                let target: wire::ForComputer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and id are required"))?;
+                self.attachment(&target.epoch, &target.lease)?;
+                let revoked = self.served_phones()?.revoke(&target.id).map_err(ControlError::internal)?;
+                Ok(json!({ "revoked": revoked }))
             }
             _ => Err(ControlError::new("unsupported", "Unknown machine host command.", None::<String>)),
         };

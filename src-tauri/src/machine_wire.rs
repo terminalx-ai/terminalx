@@ -61,6 +61,21 @@ pub const DISCONNECT: &str = "runtime.machineHost.disconnect";
 /// [`APPROVE`], only a person may (`serve_cli::consent`). `{ letBack: bool }`.
 pub const LET_BACK: &str = "runtime.machineHost.letBack";
 
+/// Phones the runtime serves itself while no window takes them (PRO-359).
+/// Make a phone pairing code ([`PhoneCode`]): answers [`CreatedPhoneCode`],
+/// or refuses with `not_enabled` (hosting is off or not listening yet) or
+/// `window_takes_phones` (a window pairs this Mac's phones in Settings →
+/// Devices). Only a person may (`serve_cli::consent`).
+pub const PHONE_CODE: &str = "runtime.machineHost.phoneCode";
+/// Let the phone waiting with `requestId` in ([`Answer`]): `{ approved: true }`,
+/// or `not_found`. Only a person may.
+pub const PHONE_APPROVE: &str = "runtime.machineHost.phoneApprove";
+/// Don't ([`Answer`]): `{ declined: true }`.
+pub const PHONE_DECLINE: &str = "runtime.machineHost.phoneDecline";
+/// Remove a paired phone ([`ForComputer`], its device id): its connections
+/// close at once. `{ revoked: bool }`.
+pub const PHONE_REVOKE: &str = "runtime.machineHost.phoneRevoke";
+
 /// A pairing code: `txm2.` and base64url, unpadded, of a [`MachineCode`].
 pub const CODE_PREFIX: &str = "txm2.";
 /// How long a code works (`OFFER_TTL_MS`), once.
@@ -184,6 +199,56 @@ pub struct Status {
     /// Pairing is paused after five wrong attempts in a minute, until then.
     #[serde(default)]
     pub paused_until: Option<i64>,
+    /// Phones this runtime serves itself (PRO-359). Absent from a runtime
+    /// before PRO-359, which served none.
+    #[serde(default)]
+    pub phones: PhoneStatus,
+}
+
+/// Phones the runtime serves while no window takes them (PRO-359).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneStatus {
+    /// Paired phones connected to this runtime now, by device id.
+    #[serde(default)]
+    pub connected: Vec<String>,
+    /// The live phone pairing code's expiry. Never the code.
+    #[serde(default)]
+    pub code: Option<CodeExpiry>,
+    /// A phone that used the code, waiting for Allow.
+    #[serde(default)]
+    pub pending: Option<PendingPhone>,
+}
+
+/// A phone waiting for Allow: the fingerprint it shows too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPhone {
+    pub request_id: String,
+    pub device_id: String,
+    pub fingerprint: String,
+    pub requested_at: i64,
+    pub expires_at: i64,
+}
+
+/// Params of [`PHONE_CODE`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PhoneCode {
+    pub epoch: String,
+    pub lease: String,
+}
+
+/// The answer to [`PHONE_CODE`]: the `terminalx://pair` link a phone scans
+/// or pastes, exactly as Settings → Devices shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedPhoneCode {
+    pub link: String,
+    pub expires_at: i64,
+    /// The four-group fingerprint a phone shows needs the phone's key, so
+    /// it is not known yet: the machine id is shown instead.
+    pub machine_id: String,
 }
 
 /// A computer waiting for Allow, as the approval dialog shows it.
@@ -534,6 +599,7 @@ mod tests {
             pending: None,
             code: Some(CodeExpiry { expires_at: 9 }),
             paused_until: None,
+            phones: Default::default(),
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["code"], serde_json::json!({ "expiresAt": 9 }));

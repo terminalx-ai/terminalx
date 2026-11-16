@@ -342,8 +342,10 @@ async fn refuse<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenit
 async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, mut stream: S, peer: SocketAddr) -> Result<()> {
     #[cfg(unix)]
     {
-        // No window takes phones: refused as unreachable, as with the window closed.
-        let route = host.phone_route().ok_or_else(|| anyhow!("no window takes phones"))?;
+        // No window takes phones: the runtime serves the phone itself (PRO-359).
+        let Some(route) = host.phone_route() else {
+            return serve_phone(host, head, stream).await;
+        };
         let mut window = tokio::net::UnixStream::connect(&route).await.context("reach the window's phone route")?;
         window.write_all(&encode_header(&Forwarded::Direct { peer: Some(peer.to_string()) })?).await?;
         window.write_all(&head).await?;
@@ -363,6 +365,23 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
         let _ = (host, head, &mut stream, peer);
         bail!("phone routes need Unix sockets")
     }
+}
+
+/// Serve a phone here, while no window takes phones (`phones`). It holds
+/// the port as a forwarded phone does, so it closes with the listener.
+#[cfg(unix)]
+async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S) -> Result<()> {
+    let phones = host.phones().cloned().ok_or_else(|| anyhow!("no window takes phones and this runtime serves none"))?;
+    let keypair = host.keypair().context("the machine host key is not loaded")?;
+    let port = host.listening_port().context("the machine host is not listening")?;
+    let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
+    let Some(tracked) = host.track_phone(cancel_tx) else { bail!("the machine host is off") };
+    let result = tokio::select! {
+        served = phones.serve(keypair, Prefixed::new(head, stream), port) => served,
+        _ = cancel.recv() => Ok(()),
+    };
+    host.untrack_phone(tracked);
+    result
 }
 
 #[cfg(test)]

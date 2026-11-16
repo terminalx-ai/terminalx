@@ -464,3 +464,39 @@ pub(crate) fn host_description(name: Option<String>, has_window: bool) -> serde_
         "platform": std::env::consts::OS,
     })
 }
+
+/// The pairing link. `name` is this computer's name, for the phone to show
+/// instead of "Paired Mac" (PRO-87). It rides beside the offer as its own
+/// query parameter, not inside it: phones parse the offer strictly, so a new
+/// field there would make every phone build before this one refuse to pair,
+/// while an extra parameter is simply not read by them. It is a label only;
+/// nothing identifies or authenticates by it.
+pub fn encode_pairing_offer(offer: &crate::local_runtime::mobile::model::PairingOffer, name: Option<&str>) -> Result<String> {
+    let payload = serde_json::to_vec(offer)?;
+    let mut link = format!("terminalx://pair?code={}", general_purpose::URL_SAFE_NO_PAD.encode(payload));
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        link.push_str("&name=");
+        link.extend(url::form_urlencoded::byte_serialize(name.as_bytes()));
+    }
+    Ok(link)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceDescribeParams {
+    label: String,
+    platform: String,
+}
+
+/// What a phone calls itself (`device.describe`, PRO-314), checked and
+/// cleaned: its label and platform.
+pub(crate) fn device_description(params: Option<&serde_json::Value>) -> Result<(String, String)> {
+    let params: DeviceDescribeParams = serde_json::from_value(params.cloned().unwrap_or_else(|| serde_json::json!({})))
+        .map_err(|error| anyhow::anyhow!("invalid device.describe params: {error}"))?;
+    let label = crate::machine_name::presentable_name(&params.label)
+        .ok_or_else(|| anyhow::anyhow!("device.describe label must contain 1 to 64 visible characters"))?;
+    if !matches!(params.platform.as_str(), "ios" | "android") {
+        bail!("device.describe platform must be \"ios\" or \"android\"");
+    }
+    Ok((label, params.platform))
+}

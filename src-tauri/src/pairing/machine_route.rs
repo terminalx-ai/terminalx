@@ -298,6 +298,7 @@ mod tests {
             pending: None,
             code: None,
             paused_until: None,
+            phones: Default::default(),
         };
         side.status = Some(status(false));
         assert!(!side.runtime_owns_direct());
