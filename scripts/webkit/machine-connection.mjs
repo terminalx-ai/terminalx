@@ -7,7 +7,8 @@
 // state means (21.09).
 //
 // Every state is shown in turn (connecting, direct on this network, direct
-// over Tailscale, relay, reconnecting, offline, needs update, access removed),
+// over Tailscale, relay, reconnecting, offline, needs update, updating (PRO-354),
+// access removed),
 // at the window's smallest size (760×520, tauri.conf.json) and a roomy one, in
 // the light and the dark theme. In each: the label and the hover text are the
 // ones the screens name, the section and the chip stay inside the sidebar and
@@ -64,6 +65,8 @@ const fixture = (machines) => `(() => {
         return { state: "reconnecting", attempt: 0, reason: "offline", retryInMs: view.retryInMs };
       case "needsUpdate":
         return { state: "updateRequired" };
+      case "updating":
+        return { state: "reconnecting", attempt: 1, reason: "updating", retryInMs: 1_000 };
       case "accessRemoved":
         return { state: "stopped" };
       default:
@@ -101,7 +104,8 @@ const STATES = [
   { id: "relay", state: { state: "relay", route: { kind: "relay", endpoint: null }, since: 0, rttMs: 41 }, label: "Relay", hint: "Through TerminalX Relay", path: "Through TerminalX Relay · 41 ms" },
   { id: "reconnecting", state: () => ({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 2, retryInMs: 500, trying: ["lan", "relay"] }), label: "Reconnecting", hint: /^Lost it 1[2-4] seconds ago$/ },
   { id: "offline", state: { state: "offline", lastSeenAt: LAST_SEEN, retryInMs: 10_000 }, label: "Offline", sidebarLabel: /^Offline · seen \d{1,2}:02/, hint: "Sessions there keep running" },
-  { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27" }, label: "Needs update", hint: "Runs an older TerminalX" },
+  { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27", side: "machine" }, label: "Needs update", hint: "Runs an older TerminalX" },
+  { id: "updating", state: () => ({ state: "updating", version: "0.2.33", since: Date.now() - 5_000 }), label: "Updating", hint: "Back in under a minute" },
   { id: "access-removed", state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac" },
 ];
 
