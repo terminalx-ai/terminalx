@@ -9,7 +9,7 @@ import { api, errorMessage } from "@/lib/api";
 import { readChangesChoice } from "@/lib/changesScope";
 import { useDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { openLinkIssue, openRenameSession } from "@/lib/dialogs";
-import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { copyShareLink, openSessionShare } from "@/lib/localSharing";
 import { showPanelTab } from "@/lib/panelTab";
 import { isQuickChat } from "@/lib/quickChats";
@@ -68,6 +68,13 @@ export function SessionMenu({ session, branch, cloud = false, terminalView }: {
     if (next && !cloud && !chosen) void api.workStatus(session.cwd).then((status) => setDefaultBranch(status.defaultBranch)).catch(() => undefined);
   };
   const target = chosen ?? defaultBranch;
+  const canLinkIssue = !quick && !session.issue;
+  const canShare = !cloud && !privacy.enabled;
+  const linkIssue = () => openLinkIssue(session.id);
+  const copyLink = () => void copyShareLink(session.id).catch(failed("Could not copy a link to the session"));
+  // The rows' own keys work with the menu closed, as the keymap has them (Settings → Shortcuts).
+  useShortcut("session.linkIssue", linkIssue, { enabled: canLinkIssue });
+  useShortcut("session.copyLink", copyLink, { enabled: canShare });
   return (
     <>
       {mirror.on && <RepoMirrorButton mirror={mirror} />}
@@ -112,14 +119,16 @@ export function SessionMenu({ session, branch, cloud = false, terminalView }: {
               <Unplug /> Unlink {session.issue.identifier}
             </DropdownMenuItem>
           ) : (
-            <DropdownMenuItem data-row="link-issue" onSelect={() => openLinkIssue(session.id)}>
+            <DropdownMenuItem data-row="link-issue" onSelect={linkIssue}>
               <CircleDot /> Link issue
+              {shortcut("session.linkIssue")}
             </DropdownMenuItem>
           ))}
           {!cloud && (
             <>
-              <DropdownMenuItem data-row="copy-link" disabled={privacy.enabled} title={privacy.enabled ? PRIVACY_MESSAGE : undefined} onSelect={() => void copyShareLink(session.id).catch(failed("Could not copy a link to the session"))}>
+              <DropdownMenuItem data-row="copy-link" disabled={privacy.enabled} title={privacy.enabled ? PRIVACY_MESSAGE : undefined} onSelect={copyLink}>
                 <Link /> Copy link
+                {shortcut("session.copyLink")}
               </DropdownMenuItem>
               <DropdownMenuItem data-row="share" disabled={privacy.enabled} title={privacy.enabled ? PRIVACY_MESSAGE : undefined} onSelect={() => openSessionShare(session.id)}>
                 <UserPlus /> Share session…
