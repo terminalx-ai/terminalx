@@ -448,6 +448,8 @@ export function SessionView({
   const runOffered = useExperimentalSettings(canLead)?.orchestratorRuns === true && canLead && isGit;
   const run = useRun(session.id, runOffered);
   const runShown = useRunViewShown(session.id) && runOffered;
+  // The window's right column an open piece of the run is shown in, beside the title bar (PRO-383).
+  const [pieceColumn, setPieceColumn] = useState<HTMLDivElement | null>(null);
   const prefs = usePrefs();
   const store = useSessionStore();
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
@@ -856,7 +858,7 @@ export function SessionView({
           </div>
         </header>
         {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
-        {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
+        {runShown && <RunView session={session} pieceColumn={pieceColumn} onShowChat={() => showRunView(session.id, false)} />}
         {machine && cloud && !compact && (
           <MachineSessionStrips
             session={session}
@@ -1018,6 +1020,8 @@ export function SessionView({
           </div>
         </section>
       </div>
+      {/* The Run view's open piece, full height beside the title bar (18.01–18.04); empty, it takes no room. */}
+      {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}

@@ -231,7 +231,7 @@ try {
     // The Run view's side panel, as on a Mac (glass on, PRO-336).
     await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
     await view.locator('[role="row"][data-piece="cli"]').first().click();
-    await view.getByTestId("piece-detail").waitFor();
+    await page.getByTestId("piece-detail").waitFor();
     await page.mouse.move(size.width - 4, size.height - 4);
     await shot(page, "run-view-panel");
     checks["no browser errors"] = errors.length === 0;
