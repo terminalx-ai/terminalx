@@ -13,7 +13,9 @@ use super::*;
 
 /// Not `idle`: idle-test agents exiting late write into the next store under it.
 const SESSION: &str = "agent-key";
-const TAB: &str = "agent";
+/// Not `agent` either: launches are kept per pane (`tab:<id>`) in one map for
+/// the whole process, and the account-switch and idle tests' agents use `agent`.
+const TAB: &str = "agent-key-tab";
 const KEY: &str = "sk-ant-api03-LaunchedAgentKey0123456789abcdefABCDEF-launch-7c1d";
 const NEWER: &str = "sk-ant-api03-ANewerKeySavedLater0123456789abcdef-later-91be";
 

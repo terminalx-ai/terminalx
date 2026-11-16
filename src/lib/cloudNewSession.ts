@@ -19,7 +19,8 @@ import {
   type CreateForm,
   type PendingCreate,
 } from "@/lib/cloudCreate";
-import { creatableProviders, machine0Offered, noProviderRefusal } from "@/lib/hiddenProviders";
+import { creatableProviders, noProviderRefusal } from "@/lib/hiddenProviders";
+import { cloudProviderLabel, orderedCloudProviderIds } from "@/lib/cloudProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -27,8 +28,8 @@ import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type Cl
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
-import { providerLabel } from "@/lib/organizationCompute";
 import { atLimit } from "@/lib/runningLimit";
+import { idleSuspendChoices } from "@/lib/idleSuspend";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -59,6 +60,8 @@ export interface CloudSessionRequest {
   title?: string;
   /** Started from an issue (#433): named after it, and carried on to a pull request unless `pipeline` is false. */
   issue?: CloudIssueStart;
+  /** A new workspace's idle window, 0 for never (PRO-410); absent or null takes the provider's default. Unused when a workspace is reused. */
+  idleSuspendMinutes?: number | null;
 }
 
 /** What starting a cloud session from an issue adds, sent only to a runtime that granted `pipeline/1`. */
@@ -259,8 +262,23 @@ function cloneUrlOf(project: CloudProject): string | null {
   return `https://${project.identity}.git`;
 }
 
-/** Providers in the order the desktop prefers them when the organization's provider list cannot be read. */
-const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "hetzner", "local-docker"];
+const PROVIDER_FLAG = /^cloud\.workspaces\.provider\.(.+)\.v1$/;
+
+/**
+ * The providers an organization's capability flags offer (PRO-69), in their
+ * descriptors' order (PRO-415). The app names none: each
+ * `cloud.workspaces.provider.<id>.v1` flag that is on is one. The flags reach
+ * the webview through the account status, whose map sorts them by key, so
+ * their own order says nothing and the descriptors decide.
+ */
+function offeredByFlags(flags: Record<string, boolean>): CloudWorkspaceProviderId[] {
+  return orderedCloudProviderIds(
+    Object.entries(flags).flatMap(([flag, on]) => {
+      const id = on ? PROVIDER_FLAG.exec(flag)?.[1] : undefined;
+      return id ? [id] : [];
+    }),
+  );
+}
 
 /**
  * The provider a new workspace in this organization uses. In the default
@@ -274,22 +292,21 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
   const status = getAccount().status;
   if (!isMultiOrg(status) || orgId === defaultOrgId(status)) {
     const { providers } = await api.cloudProviders();
-    const provider = creatableProviders(providers, orgId)[0];
-    if (!provider) throw noProviderRefusal(providers, orgId);
-    return { id: provider.id, label: provider.displayName || provider.id, setup: null };
+    const provider = creatableProviders(providers)[0];
+    if (!provider) throw noProviderRefusal(providers);
+    return { id: provider.id, label: cloudProviderLabel(provider), setup: null };
   }
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
-  const offered = (provider: CloudWorkspaceProviderId) => flags[`cloud.workspaces.provider.${provider}.v1`] === true && (provider !== "machine0" || machine0Offered(orgId));
   // Connected here with new machines paused (PRO-372): named if no other provider is usable.
   const paused: string[] = [];
-  for (const id of PROVIDER_ORDER.filter(offered)) {
+  for (const id of offeredByFlags(flags)) {
     try {
-      return { id, label: providerLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
+      return { id, label: cloudProviderLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
     } catch (error) {
       // Only "not connected here" or "paused here" moves on to the next provider;
       // anything else (not an admin, offline, rate-limited) is the real answer and is shown.
       const code = error && typeof error === "object" && "code" in error ? (error as { code: unknown }).code : null;
-      if (code === SERVER_CREATION_DISABLED) paused.push(providerLabel(id));
+      if (code === SERVER_CREATION_DISABLED) paused.push(cloudProviderLabel(id));
       else if (code !== "cloud_provider_connection_required") throw error;
     }
   }
@@ -320,13 +337,14 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     effort: request.effort ?? "",
     mode: request.mode,
     accessMode: "private",
+    idleSuspendMinutes: request.idleSuspendMinutes ?? null,
   };
   const errors = Object.values(validateForm(form));
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
   await preflightCreate(api, form, org);
   const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
-  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, org);
+  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,
@@ -342,6 +360,31 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     },
   };
   return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };
+}
+
+/** The idle windows a new workspace of an organization may have (PRO-410). */
+export interface CloudIdleOptions {
+  /** Shortest first, then 0 (never) when offered. */
+  choices: number[];
+  /** The provider's default; the server has already brought it under the organization's cap. */
+  defaultMinutes: number;
+  /** The organization's idle cap; null with none, or from an older server. */
+  cap: number | null;
+}
+
+/**
+ * What "Stop when idle" offers for a new workspace in this organization: the
+ * setup of the provider a create would use, as `prepareCloudCreate` picks
+ * it. Nothing is created or quoted.
+ */
+export async function cloudIdleOptions(orgId: string): Promise<CloudIdleOptions> {
+  const provider = await providerFor(orgId);
+  const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, cloudOrgArg(orgId)));
+  return {
+    choices: idleSuspendChoices(setup.allowedIdleSuspendMinutes),
+    defaultMinutes: setup.defaults.idleSuspendMinutes,
+    cap: setup.maxIdleSuspendMinutes ?? null,
+  };
 }
 
 /**

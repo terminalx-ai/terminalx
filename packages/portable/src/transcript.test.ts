@@ -474,3 +474,20 @@ describe("a turn's settings (PRO-379)", () => {
     expect(buildTranscript([event(1, { type: "turn_started" })], false).changedSettings).toBeUndefined();
   });
 });
+
+// PRO-378: a finished thought says how long it took; a tool call keeps when it started and ended.
+describe("times the transcript keeps for its rows", () => {
+  it("measures a thought from the event before it, and a call from its start to its result", () => {
+    const base = { sessionId: "s", tabId: "t", harness: "claude" } as const;
+    const turn = buildTranscript([
+      { ...base, id: "1", seq: 1, ts: "2026-11-16T10:00:00Z", payload: { type: "user_message", text: "go", queued: false } },
+      { ...base, id: "2", seq: 2, ts: "2026-11-16T10:00:09Z", payload: { type: "reasoning", text: "thinking" } },
+      { ...base, id: "3", seq: 3, ts: "2026-11-16T10:00:10Z", payload: { type: "tool_call_started", callId: "c", name: "Bash", toolType: "shell", input: { command: "ls" } } },
+      { ...base, id: "4", seq: 4, ts: "2026-11-16T10:00:11.5Z", payload: { type: "tool_call_completed", callId: "c", result: { text: "a", isError: false } } },
+    ] as AgentEvent[], true).turns[0];
+    const thought = turn.work.find((w) => w.kind === "reasoning");
+    expect(thought && "durationMs" in thought ? thought.durationMs : null).toBe(9000);
+    const call = turn.work.find((w) => w.kind === "tool");
+    expect(call?.kind === "tool" ? [call.call.startedTs, call.call.endedTs] : null).toEqual(["2026-11-16T10:00:10Z", "2026-11-16T10:00:11.5Z"]);
+  });
+});

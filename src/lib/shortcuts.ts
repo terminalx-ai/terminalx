@@ -82,6 +82,10 @@ const ACTIONS = [
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  // PRO-381: the new-tab menu's Browser. ⌘B is the sidebar; with Shift it is free.
+  { id: "session.newBrowserTab", label: "New browser tab", group: "Session", keys: ["mod+shift+b"] },
+  // PRO-381: the tab menu's "Fork to new tab", on the tab on screen.
+  { id: "session.forkTab", label: "Fork the conversation to a new tab", group: "Session", keys: ["mod+alt+enter"] },
   // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
   // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
   { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },
@@ -107,7 +111,8 @@ const ACTIONS = [
   { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
   { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
   { id: "session.focusOtherPane", label: "Focus other pane", group: "Session", keys: ["mod+alt+o"] },
-  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"] },
+  // ⌘\ is the design's (PRO-381); Ctrl+\ is the shell's quit key elsewhere, so it is macOS's alone.
+  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"], macKeys: ["mod+\\", "mod+alt+shift+o"] },
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
@@ -115,7 +120,6 @@ const ACTIONS = [
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"], menu: { section: "view", order: 2, label: "Terminal", target: "focused" } },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"], menu: { section: "view", order: 3, label: "Switch Chat / Terminal", target: "focused" } },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
-  { id: "session.forkTurn", label: "Fork the chat at its last turn into a new tab", group: "Session", keys: ["mod+alt+enter"] },
   { id: "session.interrupt", label: "Interrupt the running turn", group: "Session", keys: ["escape"], scope: "context" },
   // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
   { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },

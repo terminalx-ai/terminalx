@@ -7,12 +7,11 @@ import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Segmented } from "@/components/ui/controls";
+import { Segmented, Checkbox } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { ChangedFile, CommitInfo } from "@/types/session";
 import { FileDiff } from "./FileDiff";
-import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
 import { ReviewFileList } from "./ReviewFileList";
 import { AddRemote, GitError } from "./GitRecovery";
@@ -165,7 +164,6 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           {status && status.behind > 0 && <span className="text-faint">↓{status.behind}</span>}
         </div>
       </div>}
-      {!embedded && <DiffOptions />}
       {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
       {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
@@ -212,7 +210,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
               {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">
-                <label className="flex items-center gap-1"><input type="checkbox" checked={prefs.writeCommitMessagesWithAgent} onChange={(event) => setPrefs({ writeCommitMessagesWithAgent: event.target.checked })} />Write commit messages with the agent</label>
+                <Checkbox className="text-[11px] text-foreground" label="Write commit messages with the agent" checked={prefs.writeCommitMessagesWithAgent} onChange={(on) => setPrefs({ writeCommitMessagesWithAgent: on })}>Write commit messages with the agent</Checkbox>
                 <span className="text-faint">Uses your own quota.</span>
                 {prefs.writeCommitMessagesWithAgent && <><select aria-label="Commit message agent" value={commitAgent} onChange={(event) => setCommitAgent(event.target.value as "claude" | "codex")} className="rounded bg-background px-1 py-0.5"><option value="claude">Claude</option><option value="codex">Codex</option></select><Button size="xs" variant="secondary" disabled={!staged.length || !!busy} onClick={generateMessage}>{busy === "generate message" ? <Loader2 className="animate-spin" /> : null}Generate message</Button></>}
               </div>}

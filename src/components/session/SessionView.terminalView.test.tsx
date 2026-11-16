@@ -98,6 +98,11 @@ import { addProject, getSessionStore, selectSession, upsertSession, useSessionSt
 import { cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FakeAgentRuntime, agentTab, fakeXterm, type FakeXterm } from "@/test/fakeAgentRuntime";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 Element.prototype.scrollIntoView ??= function scrollIntoView() {};
@@ -367,6 +372,21 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
   });
 
+  it("puts the terminal view switch at the right end of the strip, not in the title bar (PRO-381)", async () => {
+    const header = show();
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    const toggle = await screen.findByTestId("strip-terminal-view");
+    expect(toggle.getAttribute("aria-label")).toBe("Show terminal view");
+    expect(toggle.textContent).toContain("terminal view");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Back to chat"));
+    expect(screen.getByTestId("strip-terminal-view").textContent).toBe("Claude Code · same process");
+    // The tab says it is in its terminal view.
+    expect(within(screen.getByRole("tab", { name: "Investigate" })).getByLabelText("In terminal view").textContent).toBe("terminal view");
+    fireEvent.click(screen.getByTestId("strip-terminal-view"));
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Show terminal view"));
+  });
+
   it("names the place in the title bar, with the actions at the right, and puts the tabs in a row under it with the + after them", () => {
     const header = show();
     // The title bar: the project and the branch, with the session's chips.
@@ -516,7 +536,7 @@ describe("a local session's row of tabs under the title bar", () => {
     // The title bar and the row of tabs under it.
     const header = show({ tabs: [tab("st-1", "claude", "Investigate")] }).parentElement!;
     fireEvent.click(within(header).getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(1));
     const tabs = () => within(header).getAllByRole("tab");
     await waitFor(() => expect(tabs().map((item) => item.getAttribute("aria-selected"))).toEqual(["false", "true"]));
@@ -642,7 +662,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("workspace-tab-strip")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     const strip = await screen.findByTestId("workspace-tab-strip");
     await waitFor(() => expect(spawned()).toHaveLength(1));
     // In the session's working directory: the scratch folder, not the home directory or a repository.
@@ -650,7 +670,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(spawned()[0].id.startsWith("quick-1:")).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(2));
     const tabs = () => [...strip.querySelectorAll('[role="tab"]')];
     await waitFor(() => expect(tabs().map((tab) => tab.textContent)).toEqual(["claude", "Terminal 1", "Terminal 2"]));
@@ -1352,7 +1372,7 @@ describe("#644 on a cloud agent tab", () => {
     await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
     runtime.events.push(lifecycle({ type: "item_completed", turnId: "turn", itemId: "item" }), lifecycle({ type: "turn_ended", turnId: "turn", outcome: "completed" }));
     await act(async () => runtime.connect());
-    expect(await screen.findByText(/Context compacted/)).toBeTruthy();
+    expect(await screen.findByText(/Chat compacted/)).toBeTruthy();
     expect(screen.queryByText("Compacting context…")).toBeNull();
     expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
   });

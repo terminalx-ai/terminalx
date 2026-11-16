@@ -14,6 +14,9 @@ export interface ToolCall {
   abandoned?: boolean;
   seq: number;
   subagent?: { id: string; label?: string };
+  /** When the call started and when its result came: a command's row says how long it ran. */
+  startedTs?: string;
+  endedTs?: string;
 }
 
 /** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
@@ -43,7 +46,8 @@ export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
-  | { kind: "reasoning"; text: string; key: string; seq: number }
+  /** `durationMs`: from the turn's previous event to this one, how long the agent thought, where the log's times say. */
+  | { kind: "reasoning"; text: string; key: string; seq: number; durationMs?: number }
   | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
   | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
@@ -317,6 +321,8 @@ export class TranscriptReducer {
   private usageWindows: Transcript["usageWindows"];
   private codexUsage: Transcript["codexUsage"];
   private workingSince: number | undefined;
+  /** The time of the last event this turn was given, for how long a thought took. */
+  private lastTs: number | undefined;
   private current: Turn | null = null;
   private afterCompaction = false;
 
@@ -399,6 +405,9 @@ export class TranscriptReducer {
     this.version++;
     const payload: Payload = event.payload;
     const followsCompaction = this.afterCompaction;
+    const previousTs = this.lastTs;
+    const eventAt = Date.parse(event.ts);
+    if (!event.subagent && Number.isFinite(eventAt)) this.lastTs = eventAt;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
     if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
@@ -543,7 +552,8 @@ export class TranscriptReducer {
       }
       case "reasoning": {
         const turn = this.ensureTurn(event);
-        if (payload.text.trim()) turn.work.push({ kind: "reasoning", text: payload.text, key: `r${event.seq}`, seq: event.seq });
+        const durationMs = !event.subagent && previousTs != null && Number.isFinite(eventAt) && eventAt >= previousTs ? eventAt - previousTs : undefined;
+        if (payload.text.trim()) turn.work.push({ kind: "reasoning", text: payload.text, key: `r${event.seq}`, seq: event.seq, ...(durationMs != null ? { durationMs } : {}) });
         break;
       }
       case "tool_call_started": {
@@ -556,6 +566,7 @@ export class TranscriptReducer {
           title: payload.title,
           seq: event.seq,
           subagent: event.subagent,
+          startedTs: event.ts,
         };
         // One id names one call: a second start replaces the first, which no later event reaches.
         const replaced = this.calls.get(payload.callId);
@@ -575,6 +586,7 @@ export class TranscriptReducer {
         if (call) {
           call.result = payload.result;
           call.abandoned = false;
+          call.endedTs = event.ts;
           if (call.result) this.unresolved.delete(call);
           else this.unresolved.add(call);
           this.touchCall(call);

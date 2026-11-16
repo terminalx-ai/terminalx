@@ -15,6 +15,8 @@
 //!   machine, over its direct routes and the relay (PRO-345).
 //! - [`ports`] and [`port_listeners`]: `ports/1`, a workspace port carried
 //!   over the connection, and what listens on which port (PRO-28, PRO-355).
+//! - [`machine_projects`]: `machine/6`, a machine's projects from another
+//!   computer: browse its folders, add, remove and clone (PRO-351).
 //! - [`agent_commands`]: receipts of live agent commands on a runtime with
 //!   no cloud mailbox (`agent-commands/1`, PRO-343).
 
@@ -27,6 +29,7 @@ pub mod git;
 pub mod host;
 pub mod machine;
 pub(crate) mod machine_agents;
+pub mod machine_projects;
 pub mod machine_client;
 pub mod machine_update;
 pub mod mirror;

@@ -14,7 +14,7 @@ import { DisclosureMemory, SearchDisclosures, type Disclosures } from "./disclos
 import { useChatFind } from "./ChatFind";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
-import { turnDivider } from "@/lib/turnDivider";
+import { turnFileChanges } from "@/lib/turnChanges";
 import { GoalBanner } from "./GoalBanner";
 
 const NEAR_BOTTOM_PX = 40;
@@ -100,6 +100,8 @@ export function Chat({
   answering,
   answerBlockedReason,
   askDetail = false,
+  askMeta = null,
+  takesKeys = active,
   loading = false,
   footer,
   onSendQueuedNow,
@@ -111,6 +113,8 @@ export function Chat({
   onSaveSnippet,
   turnSettings,
   onReset,
+  onRetryInNewChat,
+  onRetry,
 }: {
   sessionId: string;
   checkpointTabId?: string;
@@ -128,6 +132,10 @@ export function Chat({
   answerBlockedReason?: string | null;
   /** Quote the command, file or tool a permission request is about (a shared cloud workspace). */
   askDetail?: boolean;
+  /** At the end of a permission card's header: the session's permission mode and project. */
+  askMeta?: string | null;
+  /** This chat's view has the keys (focused and on screen): a permission card's Escape denies. */
+  takesKeys?: boolean;
   /** The conversation is on its way (a cloud tab opened here for the first time): empty is not "nothing yet". */
   loading?: boolean;
   footer: React.ReactNode;
@@ -147,7 +155,15 @@ export function Chat({
   onSaveSnippet?: (text: string) => void;
   /** The tab's settings now, for turns whose own record does not say. */
   turnSettings?: { effort?: string | null; permissionMode?: string | null };
-  onReset?: (endSeq: number) => void;
+  /** Reset to the end of a turn: which turn it is, which go, and how many files changed since, for the dialog to say. */
+  onReset?: (endSeq: number, target: ResetTarget) => void;
+  /** Take a failed turn's prompt to a new chat. */
+  onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Send a failed turn's prompt again, as a new message. Not tied to `live`: a turn that failed with no recovery
+   * standing leaves the tab idle, and sending wakes the agent as the composer would.
+   */
+  onRetry?: (seq: number) => void;
 }) {
   // Rebuilt only when a value changes: every turn is memoised on it.
   const [effort, permissionMode] = [turnSettings?.effort, turnSettings?.permissionMode];
@@ -481,9 +497,11 @@ export function Chat({
                 onFork={onFork}
                 onSaveSnippet={onSaveSnippet}
                 turnFallback={turnFallback}
-                latest={isLast}
-                onReset={!isLast && !live && !sending ? onReset : undefined}
-                divider={turnDivider(turns[start + i - 1], t)}
+                onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
+                workingSince={isLast ? transcript.workingSince : undefined}
+                // A failed last turn can go again: its prompt, sent as a new message.
+                onRetry={isLast && !t.live && !sending ? onRetry : undefined}
+                onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
               />
             );
           })}
@@ -501,7 +519,7 @@ export function Chat({
           {transcript.pendingAsks.map((ask) => (
             <div key={ask.requestId} className="mb-3">
               {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} meta={askMeta} takesKeys={takesKeys} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
               ) : (
                 <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
               )}
@@ -548,4 +566,17 @@ export function Chat({
       </div>
     </div>
   );
+}
+
+/** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+export interface ResetTarget {
+  turn: number;
+  removed: number[];
+  files: number;
+}
+
+export function resetTarget(turns: Turn[], index: number): ResetTarget {
+  const later = turns.slice(index + 1);
+  const files = new Set(later.flatMap((t) => (t.completed ? turnFileChanges(t).map((change) => change.path) : [])));
+  return { turn: index + 1, removed: later.map((_, i) => index + 2 + i), files: files.size };
 }

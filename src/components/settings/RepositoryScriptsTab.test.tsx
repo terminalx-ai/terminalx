@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => state, updateProject: state.update }));
 vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }), rerunSetup: state.rerun }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: state.open }));
+vi.mock("./EnvironmentSettings", () => ({ EnvironmentTable: ({ project }: { project: string }) => <p>Variables for {project}</p> }));
 vi.mock("@/lib/configuration", () => ({
   configuration: { watch: async () => () => {}, resolve: state.resolve, write: state.write, review: state.review },
 }));
@@ -35,20 +36,26 @@ beforeEach(() => {
   state.resolve.mockReset().mockImplementation(async (path: string) => resolved(path === "/a" ? { setupScript: { value: "npm ci", source: "user" } } : {}));
 });
 
-it("shows the page's heading and saves each script on this computer, with the archive timeout", async () => {
+it("shows the page's heading and saves each script on this computer as it is left, with the archive timeout", async () => {
   render(<RepositoryScriptsTab projectPath="/a" />);
   expect(screen.getByRole("heading", { name: "Scripts" })).toBeTruthy();
-  expect(screen.getByText("Commands that run when a workspace is set up or removed. The run command lives in Actions.")).toBeTruthy();
+  expect(screen.getByText("Commands that run when a workspace is set up, run or removed.")).toBeTruthy();
   await waitFor(() => expect(textarea("Setup script").value).toBe("npm ci"));
   expect(screen.queryByText(/· locked/)).toBeNull();
-  expect(screen.queryByRole("button", { name: /Open settings\.json/ })).toBeNull();
+  // PRO-388: the project file opens from the title bar only, and no script has a Save button of its own.
+  expect(screen.queryByRole("button", { name: /Open .*settings\.json/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["Setup", "Run", "Archive"]);
+  expect(screen.getByText(/Saved on this computer for this project as you leave each script/)).toBeTruthy();
+  expect(screen.getByText("Variables for /a")).toBeTruthy();
+  fireEvent.blur(textarea("Setup script"));
+  expect(state.update).not.toHaveBeenCalled();
   fireEvent.change(textarea("Archive script"), { target: { value: "docker compose down\nexit 0" } });
-  fireEvent.change(screen.getByLabelText("Archive timeout"), { target: { value: "2" } });
-  const saves = screen.getAllByRole("button", { name: "Save" });
-  expect(saves[0].hasAttribute("disabled")).toBe(true);
-  fireEvent.click(saves[1]);
+  fireEvent.blur(textarea("Archive script"));
   await screen.findByText("Archive script saved.");
-  expect(state.update).toHaveBeenCalledWith("/a", { scripts: { setup: "npm ci", archive: "docker compose down\nexit 0", archiveTimeoutMinutes: 2 } });
+  expect(state.update).toHaveBeenLastCalledWith("/a", { scripts: { setup: "npm ci", archive: "docker compose down\nexit 0" } });
+  fireEvent.change(screen.getByLabelText("Archive timeout"), { target: { value: "2" } });
+  await waitFor(() => expect(state.update).toHaveBeenLastCalledWith("/a", { scripts: { setup: "npm ci", archive: "docker compose down\nexit 0", archiveTimeoutMinutes: 2 } }));
   expect(state.write).not.toHaveBeenCalled();
 });
 
@@ -57,31 +64,55 @@ it("keeps the draft and lets the person retry when saving fails", async () => {
   render(<RepositoryScriptsTab projectPath="/a" />);
   await waitFor(() => expect(textarea("Setup script").value).toBe("npm ci"));
   fireEvent.change(textarea("Setup script"), { target: { value: "pnpm install" } });
-  fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+  fireEvent.blur(textarea("Setup script"));
   expect((await screen.findByRole("alert")).textContent).toContain("Disk unavailable");
   expect(textarea("Setup script").value).toBe("pnpm install");
-  fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+  fireEvent.keyDown(textarea("Setup script"), { key: "s", metaKey: true });
   await screen.findByText("Setup script saved.");
   expect(state.update).toHaveBeenLastCalledWith("/a", { scripts: { setup: "pnpm install", archive: "" } });
+});
+
+it("edits the first visible action as Run, and makes a Run action when there is none", async () => {
+  state.projects = [{ path: "/a", name: "a", actions: [
+    { id: "h", name: "Hidden", icon: "play", command: "echo hidden", hidden: true, runAfterSetup: false, concurrent: false },
+    { id: "d", name: "Dev app", icon: "play", command: "pnpm dev", hidden: false, runAfterSetup: false, concurrent: false },
+  ] }];
+  const view = render(<RepositoryScriptsTab projectPath="/a" />);
+  await screen.findByLabelText("Run script");
+  expect(textarea("Run script").value).toBe("pnpm dev");
+  fireEvent.change(textarea("Run script"), { target: { value: "" } });
+  fireEvent.blur(textarea("Run script"));
+  expect((await screen.findByRole("alert")).textContent).toContain("Dev app");
+  expect(state.update).not.toHaveBeenCalled();
+  fireEvent.change(textarea("Run script"), { target: { value: "pnpm dev --host" } });
+  fireEvent.blur(textarea("Run script"));
+  await screen.findByText("Run command saved.");
+  expect(state.update).toHaveBeenCalledWith("/a", { actions: [state.projects[0].actions![0], { ...state.projects[0].actions![1], command: "pnpm dev --host" }] });
+  view.unmount();
+
+  state.update.mockClear();
+  state.projects = [{ path: "/a", name: "a" }];
+  render(<RepositoryScriptsTab projectPath="/a" />);
+  await screen.findByLabelText("Run script");
+  fireEvent.change(textarea("Run script"), { target: { value: "bun run dev" } });
+  fireEvent.blur(textarea("Run script"));
+  await waitFor(() => expect(state.update).toHaveBeenCalledWith("/a", { actions: [{ id: expect.any(String), name: "Run", icon: "play", command: "bun run dev", hidden: false, runAfterSetup: false, concurrent: false }] }));
 });
 
 it("locks a committed script, says where it comes from, and overrides it in the local file", async () => {
   state.resolve.mockResolvedValue(resolved({ setupScript: { value: "pnpm install --frozen-lockfile", source: "repositoryShared" } }, { hash: "h", required: false, keys: [] }));
   render(<RepositoryScriptsTab projectPath="/a" />);
-  await screen.findByText("From settings.json · locked");
+  await screen.findByText("From .terminalx/settings.json · locked");
   expect(textarea("Setup script").value).toBe("pnpm install --frozen-lockfile");
   expect(textarea("Setup script").readOnly).toBe(true);
   expect(screen.getByLabelText("Locked")).toBeTruthy();
   expect(screen.getByText(/Edits go in your own/).textContent).toContain("settings.local.json, which git ignores.");
-  // Only the archive card can save; the locked setup offers its override instead.
-  expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(1);
-  fireEvent.click(button("Open settings.json"));
-  expect(state.open).toHaveBeenCalledWith("/a/.terminalx/settings.json");
+  expect(screen.getByText(/are committed in the repository, so everyone on the project gets the same ones/)).toBeTruthy();
 
   fireEvent.click(button("Override locally"));
   expect(textarea("Setup script").readOnly).toBe(false);
   fireEvent.change(textarea("Setup script"), { target: { value: "pnpm install" } });
-  fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+  fireEvent.blur(textarea("Setup script"));
   await screen.findByText("Setup script saved.");
   expect(state.write).toHaveBeenCalledWith("/a", "repositoryLocal", "setupScript", "pnpm install");
   expect(state.update).not.toHaveBeenCalled();
@@ -94,7 +125,7 @@ it("removes a local override, and leaves managed scripts read-only with no overr
     archiveTimeoutMinutes: { value: 10, source: "managed", locked: true },
   }));
   render(<RepositoryScriptsTab projectPath="/a" />);
-  await screen.findByText("From settings.local.json · local override");
+  await screen.findByText("From .terminalx/settings.local.json · local override");
   expect(screen.getByText("Managed policy · locked")).toBeTruthy();
   expect(textarea("Archive script").readOnly).toBe(true);
   expect((screen.getByLabelText("Archive timeout") as HTMLSelectElement).disabled).toBe(true);
@@ -112,7 +143,8 @@ it("asks to trust committed scripts, runs nothing until then, and Not now only h
   render(<RepositoryScriptsTab projectPath="/a" />);
   const banner = await screen.findByRole("region", { name: "Repository trust" });
   expect(banner.textContent).toContain("in this repository wants to run commands when a workspace is created or removed. Nothing runs until you trust it.");
-  expect(screen.getByText(/does not run until you choose Review and trust/)).toBeTruthy();
+  // The banner is the one trust warning: no second line under the script.
+  expect(screen.queryByText(/does not run until you choose Review and trust/)).toBeNull();
   fireEvent.click(within(banner).getByRole("button", { name: "Not now" }));
   expect(screen.queryByRole("region", { name: "Repository trust" })).toBeNull();
   cleanup();
@@ -150,7 +182,8 @@ it("explains the environment a script runs with", async () => {
   const info = await screen.findByRole("dialog", { name: "Environment info" });
   expect(info.textContent).toContain("in a visible Setup tab");
   expect(info.textContent).toContain("$TERMINALX_REPO_ROOT is the project root");
-  expect(info.textContent).toContain("Agent-only credentials are not passed on.");
+  expect(within(info).getAllByRole("listitem")).toHaveLength(3);
+  expect(within(info).getByRole("button", { name: "your and the project’s variables" })).toBeTruthy();
 });
 
 it("shows an unreadable configuration as an error without editable fields", async () => {
@@ -174,7 +207,7 @@ it("does not ask to trust a committed script that a local override replaces", as
   state.resolve.mockResolvedValue(resolved({ setupScript: { value: "make setup", source: "repositoryLocal" } }, { hash: "h", required: true, keys: ["setupScript"] }));
   state.sessions = [{ id: "s1", projectPath: "/a", cwd: "/a/w", worktreeName: "feature", tabs: [] }] as unknown as SessionEntry[];
   render(<RepositoryScriptsTab projectPath="/a" />);
-  await screen.findByText("From settings.local.json · local override");
+  await screen.findByText("From .terminalx/settings.local.json · local override");
   expect(screen.queryByRole("region", { name: "Repository trust" })).toBeNull();
   expect(screen.queryByText(/not trusted yet/)).toBeNull();
   expect(button("Run setup now").disabled).toBe(false);

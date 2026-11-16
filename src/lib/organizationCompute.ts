@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { cloudProviderLabel } from "@/lib/cloudProviders";
 
 // Compute limits and provider usage for the account's active organization.
 // Every member can read the limits; only owners and admins edit them or see
@@ -6,7 +7,6 @@ import { invoke } from "@tauri-apps/api/core";
 // after an account/organization switch) and the policy version (refused if
 // another admin changed it first).
 
-export const COMPUTE_PROVIDERS = ["machine0", "box", "hetzner"] as const;
 export const IDLE_CAP_OPTIONS = [5, 10, 15, 30, 60] as const;
 
 // A limit that is null is no limit (PRO-371): an organization is held to a
@@ -257,8 +257,8 @@ export const organizationCompute = {
     invoke<unknown>("organization_compute_provisioning_pause", { expectedVersion, paused, reason, contextRevision }).then(normalizePolicyView),
 };
 
-export const PROVIDER_LABEL: Record<string, string> = { machine0: "Machine0", box: "Box", hetzner: "Hetzner", "local-docker": "Local Docker" };
-export const providerLabel = (provider: string) => PROVIDER_LABEL[provider] ?? provider;
+/** A provider's name, from its descriptor (PRO-415). */
+export const providerLabel = (provider: string) => cloudProviderLabel(provider);
 
 /** Provider amounts are integer micros of the provider's billing currency. */
 export function formatMicros(micros: number, currency: string): string {

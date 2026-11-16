@@ -16,6 +16,7 @@ import {
   type CloudWorkspaceSnapshot,
   type OrganizationSummary,
 } from "@/lib/api";
+import { learnCloudProviders } from "@/lib/cloudProviders";
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
@@ -361,6 +362,7 @@ export async function ingestCloudList(
     const repository = repositoryOf(item, state.createMemory);
     projectNames.set(item.workspace.id, repository ? (repository.fullName ?? nameOfIdentity(repository.identity)) : item.workspace.name);
   }
+  learnCloudProviders(list.workspaces.map((item) => item.workspace.provider));
   const org = orgId ?? defaultOrgId(getAccount().status) ?? list.workspaces[0]?.workspace.orgId ?? null;
   const newer = org !== null && (listedAt.get(org) ?? -Infinity) > requestedAt;
   if (org && !newer) {

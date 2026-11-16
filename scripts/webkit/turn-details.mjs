@@ -71,9 +71,9 @@ try {
 
     // The footer: the duration and time chip, then copy, read aloud, "…" and Second opinion.
     await first.hover();
-    const chip = first.getByRole("button", { name: /^Turn details: Worked for 1m 12s · / });
+    const chip = first.getByRole("button", { name: /^Turn details: 1m 12s · / });
     failed += report(`footer ${colorScheme}`, {
-      "the chip says how long and when": /^Worked for 1m 12s · /.test(await chip.textContent()),
+      "the chip says how long and when": /^1m 12s · /.test(await chip.textContent()),
       "no Reset to here button": (await first.getByRole("button", { name: "Reset to here" }).count()) === 0,
       "a turn menu": (await first.getByRole("button", { name: "Turn actions" }).count()) === 1,
       "Second opinion with its icon": (await first.getByRole("button", { name: /Second opinion/ }).locator("svg").count()) === 1,

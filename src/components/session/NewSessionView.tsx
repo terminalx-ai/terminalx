@@ -30,7 +30,7 @@ import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, r
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
-import { AgentSetup } from "./AgentSetup";
+import { AgentSetupNotice } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
 import { StartFromPicker, type BranchTarget, type StartFromTab } from "./StartFromPicker";
 import { BaseBranchMenu } from "./BaseBranchMenu";
@@ -47,7 +47,9 @@ import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/l
 import { showRunView } from "@/lib/orchestration";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
-import { cloudStartError, quoteText, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { cloudStartError, quoteText, useCloudDraft, useCloudIdleOptions, useCloudProjectChoices } from "./CloudNewSession";
+import { IdleSuspendSelect } from "@/components/cloud/IdleSuspendSelect";
+import { initialIdleSuspend } from "@/lib/idleSuspend";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { PHASES, failureMessage, isClientError, phaseOf } from "@/lib/cloudCreate";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -196,6 +198,10 @@ export function NewSessionView({
   // On a machine a session always gets a new worktree beside its project there.
   const useWorktree = isGit && (!!machine || !!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
+  // "Stop when idle" (PRO-410): only when Create makes a new workspace; a reused or woken one keeps its own window.
+  const idleOptions = useCloudIdleOptions(cloudPlan?.kind === "create" ? cloud!.project!.orgId : null);
+  const [idleChoice, setIdleChoice] = useState<number | null>(null);
+  const idleMinutes = idleOptions ? initialIdleSuspend(idleOptions.choices, idleOptions.defaultMinutes, idleChoice) : null;
   const cloudModelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   // A machine's agents, models and efforts are its own.
@@ -230,6 +236,28 @@ export function NewSessionView({
   // The chosen agent's login on the machine, when it says (PRO-350); a definite "signed out" holds Create back.
   const machineSignIn = machine ? agentSignIn(machine.agents, harness?.id) : null;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
+  // Setup belongs to the agent the person picks (#1064): one notice, for one agent, only when this Mac
+  // knows it is missing or signed out. The first check under way (no answer yet) or an unverified login
+  // shows nothing; a re-check keeps the last answer, so the notice and its open card stay put.
+  const [setupPick, setSetupPick] = useState<string | null>(null);
+  const needsSetup = (id: string) => {
+    const state = readiness.values?.[id]?.state;
+    return state === "missing" || state === "signed_out";
+  };
+  const setupTarget = remote ? null
+    : store.harnesses.find((item) => item.id === setupPick && needsSetup(item.id))
+      ?? (harness ? (needsSetup(harness.id) ? harness : null)
+      // Nothing can start: the agent last used, else the first, once a check has answered.
+      : store.harnesses.find((item) => item.id === prefs.lastAgent && needsSetup(item.id)) ?? store.harnesses.find((item) => needsSetup(item.id)) ?? null);
+  // The agent picked for setup is ready now: it is the one the chat starts with.
+  const pickedReady = !!setupPick && readiness.values?.[setupPick]?.state === "ready";
+  useEffect(() => {
+    if (!pickedReady || !setupPick) return;
+    agentSelection.selectHarness(setupPick);
+    setSetupPick(null);
+  }, [pickedReady, setupPick]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Picking an agent that can start drops the setup pick: a later sign-in elsewhere never overrides that choice.
+  const menuSelection = setupPick ? { ...agentSelection, selectHarness: (id: string) => { setSetupPick(null); agentSelection.selectHarness(id); } } : agentSelection;
 
   useEffect(() => {
     let cancelled = false;
@@ -360,6 +388,7 @@ export function NewSessionView({
     prompt: text,
     useWorktree,
     ...(pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value, pipelineSettings: pipelineLaunch.settings } : {}),
+    ...(idleMinutes !== null ? { idleSuspendMinutes: idleMinutes } : {}),
   });
 
   /**
@@ -407,7 +436,8 @@ export function NewSessionView({
           unsettled.form.agent === request.agent &&
           unsettled.form.model === request.model &&
           unsettled.form.effort === (request.effort ?? "") &&
-          unsettled.form.mode === request.mode;
+          unsettled.form.mode === request.mode &&
+          (unsettled.form.idleSuspendMinutes ?? null) === (request.idleSuspendMinutes ?? null);
         const prepared = resend ? unsettled : await prepareCloudCreate(project, request);
         unsettledCreate.current = null;
         setStarting(`Creating the workspace on ${quoteText(prepared.quote, prepared.providerLabel).machine}…`);
@@ -682,15 +712,6 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
-          {!remote && (
-            <div className="mb-3 space-y-2 empty:hidden">
-              {(harness ? [harness] : store.harnesses).map((item) => (
-                <AgentSetup newSession key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
-                  void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
-                }} />
-              ))}
-            </div>
-          )}
 
           {/* Everything the form says is drawn inside this box: over a dimmed session there is nothing behind it to read text against. */}
           <div className={cn("relative overflow-hidden rounded-[12px] bg-composer shadow-surface hairline", modal && "border border-border shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
@@ -904,7 +925,7 @@ export function NewSessionView({
             </div>
 
             <div className="flex items-center gap-1 px-2.5 pb-2.5">
-              <AgentMenu split selection={agentSelection} disabled={busy} />
+              <AgentMenu split selection={menuSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
               {!remote && harness && !available && (
                 <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
                   {harness.name} isn't installed
@@ -961,16 +982,22 @@ export function NewSessionView({
             {/* What stands in the way of a start, said in the box, above its footer. */}
             <div className="space-y-2 px-4 pb-3 empty:hidden" data-testid="new-session-notices">
               {!remote && !projectless && preset && !project && <p role="alert" className="text-xs text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
-              {!remote && !harness && <p role="status" className="text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
+              {/* One notice, for one agent, only when it is known missing or signed out (#1064): never a card per agent, nothing while checking. */}
+              {setupTarget && (
+                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness}
+                  onDismiss={setupTarget.id === setupPick ? () => setSetupPick(null) : undefined} onRefresh={() => {
+                  void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
+                }} />
+              )}
               {cloud && starting && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
                   {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
                 </div>
               )}
-              {!remote && harness && !available && (
+              {/* The notice above already offers the install when it is for this agent. */}
+              {!remote && harness && !available && setupTarget?.id !== harness.id && (
                 <p className="text-xs text-muted-foreground">
-                  {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
-                  <code className="font-mono">{harness.installHint}</code>
+                  Install {harness.name} by running <code className="font-mono">{harness.installHint}</code>
                 </p>
               )}
               {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}
@@ -1007,6 +1034,11 @@ export function NewSessionView({
             )}
           </div>
           {machine && <MachineFormLine draft={machine} agentId={harness?.id ?? null} agentName={harness?.name ?? null} />}
+          {cloudPlan?.kind === "create" && idleOptions && idleMinutes !== null && (
+            <div className="mt-2 px-1" data-testid="cloud-idle-line">
+              <IdleSuspendSelect choices={idleOptions.choices} value={idleMinutes} cap={idleOptions.cap} disabled={busy} onChange={setIdleChoice} testId="cloud-idle-suspend" />
+            </div>
+          )}
         </div>
       </div>
       {whereShown && <AddMachineDialog open={addingMachine} onOpenChange={setAddingMachine} onPaired={() => void refreshPairedMachines()} />}

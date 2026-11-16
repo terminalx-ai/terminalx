@@ -226,6 +226,18 @@ export function turnRange(start: string, end: string): string | null {
   return `${day(from)} · ${second(from)} → ${day(to) === day(from) ? "" : `${day(to)} · `}${second(to)}`;
 }
 
+/** A settled turn's cache hit (whole percent) and average output rate (whole tokens a second), when it reported them. */
+export function turnStats(turn: Turn): { cacheHit: number | null; tokensPerSecond: number | null } {
+  const usage = turn.usage;
+  const prompt = usage?.inputTokens != null && usage.cacheReadTokens != null && usage.cacheWriteTokens != null ? usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : null;
+  const ms = turn.completed?.durationMs;
+  return {
+    cacheHit: prompt != null && prompt > 0 ? Math.round((usage!.cacheReadTokens! / prompt) * 100) : null,
+    tokensPerSecond: ms != null && ms > 0 && usage?.outputTokens != null ? Math.round(usage.outputTokens / (ms / 1000)) : null,
+  };
+}
+
+
 /** What a turn ran with when its own record does not say: the tab's settings, unless they changed after it. */
 export interface TurnFallback {
   effort?: string | null;
@@ -247,10 +259,10 @@ export function TurnDetailsPopover({ turn, fallback, label, children }: { turn: 
   const input = usage?.inputTokens;
   const read = usage?.cacheReadTokens;
   const write = usage?.cacheWriteTokens;
-  const prompt = input != null && read != null && write != null ? input + read + write : null;
-  const hit = prompt != null && prompt > 0 ? `${Math.round((read! / prompt) * 100)}%` : "–";
-  const ms = turn.completed.durationMs;
-  const speed = ms != null && ms > 0 && usage?.outputTokens != null ? `${Math.round(usage.outputTokens / (ms / 1000))}/s` : "–";
+  // The same figures as the footer beside it (PRO-378).
+  const stats = turnStats(turn);
+  const hit = stats.cacheHit != null ? `${stats.cacheHit}%` : "–";
+  const speed = stats.tokensPerSecond != null ? `${stats.tokensPerSecond}/s` : "–";
   const cost = usage?.costUsd != null ? money(usage.costUsd) : "–";
   const harness = turn.agent ?? "";
   const model = usage?.model ?? turn.model;
