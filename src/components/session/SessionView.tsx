@@ -8,13 +8,12 @@ import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, Smartphone, SquareTerminal } from "@/icons";
-import { openPairPhone } from "@/lib/pairing";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { SessionIssueWork } from "@/components/issues/IssueWork";
@@ -71,8 +70,7 @@ import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 import { useFixCheckErrors } from "@/lib/fixCheckErrors";
-import { copyText } from "@/lib/clipboard";
-import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
+import { SessionMenu, type SessionMenuTerminalView } from "./SessionMenu";
 import { BranchGitButton } from "./BranchGitButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
@@ -540,6 +538,12 @@ export function SessionView({
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
+  // The same switch as a row of the title bar's '…' menu.
+  const menuTerminalView: SessionMenuTerminalView = {
+    available: !!activeTab && !!terminalOffer?.available && (!activeIsTerminal || terminalHasConversation),
+    label: activeInTerminal ? viewSwitch.toChat : activeIsTerminal ? viewSwitch.toTerminal : "Open in terminal view",
+    toggle: () => { if (activeTab) void toggleTabView(session, activeTab, viewPlace); },
+  };
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
@@ -619,7 +623,7 @@ export function SessionView({
                   {session.title}
                 </span>
                 {costChip}
-                <WorkspaceMenu session={session} branch={own.branch} folder={session.worktreeName ?? null} base={baseNote} onContinue={continueTab} />
+                <SessionMenu session={session} branch={own.branch} terminalView={menuTerminalView} />
               </>
             ) : local && workspaceLabel ? (
               /* A local chat is placed by its branch, not named by its title (the sidebar names it): "terminalx › main". */
@@ -654,7 +658,7 @@ export function SessionView({
                 {local && session.worktreeRemoved && <Button variant="ghost" size="sm" onClick={() => openWorkspaceRestore(session.id)}>Restore workspace…</Button>}
               </span>
               {costChip}
-              <WorkspaceMenu session={session} branch={movedTo ?? session.branch} folder={session.worktreeName && !session.worktreeRemoved ? session.worktreeName : null} base={baseNote} onContinue={continueTab} />
+              <SessionMenu session={session} branch={here ? here.branch : (session.branch ?? null)} terminalView={menuTerminalView} />
               </>
             ) : (
               <>
@@ -1020,64 +1024,5 @@ export function SessionView({
       )}
     </div>
     </TerminalChatProvider>
-  );
-}
-
-/** The workspace's details, out of the title bar: the folder it lives in, the commit it started from, and a way to it. */
-function WorkspaceMenu({ session, branch, folder, base, onContinue }: { session: SessionEntry; branch: string | null | undefined; folder: string | null; base: string | null; onContinue: (() => void) | null }) {
-  // The crumb has no room for another control beside the issue, automation
-  // and pipeline chips: starting a mirror is a workspace action in this menu,
-  // and a running one shows in the title bar, where it can be stopped.
-  const mirror = useRepoMirror(session);
-  return (
-    <>
-      {mirror.on && <RepoMirrorButton mirror={mirror} />}
-      {mirror.dialog}
-      <DropdownMenu>
-        <WithTooltip label="Workspace">
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-xs" aria-label="Workspace details" className="ml-0.5 shrink-0 text-faint hover:text-foreground">
-              <Ellipsis />
-            </Button>
-          </DropdownMenuTrigger>
-        </WithTooltip>
-        <DropdownMenuContent align="start" className="min-w-[15rem]">
-          {(folder || base) && (
-            <>
-              <DropdownMenuLabel className="flex flex-col gap-0.5 font-normal">
-                {folder && <span className="flex items-center gap-1.5 text-foreground"><Folder className="size-3.5 text-faint" />{folder}</span>}
-                {base && <span className="text-[11px] text-muted-foreground">{base}</span>}
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-            </>
-          )}
-          {branch && (
-            <DropdownMenuItem onSelect={() => void copyText(branch).catch(() => {})}>
-              <Copy /> Copy branch name
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd)}>
-            <FolderOpen /> Reveal in Finder
-          </DropdownMenuItem>
-          {mirror.eligible && !mirror.on && (
-            <DropdownMenuItem onSelect={mirror.show}>
-              <FolderSync /> {mirror.label}…
-            </DropdownMenuItem>
-          )}
-          {onContinue && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={onContinue}>
-                <SessionContinue /> Continue in New Session…
-              </DropdownMenuItem>
-            </>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openPairPhone()}>
-            <Smartphone /> Pair a phone…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </>
   );
 }
