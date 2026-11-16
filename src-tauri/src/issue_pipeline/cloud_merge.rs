@@ -183,6 +183,7 @@ mod tests {
             resolution: None,
             interrupted_resolution: None,
             preserve_resolution_edits: false,
+            author_followed: false,
             resolutions: 0,
             resolve_conflicts: false,
             cloud: true,

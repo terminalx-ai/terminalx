@@ -191,6 +191,11 @@ pub struct Pipeline {
     /// A restarted merge may contain manual edits and must not be aborted automatically.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_resolution_edits: bool,
+    /// TerminalX chose the author itself, because the tab the pipeline had
+    /// was gone (#1014). A guess, not a choice: `pipelines start <tab>
+    /// --adopt-pr` may still hand the pipeline to the tab the work is in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub author_followed: bool,
     /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
     /// the merge is a person's, made from their computer with their own `gh`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -352,6 +357,20 @@ pub struct Resolution {
 /// The newest lines of the record kept per pipeline.
 pub(crate) const EVENT_LIMIT: usize = 200;
 
+/// The titles TerminalX gives the conversations it opens for a pipeline in
+/// the author's session. They are never the author's successor (#1014).
+pub(crate) const REVIEWER_TAB: &str = "Reviewer";
+pub(crate) const RESOLVER_TAB: &str = "Conflict resolver";
+
+/// Why a tab became the author in place of one that is gone (#1014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Succession {
+    /// The tab the session shows: where the person and the lead carry on.
+    Active,
+    /// The session's most recent agent tab, when the shown one is not one.
+    Latest,
+}
+
 impl Pipeline {
     pub fn label(&self) -> &str {
         self.issue.as_ref().map(|issue| issue.identifier.as_str()).unwrap_or(&self.branch)
@@ -364,6 +383,33 @@ impl Pipeline {
         }
         self.events.push(Event { at: at.to_string(), stage: self.stage, kind: kind.to_string(), message: message.into(), commit: None, url: None, session_id: None, actor: None });
         self.events.last_mut().expect("just pushed")
+    }
+
+    /// Whether a tab of `session` may carry this pipeline's work as its
+    /// author: an agent conversation over a PTY that is not one the pipeline
+    /// opened to review or resolve.
+    pub(crate) fn may_author(&self, session: &crate::store::index::SessionEntry, tab: &crate::store::index::TabEntry) -> bool {
+        let helper = [self.reviewer.as_ref(), self.resolver.as_ref()].into_iter().flatten().any(|who| who.session_id == session.id && who.tab_id == tab.id);
+        !helper
+            && !tab.is_terminal()
+            && tab.transport != crate::store::index::AgentTransport::ExperimentalCodexStdio
+            && !matches!(tab.title.as_deref(), Some(REVIEWER_TAB | RESOLVER_TAB))
+    }
+
+    /// The tab that carries on as the author when the author's own tab is no
+    /// longer in its session, as after a restart that left the lead working
+    /// in a new tab (#1014). The pipeline follows its session: the session's
+    /// active tab if it may author, else its most recent tab that may.
+    /// `None` while the author's tab is still there, or when no tab can be.
+    pub(crate) fn successor(&self, session: &crate::store::index::SessionEntry) -> Option<(String, Succession)> {
+        if session.id != self.author.session_id || session.tab(&self.author.tab_id).is_some() {
+            return None;
+        }
+        let active = session.active_tab.as_deref().and_then(|id| session.tab(id)).filter(|tab| self.may_author(session, tab));
+        match active {
+            Some(tab) => Some((tab.id.clone(), Succession::Active)),
+            None => session.tabs.iter().rev().find(|tab| self.may_author(session, tab)).map(|tab| (tab.id.clone(), Succession::Latest)),
+        }
     }
 
     /// The session's part in this pipeline.
