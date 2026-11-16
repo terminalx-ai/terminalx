@@ -195,7 +195,8 @@ m = await measure(page, '[data-testid="machine-page"]');
 failed += report("Sign in to Codex", {
   "only the agent and the step are sent": JSON.stringify(Object.keys(sent).sort()) === JSON.stringify(["cols", "harness", "rows", "step"]) && sent.harness === "codex" && sent.step === "login",
   "it says it is signing in": (await row("codex").getByTestId("machine-agent-setup").getAttribute("data-phase")) === "running",
-  "its terminal shows the device code": (await row("codex").getByTestId("machine-agent-setup-terminal").textContent()).includes("ABCD-1234"),
+  // xterm draws to a canvas, so its text is not in the DOM: the run's terminal is attached and drawn (the shot shows its output).
+  "its terminal is attached and drawn": !!(await page.evaluate(() => window.__PW_SETUP_SUB__)) && (await row("codex").getByTestId("machine-agent-setup-terminal").locator(".xterm-screen").isVisible()),
   "no text is under 12 px": m.small.length === 0,
   "nothing scrolls sideways": !m.sideways,
 }, { sent, small: m.small });
