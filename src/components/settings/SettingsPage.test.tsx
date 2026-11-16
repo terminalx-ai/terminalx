@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -34,6 +34,20 @@ describe("Settings search", () => {
     expect(screen.getByRole("option", { name: /Text size/ })).toBeTruthy();
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
+  });
+
+  // PRO-374 (design 09.01): a result row carries the row's live control, which changes the setting in place.
+  it("puts each row's live control on its result, and using it does not open the page", async () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "link actions" } });
+    const option = screen.getByRole("option", { name: /Link actions/ });
+    const control = await within(option).findByRole("switch");
+    const before = control.getAttribute("aria-checked");
+    fireEvent.click(control);
+    await waitFor(() => expect(control.getAttribute("aria-checked")).not.toBe(before));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “link actions”");
+    // The description is one line; the full text is its tooltip.
+    expect(option.querySelector("[title]")?.className).toContain("truncate");
   });
 
   it("lists matching rows grouped by page under the query, a count and the keys (design 09.31)", () => {
@@ -240,7 +254,7 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "zzqx" } });
     fireEvent.click(screen.getByRole("button", { name: "search keyboard shortcuts" }));
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Shortcuts");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Keyboard shortcuts");
     expect(search().value).toBe("");
   });
 
@@ -335,7 +349,7 @@ describe("Settings dismissal", () => {
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
 
     expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
@@ -376,12 +390,12 @@ describe("Settings dismissal", () => {
 });
 
 describe("the section Settings opens on", () => {
-  // PRO-81: the general way into Settings shows Account.
-  it("is Account when no section is asked for", () => {
+  // PRO-374: the general way into Settings shows General, first in the menu (it was Account, PRO-81).
+  it("is General when no section is asked for", () => {
     render(<SettingsPage onBack={vi.fn()} />);
-    expect(DEFAULT_SETTINGS_TAB).toBe("account");
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(DEFAULT_SETTINGS_TAB).toBe("general");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-current") === "page")).toHaveLength(1);
   });
 
@@ -402,8 +416,8 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
     // …asking for Settings again does not.
     rerender(<SettingsPage openRequest={2} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     // The same for a section asked for by name twice.
     rerender(<SettingsPage initialTab="agents" openRequest={3} onBack={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "General" }));
@@ -411,12 +425,12 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
   });
 
-  it("is Account, not a blank page, when it is handed something that names no section", () => {
+  it("is General, not a blank page, when it is handed something that names no section", () => {
     // What a click handler passes along: the click's event (O1 of the live check).
     const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];
     render(<SettingsPage initialTab={event} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
   });
 });
 

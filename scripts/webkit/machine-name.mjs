@@ -49,6 +49,7 @@ try {
           },
         );
         await page.getByRole("button", { name: "Settings", exact: true }).click();
+        await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Account", exact: true }).click(); // Settings opens on General (PRO-374).
         const section = page.getByTestId("machine-name-settings");
         await section.getByTestId("machine-name").getByText(machine.name, { exact: true }).waitFor();
         // Settings opens with a fade: measure once it has settled.

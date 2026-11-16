@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { configuration, type SettingsEditor } from "@/lib/configuration";
-import { AlertCircle, Check, ChevronDown, Code, Copy, Ellipsis, FileText, FolderGit2, FolderOpen, Lock, RotateCcw, UserRound, X } from "@/icons";
+import { AlertCircle, Check, ChevronDown, Code, Copy, FileText, FolderGit2, FolderOpen, Lock, UserRound, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -12,11 +12,12 @@ import {
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
 import { showError } from "@/lib/errorToasts";
-import { createSettingsFile, dismissSaveFailure, resetUserSetting, useSettingsFile, type SettingsFileStatus } from "@/lib/settingsFile";
+import { createSettingsFile, dismissSaveFailure, useSettingsFile, type SettingsFileStatus } from "@/lib/settingsFile";
 import {
-  cantSaveCopy, cantSaveEffect, cantSaveTitle, effectSentence, setUserKeys, SOURCE_BADGES, type SourceBadgeKind,
+  cantSaveCopy, cantSaveEffect, cantSaveStays, cantSaveTitle, effectSentence, setUserKeys, SOURCE_BADGES, type SourceBadgeKind,
 } from "@/lib/settingSources";
 import type { SettingsFileProblem } from "@/types/settingsSources";
+import { settingValueLabel, userKeyDefault } from "./SettingRowActions";
 
 const TONES = {
   managed: "bg-warning/10 text-warning",
@@ -75,34 +76,14 @@ async function ensureUserFile(file: SettingsFileStatus): Promise<void> {
 }
 
 /**
- * The trailing parts of a registry row kept in the user file: "Your value" while
- * the file sets one of the row's keys, and the ··· row menu (Reset to default,
- * Saved in …). Nothing until the file's status is known.
+ * "Your value" beside the title of a registry row kept in the user file, while
+ * the file sets one of the row's keys. The row's one “…” menu (Reset to
+ * default, Copy setting link, Saved in …) is SettingRowActions (PRO-374).
  */
-export function UserFileRowAccessory({ keys, title }: { keys: readonly string[]; title: string }) {
+export function UserFileRowAccessory({ keys }: { keys: readonly string[] }) {
   const { file } = useSettingsFile();
-  const [busy, setBusy] = useState(false);
-  if (!file) return null;
-  const set = setUserKeys(keys, file.setKeys ?? []);
-  const reset = () => {
-    setBusy(true);
-    void set.reduce((chain, key) => chain.then(() => resetUserSetting(key)), Promise.resolve())
-      .catch((error: unknown) => showError(`Couldn’t reset ${title}`, error))
-      .finally(() => setBusy(false));
-  };
-  return <>
-    {set.length > 0 && <SourceBadge kind="yours" />}
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-xs" aria-label={`${title} actions`} className="-my-1 size-5 shrink-0"><Ellipsis /></Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[15rem]">
-        <DropdownMenuItem disabled={!set.length || busy} onSelect={reset}><RotateCcw />Reset to default</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <div className="px-2 py-1.5 text-xs text-muted-foreground">Saved in <span className="font-mono">{shownPath(file)}</span></div>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  </>;
+  if (!file || !setUserKeys(keys, file.setKeys ?? []).length) return null;
+  return <SourceBadge kind="yours" />;
 }
 
 /** Open settings.json, top right of every Settings page, with its Open / Open in / Copy path menu. */
@@ -147,7 +128,10 @@ export function OpenSettingsFileButton() {
  * the parser's words, and what stays in effect. It stays until closed, and goes
  * once the file is valid again.
  */
-export function CantSaveToast() {
+export function CantSaveToast({ settingTitle }: {
+  /** The title of the setting kept at a user-file key ("preferences.sendKey"), so the toast names what stayed. */
+  settingTitle?: (key: string) => string | undefined;
+} = {}) {
   const { file, saveFailure } = useSettingsFile();
   const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
   const reset = useRef<number | undefined>(undefined);
@@ -156,6 +140,9 @@ export function CantSaveToast() {
   if (!file || !problem || !saveFailure) return null;
   const displayPath = shownPath(file);
   const title = cantSaveTitle(displayPath, problem);
+  // The setting whose change was refused, and the value it keeps: the file's last good value, else its default.
+  const stayed = (saveFailure.keys ?? []).map((key) => ({ key, title: settingTitle?.(`preferences.${key}`) })).find((entry) => entry.title);
+  const stayedValue = stayed && settingValueLabel(file.preferences?.[stayed.key] ?? userKeyDefault(`preferences.${stayed.key}`));
   const onCopy = () => {
     window.clearTimeout(reset.current);
     copyText(cantSaveCopy(displayPath, problem)).then(() => setCopy("copied"), () => setCopy("failed"));
@@ -166,7 +153,7 @@ export function CantSaveToast() {
     <div className="min-w-0 flex-1">
       <div id="cant-save-title" className="font-medium">{title}</div>
       <p className="mt-0.5 break-words text-xs text-muted-foreground">
-        {problem.key && <span className="font-mono text-foreground">{problem.key}</span>}{problem.key && ": "}{problem.message.replace(/\.$/, "")}. {cantSaveEffect(problem)}
+        {stayed?.title ? cantSaveStays(stayed.title, stayedValue) : <>{problem.key && <span className="font-mono text-foreground">{problem.key}</span>}{problem.key && ": "}{problem.message.replace(/\.$/, "")}. {cantSaveEffect(problem)}</>}
       </p>
       <div className="mt-2.5 flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={() => void openSettingsPath(file.path, displayPath)}><FileText />Open file</Button>
@@ -186,6 +173,9 @@ const LEGEND: Record<SourceBadgeKind, ReactNode> = {
   overridesProject: <>your <span className="font-mono">.terminalx/settings.local.json</span>, over the project’s value</>,
   yours: "your own settings",
 };
+
+/** The badges a layered value can show, from every layer (Layered configuration). */
+export const LAYERED_BADGES: readonly SourceBadgeKind[] = ["managed", "project", "overridesProject", "yours"];
 
 /** The badges a page can show, and what each means. Only badges this build produces are listed. */
 export function BadgeLegend({ kinds }: { kinds: readonly SourceBadgeKind[] }) {

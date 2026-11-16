@@ -59,7 +59,7 @@ describe("settings registry", () => {
 
   it("resolves row links and safely defaults unknown legacy targets", () => {
     expect(resolveSetting("appearance.textSize").section).toBe("appearance");
-    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("account.identity");
+    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("general.websiteLinks");
   });
 
   it("keeps the linkable allowlist to reversible, local display and sound switches", () => {

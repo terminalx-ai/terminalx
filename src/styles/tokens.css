@@ -94,6 +94,8 @@
   --hairline-strong: oklch(1 0 0 / 8%);
   --border: oklch(1 0 0 / 10%);
   --surface-well: oklch(0 0 0 / 28%);
+  /* An off switch's track: a grey you can see on the page, never the black well (PRO-374). */
+  --switch-off: oklch(1 0 0 / 20%);
   --surface-chat: color-mix(in oklab, var(--surface-page) 88%, black);
   /* Near black in the dark: a terminal reads as a terminal at a glance, apart from the chat. */
   --surface-terminal: oklch(0.13 0 0);
@@ -122,6 +124,7 @@
   --hairline-strong: oklch(0 0 0 / 9%);
   --border: oklch(0 0 0 / 11%);
   --surface-well: oklch(0 0 0 / 7%);
+  --switch-off: oklch(0 0 0 / 22%);
   --surface-thumb: var(--surface-card);
   --shadow-surface: 0 1px 2px oklch(0 0 0 / 10%), 0 0 0 1px oklch(0 0 0 / 4%);
   --shadow-card: 0 1px 3px oklch(0 0 0 / 6%);
