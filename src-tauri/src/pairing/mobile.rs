@@ -222,9 +222,12 @@ pub(super) struct MobileRuntime {
     notifications: Mutex<VecDeque<MobileNotification>>,
     notification_epoch: String,
     notification_seq: std::sync::atomic::AtomicU64,
-    /// Questions and permission requests already noticed, by request id: an
-    /// ask published again (a reconciliation) is not news again.
-    asked: Mutex<VecDeque<String>>,
+    /// Questions and permission requests already noticed, by `session/tab`
+    /// and request id: an ask published again (a reconciliation) is not news
+    /// again. Ids are only a tab's own (ACP's `acp:{n}` and Codex's bare
+    /// numbers count from one in each agent process), so a tab's are
+    /// forgotten when its next turn starts: a restarted agent asks anew.
+    asked: Mutex<VecDeque<(String, String)>>,
     /// What each tab's turn has met since it began, by `session/tab`.
     turns: Mutex<HashMap<String, TurnNotes>>,
     /// Pipeline news already sent, by `engine::PhoneNotice::key`.
@@ -370,10 +373,11 @@ impl MobileRuntime {
         let (kind, body, question, approval) = match &event.payload {
             Payload::TurnStarted { .. } => {
                 self.turns.lock().unwrap().remove(&tab_key);
+                self.asked.lock().unwrap().retain(|(tab, _)| *tab != tab_key);
                 return None;
             }
             Payload::QuestionsAsked { request_id, questions, .. } => {
-                if !self.first_ask(request_id) { return None; }
+                if !self.first_ask(&tab_key, request_id) { return None; }
                 let body = match questions.as_slice() {
                     [] => "An agent has a question for you.".to_string(),
                     [one] => collapse_notification_text(&one.question),
@@ -391,7 +395,7 @@ impl MobileRuntime {
                 (NoticeKind::Question, body, question, None)
             }
             Payload::PermissionRequested { request_id, tool_name, input, title, description, options, .. } => {
-                if !self.first_ask(request_id) { return None; }
+                if !self.first_ask(&tab_key, request_id) { return None; }
                 // A command says what is asked in its own words; anything else, the request's title.
                 let command = input.get("command").and_then(Value::as_str).map(str::trim).filter(|command| !command.is_empty());
                 let shown = command.map(|command| format!("Run: {command}"));
@@ -485,11 +489,11 @@ impl MobileRuntime {
         Some(self.notification(kind, title, collapse_notification_text(&notice.detail), &notice.author.session_id, &notice.author.tab_id, session_title))
     }
 
-    /// Whether this is the first notice of an ask's request id.
-    fn first_ask(&self, request_id: &str) -> bool {
+    /// Whether this is the first notice of this tab's ask by its request id.
+    fn first_ask(&self, tab_key: &str, request_id: &str) -> bool {
         let mut asked = self.asked.lock().unwrap();
-        if asked.iter().any(|seen| seen == request_id) { return false; }
-        asked.push_back(request_id.to_string());
+        if asked.iter().any(|(tab, seen)| tab == tab_key && seen == request_id) { return false; }
+        asked.push_back((tab_key.to_string(), request_id.to_string()));
         while asked.len() > NOTIFICATION_LIMIT { asked.pop_front(); }
         true
     }
@@ -3381,6 +3385,24 @@ mod tests {
         let wire = serde_json::to_value(&finished).unwrap();
         assert_eq!(wire["kind"], "finished");
         assert!(wire.get("question").is_none() && wire.get("approval").is_none());
+    }
+
+    #[test]
+    fn each_tab_asks_by_its_own_request_ids_and_a_new_turn_asks_anew() {
+        let runtime = MobileRuntime::new();
+        let in_tab = |tab: &str, payload: Payload| AgentEvent { tab_id: tab.into(), ..event(1, payload) };
+        let started = || Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: None, initiating_prompt: None };
+        // ACP and Codex number their asks per agent process: two tabs' first asks share an id.
+        for payload in [|| asked("acp:1", vec![question("Which?", &["A"], false)]), || permission("1", None)] {
+            assert!(runtime.agent_notification(&in_tab("one", payload()), titled).is_some());
+            assert!(runtime.agent_notification(&in_tab("two", payload()), titled).is_some(), "another tab's ask with the same id is news");
+            assert!(runtime.agent_notification(&in_tab("two", payload()), titled).is_none(), "the same ask published again is not");
+            assert!(runtime.agent_notification(&AgentEvent { session_id: "other".into(), ..in_tab("one", payload()) }, titled).is_some(), "nor is a tab of the same id in another session the same");
+        }
+        // The agent restarted: a new turn, its ids from one again.
+        assert!(runtime.agent_notification(&in_tab("one", started()), titled).is_none());
+        assert!(runtime.agent_notification(&in_tab("one", permission("1", None)), titled).is_some(), "a new turn's ask is news");
+        assert!(runtime.agent_notification(&in_tab("two", permission("1", None)), titled).is_none(), "another tab's turn goes on");
     }
 
     #[test]
