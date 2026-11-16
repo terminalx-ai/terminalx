@@ -106,13 +106,18 @@ export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
   return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
 }
 
+/** Whether files opened under this id are tabs of a local session: not a checkout with no session, not a cloud session. */
+function hasFileTabs(sessionId: string): boolean {
+  return !sessionId.startsWith("checkout:") && !sessionId.startsWith("cloud:");
+}
+
 /**
  * A file a local session opened: a tab in the session's tab strip, beside the
- * chat tab and never over it (PRO-402). A cloud workspace's file (`source`)
- * and a checkout's stay in the editor pane (`EditorSplit`).
+ * chat tab and never over it (PRO-402). A cloud workspace's file (`source`),
+ * a cloud session's and a checkout's stay in the editor pane (`EditorSplit`).
  */
 export function isFileTab(entry: EditorEntry): boolean {
-  return !isReviewEditor(entry) && !entry.source && !entry.sessionId.startsWith("checkout:");
+  return !isReviewEditor(entry) && !entry.source && hasFileTabs(entry.sessionId);
 }
 
 /** An editor that can be a tab of its session: a review, or a file. */
@@ -164,7 +169,7 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         && reviewPath(e.root, e.rel) && e.attachment.path === `${e.root}/${e.rel}` && (e.attachment.sentAt === undefined || typeof e.attachment.sentAt === "string")) {
         editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
           dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: "attachment", media: e.media, attachment: { path: e.attachment.path, ...(e.attachment.sentAt ? { sentAt: e.attachment.sentAt } : {}) } });
-      } else if (["text", "image", "audio", "video"].includes(e.kind) && !e.attachment && !e.sessionId.startsWith("checkout:") && reviewPath(e.root, e.rel) === e.rel) {
+      } else if (["text", "image", "audio", "video"].includes(e.kind) && !e.attachment && hasFileTabs(e.sessionId) && reviewPath(e.root, e.rel) === e.rel) {
         // A session's file tab: where the file is, never what was typed in it.
         editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
           dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: e.kind });
@@ -240,7 +245,7 @@ let nonce = 0;
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   recordRecentFile(source ?? `local:${root}`, rel);
   const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
-  const tab = !source && !sessionId.startsWith("checkout:");
+  const tab = !source && hasFileTabs(sessionId);
   const selected = getTerminalState().selected[sessionId];
   if (!tab && selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
   // A session's file tab is shown by selecting it, like any tab of the session.

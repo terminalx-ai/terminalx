@@ -152,9 +152,12 @@ describe("file tabs (PRO-402)", () => {
     selectSessionTab("s", { kind: "agent", id: "chat" });
     const cloud = openFile("s", "/repo", "a.ts", undefined, "/repo", "cloud:ws");
     const checkout = openFile("checkout:/repo", "/repo", "a.ts");
-    for (const id of [cloud, checkout]) expect(isTabEditor(getEditors().editors.find((e) => e.id === id)!)).toBe(false);
+    // A cloud session has no panes of the workspace's tabs: a file a link in its chat opens stays in the pane too.
+    const cloudSession = openFile("cloud:org:ws:one", "/repo", "a.ts");
+    for (const id of [cloud, checkout, cloudSession]) expect(isTabEditor(getEditors().editors.find((e) => e.id === id)!)).toBe(false);
     expect(getTerminalState().selected.s).toEqual({ kind: "agent", id: "chat" });
     expect(getTerminalState().selected["checkout:/repo"]).toBeUndefined();
+    expect(getTerminalState().selected["cloud:org:ws:one"]).toBeUndefined();
     expect(restoreReviewTabs(serializeReviewTabs(getEditors())).editors).toEqual([]);
   });
 
