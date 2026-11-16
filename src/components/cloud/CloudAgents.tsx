@@ -1,5 +1,5 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { Bot, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
@@ -58,6 +58,12 @@ import { usePeople } from "@/lib/cloudPeople";
 import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
+/** A session to bring to the front of the agent view: its tab, or (null) the session's first tab. */
+export interface AgentFocus {
+  sessionId: string;
+  tabId: string | null;
+}
+
 /**
  * The agent tabs of a cloud workspace (PRO-22). Tabs and transcripts show
  * from the local cache and checkpoints even while the workspace sleeps;
@@ -73,6 +79,7 @@ export function CloudAgentsView({
   waking = false,
   collabKey,
   active: shown = true,
+  focus = null,
 }: {
   scope: CloudAgentScope;
   client: WorkspaceRpcClient;
@@ -87,6 +94,8 @@ export function CloudAgentsView({
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
   active?: boolean;
+  /** Bring this session's tab to the front once it is listed; a later change of focus does it again. */
+  focus?: AgentFocus | null;
 }) {
   const snapshot = useCloudAgents(scope);
   const [selected, setSelected] = useState<string | null>(null);
@@ -121,6 +130,16 @@ export function CloudAgentsView({
   }, [generation, client, scope.organizationId, scope.workspaceId]);
 
   const tabs = snapshot.tabs;
+  // Applied once per focus, when its tab is listed: choosing another tab afterwards is not undone by later updates.
+  const focused = useRef<string | null>(null);
+  const focusKey = focus ? `${focus.sessionId}/${focus.tabId ?? ""}` : null;
+  useEffect(() => {
+    if (!focus || focused.current === focusKey) return;
+    const tab = (focus.tabId ? tabs.find((item) => item.tabId === focus.tabId) : undefined) ?? tabs.find((item) => item.info.sessionId === focus.sessionId);
+    if (!tab) return;
+    focused.current = focusKey;
+    setSelected(tab.tabId);
+  }, [focusKey, tabs]);
   const active = tabs.find((tab) => tab.tabId === selected) ?? tabs[0] ?? null;
 
   // Others see which agent tab this person is on.

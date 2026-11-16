@@ -31,7 +31,7 @@ import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
-import { isCloudKey, isMachineKey } from "@/types/target";
+import { isCloudKey, isMachineKey, machineKeyKind, machineSectionKey, parseMachineKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -294,6 +294,8 @@ export function AppShell() {
   const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
   const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
+  // A session on a paired machine (`machine:<m>:<p>:<s>`, PRO-346) opens in its machine's view, focused on it, while Machines is on.
+  const machineSession = machinesOn && machineKeyKind(store.selectedSessionId) === "session" ? store.selectedSessionId : null;
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
@@ -389,7 +391,13 @@ export function AppShell() {
             )}
             </PanelPresence>
 
-            {cloudKey ? (
+            {machineSession ? (
+              <ErrorBoundary key={machineSectionKey(parseMachineKey(machineSession)?.machineId ?? "")} label="the machine">
+                <Suspense fallback={viewFallback}>
+                  <MachineMain machineKey={machineSession} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </Suspense>
+              </ErrorBoundary>
+            ) : cloudKey ? (
               <main className={MAIN}>
                 <ErrorBoundary key={cloudKey} label="the session">
                   <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />

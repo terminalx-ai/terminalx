@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PanelLeft, RotateCw } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,8 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { WorkspaceView } from "@/components/cloud/CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
+import { machineSessionTab, useMachineProjects } from "@/lib/machineCatalog";
+import type { AgentFocus } from "@/components/cloud/CloudAgents";
 import { parseMachineKey } from "@/types/target";
 import { MachineChip, MachineLocation } from "./connectionStatus";
 
@@ -17,8 +19,15 @@ import { MachineChip, MachineLocation } from "./connectionStatus";
  * stays beside it.
  */
 export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { machineKey: string; sidebarOpen: boolean; onToggleSidebar: () => void }) {
-  const machineId = parseMachineKey(machineKey)?.machineId ?? "";
+  const parsed = parseMachineKey(machineKey);
+  const machineId = parsed?.machineId ?? "";
   const store = useMachineConnections();
+  // A session key (`machine:<m>:<p>:<s>`) opens the machine's view on that session's agent tab (PRO-346).
+  const { sessions } = useMachineProjects(machineId);
+  const row = parsed?.sessionId ? (sessions.find((session) => session.key === machineKey) ?? null) : null;
+  const focusSession = parsed?.sessionId ?? null;
+  const focusTab = row ? machineSessionTab(row) : null;
+  const focusAgent = useMemo<AgentFocus | null>(() => (focusSession ? { sessionId: focusSession, tabId: focusTab } : null), [focusSession, focusTab]);
   const { machine, state, connection, attachError } = machineConnection(store, machineId);
   const name = machine?.name ?? "Machine";
   const [clientState, setClientState] = useState<WorkspaceConnectionState>({ state: "idle" });
@@ -30,7 +39,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
 
   let body;
   if (connection && machine) {
-    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} />;
+    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} initialAgent={!!focusAgent} focusAgent={focusAgent} />;
   } else {
     body = (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground" data-testid="machine-main-empty">

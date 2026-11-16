@@ -468,6 +468,8 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  /** The machine project it belongs to (`machine/1`, docs/MACHINES.md "Project scoping"); absent elsewhere. */
+  projectId?: string | null;
   rowStatus?: import("./sessionStatus").SessionStatusInput;
   manualStatus?: import("./manualStatus").ManualStatus;
   automation?: { id: string } | null;
@@ -488,6 +490,18 @@ export interface RuntimeSession {
   activeTab?: string | null;
   /** The issue it was started from (`pipeline/1` runtimes). */
   issue?: RuntimeIssueRef | null;
+}
+
+/** A project on a paired machine (`machine.projects`, `machine.changed`; docs/MACHINES.md "machine/1"). */
+export interface MachineProject {
+  /** Derived from the project's path on the machine: 16 base64url characters, no `:` or `/`. */
+  projectId: string;
+  name: string;
+  /** A path on the machine: display only, never a local path. */
+  path: string;
+  kind: "git" | "folder" | string;
+  defaultBranch: string | null;
+  archived: boolean;
 }
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
@@ -1116,6 +1130,21 @@ export class WorkspaceRpcClient {
    */
   moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
     return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
+  }
+
+  /** A machine's projects (`machine/1`). */
+  async machineProjects(): Promise<MachineProject[]> {
+    const result = await this.call<{ projects?: MachineProject[] }>("machine.projects");
+    return Array.isArray(result.projects) ? result.projects : [];
+  }
+
+  /** `machine.changed`: the machine's name or project set changed; `projects` is the whole new list when sent. */
+  onMachineChanged(listener: (change: { projects: MachineProject[] | null }) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "machine.changed") return;
+      const projects = (notification.params as { projects?: unknown }).projects;
+      listener({ projects: Array.isArray(projects) ? (projects as MachineProject[]) : null });
+    });
   }
 
   /** The sessions this connection may see (`session.list`). */
