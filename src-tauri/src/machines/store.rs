@@ -40,6 +40,10 @@ pub struct PairedMachine {
     /// credential, which is in the Keychain (`relay:<machineId>`).
     #[serde(default)]
     pub relay: Option<RelayInfo>,
+    /// Renamed on this computer (PRO-350): `name` is this computer's, and
+    /// the name the machine describes itself with no longer replaces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_here: bool,
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
@@ -172,6 +176,7 @@ mod tests {
             last_seen_at: None,
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         }
     }

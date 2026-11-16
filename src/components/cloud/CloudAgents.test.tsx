@@ -960,6 +960,38 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ projectId: "p-terminalx" })));
   });
 
+  it("names an agent not signed in on the machine, and opens the machine's page (PRO-350)", async () => {
+    client.connection = connected({ capabilities: ["session/1", "keys/1", "agents/1"] });
+    client.listRuntimeAgents.mockResolvedValue([
+      { ...RUNTIME_AGENTS[0]!, signIn: "signedIn" },
+      { ...RUNTIME_AGENTS[1]!, signIn: "signedOut" },
+    ] as never);
+    const openPage = vi.fn();
+    render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage } }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    await waitFor(() => expect(client.listRuntimeAgents).toHaveBeenCalled());
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
+    // Claude Code is signed in there: nothing to say.
+    expect(within(form).queryByTestId("agent-sign-in-reason")).toBeNull();
+    await choose("Agent", "Codex", "menuitem");
+    const reason = await within(form).findByTestId("agent-sign-in-reason");
+    expect(reason.textContent).toContain("Codex is not signed in on dev-server. Sign in from its machine page.");
+    fireEvent.click(within(reason).getByRole("button", { name: "Open machine page" }));
+    expect(openPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about sign-in when the machine's runtime does not report it", async () => {
+    client.connection = connected({ capabilities: ["session/1", "keys/1", "agents/1"] });
+    client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS as never);
+    render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage: vi.fn() } }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
+    await choose("Agent", "Codex", "menuitem");
+    expect(within(form).queryByTestId("agent-sign-in-reason")).toBeNull();
+  });
+
   it("a cloud workspace's form has no project picker and sends no project", async () => {
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     render(view(connected()));

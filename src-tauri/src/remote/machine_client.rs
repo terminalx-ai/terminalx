@@ -649,7 +649,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.

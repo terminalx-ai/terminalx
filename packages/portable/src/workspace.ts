@@ -68,8 +68,10 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
  * `machine.updateChanged` notification.
+ * `machine/4` (PRO-350): `machine.agentSetup` and `machine.agentSetupRunning`,
+ * an agent's install or sign-in in a terminal on the machine.
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -80,6 +82,8 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.relayAccess": "machine/2",
   "machine.updateStatus": "machine/3",
   "machine.update": "machine/3",
+  "machine.agentSetup": "machine/4",
+  "machine.agentSetupRunning": "machine/4",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -619,6 +623,13 @@ export interface RuntimeAgentModel {
   resolved?: string | null;
 }
 
+/**
+ * Whether an agent's own login on the runtime's computer is in place
+ * (PRO-350): `unknown` when its CLI could not tell. A login is evidence of
+ * configuration, not of provider access.
+ */
+export type RuntimeAgentSignIn = "signedIn" | "signedOut" | "unknown";
+
 /** An agent installed on the runtime (`runtime.agents`, `agents/1`). */
 export interface RuntimeAgent {
   id: string;
@@ -628,6 +639,35 @@ export interface RuntimeAgent {
   /** Launch modes it takes; empty when it has none. */
   modes: string[];
   defaultMode: string;
+  /** Its CLI's version (PRO-350); null when it did not say, absent from an older runtime. */
+  version?: string | null;
+  /** Its login on that computer (PRO-350); absent from an older runtime, which shows the agent without a state. */
+  signIn?: RuntimeAgentSignIn;
+  /** When `signIn` was read, ms since the epoch (PRO-350). */
+  signInCheckedAt?: number;
+}
+
+/** An agent the runtime knows and has no CLI for (`runtime.agents`, PRO-350). */
+export interface RuntimeMissingAgent {
+  id: string;
+  name: string;
+  /** Whether `machine.agentSetup` can install it there (its provider has an official installer). */
+  installable: boolean;
+}
+
+/** `runtime.agents` in full (PRO-350). `missing` is null from an older runtime, which does not list them. */
+export interface RuntimeAgentsReport {
+  agents: RuntimeAgent[];
+  missing: RuntimeMissingAgent[] | null;
+}
+
+/** A step of an agent's setup on a machine (`machine/4`), as on this Mac (`src/lib/agentSetupFlow.ts`). */
+export type MachineAgentSetupStep = "install" | "login";
+
+/** The setup step of an agent running on the machine now (`machine.agentSetupRunning`). */
+export interface MachineAgentSetupRun {
+  ptyId: string;
+  step: MachineAgentSetupStep;
 }
 
 /** `session.status`: a subscribed tab's turn or process state changed. */
@@ -676,6 +716,8 @@ export interface PtyInfo {
   /** An agent tab's own terminal (`agent-pty/1`): the tab, and whether its CLI runs now. */
   tabId?: string;
   running?: boolean;
+  /** An agent's install or sign-in (`machine/4`); such a terminal is never in `pty.list`. */
+  setup?: { harness: string; step: MachineAgentSetupStep };
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -1423,6 +1465,37 @@ export class WorkspaceRpcClient {
   async listRuntimeAgents(): Promise<RuntimeAgent[]> {
     const result = await this.call<{ agents?: RuntimeAgent[] }>("runtime.agents");
     return result.agents ?? [];
+  }
+
+  /**
+   * `runtime.agents` with what PRO-350 adds: each agent's version and
+   * sign-in, and the agents with no CLI there. `refresh` reads the sign-ins
+   * again now, else the runtime answers from a check at most a minute old.
+   */
+  async runtimeAgentsReport(options: { refresh?: boolean } = {}): Promise<RuntimeAgentsReport> {
+    const result = await this.call<{ agents?: RuntimeAgent[]; missing?: RuntimeMissingAgent[] }>("runtime.agents", options.refresh ? { refresh: true } : {});
+    return { agents: result.agents ?? [], missing: result.missing ?? null };
+  }
+
+  /**
+   * `machine/4`: start an agent's install or sign-in in a terminal on the
+   * machine (PRO-350). The command is the runtime's own; the terminal is
+   * attached and typed into as any other (`attachPty`, `write`), and ends
+   * with `pty.exit`, whose code says how (`SETUP_EXIT` in
+   * `src/lib/agentSetupFlow.ts`). Refused with `setup_busy` while a step of
+   * that agent runs there; its data is that {@link MachineAgentSetupRun}
+   * when the step runs in a terminal to attach to, absent when the machine's
+   * own window runs it.
+   */
+  async startAgentSetup(params: { harness: string; step: MachineAgentSetupStep; cols: number; rows: number }): Promise<PtyInfo> {
+    // Not resent after a drop: a second start would only be refused as busy.
+    return this.call<PtyInfo>("machine.agentSetup", params);
+  }
+
+  /** `machine/4`: the setup step running there for `harness`, to follow it from another window or after a reload. */
+  async agentSetupRunning(harness: string): Promise<MachineAgentSetupRun | null> {
+    const result = await this.call<{ run?: MachineAgentSetupRun | null }>("machine.agentSetupRunning", { harness });
+    return result.run ?? null;
   }
 
   /** `pipeline/1`: the issue pipelines the runtime carries, newest last. */

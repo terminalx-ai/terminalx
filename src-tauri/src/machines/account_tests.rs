@@ -289,6 +289,7 @@ fn the_directory_maps_online_offline_not_available_this_mac_and_paired() {
             last_seen_at: None,
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         })
         .unwrap();
