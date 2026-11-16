@@ -11,6 +11,7 @@
 //!
 //! The shapes are `src/types/machines.ts`.
 
+pub mod account;
 pub mod connect;
 pub mod pair;
 pub mod secrets;
@@ -297,11 +298,12 @@ pub async fn machines_host_status(state: tauri::State<'_, crate::AppState>, mach
 /// "Let other computers operate this Mac". The runtime watches the file.
 #[tauri::command]
 pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
-    let (runtime, machines) = (state.runtime(), machines.inner().clone());
+    let (runtime, machines, pairing) = (state.runtime(), machines.inner().clone(), state.pairing.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = crate::store::settings::load();
         settings.machines.allow_operating = enabled;
         crate::store::settings::save(&settings).map_err(err)?;
+        pairing.machine_operating_changed();
         Ok(host_view(&machines, runtime))
     })
     .await
@@ -330,10 +332,28 @@ pub async fn machines_decline(request_id: String, state: tauri::State<'_, crate:
     host_command(state, machines, wire::DECLINE, serde_json::json!({ "requestId": request_id })).await
 }
 
-/// Remove a paired computer: its connections close and its credential is refused.
+/// Remove a paired computer: its connections close and its credential is
+/// refused. One allowed through the account (PRO-349) also has its grant
+/// revoked, so the operating computer's account stops listing this Mac as
+/// paired; that is best effort, and a failure is only logged.
 #[tauri::command]
 pub async fn machines_revoke(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
-    host_command(state, machines, wire::REVOKE, serde_json::json!({ "id": id })).await
+    let (runtime, machines, pairing) = (runtime(&state)?, machines.inner().clone(), state.pairing.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let answer = runtime.machine_host(wire::REVOKE, serde_json::json!({ "id": id })).map_err(err)?;
+        if let Some(grant_request_id) = revoked_grant(&answer) {
+            pairing.host_removed_computer(grant_request_id);
+        }
+        Ok(host_view(&machines, Some(runtime)))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The account grant of the computer a [`wire::REVOKE`] removed, if it had one.
+fn revoked_grant(answer: &serde_json::Value) -> Option<&str> {
+    answer["revoked"].as_bool().filter(|revoked| *revoked)?;
+    answer["grantRequestId"].as_str().filter(|grant| !grant.is_empty())
 }
 
 /// "Disconnect" (PRO-357): close a paired computer's connections now and
@@ -448,6 +468,15 @@ mod tests {
             seen.push((event.event.to_string(), event.payload.to_string()));
         }
         assert!(seen.iter().any(|(event, payload)| event == APP_UPDATE_REQUESTED_EVENT && payload == r#"{"version":"0.2.40"}"#), "{seen:?}");
+    }
+
+    #[test]
+    fn only_a_removed_computer_with_a_grant_revokes_one() {
+        use serde_json::json;
+        assert_eq!(revoked_grant(&json!({ "revoked": true, "grantRequestId": "grant-1" })), Some("grant-1"));
+        assert_eq!(revoked_grant(&json!({ "revoked": true, "grantRequestId": null })), None, "paired by code");
+        assert_eq!(revoked_grant(&json!({ "revoked": true })), None, "a runtime before PRO-349");
+        assert_eq!(revoked_grant(&json!({ "revoked": false, "grantRequestId": "grant-1" })), None);
     }
 
     #[test]

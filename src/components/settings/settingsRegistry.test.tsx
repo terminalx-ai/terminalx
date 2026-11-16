@@ -111,6 +111,9 @@ it("keeps global settings rows in the registry", () => {
   // PRO-155's action editor is mounted as one registered row (repositories.actions),
   // but its dialog switches edit an unsaved action draft; registering them would
   // advertise row links that cannot open.
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
+  // #981's automatic account switching is one agent's editor inside its accounts
+  // card, shown only with two or more subscription accounts: row links to it
+  // would usually lead nowhere, for the same reason.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx", "!./AgentAutoSwitch.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });

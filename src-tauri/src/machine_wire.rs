@@ -41,6 +41,10 @@ pub const STATUS: &str = "runtime.machineHost.status";
 pub const ADOPT_KEY: &str = "runtime.machineHost.adoptKey";
 pub const PHONE_ROUTE: &str = "runtime.machineHost.phoneRoute";
 pub const REVOKE: &str = "runtime.machineHost.revoke";
+/// Remove the paired computer that paired through the account grant
+/// `grantRequestId` (PRO-349, [`RevokeGrant`]): `{ revoked, id }`, with `id`
+/// null when no computer has that grant.
+pub const REVOKE_GRANT: &str = "runtime.machineHost.revokeGrant";
 /// Make a pairing code (PRO-342). Answers [`CreatedCode`], or refuses with
 /// `pairing_paused` (after five wrong attempts in a minute) or `not_enabled`.
 pub const CREATE_CODE: &str = "runtime.machineHost.createCode";
@@ -104,12 +108,48 @@ pub struct ComputerSummary {
     pub approved_at: i64,
     pub last_seen_at: Option<i64>,
     pub connected: bool,
-    /// When the person pressed Disconnect; refused until they let it back.
+    /// When the person pressed Disconnect; refused until they let it back (PRO-357).
     #[serde(default)]
     pub disconnected_at: Option<i64>,
-    /// How it is connected now: `direct` or `relay` (both while moving).
+    /// The relay host id of the computer's client key ([`key_id_of`]); `None`
+    /// for a record with no client key, and from a runtime before PRO-349.
     #[serde(default)]
-    pub routes: Vec<String>,
+    pub key_id: Option<String>,
+    /// How its newest live connection reached this machine; `None` while it
+    /// is not connected, and from a runtime before PRO-349.
+    #[serde(default)]
+    pub route: Option<ComputerRoute>,
+}
+
+/// `MachineRouteKind` in src/types/machines.ts, as the machine sees a computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerRoute {
+    Lan,
+    Tailscale,
+    Relay,
+}
+
+impl ComputerRoute {
+    /// A direct connection's route from its peer address: `tailscale` from
+    /// `100.64.0.0/10` (or Tailscale's IPv6 range `fd7a:115c:a1e0::/48`),
+    /// `lan` otherwise. A label, never an authentication decision
+    /// (docs/MACHINES.md decision 6).
+    pub fn of_peer(peer: std::net::IpAddr) -> Self {
+        match peer.to_canonical() {
+            std::net::IpAddr::V4(address) if address.octets()[0] == 100 && (address.octets()[1] & 0xC0) == 64 => Self::Tailscale,
+            std::net::IpAddr::V6(address) if address.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0] => Self::Tailscale,
+            _ => Self::Lan,
+        }
+    }
+}
+
+/// The short key id Settings → Machines labels a computer by: the relay host
+/// id of its client key (standard base64 of 32 bytes), `None` for anything else.
+pub fn key_id_of(client_public_key_b64: &str) -> Option<String> {
+    use base64::Engine as _;
+    let key: [u8; 32] = base64::engine::general_purpose::STANDARD.decode(client_public_key_b64).ok()?.try_into().ok()?;
+    Some(crate::relay_e2ee::host_id_of(&key))
 }
 
 /// The answer to [`STATUS`], and the payload of [`CHANGED_EVENT`].
@@ -224,6 +264,15 @@ pub struct ForComputer {
     pub id: String,
 }
 
+/// Params of [`REVOKE_GRANT`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevokeGrant {
+    pub epoch: String,
+    pub lease: String,
+    pub grant_request_id: String,
+}
+
 /// Params of [`APPROVE`] and [`DECLINE`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -239,6 +288,11 @@ pub struct Answer {
 pub struct CreateCode {
     pub epoch: String,
     pub lease: String,
+    /// The account grant this code answers (PRO-349): the computer allowed
+    /// with it is linked to the grant, so removing it on either side ends
+    /// both. Absent for a code made in Settings → Machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_request_id: Option<String>,
 }
 
 /// The machine's operating system, as `machine.describe` names it.
@@ -493,6 +547,68 @@ mod tests {
         let older: Status = serde_json::from_value(serde_json::json!({ "enabled": true, "hostKey": "ready", "machineId": null, "listening": null, "phoneRoute": false, "computers": [], "error": null })).unwrap();
         assert!(!older.runtime_owns_direct(), "a status without takesPort never takes the window's port");
         assert_eq!(older.pending, None, "a status from before PRO-342 has nothing pending");
+    }
+
+    #[test]
+    fn a_computer_names_its_key_id_and_route_and_an_older_status_still_parses() {
+        use base64::Engine as _;
+        let client = crate::relay_e2ee::HostKeypair::from_secret([4; 32]);
+        let key_id = key_id_of(&base64::engine::general_purpose::STANDARD.encode(client.public())).unwrap();
+        assert_eq!(key_id, client.host_id(), "the relay host id of the client key");
+        assert_eq!(key_id.len(), 16);
+        assert_eq!(key_id_of("not a key"), None);
+        assert_eq!(key_id_of(&base64::engine::general_purpose::STANDARD.encode([1u8; 31])), None, "31 bytes is no key");
+
+        let computer = ComputerSummary {
+            id: "computer-1".into(),
+            label: "MacBook".into(),
+            platform: Some("macos".into()),
+            approved_at: 1,
+            last_seen_at: Some(2),
+            connected: true,
+            key_id: Some(key_id.clone()),
+            route: Some(ComputerRoute::Tailscale),
+            disconnected_at: None,
+        };
+        let value = serde_json::to_value(&computer).unwrap();
+        assert_eq!(value["keyId"], key_id.as_str());
+        assert_eq!(value["route"], "tailscale");
+        let idle = ComputerSummary { connected: false, key_id: None, route: None, ..computer.clone() };
+        let value = serde_json::to_value(&idle).unwrap();
+        assert_eq!((&value["keyId"], &value["route"]), (&serde_json::Value::Null, &serde_json::Value::Null), "both are present, as null");
+        for (route, name) in [(ComputerRoute::Lan, "lan"), (ComputerRoute::Tailscale, "tailscale"), (ComputerRoute::Relay, "relay")] {
+            assert_eq!(serde_json::to_value(route).unwrap(), name);
+        }
+
+        // A runtime before PRO-349 sends neither.
+        let older: Status = serde_json::from_value(serde_json::json!({
+            "enabled": true, "hostKey": "ready", "machineId": null, "listening": null, "phoneRoute": false, "error": null,
+            "computers": [{ "id": "computer-1", "label": "MacBook", "platform": null, "approvedAt": 1, "lastSeenAt": null, "connected": true }],
+        }))
+        .unwrap();
+        assert_eq!((older.computers[0].key_id.clone(), older.computers[0].route), (None, None));
+    }
+
+    #[test]
+    fn a_direct_peer_is_tailscale_only_in_tailscale_ranges() {
+        let route = |address: &str| ComputerRoute::of_peer(address.parse().unwrap());
+        assert_eq!(route("100.64.0.1"), ComputerRoute::Tailscale);
+        assert_eq!(route("100.127.255.254"), ComputerRoute::Tailscale);
+        assert_eq!(route("::ffff:100.100.1.2"), ComputerRoute::Tailscale, "an IPv4-mapped peer on a dual-stack listener");
+        assert_eq!(route("fd7a:115c:a1e0::1"), ComputerRoute::Tailscale);
+        assert_eq!(route("100.128.0.1"), ComputerRoute::Lan);
+        assert_eq!(route("100.63.255.255"), ComputerRoute::Lan);
+        assert_eq!(route("192.168.1.20"), ComputerRoute::Lan);
+        assert_eq!(route("127.0.0.1"), ComputerRoute::Lan);
+        assert_eq!(route("fe80::1"), ComputerRoute::Lan);
+    }
+
+    #[test]
+    fn create_code_names_a_grant_only_when_it_answers_one() {
+        let plain = CreateCode { epoch: "e".into(), lease: "l".into(), grant_request_id: None };
+        assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::json!({ "epoch": "e", "lease": "l" }), "what a PRO-342 runtime accepts");
+        let parsed: CreateCode = serde_json::from_value(serde_json::json!({ "epoch": "e", "lease": "l", "grantRequestId": "g" })).unwrap();
+        assert_eq!(parsed.grant_request_id.as_deref(), Some("g"));
     }
 
     fn code() -> MachineCode {

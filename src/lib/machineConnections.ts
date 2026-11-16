@@ -45,8 +45,11 @@ function set(patch: Partial<MachineConnectionsState>) {
 
 function subscribe(listener: () => void) {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => void listeners.delete(listener);
 }
+
+/** Told whenever the paired machines, their states or this window's connections change. */
+export const subscribeMachineConnections = subscribe;
 
 /** The store as it is now, outside React. */
 export function getMachineConnections(): MachineConnectionsState {

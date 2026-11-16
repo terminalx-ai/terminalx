@@ -174,7 +174,7 @@ async fn an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_code_alone_adds_no_machine_without_allow_on_the_machine() {
     let rig = rig(600);
-    let code = local(&rig.host.create_code().unwrap().code, rig.port);
+    let code = local(&rig.host.create_code(None).unwrap().code, rig.port);
     let mut asking = ask(&rig, [4; 32], &code.device_token).await;
     assert_eq!(asking.answer(Duration::from_millis(300)).await, Answer::Silent, "it waits for the person at the machine");
     assert_eq!(asking.answer(Duration::from_secs(5)).await, Answer::Refused(wire::REFUSED_NOT_APPROVED.into()));
@@ -255,7 +255,7 @@ async fn disconnect_closes_the_connection_and_holds_the_computer_off_until_it_is
     let rig = rig(TTL);
     let token = "desk-token-0000000000000000";
     let mut computer = connected(&rig, "desk", [7; 32], token, &["machine/1"]).await;
-    eventually("connected", || rig.host.status().computers.first().is_some_and(|computer| computer.connected && computer.routes == ["direct"]).then_some(())).await;
+    eventually("connected", || rig.host.status().computers.first().is_some_and(|computer| computer.connected && computer.route == Some(wire::ComputerRoute::Lan)).then_some(())).await;
     assert!(rig.host.disconnect("desk").unwrap());
     assert!(computer.closed_within(Duration::from_secs(2)).await, "closed at once");
     let status = rig.host.status();
@@ -283,7 +283,7 @@ async fn the_activity_log_records_what_a_computer_did_and_nothing_secret() {
     let entries = logged(&rig, &[Kind::Connected, Kind::Disconnected]).await;
     let connected = entries.iter().find(|entry| entry.kind == Kind::Connected).unwrap();
     assert_eq!(connected.computer.as_deref(), Some("Desk"));
-    assert_eq!(connected.detail.as_deref(), Some("direct"));
+    assert_eq!(connected.detail.as_deref(), Some("lan"), "loopback is this network");
     assert!(connected.at > 0);
     assert!(rig.host.revoke("desk").unwrap());
     logged(&rig, &[Kind::Revoked]).await;
@@ -338,7 +338,7 @@ async fn privacy_child() {
     assert!(status.listening.is_none(), "no listener is open");
     assert!(!status.takes_port);
     assert!(!host.keeps_runtime(), "no standing service");
-    assert_eq!(host.create_code().unwrap_err().code, "not_enabled");
+    assert_eq!(host.create_code(None).unwrap_err().code, "not_enabled");
 
     // Operating: no machine connection is made, by the real dialer.
     assert!(crate::data_privacy::require_network().is_err(), "machine_remote_attach is refused");

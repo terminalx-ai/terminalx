@@ -1537,6 +1537,14 @@ impl Owners {
         self.owners.lock().unwrap().retain(|_, (id, _)| id != connection_id);
     }
 
+    /// Stop and forget the machine's owner: it was removed.
+    pub fn remove(&self, machine_id: &str) {
+        let removed = self.owners.lock().unwrap().remove(machine_id);
+        if let Some((_, supervisor)) = removed {
+            supervisor.stop();
+        }
+    }
+
     /// Nudge every owner: a wake or a network change.
     pub fn nudge_all(&self) {
         for supervisor in self.all() {

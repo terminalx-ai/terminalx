@@ -123,6 +123,9 @@ export function agentPtyId(tabId: string): string {
   return `tab:${tabId}`;
 }
 
+/** Methods a machine serves per project: they name the project (docs/MACHINES.md "Project scoping"). */
+const PROJECT_SCOPED = /^(fs|git)\./;
+
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
 
@@ -556,6 +559,8 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  /** The machine project it belongs to (`machine/1`, docs/MACHINES.md "Project scoping"); absent elsewhere. */
+  projectId?: string | null;
   rowStatus?: import("./sessionStatus").SessionStatusInput;
   manualStatus?: import("./manualStatus").ManualStatus;
   automation?: { id: string } | null;
@@ -576,6 +581,18 @@ export interface RuntimeSession {
   activeTab?: string | null;
   /** The issue it was started from (`pipeline/1` runtimes). */
   issue?: RuntimeIssueRef | null;
+}
+
+/** A project on a paired machine (`machine.projects`, `machine.changed`; docs/MACHINES.md "machine/1"). */
+export interface MachineProject {
+  /** Derived from the project's path on the machine: 16 base64url characters, no `:` or `/`. */
+  projectId: string;
+  name: string;
+  /** A path on the machine: display only, never a local path. */
+  path: string;
+  kind: "git" | "folder" | string;
+  defaultBranch: string | null;
+  archived: boolean;
 }
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
@@ -757,6 +774,8 @@ export class WorkspaceRpcClient {
   private nextLocal = 0;
   private closed = false;
   private readonly dropWaiters = new Set<() => void>();
+  /** One view per project, so a project's client keeps its identity across renders. */
+  private readonly projectViews = new Map<string, WorkspaceRpcClient>();
 
   constructor(private readonly transport: WorkspaceTransport, private readonly newRequestId: () => string = randomRequestId, timeoutMs = 30_000) {
     this.rpc = new PortableRpcClient(
@@ -775,6 +794,35 @@ export class WorkspaceRpcClient {
 
   get connection(): WorkspaceConnectionState {
     return this.state;
+  }
+
+  /**
+   * This connection as one project of a machine sees it (`machine/1`,
+   * docs/MACHINES.md "Project scoping"): every `fs.*` and `git.*` call, a
+   * file watch and a terminal opened outside a session carry `projectId`.
+   * Everything else (sessions, tabs, terminals, ports) is the machine's and
+   * goes as it is. The same object for the same project, so it can be a
+   * React dependency. A call that already names a project keeps it.
+   */
+  forProject(projectId: string): WorkspaceRpcClient {
+    const known = this.projectViews.get(projectId);
+    if (known) return known;
+    const scoped = (method: string, params: Record<string, unknown> = {}) =>
+      PROJECT_SCOPED.test(method) && params.projectId === undefined ? { ...params, projectId } : params;
+    const view = new Proxy(this, {
+      get: (target, property) => {
+        if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => target.call<T>(method, scoped(method, params));
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => target.mutate<T>(method, scoped(method, params), id);
+        if (property === "watchFiles") return (path: string, onChange: (paths: string[] | null) => void) => target.watchFiles(path, onChange, { projectId });
+        if (property === "createPty")
+          return (params: Parameters<WorkspaceRpcClient["createPty"]>[0]) => target.createPty(params.sessionId === undefined && params.projectId === undefined ? { ...params, projectId } : params);
+        if (property === "forProject") return (other: string) => target.forProject(other);
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    this.projectViews.set(projectId, view);
+    return view;
   }
 
   get generation(): number | null {
@@ -908,7 +956,7 @@ export class WorkspaceRpcClient {
   }
 
   /** `sessionId` needs `pty/2`; an older runtime would open a terminal that belongs to no session. */
-  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string }): Promise<PtyInfo> {
+  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string; projectId?: string }): Promise<PtyInfo> {
     if (params.sessionId !== undefined) this.assertCapability("pty/2", "pty.create");
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
@@ -1165,6 +1213,8 @@ export class WorkspaceRpcClient {
     worktreeName?: string | null;
     /** The desktop's Native Codex setting (#644): a Codex tab goes through Codex's app server where it can. An older runtime ignores it. */
     nativeCodex?: boolean;
+    /** `machine/1`: the machine project the session is created in (docs/MACHINES.md "Project scoping"); a machine refuses a session without one. */
+    projectId?: string;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
     if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
@@ -1204,6 +1254,21 @@ export class WorkspaceRpcClient {
    */
   moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
     return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
+  }
+
+  /** A machine's projects (`machine/1`). */
+  async machineProjects(): Promise<MachineProject[]> {
+    const result = await this.call<{ projects?: MachineProject[] }>("machine.projects");
+    return Array.isArray(result.projects) ? result.projects : [];
+  }
+
+  /** `machine.changed`: the machine's name or project set changed; `projects` is the whole new list when sent. */
+  onMachineChanged(listener: (change: { projects: MachineProject[] | null }) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "machine.changed") return;
+      const projects = (notification.params as { projects?: unknown }).projects;
+      listener({ projects: Array.isArray(projects) ? (projects as MachineProject[]) : null });
+    });
   }
 
   /** The sessions this connection may see (`session.list`). */
@@ -1457,11 +1522,11 @@ export class WorkspaceRpcClient {
    * be re-read: after a reconnect (changes made while away were not seen)
    * or a burst too large to name.
    */
-  watchFiles(path: string, onChange: (paths: string[] | null) => void): Promise<() => void> {
+  watchFiles(path: string, onChange: (paths: string[] | null) => void, scope: { projectId?: string } = {}): Promise<() => void> {
     let resumed = false;
     return this.subscribe({
       method: "fs.watch",
-      params: { path },
+      params: scope.projectId ? { path, projectId: scope.projectId } : { path },
       resumeParams: () => ({}),
       onReplay: () => {
         if (resumed) onChange(null);

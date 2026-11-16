@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::pairing::{Asking, Decision, Outcome};
 use super::registry::token_hash;
 use super::MachineHost;
-use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
+use crate::machine_wire::{encode_header, ComputerRoute, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
 use crate::relay_e2ee::{begin_e2ee_session, E2eeHello, PayloadKind};
 use crate::remote::protocol::Authority;
 use crate::remote::server::{Peer, WorkspaceRpc};
@@ -97,7 +97,7 @@ async fn connection(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: toki
     let mut stream = crate::data_privacy::NetworkIo::new(stream);
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await.context("no request")??;
     if request_path(&head)? == MACHINE_PATH {
-        serve_computer(host, rpc, Prefixed::new(head, stream)).await
+        serve_computer(host, rpc, Prefixed::new(head, stream), ComputerRoute::of_peer(peer.ip())).await
     } else {
         forward_phone(&host, head, stream, peer).await
     }
@@ -178,7 +178,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 /// full operating rights (decision 5); the live code's token waits for Allow;
 /// anything else is refused. Nothing is granted before Allow: no
 /// `e2ee_authenticated`, no record, no RPC.
-pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S) -> Result<()> {
+pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S, route: ComputerRoute) -> Result<()> {
     let mut socket = tokio_tungstenite::accept_async_with_config(stream, Some(crate::remote::host::websocket_config())).await?;
     let keypair = host.keypair().context("the machine host key is not loaded")?;
     let hello = match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.next()).await.context("no E2EE hello")? {
@@ -233,7 +233,7 @@ pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<
     // refused with its reason (PRO-357).
     let admit = host.clone();
     let admitted = computer.clone();
-    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&admitted, &token, "direct", cancel_tx)).await? {
+    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&admitted, &token, route, cancel_tx)).await? {
         Ok(Ok(tracked)) => tracked,
         Ok(Err(reason)) => return refuse_pairing(&mut socket, &mut session, reason).await,
         Err(error) => {

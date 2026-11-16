@@ -171,7 +171,7 @@ pub(super) fn paired(rig: &Rig, id: &str, secret: [u8; 32], token: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_computer_pairs_by_code_once_the_machine_allows_it() {
     let rig = rig(APPROVAL_TTL_MS);
-    let created = rig.host.create_code().unwrap();
+    let created = rig.host.create_code(None).unwrap();
     let code = local(&created.code, rig.port);
     let status = rig.host.status();
     assert_eq!(status.code.as_ref().map(|code| code.expires_at), Some(created.expires_at));
@@ -243,6 +243,60 @@ async fn a_computer_pairs_by_code_once_the_machine_allows_it() {
     assert_eq!(rig.host.registry().list().unwrap().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_computer_paired_through_a_grant_still_waits_for_allow_and_its_revocation_removes_it() {
+    let rig = rig(APPROVAL_TTL_MS);
+    let code = local(&rig.host.create_code(Some("grant-1".into())).unwrap().code, rig.port);
+    let client_secret = [11; 32];
+    let mut asking = ask(&rig, client_secret, &code.device_token).await;
+    assert_eq!(asking.answer(Duration::from_millis(300)).await, Answer::Silent, "a granted account is no approval");
+    let pending = eventually("the computer waits for Allow", || rig.host.status().pending).await;
+    assert!(rig.host.registry().list().unwrap().is_empty());
+    rig.host.approve(&pending.request_id).unwrap();
+    assert_eq!(asking.answer(Duration::from_secs(5)).await, Answer::In);
+
+    let computers = rig.host.registry().list().unwrap();
+    assert_eq!(computers[0].grant_request_id(), Some("grant-1"), "linked to the grant it answered");
+    let id = computers[0].id.clone();
+    let key_id = crate::relay_e2ee::host_id_of(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(client_secret)).as_bytes());
+    let status = rig.host.status();
+    assert_eq!(status.computers[0].key_id.as_deref(), Some(key_id.as_str()));
+    assert_eq!(status.computers[0].route, Some(crate::machine_wire::ComputerRoute::Lan), "loopback is no Tailscale address");
+    assert!(status.computers[0].connected);
+    let value = serde_json::to_value(&status).unwrap();
+    assert_eq!(value["computers"][0]["keyId"], key_id.as_str());
+    assert_eq!(value["computers"][0]["route"], "lan");
+
+    // Another grant names no computer here.
+    assert_eq!(rig.host.revoke_grant("grant-2").unwrap(), None);
+    assert_eq!(rig.host.registry().list().unwrap().len(), 1);
+    // The operating computer removed this machine: its grant's revocation removes it and closes it.
+    assert_eq!(rig.host.revoke_grant("grant-1").unwrap(), Some(id));
+    assert!(asking.closed_within(Duration::from_secs(5)).await, "its connection closes");
+    assert!(rig.host.registry().list().unwrap().is_empty());
+    let status = eventually("the status forgets it", || Some(rig.host.status()).filter(|status| status.computers.is_empty())).await;
+    assert!(status.computers.is_empty());
+    let mut again = ask(&rig, client_secret, &code.device_token).await;
+    assert!(matches!(again.answer(Duration::from_secs(5)).await, Answer::Closed(_) | Answer::Refused(_)), "its credential is refused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_a_computer_here_answers_its_grant_and_a_disconnected_one_has_no_route() {
+    let rig = rig(APPROVAL_TTL_MS);
+    let code = local(&rig.host.create_code(Some("grant-9".into())).unwrap().code, rig.port);
+    let mut asking = ask(&rig, [12; 32], &code.device_token).await;
+    let pending = eventually("the computer waits for Allow", || rig.host.status().pending).await;
+    rig.host.approve(&pending.request_id).unwrap();
+    assert_eq!(asking.answer(Duration::from_secs(5)).await, Answer::In);
+    drop(asking);
+    let idle = eventually("it disconnects", || rig.host.status().computers.into_iter().find(|computer| !computer.connected)).await;
+    assert_eq!(idle.route, None, "not connected: no route");
+    assert!(idle.key_id.is_some(), "the key id stays");
+    let removed = rig.host.revoke_computer(&idle.id).unwrap().expect("it was paired");
+    assert_eq!(removed.grant_request_id(), Some("grant-9"), "the window revokes this grant");
+    assert!(rig.host.revoke_computer(&idle.id).unwrap().is_none());
+}
+
 fn machines_secret(machines: &Machines) -> zeroize::Zeroizing<[u8; 32]> {
     machines.client_secret_for_test()
 }
@@ -250,7 +304,7 @@ fn machines_secret(machines: &Machines) -> zeroize::Zeroizing<[u8; 32]> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn decline_no_answer_and_closing_leave_no_record() {
     let rig = rig(500);
-    let code = local(&rig.host.create_code().unwrap().code, rig.port);
+    let code = local(&rig.host.create_code(None).unwrap().code, rig.port);
     let mut asked = ask(&rig, [4; 32], &code.device_token).await;
     let pending = eventually("waiting", || rig.host.status().pending).await;
     assert_eq!(pending.label, "TestMacBook", "control characters are stripped");
@@ -260,12 +314,12 @@ async fn decline_no_answer_and_closing_leave_no_record() {
     let status = rig.host.status();
     assert_eq!((status.pending, status.code), (None, None), "Don't allow ends the code");
 
-    let code = local(&rig.host.create_code().unwrap().code, rig.port);
+    let code = local(&rig.host.create_code(None).unwrap().code, rig.port);
     let mut asked = ask(&rig, [4; 32], &code.device_token).await;
     assert_eq!(asked.answer(Duration::from_secs(5)).await, Answer::Refused("not-approved".into()), "no answer in time");
     assert!(rig.host.status().code.is_none());
 
-    let code = local(&rig.host.create_code().unwrap().code, rig.port);
+    let code = local(&rig.host.create_code(None).unwrap().code, rig.port);
     let asked = ask(&rig, [4; 32], &code.device_token).await;
     eventually("waiting", || rig.host.status().pending).await;
     drop(asked);
@@ -297,7 +351,7 @@ async fn revoking_closes_the_connection_and_refuses_the_credential() {
 async fn five_wrong_attempts_pause_pairing_but_not_paired_computers() {
     let rig = rig(APPROVAL_TTL_MS);
     paired(&rig, "desk", [6; 32], "desk-token");
-    let code = local(&rig.host.create_code().unwrap().code, rig.port);
+    let code = local(&rig.host.create_code(None).unwrap().code, rig.port);
     for attempt in 0..3 {
         let mut wrong = ask(&rig, [7; 32], &crate::relay_e2ee::random_token()).await;
         assert_eq!(wrong.answer(Duration::from_secs(5)).await, Answer::Refused("code-inactive".into()), "attempt {attempt}");
@@ -311,7 +365,7 @@ async fn five_wrong_attempts_pause_pairing_but_not_paired_computers() {
     let now = chrono::Utc::now().timestamp_millis();
     let until = rig.host.status().paused_until.expect("paused");
     assert!(until > now + 55_000 && until <= now + 60_000, "a minute after the fifth");
-    let refused = rig.host.create_code().unwrap_err();
+    let refused = rig.host.create_code(None).unwrap_err();
     assert_eq!(refused.code, "pairing_paused");
     assert_eq!(refused.details.unwrap()["pausedUntil"], until);
     let mut paused = ask(&rig, [7; 32], &crate::relay_e2ee::random_token()).await;

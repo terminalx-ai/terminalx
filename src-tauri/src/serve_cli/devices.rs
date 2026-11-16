@@ -70,6 +70,9 @@ fn list(data: &Path) -> Result<(Option<bool>, Vec<ComputerSummary>)> {
         .list()?
         .into_iter()
         .map(|computer| ComputerSummary {
+            key_id: computer.client_public_key_b64.as_deref().and_then(machine_wire::key_id_of),
+            // Without a runtime nothing is connected.
+            route: None,
             id: computer.id,
             label: computer.label,
             platform: computer.platform,
@@ -77,7 +80,6 @@ fn list(data: &Path) -> Result<(Option<bool>, Vec<ComputerSummary>)> {
             last_seen_at: computer.last_seen_at,
             connected: false,
             disconnected_at: computer.disconnected_at,
-            routes: Vec::new(),
         })
         .collect();
     Ok((None, computers))
@@ -161,7 +163,7 @@ mod tests {
     use crate::machine_host::registry::{token_hash, PairedComputer};
 
     fn computer(id: &str, label: &str, connected: bool) -> ComputerSummary {
-        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected, disconnected_at: None, routes: Vec::new() }
+        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected, key_id: None, route: None, disconnected_at: None }
     }
 
     #[test]

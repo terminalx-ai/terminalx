@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
 use crate::control::ControlError;
-use crate::machine_wire::{self as wire, ComputerSummary, HostKeyState, Status};
+use crate::machine_wire::{self as wire, ComputerRoute, ComputerSummary, HostKeyState, Status};
 use self::pairing::{Asking, Decision, Pairing};
 use crate::relay_e2ee::HostKeypair;
 use crate::remote::server::WorkspaceRpc;
@@ -49,6 +49,15 @@ const SETTINGS_EVERY: u32 = 15;
 
 /// Held while a computer is connected and `pairing.keepAwake` is on.
 pub const COMPUTER_CONNECTED: crate::power::Reason = crate::power::Reason::new("A computer is operating this Mac through TerminalX");
+
+/// A route as the activity log names it.
+fn route_name(route: ComputerRoute) -> &'static str {
+    match route {
+        ComputerRoute::Lan => "lan",
+        ComputerRoute::Tailscale => "tailscale",
+        ComputerRoute::Relay => "relay",
+    }
+}
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -105,8 +114,7 @@ struct PhoneRoute {
 struct Tracked {
     id: u64,
     cancel: mpsc::UnboundedSender<()>,
-    /// `direct` or `relay`.
-    route: &'static str,
+    route: ComputerRoute,
 }
 
 #[derive(Default)]
@@ -124,7 +132,8 @@ struct State {
     port_busy: bool,
     phone_route: Option<PhoneRoute>,
     /// Open connections per paired computer, closed on revocation or when
-    /// the switch goes off. The id tells them apart.
+    /// the switch goes off, oldest first. The id tells them apart; the route
+    /// is how each reached this machine.
     connections: HashMap<String, Vec<Tracked>>,
     /// Connected computers' names, for the activity log's "disconnected".
     labels: HashMap<String, String>,
@@ -348,20 +357,20 @@ impl MachineHost {
             .list()
             .unwrap_or_default()
             .into_iter()
-            .map(|computer| ComputerSummary {
-                connected: state.connections.get(&computer.id).is_some_and(|connections| !connections.is_empty()),
-                routes: {
-                    let mut routes: Vec<String> = state.connections.get(&computer.id).into_iter().flatten().map(|tracked| tracked.route.to_string()).collect();
-                    routes.sort();
-                    routes.dedup();
-                    routes
-                },
-                disconnected_at: computer.disconnected_at,
-                id: computer.id,
-                label: computer.label,
-                platform: computer.platform,
-                approved_at: computer.approved_at,
-                last_seen_at: computer.last_seen_at,
+            .map(|computer| {
+                // The newest connection is the one it is using now.
+                let route = state.connections.get(&computer.id).and_then(|connections| connections.last()).map(|tracked| tracked.route);
+                ComputerSummary {
+                    connected: route.is_some(),
+                    key_id: computer.client_public_key_b64.as_deref().and_then(wire::key_id_of),
+                    route,
+                    disconnected_at: computer.disconnected_at,
+                    id: computer.id,
+                    label: computer.label,
+                    platform: computer.platform,
+                    approved_at: computer.approved_at,
+                    last_seen_at: computer.last_seen_at,
+                }
             })
             .collect();
         let host_key = match (&state.keypair, &state.key_error) {
@@ -621,9 +630,9 @@ impl MachineHost {
         }
     }
 
-    /// Note a computer's connection on `route`, unless the switch is off;
+    /// Note a computer's connection by `route`, unless the switch is off;
     /// the returned id forgets it again. Whether it is its first.
-    fn track(&self, computer: &registry::PairedComputer, route: &'static str, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
+    fn track(&self, computer: &registry::PairedComputer, route: ComputerRoute, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let first = {
             let mut state = self.state.lock().unwrap();
@@ -641,7 +650,7 @@ impl MachineHost {
         Ok((id, first))
     }
 
-    /// Let a computer in with `token` on `route` (`direct` or `relay`):
+    /// Let a computer in with `token` by `route`:
     /// `Ok(Err(reason))` refuses it with that `pairing_refused` reason.
     ///
     /// A credential unused for 90 days expires here, and one the person
@@ -651,7 +660,7 @@ impl MachineHost {
     /// racing this admission is either seen here or finds the connection and
     /// closes it. Admission settles a rotated token (`Registry::admitted`).
     /// Blocking: reads and writes the registry.
-    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: &'static str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
+    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
         let now = now_ms();
         if computer.expired(now) {
             if self.registry.remove(&computer.id)? {
@@ -687,7 +696,7 @@ impl MachineHost {
                     log::debug!("machine host: note when {} connected: {error:#}", computer.id);
                 }
                 if first {
-                    self.activity.record(activity::Entry::new(activity::Kind::Connected, Some((&computer.id, &computer.label)), Some(route)));
+                    self.activity.record(activity::Entry::new(activity::Kind::Connected, Some((&computer.id, &computer.label)), Some(route_name(route))));
                 }
                 Ok(Ok(tracked))
             }
@@ -758,17 +767,35 @@ impl MachineHost {
     /// Remove a paired computer, then close its connections: one admitted
     /// meanwhile finds its record gone (`admit`). Whether it was paired.
     pub fn revoke(&self, id: &str) -> Result<bool> {
-        let computer = self.registry.list()?.into_iter().find(|computer| computer.id == id);
+        Ok(self.revoke_computer(id)?.is_some())
+    }
+
+    /// [`Self::revoke`], answering the record it removed, whose
+    /// `grant_request_id` the window tells the account service about.
+    pub fn revoke_computer(&self, id: &str) -> Result<Option<registry::PairedComputer>> {
+        let record = self.registry.list()?.into_iter().find(|computer| computer.id == id);
         let removed = self.registry.remove(id)?;
         self.close_connections(id);
-        if let (true, Some(computer)) = (removed, &computer) {
+        if let (true, Some(computer)) = (removed, &record) {
             self.activity.record(activity::Entry::new(activity::Kind::Revoked, Some((&computer.id, &computer.label)), None));
         }
         // Its relay credential ends with it (`device-revoke`).
-        if let (Some(device), Some(relay)) = (computer.and_then(|computer| computer.relay_device_id), self.relay()) {
+        if let (Some(device), Some(relay)) = (record.as_ref().and_then(|computer| computer.relay_device_id.clone()), self.relay()) {
             relay.revoke_device(&device);
         }
         self.wake.notify_one();
+        Ok(record.filter(|_| removed))
+    }
+
+    /// The account revoked the grant `grant_request_id` (the operating
+    /// computer removed this machine, or signed out): remove the computer
+    /// allowed through it. Its id, `None` when no computer has that grant.
+    pub fn revoke_grant(&self, grant_request_id: &str) -> Result<Option<String>> {
+        let Some(computer) = self.registry.find_by_grant(grant_request_id)? else { return Ok(None) };
+        let removed = self.revoke_computer(&computer.id)?.map(|computer| computer.id);
+        if let Some(id) = &removed {
+            log::info!("machine host: computer {id} was removed through its account grant");
+        }
         Ok(removed)
     }
 
@@ -930,7 +957,9 @@ impl MachineHost {
 
     /// A new pairing code (docs/MACHINES.md, "As built (PRO-342)"). The
     /// code is answered to the caller only: never logged, never in the status.
-    pub fn create_code(&self) -> Result<wire::CreatedCode, ControlError> {
+    /// `grant_request_id`: the account grant it answers (PRO-349); the
+    /// computer still waits for Allow with the fingerprint, as for any code.
+    pub fn create_code(&self, grant_request_id: Option<String>) -> Result<wire::CreatedCode, ControlError> {
         let (public_key_b64, machine_id, port) = {
             let state = self.state.lock().unwrap();
             let not_enabled = |message: &str| ControlError::new("not_enabled", message, Some("Turn on \"Let other computers operate this Mac\".".into()));
@@ -946,7 +975,7 @@ impl MachineHost {
         let endpoints = crate::direct_endpoints::machine_endpoints(port, wire::MACHINE_PATH);
         let (token, expires_at) = {
             let mut state = self.state.lock().unwrap();
-            match state.pairing.create(now_ms()) {
+            match state.pairing.create(now_ms(), grant_request_id) {
                 Ok(created) => created,
                 Err(until) => {
                     let mut paused = ControlError::new("pairing_paused", "Too many wrong pairing attempts. Try again in a minute.", None::<String>);
@@ -985,7 +1014,7 @@ impl MachineHost {
         let existing = self.registry.list().map_err(ControlError::internal)?.into_iter().find(|computer| computer.client_public_key_b64.as_deref() == Some(approving.client_key_b64.as_str()));
         let id = existing.as_ref().map(|computer| computer.id.clone()).unwrap_or_else(|| format!("computer-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]));
         let computer_label = approving.label.clone();
-        let computer = registry::PairedComputer {
+        let mut computer = registry::PairedComputer {
             id: id.clone(),
             token_hash: approving.token_hash,
             label: approving.label,
@@ -1000,6 +1029,8 @@ impl MachineHost {
             disconnected_at: None,
             other: existing.map(|computer| computer.other).unwrap_or_default(),
         };
+        // Paired again: linked to the grant of this pairing, if any.
+        computer.set_grant_request_id(approving.grant_request_id);
         self.registry.put(computer).map_err(ControlError::internal)?;
         if !self.state.lock().unwrap().pairing.approved(&approving.request_id) {
             // It ended while the record was written: nothing is granted.
@@ -1098,13 +1129,20 @@ impl MachineHost {
             wire::REVOKE => {
                 let revoke: wire::Revoke = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and id are required"))?;
                 self.attachment(&revoke.epoch, &revoke.lease)?;
-                let removed = self.revoke(&revoke.id).map_err(ControlError::internal)?;
-                Ok(json!({ "revoked": removed }))
+                let removed = self.revoke_computer(&revoke.id).map_err(ControlError::internal)?;
+                // The window tells the account service the grant ended.
+                Ok(json!({ "revoked": removed.is_some(), "grantRequestId": removed.as_ref().and_then(|computer| computer.grant_request_id()) }))
+            }
+            wire::REVOKE_GRANT => {
+                let revoke: wire::RevokeGrant = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and grantRequestId are required"))?;
+                self.attachment(&revoke.epoch, &revoke.lease)?;
+                let removed = self.revoke_grant(&revoke.grant_request_id).map_err(ControlError::internal)?;
+                Ok(json!({ "revoked": removed.is_some(), "id": removed }))
             }
             wire::CREATE_CODE => {
                 let create: wire::CreateCode = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch and lease are required"))?;
                 self.attachment(&create.epoch, &create.lease)?;
-                self.create_code().map(|created| serde_json::to_value(created).expect("a code serialises"))
+                self.create_code(create.grant_request_id).map(|created| serde_json::to_value(created).expect("a code serialises"))
             }
             wire::APPROVE => {
                 let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
@@ -1176,7 +1214,7 @@ impl crate::remote::host::MachineRoutes for MachineHost {
     fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>> {
         let Some(computer) = self.registry.find_by_relay_device(relay_device_id, token)? else { return Ok(Err(wire::REFUSED_CODE_INACTIVE)) };
         let Some(computer) = self.paired_with_key(computer, client_key_b64) else { return Ok(Err(wire::REFUSED_CODE_INACTIVE)) };
-        let tracked = match self.admit(&computer, token, "relay", cancel)? {
+        let tracked = match self.admit(&computer, token, ComputerRoute::Relay, cancel)? {
             Ok(tracked) => tracked,
             Err(reason) => return Ok(Err(reason)),
         };

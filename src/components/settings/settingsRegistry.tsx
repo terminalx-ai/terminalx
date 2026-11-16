@@ -313,6 +313,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.allowOperating" },
   }),
   defineSetting({
+    id: "machines.thisMac", section: "machines", title: "This Mac",
+    description: "The name other computers see for this Mac (the same as Account → This Mac’s name), and the label of its key.",
+    searchTerms: ["machines", "this", "mac", "name", "rename", "fingerprint", "key"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machineName" },
+  }),
+  defineSetting({
     id: "machines.pairingCode", section: "machines", title: "Create pairing code",
     description: "A one-time code another computer pastes in Add a machine. It works once and lasts five minutes.",
     searchTerms: ["machines", "pairing", "code", "pair", "create", "one-time"], scope: "user",
@@ -320,13 +326,13 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
-    description: "Computers this Mac can operate, and Add a machine.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay", "update", "needs update", "version"], scope: "user",
+    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it.",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({
     id: "machines.computers", section: "machines", title: "Computers that can operate this Mac",
-    description: "Each has its own credential. Revoke ends it and closes its connection.",
+    description: "Each has its own credential. Revoking one closes its connection at once.",
     searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
   }),
