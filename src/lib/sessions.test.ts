@@ -94,7 +94,7 @@ describe("worktree deletion events", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     await sessions.restoreWorkspace(attached.id, preview, null);
-    expect(mocks.invoke).toHaveBeenCalledWith("restore_workspace", { sessionId: attached.id, expected: preview, newBranch: null });
+    expect(mocks.invoke).toHaveBeenCalledWith("restore_workspace", { sessionId: attached.id, expected: preview, newBranch: null, detached: false });
     expect(sessions.getSessionStore().selectedSessionId).toBe(attached.id);
     expect(sessions.getSessionStore().sessions).toEqual([attached]);
     expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);

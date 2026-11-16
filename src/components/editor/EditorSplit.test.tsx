@@ -42,23 +42,48 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
 });
-afterEach(async () => { cleanup(); await closeAllEditors("split"); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+// A checkout with no session: its files are the editor pane's own tabs.
+const CHECKOUT = "checkout:/workspace";
+afterEach(async () => { cleanup(); await closeAllEditors("split"); await closeAllEditors(CHECKOUT); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-it("dispatches media before text reading and keeps SVG save behavior while navigating existing tabs", async () => {
+it("draws a local session's files as tabs of the session, one at a time, with no Open files strip of its own (PRO-402)", async () => {
   const image = openFile("split", "/workspace", "photo.png");
   const { container } = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  await screen.findByRole("img", { name: "photo.png" });
+  expect(screen.getByRole("tabpanel", { name: "photo.png" })).toBeTruthy();
+  // The pane's own strip and its hide and close-all buttons belong to files that are not session tabs.
+  expect(container.querySelector('[role="tablist"]')).toBeNull();
+  expect(screen.queryByRole("button", { name: "Hide editor pane" })).toBeNull();
+  let text = "";
+  act(() => { text = openFile("split", "/workspace", "docs/notes.txt"); });
+  await waitFor(() => expect(liveEditorsFor("/workspace/docs/notes.txt")).toHaveLength(1));
+  expect(screen.getByRole("tabpanel", { name: "notes.txt" })).toBeTruthy();
+  expect(screen.queryByRole("tabpanel", { name: "photo.png" })).toBeNull();
+  // The chat tab is selected again: neither file covers it, and both keep their place.
+  act(() => selectSessionTab("split", { kind: "agent", id: "agent" }));
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  expect(getEditors().editors.map((e) => e.id)).toEqual([image, text]);
+  act(() => setActiveEditor("split", image));
+  expect(screen.getByRole("tabpanel", { name: "photo.png" })).toBeTruthy();
+  expect(liveEditorsFor("/workspace/docs/notes.txt")).toHaveLength(1);
+});
+
+it("dispatches media before text reading and keeps SVG save behavior while navigating existing tabs", async () => {
+  const image = openFile(CHECKOUT, "/workspace", "photo.png");
+  const { container } = render(<TooltipProvider><EditorSplit sessionId={CHECKOUT} active /></TooltipProvider>);
+  expect(screen.getByRole("tablist", { name: "Open files" })).toBeTruthy();
   await screen.findByRole("img", { name: "photo.png" });
   expect(fs.readText).not.toHaveBeenCalled();
   await waitFor(() => expect(getEditors().lastFocused).toBe("editor"));
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   let svg = "";
-  act(() => { svg = openFile("split", "/workspace", "logo.svg"); });
+  act(() => { svg = openFile(CHECKOUT, "/workspace", "logo.svg"); });
   await waitFor(() => expect(liveEditorsFor("/workspace/logo.svg")).toHaveLength(1));
   act(() => liveEditorsFor("/workspace/logo.svg")[0].view.dispatch({ changes: { from: 0, to: 6, insert: '<svg id="edited"/>' } }));
   expect(getEditors().editors.find((e) => e.id === svg)?.dirty).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(fs.writeText).toHaveBeenCalledWith("/workspace/logo.svg", '<svg id="edited"/>'));
-  act(() => { expect(openFile("split", "/workspace", "photo.png")).toBe(image); });
+  act(() => { expect(openFile(CHECKOUT, "/workspace", "photo.png")).toBe(image); });
   expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
   expect(fs.readText).toHaveBeenCalledTimes(1);
   expect(liveEditorsFor("/workspace/photo.png")).toEqual([]);
