@@ -110,6 +110,7 @@ const machineSessions = vi.hoisted(() => ({ enabled: vi.fn(), update: vi.fn(asyn
 vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled }));
 vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
+vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
 vi.mock("@/components/cloud/CloudWorkspaceMain", () => ({ CloudWorkspaceMain: ({ workspaceKey }: { workspaceKey: string }) => <main data-testid="cloud-workspace-main" data-key={workspaceKey} /> }));
 vi.mock("@/lib/orchestration", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/orchestration")>()),
@@ -293,6 +294,19 @@ describe("machine sessions (PRO-346)", () => {
     runShortcut.machines = true;
     render(<AppShell />);
     expect(machineSessions.enabled).toHaveBeenLastCalledWith(true);
+  });
+
+  it("opens a machine session as a session, not the machine's workspace view (PRO-347)", async () => {
+    runShortcut.machines = true;
+    sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
+    render(<AppShell />);
+    expect((await screen.findByTestId("machine-session")).getAttribute("data-key")).toBe("machine:m1:P1:s1");
+    expect(screen.queryByTestId("machine-main")).toBeNull();
+    cleanup();
+    // Machines off: nothing of the machine is shown.
+    runShortcut.machines = false;
+    render(<AppShell />);
+    expect(screen.queryByTestId("machine-session")).toBeNull();
   });
 
   it.each([

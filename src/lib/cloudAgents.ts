@@ -129,15 +129,26 @@ export function subscribeAllCloudAgents(listener: () => void): () => void {
 }
 
 /**
- * A runtime attached by pairing code for development: no organization, so no
- * API mailbox, keys, checkpoints or cache. Prompts go over live RPC; steering,
- * stopping and decisions need a cloud workspace.
+ * A runtime with no organization: a paired machine (PRO-345). It has no API
+ * mailbox, keys, checkpoints or cache. Every command goes over the live
+ * connection: with `agent-commands/1` (PRO-343) send, steer, stop and
+ * decisions alike, each answered once per id from the machine's receipts;
+ * on an older machine only prompts.
  */
 export function isDevScope(scope: CloudAgentScope): boolean {
   return !scope.organizationId;
 }
 
-export const DEV_SCOPE_NOTICE = "Steering, stopping and permission decisions need a cloud workspace; this development runtime only takes prompts.";
+/** An older machine, without `agent-commands/1`. */
+export const DEV_SCOPE_NOTICE = "Steering, stopping and answering approvals need a newer TerminalX on that machine; it only takes prompts.";
+
+/** Nothing is queued on this Mac for a machine it cannot reach (docs/MACHINES.md decision 3). */
+export const LIVE_NOT_CONNECTED = "Not connected: nothing is sent until the machine is back.";
+
+/** Whether `scope`'s commands go live, all of them: a machine that serves `agent-commands/1`. */
+export function takesLiveCommands(scope: CloudAgentScope, client: WorkspaceRpcClient | null): boolean {
+  return isDevScope(scope) && !!client && client.connection.state === "connected" && client.hasCapability("agent-commands/1");
+}
 
 export function cloudAgentsKey(scope: CloudAgentScope): string {
   return `${scope.organizationId}:${scope.workspaceId}`;
@@ -1061,30 +1072,87 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
 /** `data.reason` of a live `session.send` the runtime refused with a sentence meant for the person. */
 const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden", "attachment-missing"]);
 
-/** A development runtime has no mailbox: the legacy live `session.send`. */
-async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = []): Promise<OutboxEntry> {
+/**
+ * What a refused live command says to the person (docs/MACHINES.md decision
+ * 3, "Refusals"): the runtime's own sentence where it wrote one for them,
+ * else what the refusal means.
+ */
+export function liveCommandError(error: unknown): Error {
+  if (!(error instanceof WorkspaceRpcError)) return error instanceof Error ? error : new Error(String(error));
+  const reason = (error.data as { reason?: unknown } | undefined)?.reason;
+  if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) return new Error(error.message);
+  if (error.code === "conflict" && reason === "request-not-pending") return new Error("That request was already answered, or the agent no longer waits for it.");
+  if (error.code === "outcome_unknown") return new Error("The machine restarted while applying this, so it cannot say whether it reached the agent. Look at the conversation before trying again.");
+  return error;
+}
+
+/** The connection a live command goes over, and the tab's session there; refused while the machine is away. */
+function liveTarget(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null): { client: WorkspaceRpcClient; sessionId: string } {
   const tab = store(scope).tabs.get(tabId);
-  if (!client || client.connection.state !== "connected" || !tab?.info.sessionId) throw new Error("The development runtime is not connected");
-  try {
-    await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text, ...(images.length ? { images } : {}) });
-  } catch (error) {
-    // The runtime's own sentence for what it refused to type or to queue (PRO-88), rather than the bare code.
-    const reason = error instanceof WorkspaceRpcError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined;
-    if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) throw new Error((error as Error).message);
-    throw error;
-  }
+  if (!client || client.connection.state !== "connected") throw new Error(LIVE_NOT_CONNECTED);
+  if (!tab?.info.sessionId) throw new Error("This tab is not known to the machine yet.");
+  return { client, sessionId: tab.info.sessionId };
+}
+
+/** A command applied live: what the outbox would have said once it settled. */
+function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, requestId?: string): OutboxEntry {
   const now = Date.now();
-  return { clientCommandId: `live-${now}`, tabId, kind: "send", text, state: "applied", createdAt: now, updatedAt: now };
+  return { clientCommandId: `live-${now}`, tabId, kind, ...(text !== undefined ? { text } : {}), ...(requestId ? { requestId } : {}), state: "applied", createdAt: now, updatedAt: now };
+}
+
+/**
+ * A prompt to a machine, live. With `agent-commands/1` its id is kept across
+ * a dropped connection (the client resends it with the same id) and the
+ * machine answers a resend from its durable receipt, so it is typed once; a
+ * prompt during a turn waits in the tab's follow-up queue there. Settings
+ * chosen while away ride with it, as they ride with a mailbox send.
+ */
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = []): Promise<OutboxEntry> {
+  const s = store(scope);
+  const target = liveTarget(scope, tabId, client);
+  const durable = takesLiveCommands(scope, target.client);
+  const settings = durable ? (s.tabs.get(tabId)?.pendingConfig ?? null) : null;
+  let receipt: { settingsIgnored?: boolean } | undefined;
+  try {
+    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(settings ?? {}) });
+  } catch (error) {
+    throw liveCommandError(error);
+  }
+  const current = s.tabs.get(tabId);
+  if (current && settings) {
+    // Only what went out is settled; a change made meanwhile waits for the next.
+    if (current.pendingConfig === settings) current.pendingConfig = null;
+    current.settingsIgnored = receipt?.settingsIgnored === true;
+    publish(s);
+  }
+  return appliedEntry(tabId, "send", text);
+}
+
+/** Steer, stop or decide on a machine (`agent-commands/1`); an older machine takes prompts only. */
+async function commandLive(scope: CloudAgentScope, tabId: string, method: "session.steer" | "session.stop" | "session.decide", params: Record<string, unknown>, client: WorkspaceRpcClient | null): Promise<void> {
+  const target = liveTarget(scope, tabId, client);
+  if (!takesLiveCommands(scope, target.client)) throw new Error(DEV_SCOPE_NOTICE);
+  try {
+    await target.client.mutate(method, { sessionId: target.sessionId, tabId, ...params });
+  } catch (error) {
+    throw liveCommandError(error);
+  }
 }
 
 /** Into the running turn now. */
-export function steerCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
-  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
+export async function steerCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) {
+    await commandLive(scope, tabId, "session.steer", { text }, client);
+    return appliedEntry(tabId, "steer", text);
+  }
   return enqueue(scope, tabId, "steer", { text }, client);
 }
 
-export function stopCloudAgent(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
-  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
+export async function stopCloudAgent(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) {
+    await commandLive(scope, tabId, "session.stop", {}, client);
+    return appliedEntry(tabId, "stop");
+  }
   return enqueue(scope, tabId, "stop", {}, client);
 }
 
@@ -1098,7 +1166,7 @@ export async function decideCloudAgent(
   decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> },
   client: WorkspaceRpcClient | null,
 ): Promise<OutboxEntry | null> {
-  if (isDevScope(scope)) throw new Error(DEV_SCOPE_NOTICE);
+  if (isDevScope(scope)) return decideLive(scope, tabId, decision, client);
   const s = store(scope);
   const existing = decisionFor(s.outbox, decision.requestId);
   if (existing) return existing;
@@ -1107,6 +1175,44 @@ export async function decideCloudAgent(
   publish(s);
   try {
     return await enqueue(scope, tabId, "permission-decision", decision, client);
+  } finally {
+    s.deciding.delete(decision.requestId);
+    publish(s);
+  }
+}
+
+/**
+ * One id per permission request a machine is asked to decide: a second
+ * click, or a retry after the reply was lost, is the same command, which the
+ * machine answers from its receipt instead of deciding twice. A different
+ * answer under the same id is refused there (`id-reused`).
+ */
+const liveDecisionIds = new Map<string, string>();
+
+async function decideLive(
+  scope: CloudAgentScope,
+  tabId: string,
+  decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> },
+  client: WorkspaceRpcClient | null,
+): Promise<OutboxEntry | null> {
+  const s = store(scope);
+  if (s.deciding.has(decision.requestId)) return null;
+  const target = liveTarget(scope, tabId, client);
+  if (!takesLiveCommands(scope, target.client)) throw new Error(DEV_SCOPE_NOTICE);
+  const key = `${cloudAgentsKey(scope)}|${tabId}|${decision.requestId}`;
+  let id = liveDecisionIds.get(key);
+  if (!id) {
+    id = `decide-${crypto.randomUUID().replace(/-/g, "")}`;
+    if (liveDecisionIds.size > 512) liveDecisionIds.clear();
+    liveDecisionIds.set(key, id);
+  }
+  s.deciding.add(decision.requestId);
+  publish(s);
+  try {
+    await target.client.mutate("session.decide", { sessionId: target.sessionId, tabId, ...decision }, id);
+    return appliedEntry(tabId, "permission-decision", undefined, decision.requestId);
+  } catch (error) {
+    throw liveCommandError(error);
   } finally {
     s.deciding.delete(decision.requestId);
     publish(s);
