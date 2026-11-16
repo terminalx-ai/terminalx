@@ -28,7 +28,7 @@ const DETAIL_CHARS: usize = 120;
 pub enum Kind {
     /// The person allowed a new computer.
     Paired,
-    /// A computer's first connection opened. `detail`: `direct` or `relay`.
+    /// A computer's first connection opened. `detail`: `lan`, `tailscale` or `relay`.
     Connected,
     /// Its last connection closed.
     Disconnected,
