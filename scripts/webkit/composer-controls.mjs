@@ -6,7 +6,9 @@
 //   - the open picker: Agent, Model and Effort rows, each opening a submenu beside it;
 //   - a model picked mid-chat: the amber card (nothing switched yet), then "Switching to … after this turn · Undo";
 //   - an agent that lists no models: the button keeps the session's model, the Model row says "None found"
-//     in red, and the "No models from Codex" card stands beside the Model row.
+//     in red, and the "No models from Codex" card stands beside the Model row;
+//   - the new-session and issue picker (AgentMenu): the same Agent, Model and Effort rows, each opening its
+//     choices beside it, by pointer and by keyboard.
 // pnpm build && node scripts/webkit/composer-controls.mjs
 // WEBKIT_LAYOUT_SCREENSHOTS=~/shots node scripts/webkit/composer-controls.mjs
 import assert from "node:assert/strict";
@@ -20,6 +22,14 @@ import { createRoot } from 'react-dom/client';
 import '/src/styles/app.css';
 import { Composer } from '/src/components/chat/Composer.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
+import { AgentMenu } from '/src/components/session/AgentMenu.tsx';
+import { useSessionAgent } from '/src/lib/useSessionAgent.ts';
+const which = new URLSearchParams(location.search).get('case');
+const HARNESSES = [{ id: 'claude', name: 'Claude Code', available: true, installHint: '', caps: {} }, { id: 'codex', name: 'Codex', available: true, installHint: '', caps: {} }];
+function NewSession() {
+  const selection = useSessionAgent(HARNESSES);
+  return <div className="flex h-dvh items-center justify-center bg-background text-foreground"><AgentMenu selection={selection} /></div>;
+}
 const empty = new URLSearchParams(location.search).get('case') === 'empty';
 const tab = empty
   ? { id: 'tab-empty', harness: 'codex', model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'manual', status: 'idle', created: '', modified: '' }
@@ -38,7 +48,7 @@ function App() {
     </div>
   </TooltipProvider>;
 }
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(which === 'new' ? <NewSession/> : <App/>);
 `;
 
 const claude = (id, label, isDefault = false) => ({ id, label, harness: "claude", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high", acceptsImages: true, isDefault, upgrade: null, description: null });
@@ -94,7 +104,7 @@ try {
         + `window.__PW_STUB__.answers.list_models = ${JSON.stringify(models)};\n`
         + `document.addEventListener('DOMContentLoaded', () => { document.documentElement.setAttribute('data-theme', 'den'); document.documentElement.setAttribute('data-mode', ${JSON.stringify(scheme)}); });`);
       await page.goto(`http://127.0.0.1:${port}/controls-page?case=${which}`);
-      await page.locator("[data-composer-box]").waitFor();
+      await page.locator(which === "new" ? '[data-testid="agent-menu"]' : "[data-composer-box]").waitFor();
       await page.evaluate(() => document.fonts.ready);
       return { page, errors };
     };
@@ -225,7 +235,64 @@ try {
       assert.deepEqual(errors, [], `${scheme}: no page errors`);
       await page.close();
     }
-    console.log(`ok 1440px ${scheme}: composer row, picker rows and submenu, mid-chat confirm and Undo, no-models card`);
+
+    // ── The new-session picker: the same three rows, then Permissions.
+    {
+      const { page, errors } = await open("new");
+      const button = page.getByTestId("agent-menu");
+      await button.filter({ hasText: "Opus 5.5" }).waitFor();
+      await button.click();
+      const menu = page.getByRole("menu").first();
+      await menu.waitFor();
+      const settled = () => page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => {}))));
+      await settled();
+      const rows = await menu.evaluate((el) => [...el.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => ({ text: item.textContent, rect: item.getBoundingClientRect().toJSON(), shown: item.checkVisibility() })));
+      assert.deepEqual(rows.map((r) => r.text), ["AgentClaude Code", "ModelOpus 5.5", "EffortHigh", "PermissionsAsk every time"], `${scheme}: new-session picker rows`);
+      const menuBox = await menu.boundingBox();
+      assert.ok(rows.every((r) => r.shown && r.rect.height >= 24 && r.rect.height <= 36 && r.rect.left >= menuBox.x && r.rect.right <= menuBox.x + menuBox.width + 0.5), `${scheme}: one line each, inside the menu ${JSON.stringify(rows)}`);
+      // Nothing of a closed row's choices is drawn.
+      assert.equal(await menu.getByRole("menuitemradio").evaluateAll((items) => items.filter((i) => i.checkVisibility()).length), 0, `${scheme}: efforts are not listed until their row opens`);
+      const beside = async (name, expected) => {
+        const list = menu.getByRole("group", { name });
+        await list.waitFor({ state: "visible" });
+        await settled();
+        const box = await list.boundingBox();
+        assert.ok(box.x >= menuBox.x + menuBox.width - 8 && box.x + box.width <= 1440 && box.y >= 0 && box.y + box.height <= 900, `${scheme}: ${name} choices open beside the menu ${JSON.stringify({ menuBox, box })}`);
+        const items = await list.locator('[role^="menuitem"]').evaluateAll((items) => items.map((item) => {
+          const r = item.getBoundingClientRect();
+          return { text: item.textContent, hit: item.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
+        }));
+        assert.deepEqual(items.map((i) => i.text), expected, `${scheme}: ${name} choices`);
+        assert.ok(items.every((i) => i.hit), `${scheme}: ${name} choices are drawn on top and clickable ${JSON.stringify(items)}`);
+        return list;
+      };
+      await page.getByRole("menuitem", { name: /^Agent/ }).hover();
+      await beside("Agent", ["Claude Codecurrent", "Codex"]);
+      await page.getByRole("menuitem", { name: /^Effort/ }).hover();
+      const efforts = await beside("Effort", ["Low", "Medium", "High", "Extra high", "Max"]);
+      assert.ok(!(await menu.getByRole("group", { name: "Agent" }).isVisible()), `${scheme}: one list at a time`);
+      await shot(page, "new-session");
+      await efforts.getByRole("menuitemradio", { name: "Max" }).click();
+      await menu.waitFor({ state: "detached" });
+      assert.equal(await page.getByTestId("agent-effort").textContent(), "Max", `${scheme}: the effort picked is the one on the button`);
+      // By keyboard: down to Effort, in with the right arrow, out with the left, away with Escape.
+      await button.focus();
+      await page.keyboard.press("Enter");
+      await menu.waitFor();
+      for (let i = 0; i < 4 && !(await page.evaluate(() => document.activeElement?.textContent?.startsWith("Effort"))); i++) await page.keyboard.press("ArrowDown");
+      assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: the arrows reach the Effort row`);
+      await page.keyboard.press("ArrowRight");
+      await menu.getByRole("group", { name: "Effort" }).waitFor({ state: "visible" });
+      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("role")), "menuitemradio", `${scheme}: the arrow key moves into the efforts`);
+      await page.keyboard.press("ArrowLeft");
+      await menu.getByRole("group", { name: "Effort" }).waitFor({ state: "hidden" });
+      assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: and back to the Effort row`);
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+      assert.deepEqual(errors, [], `${scheme}: no page errors`);
+      await page.close();
+    }
+    console.log(`ok 1440px ${scheme}: composer row, picker rows and submenu, mid-chat confirm and Undo, no-models card, new-session picker rows`);
   }
 } finally {
   await browser?.close();
