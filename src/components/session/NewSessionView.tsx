@@ -1,3 +1,6 @@
+import { AllowNewMachines } from "@/components/cloud/AllowNewMachines";
+import { ProvidersPaused } from "@/lib/hiddenProviders";
+import type { CloudProviderSummary } from "@/lib/api";
 import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
@@ -104,6 +107,8 @@ export function NewSessionView({
   const [limitOrg, setLimitOrg] = useState<string | null>(null);
   /** The organization the last cloud start's error is about, so a missing login opens that organization's page. */
   const [errorOrg, setErrorOrg] = useState<string | null>(null);
+  // A create refused because new machines are paused on these connected providers (PRO-372): a manager allows them here.
+  const [pausedFor, setPausedFor] = useState<CloudProviderSummary[] | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
@@ -288,6 +293,7 @@ export function NewSessionView({
     const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
     setLimitOrg(atRunningLimit ? orgId : null);
     setErrorOrg(orgId);
+    setPausedFor(e instanceof ProvidersPaused ? e.providers : null);
     setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e, orgId));
     // Refused for lack of role: read the roles again, so the form and the menus stop offering it.
     if (isRoleRefusal(e)) void refreshAccountRoles(true);
@@ -300,6 +306,7 @@ export function NewSessionView({
     setBusy(true);
     setError(null);
     setLimitOrg(null);
+    setPausedFor(null);
     const plan = planCloudStart(cloud.project);
     try {
       if (plan.kind === "create") {
@@ -709,6 +716,18 @@ export function NewSessionView({
             </div>
           )}
           {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
+          {cloud && error && pausedFor && (
+            <div className="mt-2">
+              <AllowNewMachines
+                providers={pausedFor}
+                onAllowed={() => {
+                  setPausedFor(null);
+                  setError(null);
+                  void createCloud();
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>

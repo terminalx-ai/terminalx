@@ -1577,6 +1577,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_provider_disabled"
   | "cloud_provider_connection_required"
   | "cloud_provider_connection_attention_required"
+  | "cloud_provider_creation_disabled"
   | "cloud_provider_operation_in_progress"
   | "cloud_provider_credential_invalid"
   | "cloud_provider_permission_denied"

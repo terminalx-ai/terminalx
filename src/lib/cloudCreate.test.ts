@@ -129,6 +129,30 @@ describe("createWorkspace", () => {
     expect(kept.at(-1)).toBeNull();
   });
 
+  // PRO-372: connected in the web console, new machines paused: never "connect a compute provider".
+  it("says a connected provider's new machines are paused, and who can allow them", () => {
+    expect(createErrorMessage("cloud_provider_creation_paused", "Boat", true)).toBe(
+      "Boat is connected, but new machines are paused for this organization. Allow them in Settings → Organizations, under Cloud compute.",
+    );
+    expect(createErrorMessage("cloud_provider_creation_paused", "Boat and Hetzner", false)).toBe(
+      "Boat and Hetzner are connected, but new machines are paused for this organization. An owner or admin can allow them in Settings → Organizations, under Cloud compute.",
+    );
+  });
+
+  it("explains the server's paused refusal as paused", () => {
+    expect(createErrorMessage("cloud_provider_creation_disabled", "Boat", false)).toBe(
+      "Boat is connected, but new machines are paused for this organization. An owner or admin can allow them in Settings → Organizations, under Cloud compute.",
+    );
+  });
+
+  it("tells a member who connects a compute provider, and an owner or admin to connect one", () => {
+    expect(createErrorMessage("cloud_provider_connection_required", null, false)).toBe(
+      "No compute provider is connected for this organization. An owner or admin connects one in Settings → Organizations, under Cloud compute.",
+    );
+    expect(createErrorMessage("cloud_provider_connection_required", null, true)).toBe("Connect a compute provider in Settings first.");
+    expect(createErrorMessage("cloud_provider_connection_required")).toBe("Connect a compute provider in Settings first.");
+  });
+
   it("says a hidden provider is not offered rather than naming its code", () => {
     expect(createErrorMessage("cloud_provider_disabled")).toBe("This provider isn't offered right now. Choose another provider.");
   });
