@@ -215,6 +215,18 @@ it("names the machine in the session subtitle with the name saved on this phone"
   expect(container.textContent).not.toContain("Office iMac");
 });
 
+// 22.07 frame 5: the header names the session by its branch, the notifications sheet by the session's own title, as its notifications do.
+it("titles the session's notification sheet with the session's title, not the branch the header shows", async () => {
+  mocks.app = { ...mocks.app, sessions: mocks.app.sessions.map((session: { id: string }) => session.id === "worktree" ? { ...session, branch: "pro-990-notifications" } : session) };
+  await render();
+  expect(container.textContent).toContain("pro-990-notifications");
+  await act(async () => { [...container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label") === "Notifications for this session")!.click(); });
+  const sheet = container.querySelector("[role='dialog']")!;
+  expect(sheet.textContent).toContain("Create a new issue");
+  expect(sheet.textContent).toContain("Notifications for this session");
+  expect(sheet.textContent).not.toContain("pro-990-notifications");
+});
+
 describe("mobile transcript ordering (#384)", () => {
   const at = (seq: number, ts: string, payload: AgentEvent["payload"]): AgentEvent => ({ ...event("claude", "", seq), ts, payload });
   // The native list is inverted; its data starts at the newest message.
