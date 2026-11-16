@@ -157,7 +157,7 @@ try {
     const row = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: /Fix login/ }).first();
     await row.hover();
     await page.getByRole("button", { name: "Menu for Fix login", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Remove workspace, keep conversations…" }).click();
+    await page.getByRole("menuitem", { name: /^Remove workspace…/ }).click();
     await page.getByText("Clean and merged: safe to remove.").waitFor();
     await page.getByRole("button", { name: "Remove workspace", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Archive script failed (exit 1). Remove anyway?" });

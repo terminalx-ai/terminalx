@@ -665,8 +665,8 @@ export const api = {
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
-  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
-    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null, detached = false) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch, detached }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),

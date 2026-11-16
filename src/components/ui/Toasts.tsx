@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertCircle, Bot, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, Target, TriangleAlert, X } from "@/icons";
 import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
@@ -9,7 +9,6 @@ import { WorkspaceSetupToasts } from "@/components/terminal/WorkspaceSetupNotice
 import { AgentLoginToasts } from "@/components/settings/AgentLoginToasts";
 import { SettingsLinkToasts } from "@/components/settings/SettingsLinkToasts";
 import { copyText } from "@/lib/clipboard";
-import { liftClearOf } from "@/components/cleanup/CleanupIndicator";
 import { dismissAttachmentNotice, useAttachmentNotices, type AttachmentNotice } from "@/lib/attachmentNotices";
 import { dismissError, errorToastText, runErrorAction, useErrorToasts, type ErrorToast, type ErrorToastAction } from "@/lib/errorToasts";
 
@@ -19,11 +18,8 @@ export function Toasts() {
   const errors = useErrorToasts();
   const attachmentNotices = useAttachmentNotices();
   const store = useSessionStore();
-  const root = useRef<HTMLDivElement>(null);
-  // Error toasts keep off the composer too: a failed held follow-up's (PRO-380) would sit over its Send.
-  const lift = useLiftOffComposer(root, attachmentNotices.length + errors.length);
   return (
-    <div ref={root} className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto" style={lift ? { transform: `translateY(-${lift}px)` } : undefined}>
+    <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       <WorkspaceSetupToasts />
       <AgentLoginToasts />
       <SettingsLinkToasts />
@@ -133,7 +129,13 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
                 <div className="mt-1.5 truncate rounded-md bg-raised px-2 py-1 font-mono text-[11.5px] hairline" title={toast.cause} data-error-detail="">{toast.cause}</div>
               ) : toast.cause ? <div className="font-mono text-foreground" data-error-detail="">{toast.cause}</div> : null}
             </>
-          ) : toast.cause ? <>{toast.action}: <span className="font-mono text-foreground">{toast.cause}</span></> : `${toast.action}.`}
+          ) : toast.cause ? (
+            // The cause on a line of its own (17.09), never run on inside the sentence where it wraps mid-phrase.
+            <>
+              <div>{toast.action}:</div>
+              <div className="mt-0.5 font-mono text-foreground" data-error-detail="">{toast.cause}</div>
+            </>
+          ) : `${toast.action}.`}
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
         {toast.actions?.map((action) => (
@@ -177,52 +179,6 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
       </button>
     </div>
   );
-}
-
-/** Kept from the window's top edge however tall the composer is. */
-const TOP_MARGIN = 8;
-
-/**
- * While a notice about the files just offered to a composer is up (PRO-290),
- * the stack rises clear of that composer (`data-composer-box`), as the
- * clean-up indicator does: in a narrow window it would otherwise sit on the
- * chips, the draft and Send. It never rises past the top of the window.
- * Composers grow as files are read in (followed as they resize) and move
- * with the panels (read again twice a second while such a notice shows).
- */
-function useLiftOffComposer(element: RefObject<HTMLElement | null>, notices: number): number {
-  const [lift, setLift] = useState(0);
-  const applied = useRef(0);
-  applied.current = lift;
-  useLayoutEffect(() => {
-    if (!notices) {
-      setLift(0);
-      return;
-    }
-    const measure = () => {
-      const node = element.current;
-      if (!node) return;
-      const now = node.getBoundingClientRect();
-      if (now.height === 0) return;
-      // Where it rests: what is measured already includes the lift in force.
-      const rest = { left: now.left, right: now.right, top: now.top + applied.current, bottom: now.bottom + applied.current };
-      // The held follow-ups over a composer (PRO-380) are its controls too.
-      const composers = [...document.querySelectorAll<HTMLElement>("[data-composer-box], [data-held-tray]")].map((box) => box.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
-      setLift(Math.max(0, Math.round(Math.min(liftClearOf(rest, composers), rest.top - TOP_MARGIN))));
-    };
-    measure();
-    // A composer grows as the files offered to it are read in: follow it at once.
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    for (const box of document.querySelectorAll("[data-composer-box], [data-held-tray]")) observer?.observe(box);
-    const timer = window.setInterval(measure, 500);
-    window.addEventListener("resize", measure);
-    return () => {
-      observer?.disconnect();
-      window.clearInterval(timer);
-      window.removeEventListener("resize", measure);
-    };
-  }, [element, notices]);
-  return lift;
 }
 
 /**

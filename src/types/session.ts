@@ -244,6 +244,8 @@ export interface Project {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  /** Hidden from the sidebar; its sessions keep running. Absent is shown. */
+  hidden?: boolean;
   archived?: boolean;
   /** Absent while every setting is the default. */
   issuePipeline?: IssuePipelineSettings | null;
@@ -266,6 +268,7 @@ export interface ProjectPatch {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  hidden?: boolean;
   archived?: boolean;
   issuePipeline?: IssuePipelineSettings;
   agentIssueUpdates?: boolean;
