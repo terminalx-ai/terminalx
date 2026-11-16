@@ -1,0 +1,34 @@
+runs: 12
+  relay-cold-08.jsonl: winner path relay
+  relay-cold-09.jsonl: winner path relay
+  relay-cold-10.jsonl: winner path relay
+  relay-cold-11.jsonl: winner path relay
+  relay-cold-12.jsonl: winner path relay
+  relay-cold-13.jsonl: winner path relay
+  relay-cold-14.jsonl: winner path relay
+  relay-cold-15.jsonl: winner path relay
+  relay-cold-16.jsonl: winner path relay
+  relay-cold-17.jsonl: winner path relay
+  relay-cold-18.jsonl: winner path relay
+  relay-cold-19.jsonl: winner path relay
+| Step (from previous point to this point) | n | median ms | p90 ms |
+| --- | --- | --- | --- |
+| process start -> didFinishLaunching | 12 | 40 | 48 |
+| didFinishLaunching -> JS module eval | 12 | 44 | 46 |
+| JS module eval -> root render | 12 | 43 | 44 |
+| root render -> storage read done | 12 | 30 | 32 |
+| storage read done -> account check done | 12 | 0 | 0 |
+| account check done -> initial URL | 12 | 381 | 385 |
+| initial URL -> credential read | 12 | 8 | 11 |
+| credential read -> E2EE key loaded | 12 | 8 | 8 |
+| E2EE key loaded -> race start | 12 | 0 | 1 |
+| race start -> relay socket open | 12 | 1254 | 1349 |
+| relay socket open -> relay hello | 12 | 1262 | 1474 |
+| relay hello -> e2ee_ready | 12 | 364 | 443 |
+| e2ee_ready -> e2ee_authenticated | 12 | 348 | 461 |
+| e2ee_authenticated -> connected | 12 | 724 | 826 |
+| connected -> storage writes done | 12 | 28 | 30 |
+| storage writes done -> capabilities answered | 12 | 465 | 577 |
+| capabilities answered -> summaries answered | 12 | 2252 | 2400 |
+| summaries answered -> list rendered | 12 | 16 | 22 |
+| total: process start -> list rendered | 12 | 7406 | 7707 |

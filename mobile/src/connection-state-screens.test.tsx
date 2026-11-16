@@ -18,12 +18,14 @@ vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, 
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
 vi.mock("react-native", () => {
-  const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
+  const Box = ({ children, accessibilityLabel }: { children?: ReactNode; accessibilityLabel?: string }) => <div aria-label={accessibilityLabel}>{children}</div>;
   // The top bar (#984) fades in and out; here it only needs to exist.
   const Animated = { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) };
   return {
     Animated,
     AppState: { currentState: "active" },
+    // No launch arguments: the Cloud tab reads `-openWorkspace` from them on iOS.
+    Settings: { get: () => undefined },
     View: Box, Text: Box, ScrollView: Box, Platform: { OS: "ios", select: ({ default: fallback }: any) => fallback },
     // The spinner of the connection line, drawn so a test can see it.
     ActivityIndicator: () => <i data-spinner />,
@@ -97,8 +99,11 @@ describe("a list's spinner is the person's pull alone (#983)", () => {
     backgroundLoad(true);
     // Machines says it is loading only while no machine is paired yet (#994).
     if (_name === "Machines") Object.assign(mocks.app, { hosts: [], activeHost: null });
+    // Cloud says it is loading only before its first list is read, with placeholder rows (#988).
+    if (_name === "Cloud") mocks.catalog.getSnapshot = () => ({ organizations: [], loading: true, error: null, refreshedAt: null, saved: false });
     await show(screen());
-    expect(container.textContent).toMatch(/Loading|Looking for your Macs/);
+    if (_name === "Cloud") expect(container.querySelector('[aria-label="Loading cloud workspaces"]')).not.toBeNull();
+    else expect(container.textContent).toMatch(/Loading|Looking for your Macs/);
     expect(container.querySelector("[data-empty-spinner]")).toBeNull();
   });
 });
