@@ -9,6 +9,7 @@ import { useViewedChanges } from "@/lib/viewedChanges";
 import { copyText } from "@/lib/clipboard";
 import type { ChangedFile } from "@/types/session";
 import { DiffStats, diffMediaKind, FileDiff, PathChip, TOO_LARGE, TooLargeState } from "@/components/changes/FileDiff";
+import { ReviewStackPane } from "./ReviewStackPane";
 import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
@@ -22,12 +23,17 @@ import { useSessionThreads } from "@/components/changes/ReviewThreads";
 import { EditorPane } from "./EditorPane";
 import { MediaPane } from "./MediaPane";
 
-/** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
+/** A review tab: the scope's stacked files (PRO-392), or one file with its Entire file, Preview and Edit modes. */
 export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
+  return entry.diff.stack ? <ReviewStackPane entry={entry} visible={visible} /> : <SingleDiffPane entry={entry} visible={visible} />;
+}
+
+/** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
+function SingleDiffPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const session = useSessionStore().sessions.find((s) => s.id === entry.sessionId);
   const tabId = session?.activeTab ?? session?.tabs[0]?.id;
-  return <ReviewCommentsProvider onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
+  return <ReviewCommentsProvider chrome={false} onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
 }
 function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;

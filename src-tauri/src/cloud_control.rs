@@ -86,12 +86,19 @@ pub fn call(sink: &dyn EventSink, action: &str, params: Value) -> Result<Value, 
 }
 
 fn call_within(sink: &dyn EventSink, action: &str, params: Value, timeout: Duration) -> Result<Value, ControlError> {
+    call_event(sink, REQUEST_EVENT, action, params, timeout)
+}
+
+/// Hand `action` to the window as `event` and wait for its answer through
+/// `cloud_control_reply`: the cloud's requests and a machine's
+/// (`machine_control`) share the one reply command.
+pub(crate) fn call_event(sink: &dyn EventSink, event: &str, action: &str, params: Value, timeout: Duration) -> Result<Value, ControlError> {
     let id = uuid::Uuid::now_v7().to_string();
     requests().answers.lock().unwrap().insert(id.clone(), None);
-    sink.emit(REQUEST_EVENT, &json!({ "id": id, "action": action, "params": params }));
+    sink.emit(event, &json!({ "id": id, "action": action, "params": params }));
     let Some(answer) = wait(&id, timeout) else {
         return Err(ControlError::new(
-            "cloud_unavailable",
+            if event == REQUEST_EVENT { "cloud_unavailable" } else { "window_unavailable" },
             "The TerminalX window did not answer in time.",
             Some("Make sure a TerminalX window is open and try again. A message already sent is not sent twice: check the session before repeating it.".to_string()),
         ));

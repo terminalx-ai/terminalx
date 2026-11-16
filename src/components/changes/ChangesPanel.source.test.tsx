@@ -466,14 +466,14 @@ it("shows no merge for a source that cannot tell, and a merge that cannot be rea
   expect(screen.getByText("0 of 5 viewed")).toBeTruthy();
 });
 
-it("opens local Changes rows in centre tabs with the chosen range and rename path", async () => {
+it("opens local Changes rows in the scope's one review tab with the chosen range (PRO-392)", async () => {
   const source = fakeSource("local:/repo");
   source.cloud = false;
   source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 1, deletions: 1 }]);
   render(<ChangesPanel source={source} cwd="/repo" sessionId="centre" events={[]} version={0} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
   expect(getEditors().editors.find((e) => e.sessionId === "centre")).toMatchObject({
-    kind: "diff", rel: "new.ts", name: "new.ts · All changes", diff: { range: { base: "merge-base", head: "snapshot" }, oldPath: "old.ts" },
+    kind: "diff", rel: "new.ts", name: "Review · All changes", diff: { stack: true, range: { base: "merge-base", head: "snapshot" } },
   });
   expect(screen.queryByTestId("diff")).toBeNull();
   expect(source.fileContentsAt).not.toHaveBeenCalled();
