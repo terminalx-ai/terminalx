@@ -105,7 +105,7 @@ const SIGN_INS: Record<string, string> = { codex: "ChatGPT" };
 /** The picker's Model row when the agent answered with no models. Never the button's label. */
 const NONE_FOUND = "None found";
 /** The permission chip's word for a mode, shorter than the menu's. */
-const SHORT_MODES: Record<string, string> = { manual: "Ask", [BYPASS_MODE]: "Bypass" };
+const shortMode = (mode: string | null | undefined) => (mode === "manual" ? "Ask" : mode === BYPASS_MODE ? "Bypass" : null);
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -881,7 +881,7 @@ function PermissionIcon({ tone }: { tone: PermissionChoice["tone"] }) {
 function PermissionChip({ permissions: p, onOpen }: { permissions: PermissionChoice; onOpen: (open: boolean) => void }) {
   // Opens on a click and an accessibility press too, like the model picker.
   const menu = useRowMenu({ onOpenChange: onOpen });
-  const short = SHORT_MODES[p.picked ?? ""] ?? p.label;
+  const short = shortMode(p.picked) ?? p.label;
   return (
     <DropdownMenu {...menu.root}>
       <DropdownMenuTrigger asChild {...menu.trigger} disabled={!!p.lock}>
