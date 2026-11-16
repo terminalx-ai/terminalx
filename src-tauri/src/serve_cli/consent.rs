@@ -23,7 +23,12 @@
 //! runtime, which has no window, therefore also refuses a caller with no
 //! controlling terminal: there, only `pair` in a person's terminal answers.
 //! What no check here can tell from a person: a process of the same user that
-//! detaches and opens a new pseudo-terminal of its own to run `pair` in.
+//! detaches and opens a new pseudo-terminal of its own to run `pair` in. And on
+//! a runtime the desktop launched, where the window (which has no terminal)
+//! must be let through, a process that detaches with `setsid` and asks with no
+//! terminal at all: the runtime cannot yet tell the window from it, because it
+//! does not know which process is the window. Recognising the window is a
+//! follow-up; before this guard, nothing was refused on any runtime.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};

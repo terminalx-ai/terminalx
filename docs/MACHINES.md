@@ -1025,7 +1025,12 @@ as a user service and is paired from its own terminal. The user's guide is
   process it started, one whose controlling terminal is one of its terminals,
   and, on a runtime with no window, one with no controlling terminal. The
   window's client sends a witness too. `pair` also refuses when its input or
-  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`).
+  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known
+  limits: a same-user process that detaches and opens a pseudo-terminal of its
+  own looks like a person anywhere; and on a desktop-launched runtime, which
+  must let the terminal-less window through, a process that detaches with
+  `setsid` and has no terminal is let through too, until the runtime can
+  recognise the window process itself (follow-up).
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
