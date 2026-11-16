@@ -1,4 +1,5 @@
 import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/reviewComments";
+import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -741,19 +742,21 @@ export function Composer({
                 </Button>
               </WithTooltip>
             ) : (
-              <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
-                <Button
-                  size="icon-sm"
-                  className={CORNER}
-                  variant={draft.trim() || sendable.length ? "accent" : "secondary"}
-                  aria-label={sending ? "Sending" : "Send"}
-                  aria-busy={sending}
-                  disabled={disabled || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
-                  onClick={() => void send()}
-                >
-                  <ArrowUp />
-                </Button>
-              </WithTooltip>
+              <SetupCheckCoach tabId={tab.id}>
+                <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
+                  <Button
+                    size="icon-sm"
+                    className={CORNER}
+                    variant={draft.trim() || sendable.length ? "accent" : "secondary"}
+                    aria-label={sending ? "Sending" : "Send"}
+                    aria-busy={sending}
+                    disabled={disabled || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
+                    onClick={() => void send()}
+                  >
+                    <ArrowUp />
+                  </Button>
+                </WithTooltip>
+              </SetupCheckCoach>
             )}
           </div>
         </div>
