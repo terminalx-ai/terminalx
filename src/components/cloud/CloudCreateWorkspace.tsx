@@ -17,6 +17,7 @@ import {
   PHASES,
   createErrorMessage,
   createWorkspace,
+  creationPausedText,
   failureMessage,
   isClientError,
   launchLatencyText,
@@ -34,7 +35,8 @@ import {
   type PhaseId,
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
-import { creatableProviders } from "@/lib/hiddenProviders";
+import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
+import { AllowNewMachines } from "./AllowNewMachines";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
@@ -122,17 +124,19 @@ export function CloudCreateWorkspace({
       .catch((e: unknown) => setRepositoriesError(errorCode(e)));
   }, []);
 
+  const showProviders = useCallback((list: CloudProviderSummary[]) => {
+    setProviders(list);
+    const usable = creatableProviders(list);
+    setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
+  }, []);
+
   useEffect(() => {
     loadRepositories();
     api
       .cloudProviders()
-      .then((result) => {
-        setProviders(result.providers);
-        const usable = creatableProviders(result.providers);
-        setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
-      })
+      .then((result) => showProviders(result.providers))
       .catch((e: unknown) => setLoadError(errorCode(e)));
-  }, [loadRepositories]);
+  }, [loadRepositories, showProviders]);
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
@@ -224,7 +228,7 @@ export function CloudCreateWorkspace({
     >
       {loadError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}).</p>}
       {providers && usable.length === 0 && (
-        <p className="text-xs text-muted-foreground">No compute provider is ready. An admin connects one in Settings → Cloud compute.</p>
+        <NoProvider providers={providers} organizationId={organizationId} onAllowed={showProviders} />
       )}
 
       <label className="flex flex-col gap-1 text-xs">
@@ -565,4 +569,23 @@ function lastReached(snapshot: CloudWorkspaceSnapshot): number {
   if (stage === "bootstrapping") return 1;
   if (stage === "connecting-relay") return 2;
   return 0;
+}
+
+/**
+ * Why there is no provider to choose, in the words the create would refuse
+ * with (PRO-372): paused new machines come with the button that allows them,
+ * for whoever may manage the provider.
+ */
+function NoProvider({ providers, organizationId, onAllowed }: { providers: CloudProviderSummary[]; organizationId: string; onAllowed: (providers: CloudProviderSummary[]) => void }) {
+  const refusal = noProviderRefusal(providers);
+  const paused = pausedProviders(providers);
+  const canAllow = paused.some((provider) => provider.canManage) && Boolean(getAccount().status.context?.revision);
+  // The provider's own `canManage` answers who may allow it; the role is the fallback for the rest.
+  const manages = canAllow || managesOrganization(getAccount().status, organizationId);
+  return (
+    <div className="flex flex-col gap-2 text-xs" data-testid="cloud-create-no-provider">
+      <p className="text-muted-foreground">{canAllow ? creationPausedText(refusal.detail) : createErrorMessage(refusal.code, refusal.detail, manages)}</p>
+      <AllowNewMachines providers={paused} onAllowed={onAllowed} />
+    </div>
+  );
 }

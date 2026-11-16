@@ -18,7 +18,7 @@ vi.mock("@/lib/account", async (original) => ({
   }),
 }));
 
-const { creatableProviders, listedProviders, machine0Offered, pausedProviders } = await import("@/lib/hiddenProviders");
+const { creatableProviders, listedProviders, machine0Offered, noProviderRefusal, pausedProviders } = await import("@/lib/hiddenProviders");
 
 const summary = (id: CloudProviderSummary["id"], overrides: Partial<CloudProviderSummary> = {}): CloudProviderSummary => ({
   id,
@@ -70,5 +70,20 @@ describe("hidden providers (Machine0)", () => {
     expect(pausedProviders(providers).map((provider) => provider.id)).toEqual(["box"]);
     account.flags = { "cloud.machine0-byok-pilot.v1": true };
     expect(pausedProviders(providers).map((provider) => provider.id)).toEqual(["machine0", "box"]);
+  });
+
+  // PRO-372: a provider connected in the web console with its new machines paused is not "none connected".
+  it("says why there is no provider to use: paused, needing attention, or none connected", () => {
+    const paused = noProviderRefusal([summary("box", { displayName: "Boat", availability: "disabled-for-create", connection: connected }), summary("hetzner", { availability: "not-connected" })]);
+    expect([paused.code, paused.detail]).toEqual(["cloud_provider_creation_paused", "Boat"]);
+    const both = noProviderRefusal([summary("box", { displayName: "Boat", availability: "disabled-for-create", connection: connected }), summary("hetzner", { displayName: "Hetzner", availability: "disabled-for-create", connection: connected })]);
+    expect(both.detail).toBe("Boat and Hetzner");
+    const attention = noProviderRefusal([summary("box", { displayName: "Boat", availability: "attention-required", connection: { ...connected, state: "attention-required" } })]);
+    expect([attention.code, attention.detail]).toEqual(["cloud_provider_connection_attention_required", "Boat"]);
+    expect(noProviderRefusal([summary("box", { availability: "not-connected" })]).code).toBe("cloud_provider_connection_required");
+    expect(noProviderRefusal([]).code).toBe("cloud_provider_connection_required");
+    // A hidden Machine0, paused or needing attention, is no reason: allowing it would not offer it.
+    expect(noProviderRefusal([summary("machine0", { availability: "disabled-for-create", connection: connected })]).code).toBe("cloud_provider_connection_required");
+    expect(noProviderRefusal([summary("machine0", { availability: "attention-required", connection: connected })]).code).toBe("cloud_provider_connection_required");
   });
 });

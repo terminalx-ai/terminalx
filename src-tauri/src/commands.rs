@@ -113,6 +113,23 @@ pub async fn organization_select(
     }).await.map_err(err)?.map_err(err)
 }
 
+/// An organization's cloud computer name and colour (PRO-370); owners and admins of it.
+#[tauri::command]
+pub async fn organization_computer_save(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    computer_name: Option<String>,
+    computer_color: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
+        account.save_computer_identity(&organization_id, &context_revision, computer_name.as_deref(), computer_color.as_deref())?;
+        Ok(account.status(&app))
+    }).await.map_err(err)?.map_err(err)
+}
+
 // ------------------------------------------------------ organization members
 
 #[tauri::command]

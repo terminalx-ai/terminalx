@@ -3148,6 +3148,9 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_provider_disabled"
             | "cloud_provider_connection_required"
             | "cloud_provider_connection_attention_required"
+            // Connected, with new machines paused for the organization
+            // (terminalx-saas #257); older servers said cloud_provider_unavailable.
+            | "cloud_provider_creation_disabled"
             | "cloud_provider_operation_in_progress"
             | "cloud_provider_account_mismatch"
             | "cloud_provider_disposition_required"

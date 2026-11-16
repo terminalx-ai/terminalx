@@ -440,6 +440,18 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  // PRO-372: the organization's provider was connected in the web console, with new machines paused.
+  it("says new machines are paused, not that a provider is needed, when the only provider is connected but paused", async () => {
+    await place([], { used: 0, limit: 2 });
+    mocks.api.cloudProviders.mockResolvedValue({
+      providers: [{ id: "box", displayName: "Boat", availability: "disabled-for-create", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: "fp" } }],
+    });
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Boat" });
+    expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
   it("asks a new workspace for a native Codex first tab only for Codex, and only when Settings → Experimental says so (#745)", async () => {
     await place([], { used: 0, limit: 5 });
     const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
@@ -562,6 +574,22 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
     expect(prepared.form.provider).toBe("box");
     expect(prepared.providerLabel).toBe("Box");
+  });
+
+  // PRO-372: an organization made in the web console, not the active one, whose Boat connection has new machines paused.
+  it("says new machines are paused there, not that the provider is unavailable, when the server refuses its setup for that", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.box.v1": true, "cloud.workspaces.provider.hetzner.v1": true } } } : org,
+      ),
+    };
+    mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
+      throw { code: provider === "box" ? "cloud_provider_creation_disabled" : "cloud_provider_connection_required" };
+    });
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Box" });
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box", "hetzner"]);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
   it("skips Machine0 when the server hides it, even where its provider flag is on", async () => {

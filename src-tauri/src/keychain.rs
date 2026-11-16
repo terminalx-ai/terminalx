@@ -249,6 +249,7 @@ mod tests {
             "account_sign_out",
             "organization_create",
             "organization_select",
+            "organization_computer_save",
             "pairing_status",
             "pairing_generate",
             "pairing_revoke",

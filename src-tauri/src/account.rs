@@ -155,6 +155,11 @@ pub struct OrganizationSummary {
     /// What the cloud offers in this organization (PRO-69); absent from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<OrganizationCloud>,
+    /// The organization's cloud computer name and colour (PRO-370); absent from older servers and when not chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_color: Option<String>,
 }
 
 /// What creating an organization did (PRO-16): the organization, and whether
@@ -300,6 +305,10 @@ struct Organization {
     is_personal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud: Option<OrganizationCloud>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    computer_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    computer_color: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -471,7 +480,7 @@ impl AccountManager {
         let session = inner.session.as_mut().expect("signed in");
         session.organizations = organizations
             .iter()
-            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
+            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
@@ -868,6 +877,43 @@ impl AccountManager {
         }
         drop(_gate);
         self.store().map_err(StoreError::into_error).context("save selected organization")
+    }
+
+    /// Save an organization's cloud computer name and colour (PRO-370), any
+    /// organization the person manages, whichever is active. Fenced by the
+    /// account context it was asked for; the saved values go into the
+    /// account snapshot so every view shows them before the next refresh.
+    pub(crate) fn save_computer_identity(&self, organization_id: &str, revision: &str, name: Option<&str>, color: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            let valid = (1..=40).contains(&name.len())
+                && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !name.starts_with('-') && !name.ends_with('-') && !name.contains("--");
+            if !valid { return Err(anyhow!("invalid_computer_name")); }
+        }
+        if color.is_some_and(|color| !COMPUTER_COLORS.contains(&color)) { return Err(anyhow!("invalid_computer_color")); }
+        if organization_id.is_empty() || !organization_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(anyhow!("invalid organization"));
+        }
+        let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
+        if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
+        let (target, access) = self.context_in(organization_id).map_err(|error| anyhow!(error))?;
+        if target.user_id != context.user_id || target.profile_id != context.profile_id { return Err(anyhow!("account context changed")); }
+        let saved: ComputerIdentity = send_authenticated(
+            "PUT",
+            &format!("{ORGANIZATIONS_PATH}/{organization_id}/computer"),
+            json!({ "computerName": name, "computerColor": color }),
+            Some(&target.access_token),
+        )?;
+        if !self.is_current_in(&target, access) { return Err(anyhow!("account context changed after saving the computer")); }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != target.generation || inner.session.as_ref().is_none_or(|session| session.cloud.user_id != target.user_id || session.cloud.cloud_profile_id != target.profile_id) {
+            return Err(anyhow!("account context changed after saving the computer"));
+        }
+        if let Some(org) = inner.session.as_mut().and_then(|session| session.organizations.iter_mut().find(|org| org.org_id == organization_id)) {
+            org.computer_name = saved.computer_name;
+            org.computer_color = saved.computer_color;
+        }
+        Ok(())
     }
 
     pub(crate) fn select_organization_for_revision(&self, organization_id: &str, revision: &str) -> Result<()> {
@@ -1418,7 +1464,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
             let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone(), computer_name: org.computer_name.clone(), computer_color: org.computer_color.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
@@ -1587,6 +1633,27 @@ fn post_json<T: DeserializeOwned>(
     Ok(value)
 }
 
+/// The colours an organization's cloud computer can have (PRO-370), as the server allows them.
+const COMPUTER_COLORS: [&str; 6] = ["orange", "blue", "green", "violet", "red", "gray"];
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerIdentity {
+    #[serde(default)]
+    computer_name: Option<String>,
+    #[serde(default)]
+    computer_color: Option<String>,
+}
+
+fn send_authenticated<T: DeserializeOwned>(method: &str, path: &str, body: serde_json::Value, access_token: Option<&str>) -> Result<T, anyhow::Error> {
+    let mut request = cloud_agent().request(method, &endpoint(path)).set("content-type", "application/json");
+    if let Some(token) = access_token {
+        request = request.set("authorization", &format!("Bearer {token}"));
+    }
+    let response = request.send_json(body).map_err(|error| anyhow!("account service request failed: {error}"))?;
+    response.into_json::<T>().map_err(|error| anyhow!("account service returned invalid JSON: {error}"))
+}
+
 fn post_authenticated<T: DeserializeOwned>(
     path: &str,
     body: serde_json::Value,
@@ -1723,7 +1790,7 @@ mod tests {
 
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
-        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None };
         let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
@@ -2312,7 +2379,7 @@ mod tests {
         let mut session = from.clone();
         session.access_token = "rotated-access".into();
         session.refresh_token = "rotated-refresh".into();
-        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
+        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None, computer_name: None, computer_color: None }];
         session
     }
 

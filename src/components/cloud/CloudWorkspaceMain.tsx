@@ -21,6 +21,8 @@ import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } fro
 import { useCloudAgentRan } from "@/lib/cloudSessions";
 import { detachCloudTerminals, errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
+import { useAccount } from "@/lib/account";
+import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
@@ -46,6 +48,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const catalog = useCloudCatalog();
   const sections = useOrganizationVisibility();
   const parsed = parseCloudWorkspaceKey(workspaceKey);
+  const { status: accountStatus } = useAccount();
+  const computer = accountStatus.organizations?.find((org) => org.id === parsed?.orgId) ?? null;
   // Signed out, or no longer a member: nothing of the organization is shown or connected.
   const member = !!parsed && sections.live.has(parsed.orgId);
   const item = parsed && member ? findCloudWorkspace(catalog, parsed.orgId, parsed.workspaceId) : null;
@@ -190,7 +194,14 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
             </Button>
           </WithTooltip>
         )}
-        <Cloud className="size-4 shrink-0 text-muted-foreground" />
+        {/* The organization's cloud computer, in its name and colour (PRO-370). */}
+        <Cloud className="size-4 shrink-0" style={{ color: computer ? computerColorCss(computer.computerColor) : undefined }} />
+        {computer && (
+          <>
+            <span className="max-w-40 shrink-0 truncate font-mono text-xs text-muted-foreground" data-testid="cloud-computer-name">{computerNameOf(computer)}</span>
+            <span className="shrink-0 text-xs text-faint" aria-hidden>›</span>
+          </>
+        )}
         <span className="min-w-0 truncate text-sm font-medium">{item?.workspace.name ?? "Cloud workspace"}</span>
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
         <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>

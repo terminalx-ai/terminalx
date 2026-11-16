@@ -778,6 +778,9 @@ export interface OrganizationSummary {
   isPersonal?: boolean;
   /** What the cloud offers in this organization (PRO-69); absent from older servers. */
   cloud?: { enabled: boolean; flags: Record<string, boolean> } | null;
+  /** The organization's cloud computer name and colour (PRO-370); null or absent when not chosen. */
+  computerName?: string | null;
+  computerColor?: string | null;
 }
 
 export interface AccountIdentity {
@@ -1586,6 +1589,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_provider_disabled"
   | "cloud_provider_connection_required"
   | "cloud_provider_connection_attention_required"
+  | "cloud_provider_creation_disabled"
   | "cloud_provider_operation_in_progress"
   | "cloud_provider_credential_invalid"
   | "cloud_provider_permission_denied"
