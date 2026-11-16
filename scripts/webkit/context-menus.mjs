@@ -92,7 +92,11 @@ try {
     await file.click({ button: "right" });
     await menu.waitFor();
     const fileActions = await actions();
-    assert(fileActions.some((item) => item.label === "Open"));
+    // PRO-402: the file menu of 06.05, in order.
+    assert.deepEqual(
+      fileActions.map((item) => item.label.replace(/(↵|⌥⌘C|Ctrl\+?Alt\+?C)$/i, "")),
+      ["View", "View diff", "Attach in chatAdds @README.md", "Open in", "Copy path", "Copy relative path", "Reveal in Finder", "Discard changes"],
+    );
     await close();
     const tree = page.getByRole("tree");
     await tree.focus();
