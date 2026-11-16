@@ -1,13 +1,19 @@
-# Phone fixture (22.01–22.05)
+# Phone fixture (22.01–22.06)
 
 The production app (its root layout, native tab bar and every screen) with
-only `src/state/AppProvider.tsx` swapped for `fixture-app.tsx`. The real
-`HostApi` runs over a fake connection that answers the Mac's requests with
-placeholder data:
+only `src/state/AppProvider.tsx` swapped for `fixture-app.tsx` and
+`src/cloud/CloudProvider.tsx` for `fixture-cloud.tsx`. The real `HostApi` runs
+over a fake connection that answers the Mac's requests with placeholder data:
 
 - five machines: two paired Macs online, two offline, and one on the account only;
 - nine sessions: two waiting on the person, three working, one merged, one with failing checks, and so on;
 - a conversation with earlier turns, a reply, and two commands.
+
+The Cloud tab runs the real `CloudCatalog` and `CloudApi`; only `fetch` is
+answered in memory. It has two organizations with workspaces (one working, two
+stopped, one waiting on an answer) and five without any. One stopped workspace
+has a saved conversation: its checkpoint is sealed with the app's own crypto
+and opened on the phone by the real reader, with a placeholder key.
 
 There is no pairing, account, network or private data. Each `flow-22.0N.yaml`
 drives the app with Maestro and saves a screenshot for each state that design
@@ -25,6 +31,10 @@ in a flow), and it reaches the app through `Settings.get("fixtureScenario")`.
 | `offline` | No internet |
 | `held` | The Mac holds the phone off ("Disconnected on your Mac") |
 | `slow-refresh` | Connected, and a pull to refresh takes 6 s |
+
+`fixtureCloud: loading` holds the first read of the cloud list, so the Cloud
+tab shows its placeholder rows. `openRoute: /cloud` with `openWorkspace: <id>`
+opens a workspace at launch, as a tap on its row does.
 
 `fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
 the session screen (working, a question, a table, done).
