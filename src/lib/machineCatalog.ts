@@ -315,8 +315,11 @@ function boot() {
 
 // ---- rows ------------------------------------------------------------------
 
-function tabRow(tab: RuntimeSession["tabs"][number], session: RuntimeSession, first: boolean, agent: CloudAgentTab | undefined, unread: readonly string[]): MachineSessionTab {
-  const status = (agent ? agent.info.status : tab.status) as TabStatus;
+function tabRow(tab: RuntimeSession["tabs"][number], session: RuntimeSession, first: boolean, agent: CloudAgentTab | undefined, unread: readonly string[], live: boolean): MachineSessionTab {
+  const reported = (agent ? agent.info.status : tab.status) as TabStatus;
+  // Only a machine that answers now says a turn is running: a saved "working" may long have ended there.
+  // So the row mark, the sidebar's filters, the overview and the badge all read an unreachable machine's turn as idle.
+  const status: TabStatus = reported === "in_progress" && !live ? "idle" : reported;
   const title = agent?.info.title ?? tab.title ?? null;
   return {
     tabId: tab.id,
@@ -339,7 +342,7 @@ export function buildMachineSessions(machineId: string, entry: MachineCatalogEnt
   const rows: MachineSessionRow[] = [];
   for (const session of entry.sessions) {
     if (!session.projectId) continue;
-    const tabs = session.tabs.map((tab, index) => tabRow(tab, session, index === 0, agents.get(tab.id), entry.unread));
+    const tabs = session.tabs.map((tab, index) => tabRow(tab, session, index === 0, agents.get(tab.id), entry.unread, entry.source === "live"));
     rows.push({
       key: machineSessionKey(machineId, session.projectId, session.id),
       machineId,

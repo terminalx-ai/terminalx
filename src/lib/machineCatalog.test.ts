@@ -265,4 +265,43 @@ describe("machine catalog", () => {
     mini.setState({ state: "reconnecting" } as WorkspaceConnectionState);
     await expect(catalog.updateMachineSession("machine:m1:P1:s1", { archived: true })).rejects.toThrow(/not connected/);
   });
+
+  it("puts a pinned session first in its project, above newer ones, once the machine has pinned it", async () => {
+    const mini = new FakeMachine();
+    mini.projects = [project("P1", "terminalx")];
+    mini.sessions = [session("old", "P1", "Older", { lastMessageAt: "2026-11-14T09:00:00Z" }), session("new", "P1", "Newer", { lastMessageAt: "2026-11-14T11:00:00Z" })];
+    catalog.getMachineCatalog();
+    hold({ m1: mini });
+    mini.connect();
+    await flush();
+    const order = () => catalog.buildMachineProjects("m1", catalog.getMachineCatalog().machines.m1, catalog.allMachineSessions())[0].sessions.map((row) => row.sessionId);
+    expect(order()).toEqual(["new", "old"]);
+
+    await catalog.updateMachineSession("machine:m1:P1:old", { pinned: true });
+    expect(order()).toEqual(["old", "new"]);
+    // The same when the machine's own list says so.
+    mini.notify("session.sessions", { sessions: mini.sessions });
+    expect(order()).toEqual(["old", "new"]);
+  });
+
+  it("reads a working turn on a machine that cannot be reached as idle, keeping what needs the person", async () => {
+    const mini = new FakeMachine();
+    mini.projects = [project("P1", "terminalx")];
+    mini.sessions = [session("s1", "P1", "Working one"), session("s2", "P1", "Asking one")];
+    mini.tabs = [tab("s1", "in_progress"), tab("s2", "waiting")];
+    catalog.getMachineCatalog();
+    hold({ m1: mini });
+    mini.connect();
+    await flush();
+    const marks = () => Object.fromEntries(catalog.allMachineSessions().map((row) => [row.sessionId, [catalog.machineSessionStatus(row), row.tabs[0].status]]));
+    expect(marks()).toEqual({ s1: ["in_progress", "in_progress"], s2: ["waiting", "waiting"] });
+
+    mini.setState({ state: "reconnecting" } as WorkspaceConnectionState);
+    expect(marks()).toEqual({ s1: ["idle", "idle"], s2: ["waiting", "waiting"] });
+
+    // Back: the machine's answer is what counts again.
+    mini.connect();
+    await flush();
+    expect(marks().s1).toEqual(["in_progress", "in_progress"]);
+  });
 });
