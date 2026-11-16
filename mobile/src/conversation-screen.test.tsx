@@ -53,7 +53,9 @@ vi.mock("react-native", () => {
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     Animated: { View: Box, Value: class { setValue() {} interpolate() { return "0deg"; } }, loop: () => ({ start: () => undefined, stop: () => undefined }), timing: () => ({}) },
     Easing: { linear: (value: number) => value },
-    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
+    View: Box, Text: Box, KeyboardAvoidingView: Box,
+    // A horizontal strip says its frame's style (merged), which is where it clips touches.
+    ScrollView: ({ children, horizontal, style, contentContainerStyle }: any) => <div data-strip={horizontal ? JSON.stringify({ frame: Object.assign({}, ...[style].flat(3).filter(Boolean)), content: Object.assign({}, ...[contentContainerStyle].flat(3).filter(Boolean)) }) : undefined}>{children}</div>,
     Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => mocks.keyboardDismissed() },
     PanResponder: { create: () => ({ panHandlers: {} }) },
     ActivityIndicator: () => null,
@@ -62,7 +64,7 @@ vi.mock("react-native", () => {
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     // A long press is a right-click here.
-    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress} onContextMenu={onLongPress ? (event) => { event.preventDefault(); onLongPress(); } : undefined}>{children}</button>,
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint, hitSlop }: any) => <button disabled={disabled} aria-label={accessibilityLabel} data-hitslop={hitSlop === undefined ? undefined : JSON.stringify(hitSlop)} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress} onContextMenu={onLongPress ? (event) => { event.preventDefault(); onLongPress(); } : undefined}>{children}</button>,
     TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur, autoFocus }: any) => <input value={value} autoFocus={autoFocus} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
@@ -1392,6 +1394,38 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     expect(text()).toContain("Needs approval");
     await click("Stop");
     expect(mocks.app.api.interrupt).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives the composer's model, effort and permission mark 44 pt places to tap, which the strip they scroll in does not clip", async () => {
+    takesControls();
+    mocks.app.api.models = vi.fn(async () => [{ id: "opus", label: "Opus", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]);
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    // The composer's strip: the last horizontal one, after the chat tabs.
+    const strip = JSON.parse([...container.querySelectorAll("[data-strip]")].at(-1)!.getAttribute("data-strip")!);
+    // The composer's row is 32 pt; the strip reaches 6 pt past it on each side, so its frame is 44 pt and nothing moves.
+    expect(32 - 2 * strip.frame.marginVertical).toBeGreaterThanOrEqual(44);
+    expect(strip.content.minHeight).toBeGreaterThanOrEqual(44);
+    const slop = (label: string | RegExp) => {
+      const found = [...container.querySelectorAll("button")].find((item) => typeof label === "string" ? item.getAttribute("aria-label") === label : label.test(item.getAttribute("aria-label") ?? ""))!;
+      return JSON.parse(found.getAttribute("data-hitslop")!) as { top: number; bottom: number; left: number; right: number };
+    };
+    // Drawn sizes: a 14 pt line of text is 17 pt tall, and the mark is an 18 pt icon; "High" is about 29 pt wide.
+    for (const [label, tall] of [["Opus", 17], ["High", 17], [/^Permission mode/, 18]] as const) {
+      const { top, bottom } = slop(label);
+      expect(tall + top + bottom, String(label)).toBeGreaterThanOrEqual(43);
+      // Never past the strip's frame, where the ScrollView would cut it.
+      expect(top, String(label)).toBeLessThanOrEqual((44 - tall) / 2 + 0.5);
+    }
+    const effort = slop("High");
+    const mode = slop(/^Permission mode/);
+    expect(29 + effort.left + effort.right).toBeGreaterThanOrEqual(42);
+    expect(18 + mode.left + mode.right).toBeGreaterThanOrEqual(44);
+    // Neighbours split their gaps (5 pt and 12 pt) instead of overlapping.
+    expect(slop("Opus").right + effort.left).toBeLessThanOrEqual(5);
+    expect(effort.right + mode.left).toBeLessThanOrEqual(12);
+    expect(mode.right).toBeLessThanOrEqual(strip.content.paddingRight);
   });
 
   it("drops the status line while not connected; the composer keeps its buttons (22.01)", async () => {

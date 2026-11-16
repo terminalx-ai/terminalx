@@ -120,6 +120,21 @@ function IconButton({ label, icon, disabled, onPress }: { label: string; icon: R
 }
 
 
+/**
+ * The composer's model, effort and permission mark are small words and an
+ * 18 pt icon, as 22.03 draws them; each is tapped through a 44 pt place.
+ * The strip they scroll in reaches past the 32 pt row (`chipStrip`) so a
+ * ScrollView, which clips touches to its frame, does not cut those places
+ * short. Side by side, the places split the gaps between them instead of
+ * overlapping: model and effort share their 5 pt gap, effort and the mark
+ * their 12 pt one, and the mark takes the room to its right.
+ */
+const CHIP_SLOP = {
+  model: { top: 13, bottom: 13, left: 8, right: 2 },
+  effort: { top: 13, bottom: 13, left: 3, right: 10 },
+  mode: { top: 13, bottom: 13, left: 2, right: 24 },
+};
+
 /** What a question's card says on a phone paired with a Mac that takes no answer from it (#979). */
 const ANSWER_ON_MAC = "Answer this question from your Mac.";
 
@@ -589,15 +604,15 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
           {action}
         </View> : <View style={styles.toolbar}>
           {sendToAgent ? <IconButton label="Add attachment" icon={<Plus size={20} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={styles.chips}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={[styles.flex, styles.chipStrip]} contentContainerStyle={styles.chips}>
             {controls ? <>
               {/* The model and its effort in one line, the model bold; each opens its own picker. */}
               <View style={[styles.model, dimmed]}>
-                <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.model.label} disabled={controls.settings.model.disabled} hitSlop={8} onPress={controls.settings.model.open}><Text numberOfLines={1} style={[styles.modelText, { color: palette.ink }]}>{controls.settings.model.label}</Text></Pressable>
-                {controls.settings.effort ? <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.effort.label} disabled={controls.settings.effort.disabled} hitSlop={8} onPress={controls.settings.effort.open}><Text numberOfLines={1} style={[styles.effortText, { color: palette.muted }]}>{controls.settings.effort.label}</Text></Pressable> : null}
+                <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.model.label} disabled={controls.settings.model.disabled} hitSlop={CHIP_SLOP.model} onPress={controls.settings.model.open}><Text numberOfLines={1} style={[styles.modelText, { color: palette.ink }]}>{controls.settings.model.label}</Text></Pressable>
+                {controls.settings.effort ? <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.effort.label} disabled={controls.settings.effort.disabled} hitSlop={CHIP_SLOP.effort} onPress={controls.settings.effort.open}><Text numberOfLines={1} style={[styles.effortText, { color: palette.muted }]}>{controls.settings.effort.label}</Text></Pressable> : null}
               </View>
               {/* The permission mode as a mark alone, named for assistive technology; Bypass by its own shape, not a colour. */}
-              <Pressable accessibilityRole="button" accessibilityLabel={`Permission mode: ${controls.settings.mode.label}`} disabled={controls.settings.mode.disabled} hitSlop={10} onPress={controls.settings.mode.open} style={dimmed}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Permission mode: ${controls.settings.mode.label}`} disabled={controls.settings.mode.disabled} hitSlop={CHIP_SLOP.mode} onPress={controls.settings.mode.open} style={dimmed}>
                 {controls.settings.mode.bypass ? <ShieldAlert size={18} color={palette.muted} /> : <Shield size={18} color={palette.muted} />}
               </Pressable>
             </> : null}
@@ -838,7 +853,9 @@ const styles = StyleSheet.create({
   noteBanner: { flexDirection: "row", alignItems: "center", gap: 7 },
   noteBannerText: { flex: 1, fontSize: 13 },
   toolbar: { flexDirection: "row", alignItems: "center", gap: 12 },
-  chips: { alignItems: "center", gap: 12 },
+  // 6 pt above and below the 32 pt row, and 8 pt at each end, given back by the margins: the strip's frame is 44 pt tall, nothing moves.
+  chipStrip: { marginVertical: -6, marginHorizontal: -8 },
+  chips: { alignItems: "center", gap: 12, minHeight: 44, paddingLeft: 8, paddingRight: 24 },
   sendFeedback: { flex: 1, fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
   resend: { minHeight: 36, paddingHorizontal: 12 },
