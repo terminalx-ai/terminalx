@@ -3,6 +3,7 @@
 //! No PTY tail, second subscription, automatic reconnect, or prompt replay: a
 //! tab whose connection ended resumes its thread only for the next explicit send.
 use super::*;
+use std::path::PathBuf;
 use std::time::Duration;
 use crate::harness::codex::owned_transport::{Observation, TurnOutcome};
 use crate::harness::codex::stdio::{Action as StdioAction, Outbound, Stdio};
@@ -140,6 +141,18 @@ fn native_account_home(env: &mut Vec<(String, String)>, grant: &crate::cloud_gra
     let home = codex::home::prepare_native_account(cwd, &crate::store::root()?, id).context("prepare the account's native Codex home")?;
     env.retain(|(key, _)| key != "CODEX_HOME");
     env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+    Ok(())
+}
+
+/// Bring native thread `thread` into the home `env` runs Codex in (its
+/// `CODEX_HOME`, else the reader's own), from This Mac's native home or the
+/// native homes of added accounts, whose `sessions` are one (#980).
+fn bring_native_thread(env: &[(String, String)], thread: &str) -> Result<()> {
+    let target = env.iter().rev().find(|(key, _)| key == "CODEX_HOME").map(|(_, home)| PathBuf::from(home)).or_else(codex::home::user_root);
+    let Some(target) = target else { return Ok(()) };
+    let homes: Vec<PathBuf> = [codex::home::user_root(), codex::home::native_root_if_made()].into_iter().flatten().collect();
+    codex::home::bring_rollout(&target, &homes, thread)
+        .context("Codex's saved conversation could not be brought to this account. No prompt was sent.")?;
     Ok(())
 }
 
@@ -543,6 +556,13 @@ impl SessionManager {
         // native tab cannot answer: native Codex runs in the account's
         // hook-free native home instead (#980).
         native_account_home(&mut env, &grant, cwd)?;
+        // A thread switched between This Mac's login and an added account is
+        // in the other one's home: bring its newest copy here first (#980).
+        if grant.codex_auth.is_none() {
+            if let Some(thread) = entry.as_ref().and_then(|entry| entry.tab(tab)).and_then(|t| t.provider_session_id.clone()) {
+                bring_native_thread(&env, &thread)?;
+            }
+        }
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(cwd)?);
         native.unset.extend(["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()]);

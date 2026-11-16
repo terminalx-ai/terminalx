@@ -274,6 +274,26 @@ pub fn copy_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
+/// Make the newest copy of conversation `session_id` among `homes` the one in
+/// `target` before a native Codex resumes it there (#980). This Mac's login
+/// runs native Codex in the reader's own home and an added account in its
+/// native home, so a thread switched between them is in the other one, or an
+/// older copy is left from the last switch. `true` when a copy was made;
+/// `false` when `target` already has the newest, or no home has it.
+pub fn bring_rollout(target: &Path, homes: &[PathBuf], session_id: &str) -> Result<bool> {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let real = |path: &Path| std::fs::canonicalize(path).ok();
+    let here = find_rollout(target, session_id).filter(|path| path.is_file());
+    let newest = homes.iter()
+        .filter_map(|home| find_rollout(home, session_id).filter(|path| path.is_file()).map(|path| (home, path)))
+        .max_by_key(|(_, path)| modified(path));
+    let Some((home, source)) = newest else { return Ok(false) };
+    if let Some(here) = &here {
+        if real(here) == real(&source) || modified(here) >= modified(&source) { return Ok(false) }
+    }
+    copy_rollout(target, home, session_id)
+}
+
 // -------------------------------------------------------------------- linking
 
 /// Point `<managed>/<name>` at the reader's copy. A link already pointing
@@ -661,6 +681,32 @@ mod tests {
         assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
         assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"), "the account's login is its auth.json");
         assert!(config["hooks"]["state"].as_table().is_some_and(|state| state.is_empty()), "no hook is trusted");
+    }
+
+    #[test]
+    fn a_native_thread_follows_a_switch_between_homes_with_its_newest_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mac, account) = (dir.path().join("mac"), dir.path().join("account"));
+        let id = "019a0000-0000-7000-8000-000000000001";
+        let write = |home: &Path, text: &str| {
+            let day = home.join("sessions/2026/11/16");
+            std::fs::create_dir_all(&day).unwrap();
+            std::fs::write(day.join(format!("rollout-2026-11-16T08-00-00-{id}.jsonl")), text).unwrap();
+        };
+        let read = |home: &Path| std::fs::read_to_string(find_rollout(home, id).unwrap()).unwrap();
+        let homes = [mac.clone(), account.clone()];
+        write(&mac, "turn 1\n");
+        // On This Mac's login, then Switch account: the account's home gets the thread.
+        assert!(bring_rollout(&account, &homes, id).unwrap());
+        assert_eq!(read(&account), "turn 1\n");
+        assert!(!bring_rollout(&account, &homes, id).unwrap(), "nothing newer to bring");
+        // A turn on the account, then back to This Mac's login: the newer copy replaces the old.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(&account, "turn 1\nturn 2\n");
+        assert!(bring_rollout(&mac, &homes, id).unwrap());
+        assert_eq!(read(&mac), "turn 1\nturn 2\n");
+        // A thread no home has is left to Codex.
+        assert!(!bring_rollout(&mac, &homes, "019a0000-0000-7000-8000-00000000ffff").unwrap());
     }
 
     #[test]

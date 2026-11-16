@@ -2206,3 +2206,23 @@ fn native_codex_on_an_added_account_runs_in_its_hook_free_native_home() {
     native_account_home(&mut env, &local, "/work/repo").unwrap();
     assert_eq!(env, vec![("A".to_string(), "1".to_string())]);
 }
+
+/// #980: a native thread continued on another login is brought into the
+/// home Codex resumes it in, the one the launch's `CODEX_HOME` names.
+#[cfg(unix)]
+#[test]
+fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
+    let _home = store::temp_home();
+    let thread = "019a0000-0000-7000-8000-0000000000aa";
+    // Written by native Codex on an added account: under the shared native sessions.
+    let day = codex::home::native_root().unwrap().join("sessions/2026/11/16");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join(format!("rollout-2026-11-16T08-00-00-{thread}.jsonl")), "{\"turn\":1}\n").unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let env = vec![("A".to_string(), "1".to_string()), ("CODEX_HOME".to_string(), target.path().to_string_lossy().into_owned())];
+    bring_native_thread(&env, thread).unwrap();
+    let brought = codex::home::find_rollout(target.path(), thread).expect("the thread is in the home it resumes in");
+    assert_eq!(std::fs::read_to_string(brought).unwrap(), "{\"turn\":1}\n");
+    // A thread no home has is left for Codex to report.
+    bring_native_thread(&env, "019a0000-0000-7000-8000-0000000000bb").unwrap();
+}
