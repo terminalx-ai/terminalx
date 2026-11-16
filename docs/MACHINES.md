@@ -1937,7 +1937,11 @@ desktop answers `unsupported`.
 - **Native first** (`src-tauri/src/machine_control.rs`): the desktop refuses
   everything with `machines_disabled` while Experimental → Machines is off.
   `list`, `status`, `add` (`Machines::inspect` and `pair`, waiting for Allow)
-  and `remove` (as Settings → Machines → Remove) are answered here. For every
+  and `remove` (as Settings → Machines → Remove) are answered here. `add`
+  takes two calls: the first shows the fingerprint and contacts nothing
+  (`fingerprint_confirmation_required`); the second names it with
+  `--fingerprint` and pairs, so the person compares it with the machine's
+  approval before pressing Allow, as with the dialog. For every
   other action it resolves the machine (id, `machine:` key, or a name in any
   case: `machine_unknown`, `ambiguous_selector`) and refuses at once by the
   owner's state: `reconnecting` and `offline` are `machine_offline`, and

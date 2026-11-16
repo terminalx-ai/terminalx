@@ -699,10 +699,12 @@ async function worktreesDelete(params: Params) {
     const matches = held.length === expected.length && held.every((ids) => ids.some((id) => named.has(id)));
     if (!matches) throw new MachineControlError("sessions_changed", `The worktree ${candidate.name} holds other sessions than --sessions names.`, "List it again and pass the sessions it holds now.");
   }
-  if (candidate.verdict !== "eligible" && params.force !== true) {
+  const safe = candidate.verdict === "eligible";
+  // A preview is shown whatever the verdict: it is what --force is decided on.
+  if (params.dryRun === true) return { dryRun: true, worktree: view, wouldRemove: safe || params.force === true };
+  if (!safe && params.force !== true) {
     throw new MachineControlError("worktree_not_safe", `${machine.name} would not remove ${candidate.name}: ${candidate.reason ?? candidate.verdict}.`, "Pass --force only when what it holds may be lost.");
   }
-  if (params.dryRun === true) return { dryRun: true, worktree: view };
   if (params.confirmed !== true) throw new MachineControlError("confirmation_required", `Deleting ${candidate.name} on ${machine.name} removes its folder and the sessions in it.`, "Pass --yes to delete it.");
   let results;
   try {

@@ -1768,7 +1768,7 @@ connection it already holds to it, directly or through the relay.
 ```text
 terminalx machines list --json
 terminalx machines status <machine> --json
-terminalx machines add --code <code> [--this-network] --json
+terminalx machines add --code <code> [--fingerprint <fingerprint>] [--this-network] --json
 terminalx machines remove <machine> --yes --json
 terminalx projects list --machine <machine> --json
 terminalx sessions list --machine <machine> [--project <project>] [--archived] --json
@@ -1811,10 +1811,15 @@ terminalx send machine:<m>:<p>:<s> "Also add a regression test" --json
   route setting and connection `state` (`direct`, `relay`, `connecting`, `reconnecting`,
   `offline`, `needsUpdate`, `updating`, `accessRemoved`, `disconnected`, or `idle` when this
   window holds no connection). `status` adds `problem`: the error any command would get now.
-- `machines add --code` pairs as the Add a machine dialog does: it waits (up to two minutes)
-  for the person at the machine to compare the fingerprint and press Allow, then answers with
-  the machine and the `fingerprint`. `--this-network` never uses the relay for it. A code for a
-  machine already paired answers `alreadyPaired: true` and pairs nothing.
+- `machines add --code` pairs in two steps, as the Add a machine dialog does. Without
+  `--fingerprint` it contacts nothing and answers `fingerprint_confirmation_required`, with the
+  machine's name and the `fingerprint` in `details`. Show that fingerprint to the person. Then
+  run the same command with `--fingerprint <fingerprint>`: the machine asks its person to
+  Allow this computer, and they should allow it only if the machine shows the same
+  fingerprint. The command waits (up to two minutes) for Allow, then answers with the machine.
+  A fingerprint that does not match the code is `pairing_fingerprint_mismatch`. `--this-network`
+  never uses the relay. A code for a machine already paired answers `alreadyPaired: true` and
+  pairs nothing.
 - `machines remove --yes` forgets the machine here: its connection, record and credentials. Its
   sessions keep running there; pairing again needs a new code from it.
 - `sessions list --machine` lists that machine's sessions; `--all-machines` lists this
@@ -1837,7 +1842,8 @@ terminalx send machine:<m>:<p>:<s> "Also add a regression test" --json
   the ids `permissions list --machine` prints.
 - `worktrees list` and `worktrees delete` are Settings → Storage on the machine: each worktree
   has a `verdict`, and the machine checks a removal again before it removes anything.
-  `--dry-run` shows what would go; `--force` removes one whose verdict is not `eligible`.
+  `--dry-run` shows the worktree, its verdict and `wouldRemove`, whatever the verdict; `--force`
+  removes one whose verdict is not `eligible`.
   Renaming a machine's worktree is not offered.
 
 **Out of scope.** Orchestration runs stay on this computer: a run's workers cannot run on a
@@ -2050,6 +2056,9 @@ JSON failures have this shape:
 - `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
   in, or the person at it disconnected this computer. Ask the person; do not retry.
 - `machines_disabled`: Settings → Experimental → Machines is off. Tell the person; do not retry.
+- `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
+  to the person, then repeat the command with `--fingerprint`.
+- `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.
 - `pairing_not_approved`, `pairing_code_inactive`, `pairing_another_computer`,
   `pairing_pairing_paused`, `pairing_unreachable`, `pairing_invalid_code`: `machines add`
   did not pair; `recovery` says what to do (`details.reason` is the reason).

@@ -113,7 +113,7 @@ Usage:
   terminalx cloud resume CLOUD_WORKSPACE [--json]
   terminalx machines list [--json]
   terminalx machines status MACHINE [--json]
-  terminalx machines add --code CODE [--this-network] [--json]
+  terminalx machines add --code CODE [--fingerprint FINGERPRINT] [--this-network] [--json]
   terminalx machines remove MACHINE --yes [--json]
   terminalx projects list --machine MACHINE [--json]
   terminalx sessions list --machine MACHINE [--project PROJECT] [--archived] [--json]
@@ -1048,7 +1048,11 @@ fn parse_machines(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 return Err(invalid("--code needs the pairing code the machine shows."));
             }
             let this_network = tokens.flag("--this-network")?;
-            native("add", json!({"code": code.trim(), "route": if this_network { "thisNetwork" } else { "relayAndNearby" }}), tokens)
+            let mut params = json!({"code": code.trim(), "route": if this_network { "thisNetwork" } else { "relayAndNearby" }});
+            if let Some(fingerprint) = tokens.option("--fingerprint")? {
+                params["fingerprint"] = json!(fingerprint);
+            }
+            native("add", params, tokens)
         }
         "remove" => {
             let confirmed = tokens.flag("--yes")?;
@@ -3005,6 +3009,9 @@ mod tests {
         // Pairing waits for Allow on the machine (two minutes).
         assert!(timeout > Duration::from_secs(150));
         assert_eq!(rpc_of(&["machines", "add", "--code", "txm2.abc", "--this-network"]).1["route"], "thisNetwork");
+        // The first call carries no fingerprint, so the app shows it and pairs nothing.
+        assert!(rpc_of(&["machines", "add", "--code", "txm2.abc"]).1.get("fingerprint").is_none());
+        assert_eq!(rpc_of(&["machines", "add", "--code", "txm2.abc", "--fingerprint", "CEF4 2468 FE26 9E4B"]).1["fingerprint"], "CEF4 2468 FE26 9E4B");
         assert_eq!(rpc_of(&["machines", "remove", "m1", "--yes"]).1, json!({"machine": "m1", "confirmed": true}));
         assert_eq!(rpc_of(&["machines", "remove", "m1"]).1["confirmed"], false);
         for refused in [&["machines"][..], &["machines", "add"], &["machines", "add", "--code", " "], &["machines", "status"], &["machines", "rename", "m1"], &["machines", "list", "extra"]] {

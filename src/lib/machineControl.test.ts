@@ -98,6 +98,23 @@ describe("machine control", () => {
     if (!answer.ok) expect(answer.error.message).toContain("Mac mini runs TerminalX 0.2.30");
   });
 
+  it("previews a worktree delete whatever its verdict, and refuses the delete itself without --force", async () => {
+    const candidate = { projectPath: "/srv/api", path: "/srv/api-wt/fix", name: "fix", branch: "fix", managed: true, verdict: "dirty", reason: "2 files changed", lastActivity: null, sessions: [], token: "t1" };
+    const removeCleanup = vi.fn();
+    live.client = {
+      connection: { state: "connected" },
+      hasCapability: () => true,
+      machineProjects: async () => [{ projectId: "p1", name: "api", path: "/srv/api", kind: "git", defaultBranch: "main", archived: false }],
+      scanCleanup: async () => [{ path: "/srv/api", name: "api", note: null, candidates: [candidate] }],
+      removeCleanup,
+    };
+    const preview = await answerMachineControl("worktrees.delete", { machine, worktree: "fix", dryRun: true });
+    expect(preview).toMatchObject({ ok: true, result: { dryRun: true, wouldRemove: false, worktree: { name: "fix", verdict: "dirty" } } });
+    expect(await answerMachineControl("worktrees.delete", { machine, worktree: "fix", dryRun: true, force: true })).toMatchObject({ ok: true, result: { wouldRemove: true } });
+    expect(await answerMachineControl("worktrees.delete", { machine, worktree: "fix", confirmed: true })).toMatchObject({ ok: false, error: { code: "worktree_not_safe" } });
+    expect(removeCleanup).not.toHaveBeenCalled();
+  });
+
   it("answers an unknown command or a missing machine in the CLI's error shape", async () => {
     expect(await answerMachineControl("exec", { machine })).toMatchObject({ ok: false, error: { code: "unsupported" } });
     expect(await answerMachineControl("read", { target: "s1" })).toMatchObject({ ok: false, error: { code: "invalid_arguments" } });

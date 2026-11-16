@@ -223,6 +223,39 @@ pub(crate) fn pairing_route(params: &Value) -> Result<&'static str, ControlError
 }
 
 /// A pairing that did not pair, by `MachinePairingFailure`, as the CLI's error.
+/// Only the fingerprint's letters and digits count: `cef4 2468…` is `CEF4·2468·…`.
+fn fingerprint_digits(fingerprint: &str) -> String {
+    fingerprint.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+/// `machines add` pairs in two steps, as the Add a machine dialog does: the
+/// fingerprint is shown before anything reaches the machine, and the second
+/// call names it with `--fingerprint`. The machine's approval asks the person
+/// there to allow only a computer showing the same one.
+pub(crate) fn fingerprint_gate(name: &str, fingerprint: &str, expires_at: i64, given: Option<&str>) -> Result<(), ControlError> {
+    let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) else {
+        let mut error = ControlError::new(
+            "fingerprint_confirmation_required",
+            format!("Pairing with {name} shows the fingerprint {fingerprint}. Nothing was sent to {name} yet."),
+            Some(format!(
+                "Run the same command with --fingerprint \"{fingerprint}\". {name} then asks its person to Allow this computer; they should allow it only if {name} shows {fingerprint} too."
+            )),
+        );
+        error.details = Some(json!({ "machine": name, "fingerprint": fingerprint, "expiresAt": expires_at }));
+        return Err(error);
+    };
+    if fingerprint_digits(given) != fingerprint_digits(fingerprint) {
+        let mut error = ControlError::new(
+            "pairing_fingerprint_mismatch",
+            format!("This code gives the fingerprint {fingerprint}, not {given}. Nothing was sent to {name}."),
+            Some("Check that the code is the one the machine shows now; run machines add without --fingerprint to see its fingerprint.".to_string()),
+        );
+        error.details = Some(json!({ "machine": name, "fingerprint": fingerprint }));
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn pairing_refusal(reason: &str, message: &str) -> ControlError {
     let recovery = match reason {
         "not-approved" => "Ask the person at the machine to press Allow, then run terminalx machines add again with a new code.",
@@ -367,8 +400,9 @@ mod desktop {
         }
     }
 
-    /// Pair with the machine of a code, as the Add a machine dialog does.
-    /// It waits for the person at the machine to press Allow.
+    /// Pair with the machine of a code, as the Add a machine dialog does: the
+    /// first call shows the fingerprint, and one naming it (`--fingerprint`)
+    /// waits for the person at the machine to press Allow.
     fn add(connections: &Arc<MachineConnections>, sink: &dyn EventSink, params: &Value) -> Result<Value, ControlError> {
         let code = params.get("code").and_then(Value::as_str).map(str::trim).filter(|code| !code.is_empty()).ok_or_else(|| ControlError::invalid("--code needs the pairing code the machine shows."))?;
         let route = pairing_route(params)?;
@@ -390,6 +424,9 @@ mod desktop {
                 return Ok(answer);
             }
         }
+        let name = inspected["machine"]["name"].as_str().unwrap_or("the machine");
+        let fingerprint = inspected["fingerprint"].as_str().unwrap_or_default();
+        fingerprint_gate(name, fingerprint, inspected["expiresAt"].as_i64().unwrap_or_default(), params.get("fingerprint").and_then(Value::as_str))?;
         let route = serde_json::from_value(json!(route)).map_err(internal)?;
         let result = tauri::async_runtime::block_on(machines.pair(code.to_string(), route)).map_err(internal)?;
         let result = serde_json::to_value(&result).map_err(internal)?;
@@ -515,4 +552,16 @@ mod tests {
         assert_eq!(key_machine("machine:"), None);
         assert_eq!(key_machine("cloud:o:w"), None);
     }
+
+    #[test]
+    fn machines_add_shows_the_fingerprint_before_it_pairs() {
+        let shown = fingerprint_gate("Mac mini", "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B", 7, None).unwrap_err();
+        assert_eq!(shown.code, "fingerprint_confirmation_required");
+        assert_eq!(shown.details.as_ref().unwrap()["fingerprint"], "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B");
+        assert!(fingerprint_gate("Mac mini", "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B", 7, Some("  ")).is_err());
+        assert!(fingerprint_gate("Mac mini", "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B", 7, Some("cef4 2468 fe26 9e4b")).is_ok());
+        assert!(fingerprint_gate("Mac mini", "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B", 7, Some("CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B")).is_ok());
+        assert_eq!(fingerprint_gate("Mac mini", "CEF4\u{00B7}2468\u{00B7}FE26\u{00B7}9E4B", 7, Some("CEF4-2468-FE26-0000")).unwrap_err().code, "pairing_fingerprint_mismatch");
+    }
+
 }
