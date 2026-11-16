@@ -1292,7 +1292,11 @@ impl crate::remote::machine::MachineAccess for HostAccess {
             return endpoints.clone();
         }
         let endpoints = host.direct_endpoints();
-        *cached = Some((std::time::Instant::now(), endpoints.clone()));
+        // Asked before the listener is up there are none yet: keep asking
+        // rather than hold an empty list for the whole freshness window.
+        if !endpoints.is_empty() {
+            *cached = Some((std::time::Instant::now(), endpoints.clone()));
+        }
         endpoints
     }
 
