@@ -149,6 +149,8 @@ mod tests {
             merge_check: None,
             review_pending_since: None,
             findings_sent_round: 0,
+            moved_reviews: 0,
+            head_wait: None,
             verdict: None,
             failed_local_checks: Vec::new(),
         local_check: None,

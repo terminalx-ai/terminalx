@@ -139,7 +139,8 @@ pub struct Event {
     pub at: String,
     pub stage: Stage,
     /// `started`, `workDone`, `pullRequest`, `tracker`, `reviewRequested`,
-    /// `reviewPending`, `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
+    /// `reviewPending`, `reviewAgain` (a review set aside because the branch
+    /// moved during it, asked again in the same round), `verdict`, `findingsPosted`, `findingsSent`, `pushed`,
     /// `reminder`, `waiting`, `readyToMerge`, `needsYou`, `answered`, `merged`,
     /// `stopped`, `resumed`, `participantsReleased`, `lateReply`, `autoMerge`, `resolveConflicts`,
     /// `resolutionRequested`, `resolutionPending` (a resolver waiting on work
@@ -241,6 +242,15 @@ pub struct Pipeline {
     /// after this, and then asked for once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_pending_since: Option<String>,
+    /// Reviews in a row whose verdict was set aside because the branch moved
+    /// while the reviewer read it (#1018). Each is asked again in the same
+    /// round; after [`engine::MOVED_REVIEW_TRIES`] it is a person's.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub moved_reviews: u32,
+    /// The branch moved during a review and is waited on until it holds
+    /// still, before the reviewer reads it again (#1018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_wait: Option<HeadWait>,
     /// The last review whose findings reached the author.
     #[serde(default)]
     pub findings_sent_round: u32,
@@ -310,6 +320,25 @@ pub struct PipelineChecks {
     pub until: Option<String>,
     /// How long it waits before stopping for a person ([`engine::CHECKS_WAIT_MINUTES`]).
     pub limit_minutes: u32,
+}
+
+/// A review set aside because the branch moved while the reviewer read it
+/// (#1018): the pipeline reviews the new head once it has held still for
+/// [`engine::HEAD_STILL_MINUTES`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadWait {
+    /// The commit the set-aside review was of.
+    pub reviewed: String,
+    /// The checkout's head as last seen, and since when it has stayed there.
+    pub head: String,
+    pub still_since: String,
+    /// When the wait began. It ends with a person after [`engine::HEAD_WAIT_MINUTES`].
+    pub since: String,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
