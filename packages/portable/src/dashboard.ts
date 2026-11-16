@@ -147,7 +147,21 @@ export const TABLE_COLUMNS = [
   { id: "updated", label: "Updated" },
   { id: "created", label: "Created" },
 ] as const;
-export type TableColumnId = typeof TABLE_COLUMNS[number]["id"];
+/**
+ * Where a session runs: This Mac, a paired machine's name, or Cloud (PRO-346).
+ * The table shows it only while a machine is paired and Experimental →
+ * Machines is on, right after Project; otherwise the table is
+ * {@link TABLE_COLUMNS} alone.
+ */
+export const WHERE_COLUMN = { id: "where", label: "Where" } as const;
+type BaseColumnId = typeof TABLE_COLUMNS[number]["id"];
+export type TableColumnId = BaseColumnId | typeof WHERE_COLUMN.id;
+export interface TableColumn { readonly id: TableColumnId; readonly label: string }
+const WITH_WHERE: readonly TableColumn[] = [...TABLE_COLUMNS.slice(0, 3), WHERE_COLUMN, ...TABLE_COLUMNS.slice(3)];
+/** The columns the table offers: with Where only when `where` (a machine paired, Machines on). */
+export function tableColumns(where: boolean): readonly TableColumn[] {
+  return where ? WITH_WHERE : TABLE_COLUMNS;
+}
 export interface DashboardSort { column: TableColumnId; direction: "asc" | "desc" }
 export interface DashboardPreferences {
   view: "board" | "table";
@@ -157,7 +171,7 @@ export interface DashboardPreferences {
 export const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = {
   view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: [],
 };
-const isTableColumn = (value: unknown): value is TableColumnId => TABLE_COLUMNS.some((column) => column.id === value);
+const isTableColumn = (value: unknown): value is TableColumnId => WITH_WHERE.some((column) => column.id === value);
 
 /** Ignore invalid/obsolete saved values; always leave at least one column visible. */
 export function dashboardPreferences(value: unknown): DashboardPreferences {
@@ -167,12 +181,14 @@ export function dashboardPreferences(value: unknown): DashboardPreferences {
     view: saved.view === "table" ? "table" : "board",
     sort: isTableColumn(saved.sort?.column) && (saved.sort?.direction === "asc" || saved.sort?.direction === "desc")
       ? { column: saved.sort.column, direction: saved.sort.direction } : DEFAULT_DASHBOARD_PREFERENCES.sort,
-    hiddenColumns: hidden.length === TABLE_COLUMNS.length ? hidden.filter((id) => id !== "name") : hidden,
+    // Where is not always offered, so every other column hidden still leaves Name.
+    hiddenColumns: TABLE_COLUMNS.every(({ id }) => hidden.includes(id)) ? hidden.filter((id) => id !== "name") : hidden,
   };
 }
 
-export function toggleTableColumn(hidden: TableColumnId[], column: TableColumnId): TableColumnId[] {
-  if (!hidden.includes(column) && TABLE_COLUMNS.every(({ id }) => id === column || hidden.includes(id))) return hidden;
+/** Hide or show a column; the last one shown among `columns` (the ones offered) stays. */
+export function toggleTableColumn(hidden: TableColumnId[], column: TableColumnId, columns: readonly TableColumn[] = TABLE_COLUMNS): TableColumnId[] {
+  if (!hidden.includes(column) && columns.every(({ id }) => id === column || hidden.includes(id))) return hidden;
   return toggleFilter(hidden, column);
 }
 
@@ -181,12 +197,12 @@ export function nextDashboardSort(current: DashboardSort, column: TableColumnId)
 }
 
 /** Values used for ordering are the same values rendered by the view. Unknowns sort last in either direction. */
-export type DashboardTableRow = { id: string } & Record<TableColumnId, string | number | null>;
+export type DashboardTableRow = { id: string } & Record<BaseColumnId, string | number | null> & { where?: string | null };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 export function sortDashboardRows<T extends DashboardTableRow>(rows: readonly T[], sort: DashboardSort): T[] {
   const value = (row: T): string | number | null => {
     const raw = row[sort.column];
-    if (raw === null || raw === "") return null;
+    if (raw === null || raw === undefined || raw === "") return null;
     if (sort.column === "updated" || sort.column === "created") {
       const date = Date.parse(String(raw));
       return Number.isFinite(date) ? date : null;
