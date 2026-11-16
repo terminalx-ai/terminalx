@@ -85,7 +85,7 @@ it("loads All changes first when the list shown does not have the thread's file,
   await screen.findByTestId("changes-review-threads");
   await screen.findByText(/No turn snapshots are available/);
   expect(await requestThreadJump(source.key, thread)).toBe(true);
-  await waitFor(() => expect((screen.getByRole("combobox", { name: "Changes scope" }) as HTMLSelectElement).value).toBe("all"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Changes scope" }).textContent).toBe("All changes"));
   await waitFor(() => expect(document.querySelector('.diff-pane article[data-review-thread="thread-1"]')).not.toBeNull());
 });
 

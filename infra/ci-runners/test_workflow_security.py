@@ -118,7 +118,7 @@ class WorkflowSecurity(unittest.TestCase):
             if s.get("uses", "").startswith("actions/cache")
             and "/save@" not in s["uses"]
         ]
-        self.assertEqual(len(caches), 5)
+        self.assertEqual(len(caches), 6)
         for cache in caches:
             self.assertIn("${{ env.CI_CACHE_SCOPE }}", cache["with"]["key"])
             self.assertIn("-main-", cache["with"]["restore-keys"].splitlines()[1])

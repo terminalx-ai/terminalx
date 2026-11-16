@@ -68,7 +68,7 @@ describe("settings registry", () => {
   it("keeps the linkable allowlist to reversible, local display and sound switches", () => {
     // A link from another app can turn these on, and nothing else. Review any change here as a security boundary.
     expect(SETTINGS_ROWS.filter((row) => "linkable" in row && row.linkable).map((row) => row.id)).toEqual(["general.sounds", "general.turnChanges", "general.promptMap"]);
-    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "general.dataPrivacy", "general.websiteLinks", "general.linkActions", "general.useWorktree", "account.workStatus", "account.sharing", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex", "experimental.sessionCost", "transcription.remoteContext"]) {
+    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "account.dataPrivacy", "general.websiteLinks", "general.linkActions", "general.useWorktree", "account.workStatus", "account.sharing", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex", "experimental.sessionCost", "transcription.remoteContext"]) {
       // resolveSetting falls back to account.identity for an unknown id, so check the row is the one named.
       expect(resolveSetting(id).id).toBe(id);
       expect("linkable" in resolveSetting(id) && resolveSetting(id).linkable, id).toBeFalsy();

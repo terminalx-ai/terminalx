@@ -28,13 +28,13 @@ const checks = [
   "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
-  "dictation-edits", "environment", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar",
-  "machine-name", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
+  "dictation-edits", "environment", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
+  "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",
   "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
-  "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session",
-  "sidebar-design", "settings-pro-377",
+  "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
+  "sidebar-design", "chat-transcript", "changes-design", "sidebar-menus", "machines-screens", "settings-pro-377",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

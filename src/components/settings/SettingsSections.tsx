@@ -1,4 +1,3 @@
-import { DataPrivacySettings } from "./DataPrivacySettings";
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
@@ -64,7 +63,6 @@ export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   };
   return (
     <div className="flex flex-col">
-      <DataPrivacySettings />
       <SettingsFileRow />
       <RegisteredSetting setting="general.websiteLinks" control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <RegisteredSetting setting="general.linkActions" control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />

@@ -12,8 +12,9 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
+import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, settingsSearchSummary, type SettingSearchMatch } from "@/lib/settingsSearch";
@@ -64,9 +65,10 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const initial = resolveSetting(initialTab);
   const [section, setSection] = useState<SettingsSection>(initial.section);
   const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
-  const [target, setTarget] = useState<string | null>(() => initialTab === initial.id ? initial.id : null);
+  const [target, setTarget] = useState<string | null>(() => isRowLink(initialTab) ? initial.id : null);
   const content = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
@@ -118,7 +120,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   useEffect(() => {
     setSection(initial.section);
     setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
-    setTarget(initialTab === initial.id ? initial.id : null);
+    setTarget(isRowLink(initialTab) ? initial.id : null);
     setQuery("");
     setSelected(0);
     setSelectionRequest((request) => request + 1);
@@ -269,8 +271,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
         </nav>
       </aside>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Open settings.json, top right of every page (PRO-140). */}
-        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end gap-2 px-3 empty:hidden"><OpenSettingsFileButton /></div>
+        {/* Open settings.json, top right of every page (PRO-140); a project page names the project's own file (PRO-388). */}
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end gap-2 px-3 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : undefined} /></div>
         <div className="flex min-h-0 flex-1">
         <section ref={content} className={cn(
           "min-w-0 flex-1 overflow-y-auto scrollbar-thin",
@@ -328,8 +330,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             </div>}
           </div>}
           <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}`}>
-            <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="mb-5 break-words text-xl font-semibold tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
-            {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+            <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+              <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="min-w-0 flex-1 basis-48 break-words text-xl font-semibold tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
+              {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
+              <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
+            </div>
+            <SettingsHeaderSlotProvider value={headerSlot}>
+              {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+            </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />
           </div>
         </section>

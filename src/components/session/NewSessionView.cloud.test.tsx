@@ -22,6 +22,7 @@ const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.
     startInWorkspace: vi.fn(),
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
+    cloudIdleOptions: vi.fn(),
   },
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
@@ -122,6 +123,8 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
+  // The organization's "Stop when idle" windows for a new workspace (PRO-410): the provider's default is 30 minutes.
+  flow.cloudIdleOptions.mockResolvedValue({ choices: [15, 30, 60, 0], defaultMinutes: 30, cap: null });
   modelConnection.client = null;
   modelConnection.targets.mockClear();
   mayStart.value = true;
@@ -155,7 +158,8 @@ describe("new session in a cloud project", () => {
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
     // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
     // and the button claims no version for it.
-    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Permissions: Bypass" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
@@ -174,7 +178,7 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
     flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
     const view = render(<NewSessionView />);
-    const button = await screen.findByRole("button", { name: "Opus 4.6, Bypass" });
+    const button = await screen.findByRole("button", { name: "Opus 4.6" });
     expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
     mouseClick(button);
     const top = await screen.findByRole("menu");
@@ -189,7 +193,8 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
     view.rerender(<NewSessionView />);
     expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
-    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Permissions: Bypass" })).toBeTruthy();
   });
 
   /** The catalog with the workspace Create just made, at this point of its start. */
@@ -203,9 +208,13 @@ describe("new session in a cloud project", () => {
     flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
     const view = render(form());
     type("Start the API");
+    // "Stop when idle" is offered once the organization's windows are read.
+    await screen.findByTestId("cloud-idle-line");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
     expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1);
+    // The new workspace stops itself after the provider's default idle window unless another is chosen (PRO-410).
+    expect(flow.prepareCloudCreate.mock.calls[0][1]).toMatchObject({ idleSuspendMinutes: 30 });
     expect(screen.queryByTestId("cloud-create-confirm")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create workspace and start" })).toBeNull();
     await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("Starting the workspace"));
@@ -239,13 +248,14 @@ describe("new session in a cloud project", () => {
   it("resends the same create after an unknown outcome, so Create again cannot make a second workspace", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "create" });
     // The prepared create carries the request it was made from, as the real one does.
-    flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string }) => ({
+    flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string; idleSuspendMinutes?: number }) => ({
       ...prepared,
-      form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode },
+      form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode, idleSuspendMinutes: request.idleSuspendMinutes },
     }));
     flow.confirmCloudCreate.mockRejectedValueOnce({ code: "cloud_workspace_request_timeout", status: 0, retryWithSameIdempotencyKey: true }).mockResolvedValue({ workspace: { id: "ws-new" } });
     render(form());
     type("Start the API");
+    await screen.findByTestId("cloud-idle-line");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
@@ -480,7 +490,7 @@ describe("the composer's pickers", () => {
 
   it("project, and agent with model and permissions, each open on a real mouse click, and a second click closes it", async () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
-    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Opus/, "Agent"], [/^Opus/, "Model"], [/^Opus/, "Permissions"]] as const) {
+    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Opus/, "Agent"], [/^Opus/, "Model"], [/^Permissions/, "Permissions"]] as const) {
       mouseClick(picker(name));
       const menu = await screen.findByRole("menu");
       expect(within(menu).getByText(label)).toBeTruthy();

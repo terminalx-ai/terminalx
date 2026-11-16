@@ -16,7 +16,7 @@ import { createSettingsFile, dismissSaveFailure, resetUserSetting, useSettingsFi
 import {
   cantSaveCopy, cantSaveEffect, cantSaveTitle, effectSentence, setUserKeys, SOURCE_BADGES, type SourceBadgeKind,
 } from "@/lib/settingSources";
-import type { SettingsFileProblem } from "@/types/settingsSources";
+import type { SettingsFileLayer, SettingsFileProblem } from "@/types/settingsSources";
 
 const TONES = {
   managed: "bg-warning/10 text-warning",
@@ -105,16 +105,51 @@ export function UserFileRowAccessory({ keys, title, menu = true }: { keys: reado
   </>;
 }
 
-/** Open settings.json, top right of every Settings page, with its Open / Open in / Copy path menu. */
-export function OpenSettingsFileButton() {
+/**
+ * The repository's own settings files (PRO-388), refreshed when they change: the committed
+ * `.terminalx/settings.json` and the git-ignored `settings.local.json`, when they exist.
+ */
+function useProjectSettingsFiles(projectPath: string | undefined): SettingsFileLayer[] {
+  const [files, setFiles] = useState<SettingsFileLayer[]>([]);
+  useEffect(() => {
+    setFiles([]);
+    if (!projectPath) return;
+    let live = true;
+    let stop: (() => void) | undefined;
+    const load = () => void configuration.files(projectPath).then(
+      (layers) => { if (live) setFiles(layers.filter((layer) => (layer.layer === "repositoryShared" || layer.layer === "repositoryLocal") && layer.exists && !!layer.path)
+        .sort((a, b) => Number(b.layer === "repositoryShared") - Number(a.layer === "repositoryShared"))); },
+      () => { if (live) setFiles([]); },
+    );
+    void configuration.watch(projectPath, load).then((unsubscribe) => { if (live) stop = unsubscribe; else unsubscribe(); }, () => {});
+    load();
+    return () => { live = false; stop?.(); };
+  }, [projectPath]);
+  return files;
+}
+
+/**
+ * Open settings.json, top right of every Settings page, with its Open / Open in / Copy path menu.
+ * On a project page (PRO-388) it names and opens the project's own file instead: the committed
+ * `.terminalx/settings.json`, or the local one when only that exists; the menu also offers yours.
+ */
+export function OpenSettingsFileButton({ projectPath }: { projectPath?: string }) {
   const { file } = useSettingsFile();
+  const projectFiles = useProjectSettingsFiles(projectPath);
   if (!file) return null;
-  const displayPath = shownPath(file);
-  const name = shortFileName(displayPath);
-  const line = file.problem?.line;
-  const broken = !!file.problem;
-  const open = (app?: (typeof EDITORS)[number]) => void ensureUserFile(file).then(() => openSettingsPath(file.path, displayPath, app), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
-  const reveal = () => void ensureUserFile(file).then(() => revealSettingsPath(file.path, displayPath), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
+  const userPath = shownPath(file);
+  const project = projectFiles.find((layer) => layer.layer === "repositoryShared") ?? projectFiles[0];
+  // The file the button names and opens: the project's on a project page, otherwise yours.
+  const target = project
+    ? { path: project.path!, displayPath: project.displayPath || project.path!, problem: project.problem, ensure: () => Promise.resolve() }
+    : { path: file.path, displayPath: userPath, problem: file.problem, ensure: () => ensureUserFile(file) };
+  const name = shortFileName(target.displayPath);
+  const line = target.problem?.line;
+  const broken = !!target.problem;
+  const openFile = (path: string, displayPath: string, ensure: () => Promise<void>, app?: (typeof EDITORS)[number]) =>
+    void ensure().then(() => openSettingsPath(path, displayPath, app), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
+  const open = (app?: (typeof EDITORS)[number]) => openFile(target.path, target.displayPath, target.ensure, app);
+  const reveal = () => void target.ensure().then(() => revealSettingsPath(target.path, target.displayPath), (error: unknown) => showError(`Couldn’t create ${target.displayPath}`, error));
   const part = "inline-flex h-7 shrink-0 items-center whitespace-nowrap text-xs outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40";
   return <div data-open-settings-file="" className={cn("flex shrink-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground")}>
     <button type="button" onClick={() => open()} className={cn(part, "gap-1.5 px-2.5 [&_svg]:size-3.5")}>
@@ -127,16 +162,23 @@ export function OpenSettingsFileButton() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[16rem]">
         <DropdownMenuLabel>Open</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => open()} className="items-start">
+        {projectFiles.map((layer) => {
+          const shown = layer.displayPath || layer.path!;
+          return <DropdownMenuItem key={layer.layer} onSelect={() => openFile(layer.path!, shown, () => Promise.resolve())} className="items-start">
+            {layer.layer === "repositoryShared" ? <FolderGit2 className="mt-0.5" /> : <UserRound className="mt-0.5" />}
+            <span className="flex min-w-0 flex-col"><span>{layer.layer === "repositoryShared" ? "Project settings" : "Your local overrides"}</span><span className="truncate font-mono text-xs text-muted-foreground">{shortFileName(shown)}</span></span>
+          </DropdownMenuItem>;
+        })}
+        <DropdownMenuItem onSelect={() => openFile(file.path, userPath, () => ensureUserFile(file))} className="items-start">
           <UserRound className="mt-0.5" />
-          <span className="flex min-w-0 flex-col"><span>Your settings</span><span className="truncate font-mono text-xs text-muted-foreground">{displayPath}</span></span>
+          <span className="flex min-w-0 flex-col"><span>Your settings</span><span className="truncate font-mono text-xs text-muted-foreground">{userPath}</span></span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuLabel>Open in</DropdownMenuLabel>
+        <DropdownMenuLabel>Open {name} in</DropdownMenuLabel>
         <DropdownMenuItem onSelect={reveal}><FolderOpen />Finder</DropdownMenuItem>
         {EDITORS.map((editor) => <DropdownMenuItem key={editor.id} onSelect={() => open(editor)}><Code />{editor.label}</DropdownMenuItem>)}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void copyText(file.path).catch((error: unknown) => showError("Couldn’t copy the path", error))}><Copy />Copy path</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void copyText(target.path).catch((error: unknown) => showError("Couldn’t copy the path", error))}><Copy />Copy path</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>;

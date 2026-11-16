@@ -144,12 +144,13 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
   const unsent = comments.filter((c) => !c.sent);
   return <Context.Provider value={value}>
     <div ref={container} className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 border-b border-hairline px-3 py-2 text-xs">
-        <div className="flex items-center gap-2">
+      {/* No bar at all until there is something to say: an empty "0 review comments" would take the top of Changes. */}
+      {(comments.length > 0 || error || notice || draft?.owner === owner) && <div className="shrink-0 border-b border-hairline px-3 py-2 text-xs">
+        {comments.length > 0 && <div className="flex items-center gap-2">
           <span>{comments.length} review {comments.length === 1 ? "comment" : "comments"}</span>
           <Button className="ml-auto" size="sm" variant="secondary" disabled={!tabId || !unsent.length || busy} onClick={() => add(unsent)}>Add all to chat{unsent.length ? ` (${unsent.length})` : ""}</Button>
-        </div>
-        {error && <div role="alert" className="mt-1 text-destructive">Review comments: {error} <button type="button" onClick={() => { setError(null); void load(); }}>Retry</button></div>}
+        </div>}
+        {error && <div role="alert" className="mt-1 text-destructive first:mt-0">Review comments: {error} <button type="button" onClick={() => { setError(null); void load(); }}>Retry</button></div>}
         {notice && <p role="status" className="mt-1 text-muted-foreground">{notice}</p>}
         {draft?.owner === owner && <form onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (!busy && discard()) clearDraft(draft); } }} className="mt-2 space-y-2 rounded-lg border border-hairline bg-well p-2" onSubmit={(e) => {
           e.preventDefault();
@@ -161,7 +162,7 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
           <div className="flex gap-2"><Button type="submit" size="sm" variant="accent" disabled={busy || !draft.note.trim()}>Save</Button><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { if (discard()) clearDraft(draft); }}>Cancel</Button></div>
         </form>}
         {!!comments.length && <details className="mt-1" onToggle={(e) => setShowAll(e.currentTarget.open)}><summary className="cursor-pointer text-muted-foreground">All review comments</summary><div className="max-h-64 overflow-auto">{showAll && comments.map((c) => <ReviewCommentCard key={c.id} comment={c} />)}</div></details>}
-      </div>
+      </div>}
       <div className="min-h-0 flex-1">{children}</div>
     </div>
   </Context.Provider>;

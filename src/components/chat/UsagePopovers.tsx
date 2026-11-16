@@ -149,6 +149,17 @@ function time(value: string) {
   return Number.isFinite(ms) ? new Date(ms).toLocaleString() : "Unavailable";
 }
 
+/** A settled turn's cache hit (whole percent) and average output rate (whole tokens a second), when it reported them. */
+export function turnStats(turn: Turn): { cacheHit: number | null; tokensPerSecond: number | null } {
+  const usage = turn.usage;
+  const prompt = usage?.inputTokens != null && usage.cacheReadTokens != null && usage.cacheWriteTokens != null ? usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : null;
+  const ms = turn.completed?.durationMs;
+  return {
+    cacheHit: prompt != null && prompt > 0 ? Math.round((usage!.cacheReadTokens! / prompt) * 100) : null,
+    tokensPerSecond: ms != null && ms > 0 && usage?.outputTokens != null ? Math.round(usage.outputTokens / (ms / 1000)) : null,
+  };
+}
+
 export function TurnDetailsPopover({ turn, children }: { turn: Turn; children: ReactNode }) {
   if (!turn.completed || turn.live) return null;
   const usage = turn.usage;

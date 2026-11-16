@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import {
   Archive,
   ArrowLeft,
@@ -408,7 +409,7 @@ export function TabMenuItems({
             <MessageSquare /> <span className="max-w-56 truncate">Session “{owner.title}”</span>
           </ContextMenuSubTrigger>
           <ContextMenuSubContent>
-            <ContextMenuItem disabled={off} onSelect={() => void archiveSession(owner.id, !owner.archived).catch(failed("archiving the session"))}>
+            <ContextMenuItem disabled={off} onSelect={() => void (owner.archived ? archiveSession(owner.id, false) : archiveWithUndo(owner.id)).catch(failed("archiving the session"))}>
               <Archive /> {owner.archived ? "Unarchive" : "Archive"}
             </ContextMenuItem>
             {/* The floating window has no share dialog to open. */}

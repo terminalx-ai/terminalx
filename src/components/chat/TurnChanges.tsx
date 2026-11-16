@@ -8,7 +8,7 @@ import { openDiff, reviewPath } from "@/lib/editors";
 import type { ChangeRange } from "@/lib/changes";
 import { fileName, shortPath } from "@/lib/paths";
 import type { TurnFileChange } from "@/lib/turnChanges";
-import { File } from "@/icons";
+import { Check, File, Undo2 } from "@/icons";
 import { useDisclosure } from "./disclosures";
 
 /** Chips shown before the rest fold into "+N more"; a list one longer than this shows whole. */
@@ -87,8 +87,8 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
         );
       })}
       {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && <div className="flex gap-1">
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}>Undo</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}>Keep</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}><Undo2 /> Undo turn</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}><Check /> Keep</Button>
       </div>}
       {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : saved.restored ? "Restored" : "Kept"}</span>}
       {saved?.undone && saved.backupRef && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}

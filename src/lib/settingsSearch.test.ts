@@ -41,7 +41,7 @@ describe("settings row search", () => {
 
   it("keeps finding what the old section search found, now as rows", () => {
     const first = (query: string) => searchSettings(query)[0]?.id;
-    expect(first("data privacy")).toBe("general.dataPrivacy");
+    expect(first("data privacy")).toBe("account.dataPrivacy");
     expect(first("archive script")).toBe("repositories.scripts");
     expect(first("setup script")).toBe("repositories.scripts");
     expect(first("settings file")).toBe("general.settingsFile");
