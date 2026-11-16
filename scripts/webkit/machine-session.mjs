@@ -299,7 +299,7 @@ for (const colorScheme of ["light", "dark"]) {
   {
     await page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`).click();
     await strip.waitFor();
-    await page.evaluate(() => window.__PW_MACHINE__({ state: "reconnecting", attempt: 1, since: Date.now() - 12_000, lastRoute: { kind: "tailscale", endpoint: null } }));
+    await page.evaluate(() => window.__PW_MACHINE__({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 1, retryInMs: 2000, trying: ["lan", "relay"] }));
     const notice = page.locator('main [data-testid="machine-session-reconnecting"]');
     await notice.waitFor({ timeout: 5_000 }).catch(() => undefined);
     await page.waitForTimeout(200);

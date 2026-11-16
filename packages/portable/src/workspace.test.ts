@@ -1134,3 +1134,52 @@ describe("machine/3: a machine's update (PRO-354)", () => {
     client.close();
   });
 });
+
+describe("a machine project's view of the connection (PRO-347)", () => {
+  const params = (runtime: FakeRuntime, method: string) => runtime.sent.filter((frame) => frame.method === method).map((frame) => frame.params as Record<string, unknown>);
+
+  it("names the project on every fs and git call, and on nothing else", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect(["fs/1", "git/1", "session/1"]);
+    const project = client.forProject("p1");
+    await project.call("fs.list", { path: "src" }).catch(() => undefined);
+    await project.call("git.status", { repo: "." }).catch(() => undefined);
+    await project.call("session.list").catch(() => undefined);
+    // One given by the caller stays.
+    await project.call("fs.read", { path: "a", projectId: "p2" }).catch(() => undefined);
+    expect(params(runtime, "fs.list")).toEqual([{ path: "src", projectId: "p1" }]);
+    expect(params(runtime, "git.status")).toEqual([{ repo: ".", projectId: "p1" }]);
+    expect(params(runtime, "session.list")[0]).not.toHaveProperty("projectId");
+    expect(params(runtime, "fs.read")).toEqual([{ path: "a", projectId: "p2" }]);
+    client.close();
+  });
+
+  it("is one view per project, over the same connection", () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    expect(client.forProject("p1")).toBe(client.forProject("p1"));
+    expect(client.forProject("p1")).not.toBe(client.forProject("p2"));
+    expect(client.forProject("p1").forProject("p2")).toBe(client.forProject("p2"));
+    expect(client.forProject("p1").connection).toBe(client.connection);
+    client.close();
+  });
+
+  it("creates a terminal in the project unless it is a session's, and watches the project's files", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect(["pty/1", "pty/2", "fs/1", "session/1"]);
+    const project = client.forProject("p1");
+    await project.createPty({ cols: 80, rows: 24 }).catch(() => undefined);
+    await project.createPty({ cols: 80, rows: 24, sessionId: "s1" }).catch(() => undefined);
+    // This fake runtime has no fs.watch; what was asked is what matters.
+    void project.watchFiles("src", () => undefined).catch(() => undefined);
+    await vi.waitFor(() => expect(params(runtime, "fs.watch")).toHaveLength(1));
+    const created = params(runtime, "pty.create");
+    expect(created[0]).toMatchObject({ cols: 80, rows: 24, projectId: "p1" });
+    expect(created[1]).toMatchObject({ sessionId: "s1" });
+    expect(created[1]).not.toHaveProperty("projectId");
+    expect(params(runtime, "fs.watch")[0]).toMatchObject({ path: "src", projectId: "p1" });
+    client.close();
+  });
+});
