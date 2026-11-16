@@ -48,6 +48,7 @@ const { agent } = await import("@/lib/api");
 const { peekInstance, disposeInstance } = await import("@/lib/terminal");
 const { resetTabViews, tabViewOf, useTabViews } = await import("@/lib/tabViews");
 const { TerminalView } = await import("@/components/terminal/TerminalView");
+const { forgetAgentAccounts, takeAgentAccounts } = await import("@/lib/useSessionAgent");
 
 const flush = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
 
@@ -383,5 +384,46 @@ describe("a tab's right-click menu", () => {
     for (const name of ["Tab title", "Working directory", "Reveal working directory in the file manager", "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();
     for (const name of ["Close tab", "Pin tab", "New terminal", "Duplicate tab"]) await choose(name);
     expect(backend.calls.filter((call) => ["remove_tab", "set_tab_layout", "pty_spawn", "add_tab"].includes(call.command))).toEqual([]);
+  });
+});
+
+// #980: Switch account restarts the tab's agent on another account and resumes the conversation.
+describe("Switch account", () => {
+  const WORK = "0123456789abcdef";
+  const account = (id: string, label: string) => ({ id, agent: "claude" as const, kind: "subscription" as const, label, email: null, plan: null, organization: null, local: id === "local", isDefault: id === "local", missing: false, addedAt: null });
+  const claude = (accounts: ReturnType<typeof account>[]) => act(() => takeAgentAccounts({ agent: "claude", accounts, defaultAccount: "local", projectDefaults: {} }));
+  afterEach(() => forgetAgentAccounts());
+
+  it("is not offered with one account", async () => {
+    claude([account("local", "This Mac's login")]);
+    render(<Menu tab="agent:a3" />);
+    await flush();
+    expect(offered("Switch account")).toBe(false);
+  });
+
+  it("lists the agent's other accounts and switches the tab to the one chosen", async () => {
+    claude([account("local", "This Mac's login"), account(WORK, "Work · Max")]);
+    // Its turn has ended: nothing is cut off by the restart.
+    backend.sessions[0].tabs[2].status = "idle";
+    await refreshSessions();
+    render(<Menu tab="agent:a3" />);
+    await flush();
+    expect(item("Switch account").getAttribute("aria-disabled")).toBeNull();
+    // The tab runs on This Mac's login: only the other is offered.
+    expect(offered("This Mac's login")).toBe(false);
+    await choose("Work · Max");
+    expect(backend.callsOf("tab_resume_conversation")).toEqual([{ sessionId: "a", tabId: "a3", harness: "claude", providerSessionId: "conversation-a3", account: WORK }]);
+  });
+
+  it("is off before there is a conversation to continue, and while a turn waits or runs", async () => {
+    claude([account("local", "This Mac's login"), account(WORK, "Work · Max")]);
+    const { unmount } = render(<Menu tab="agent:a1" />);
+    await flush();
+    expect(item("Switch account").getAttribute("aria-disabled")).toBe("true");
+    unmount();
+    // a3 waits for an answer: its turn is open.
+    render(<Menu tab="agent:a3" />);
+    await flush();
+    expect(item("Switch account").getAttribute("aria-disabled")).toBe("true");
   });
 });

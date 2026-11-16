@@ -300,7 +300,7 @@ pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> 
         let agent_title = (tab.harness == "claude")
             .then_some(tab.provider_session_id.as_deref())
             .flatten()
-            .and_then(|id| crate::harness::claude::transcript::locate(&session.cwd, id))
+            .and_then(|id| crate::agent_data::locate_claude(tab, &session.cwd, id))
             .and_then(|path| cached_agent_title(&path));
         if let Some(title) = crate::session_names::chosen_name(&first, agent_title) {
             out.insert(tab.id.clone(), title);

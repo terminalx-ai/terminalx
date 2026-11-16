@@ -15,6 +15,7 @@ import { SparseCheckoutRow } from "./SparseCheckoutRow";
 import { RepositoryActionsPage } from "./RepositoryActionsPage";
 import { RepositoryPreviewUrlsPage } from "./RepositoryPreviewUrlsPage";
 import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
+import { ProjectAgentAccounts } from "./ProjectAgentAccounts";
 
 // Preview URLs and Files to copy are sections of General (PRO-131): their rows, and links to them, open General.
 const REPOSITORY_PAGES: { row: SettingId; label: string }[] = [
@@ -29,7 +30,8 @@ export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath
   const project = projects.find((project) => !project.archived && project.path === projectPath);
   const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a project to view its settings.</p>;
-  if (project.kind === "folder") return <MergedCleanupSettings projectPath={project.path} />;
+  // A folder project has a default account too (#980): shown only once an agent has several.
+  if (project.kind === "folder") return <><ProjectAgentAccounts projectPath={project.path} /><MergedCleanupSettings projectPath={project.path} /></>;
   // Every other project row (paths, preview URLs, files to copy, cleanup, orchestrator) lives on General.
   const page = REPOSITORY_PAGES.find((candidate) => candidate.row === row) ?? REPOSITORY_PAGES[0];
   const general = page.row === "repositories.rootPath";
@@ -120,6 +122,7 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
       <RegisteredSetting setting="repositories.rootPath" instance={project.path}>{pathRow("Root path", project.path, "Don't move or delete this folder; remove the project instead.")}</RegisteredSetting>
       {preview && <RegisteredSetting setting="repositories.workspacesPath" instance={project.path}>{pathRow("Worktree folder", preview.workspacesPath, "New workspaces are created here. Remove workspaces in TerminalX rather than deleting folders.")}</RegisteredSetting>}
       <RegisteredSetting setting="repositories.sparseCheckout" instance={project.path}><SparseCheckoutRow project={project} /></RegisteredSetting>
+      <ProjectAgentAccounts projectPath={project.path} />
       <RegisteredSetting setting="repositories.previewUrls" instance={project.path}>
         <div className="border-b border-hairline py-4"><RepositoryPreviewUrlsPage projectPath={project.path} /></div>
       </RegisteredSetting>

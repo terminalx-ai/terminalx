@@ -8,6 +8,7 @@ const mock = vi.hoisted(() => ({ preview: vi.fn(), update: vi.fn(), reveal: vi.f
 vi.mock("@/lib/api", () => ({ api: { repositoryFilesPreview: mock.preview }, errorMessage: (e: unknown) => String(e) }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: mock.projects }), updateProject: mock.update }));
 vi.mock("./MergedCleanupSettings", () => ({ MergedCleanupSettings: () => null }));
+vi.mock("./ProjectAgentAccounts", () => ({ ProjectAgentAccounts: ({ projectPath }: { projectPath: string }) => <p>Agent accounts for {projectPath}</p> }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mock.reveal }));
 vi.mock("@/lib/clipboard", () => ({ copyText: mock.copy }));
 vi.mock("./RepositoryActionsPage", () => ({ RepositoryActionsPage: ({ projectPath }: { projectPath: string }) => <p>Actions page for {projectPath}</p> }));
@@ -219,5 +220,18 @@ describe("Project settings", () => {
     expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
     expect(within(screen.getByRole("navigation", { name: "Project settings" })).getAllByRole("button").map((button) => button.textContent)).toEqual(["General", "Scripts", "Actions", "Environment"]);
     await act(async () => undefined);
+  });
+});
+
+describe("a project's default agent account (#980)", () => {
+  it("is on a repository's General page and on a folder project's settings, and on no other page", async () => {
+    const { unmount } = render(<RepositoriesTab projectPath="/repo" row="repositories.rootPath" />);
+    expect(screen.getByText("Agent accounts for /repo")).toBeTruthy();
+    unmount();
+    const scripts = render(<RepositoriesTab projectPath="/repo" row="repositories.environment" />);
+    expect(screen.queryByText("Agent accounts for /repo")).toBeNull();
+    scripts.unmount();
+    render(<RepositoriesTab projectPath="/folder" />);
+    expect(screen.getByText("Agent accounts for /folder")).toBeTruthy();
   });
 });

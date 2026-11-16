@@ -64,7 +64,7 @@ const PASSED_ENV: &[&str] = &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_
 /// Runs the CLI (`"$@"`) and kills its whole process group once stdin, the
 /// app's end of the lifeline, closes: when the app lets go of it, or dies.
 /// The CLI's own stdin is /dev/null; its exit status is the watchdog's.
-const WATCHDOG: &str = r#"exec 3<&0
+pub(crate) const WATCHDOG: &str = r#"exec 3<&0
 "$@" </dev/null 3<&- &
 cli=$!
 ( cat <&3; kill -KILL 0 ) </dev/null >/dev/null 2>&1 &
@@ -145,11 +145,14 @@ struct Inner {
     lifeline: Option<ChildStdin>,
     /// The throwaway home, until it is wiped.
     home: Option<tempfile::TempDir>,
+    /// An agent account's own `CODEX_HOME` (#980) the CLI signs in to: its
+    /// `auth.json` stays there, and nothing of it is held here.
+    keep_in: Option<PathBuf>,
 }
 
 impl Inner {
     fn new(phase: Phase, sign_in: Option<SignIn>) -> Self {
-        Self { phase, sign_in, cancel: false, child: None, lifeline: None, home: None }
+        Self { phase, sign_in, cancel: false, child: None, lifeline: None, home: None, keep_in: None }
     }
 }
 
@@ -450,6 +453,33 @@ fn kill_group(child: &mut Child) {
 /// `parent`, and wait for its code. `extra_args` go after Codex's own
 /// (a debug build passes a stand-in issuer this way).
 pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Path) -> Result<(DeviceLogin, DeviceCode), DeviceLoginError> {
+    start_with(program, extra_args, path_env, parent, None)
+}
+
+/// Sign in to an agent account (#980): the same device-code login, with
+/// `CODEX_HOME` the account's own directory `codex_home` (made beforehand,
+/// owner-only, with the file store in its `config.toml`), so Codex writes
+/// the login into `codex_home/auth.json` and it stays there. `HOME` is still
+/// a throwaway, wiped when the CLI ends. Nothing of the login is held:
+/// [`DeviceLogin::sign_in`] stays `None`, and the phase says whether the
+/// account now has one.
+pub fn start_into(program: &Path, extra_args: &[String], path_env: &str, parent: &Path, codex_home: &Path) -> Result<(DeviceLogin, DeviceCode), DeviceLoginError> {
+    let meta = std::fs::symlink_metadata(codex_home).map_err(|_| DeviceLoginError::Unavailable)?;
+    if !meta.is_dir() {
+        return Err(DeviceLoginError::Unavailable);
+    }
+    start_with(program, extra_args, path_env, parent, Some(codex_home))
+}
+
+/// Whether an account's `CODEX_HOME` holds a ChatGPT sign-in Codex wrote:
+/// a regular `auth.json` (never through a link) with the tokens a login has.
+pub fn signed_in_at(codex_home: &Path) -> bool {
+    let Some(file) = open_regular(&codex_home.join("auth.json"), false) else { return false };
+    let mut raw = Zeroizing::new(String::new());
+    file.take(MAX_AUTH_BYTES + 1).read_to_string(&mut raw).is_ok() && sign_in_from_raw(&raw).is_some()
+}
+
+fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Path, keep_in: Option<&Path>) -> Result<(DeviceLogin, DeviceCode), DeviceLoginError> {
     let unavailable = |_| DeviceLoginError::Unavailable;
     sweep_stale(parent);
     let mut builder = tempfile::Builder::new();
@@ -458,12 +488,18 @@ pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Pat
     builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
     let home = builder.tempdir_in(parent).map_err(unavailable)?;
     std::fs::write(home.path().join(OWNER_FILE), std::process::id().to_string()).map_err(unavailable)?;
-    let codex_home = home.path().join(".codex");
-    let mut dir = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
-    dir.create(&codex_home).map_err(unavailable)?;
-    std::fs::write(codex_home.join("config.toml"), CONFIG).map_err(unavailable)?;
+    let codex_home = match keep_in {
+        Some(account) => account.to_path_buf(),
+        None => {
+            let codex_home = home.path().join(".codex");
+            let mut dir = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+            dir.create(&codex_home).map_err(unavailable)?;
+            std::fs::write(codex_home.join("config.toml"), CONFIG).map_err(unavailable)?;
+            codex_home
+        }
+    };
 
     // Spawning `program` directly would report a missing one; through the watchdog it would not.
     if !program.is_file() {
@@ -522,7 +558,7 @@ pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Pat
         String::from_utf8_lossy(&text).contains("timed out")
     });
 
-    let inner = Arc::new(Mutex::new(Inner { child: Some(child), lifeline, home: Some(home), ..Inner::new(Phase::Waiting, None) }));
+    let inner = Arc::new(Mutex::new(Inner { child: Some(child), lifeline, home: Some(home), keep_in: keep_in.map(Path::to_path_buf), ..Inner::new(Phase::Waiting, None) }));
     let watched = inner.clone();
     let started = Instant::now();
     std::thread::spawn(move || {
@@ -559,10 +595,16 @@ pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Pat
         inner.lifeline = None;
         // Shut down meanwhile: the home is already gone, and so is anything it held.
         let Some(home) = inner.home.take() else { return };
-        let written = status.filter(|status| status.success()).map(|_| read_auth(home.path()).and_then(|raw| sign_in_from_raw(&raw)));
+        let kept = inner.keep_in.clone();
+        let written = status.filter(|status| status.success()).map(|_| match &kept {
+            // The account keeps its own login: only whether there is one.
+            Some(account) => signed_in_at(account).then(|| SignIn { secret: Zeroizing::new(String::new()), account: None }),
+            None => read_auth(home.path()).and_then(|raw| sign_in_from_raw(&raw)),
+        });
         wipe(home);
         if inner.phase == Phase::Waiting && !inner.cancel {
             (inner.phase, inner.sign_in) = match (status, written) {
+                (_, Some(Some(_))) if kept.is_some() => (Phase::SignedIn, None),
                 (_, Some(Some(sign_in))) => (Phase::SignedIn, Some(sign_in)),
                 (Some(_), _) if timed_out => (Phase::Expired, None),
                 _ => (Phase::Failed, None),
@@ -781,6 +823,51 @@ echo 'Successfully logged in' >&2
         login.shutdown();
         assert!(login.sign_in().is_none());
         assert_eq!(login.phase(), Phase::Cancelled);
+    }
+
+    #[test]
+    fn an_account_sign_in_leaves_the_login_in_the_accounts_own_home_and_holds_none() {
+        let bin = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        std::fs::write(account.path().join("config.toml"), CONFIG).unwrap();
+        let cli = fake_cli(bin.path(), "succeed");
+        let (login, _code) = start_into(&cli, &[], "/usr/bin:/bin", parent.path(), account.path()).unwrap();
+        assert_eq!(settle(&login), Phase::SignedIn);
+        assert!(login.sign_in().is_none(), "nothing of the account's login is held");
+        assert!(signed_in_at(account.path()), "Codex's own auth.json stays in the account's home");
+        assert_eq!(homes(parent.path()), 0, "only the throwaway HOME is wiped");
+        let record = std::fs::read_to_string(bin.path().join("record")).unwrap();
+        let fields: Vec<&str> = record.trim_end().split('|').collect();
+        assert_eq!(Path::new(fields[2]), account.path(), "CODEX_HOME is the account's directory");
+        assert!(Path::new(fields[1]).starts_with(parent.path()), "HOME is still a throwaway");
+        // A cancel afterwards does not take the account's login away.
+        login.shutdown();
+        assert!(signed_in_at(account.path()));
+
+        // A failed sign-in into an account says so, and writes nothing there.
+        let other = tempfile::tempdir().unwrap();
+        let failing = fake_cli(&bin.path().join("2").tap_mkdir(), "fail");
+        let (login, _code) = start_into(&failing, &[], "/usr/bin:/bin", parent.path(), other.path()).unwrap();
+        assert_eq!(settle(&login), Phase::Failed);
+        assert!(!signed_in_at(other.path()));
+        // A link where the account's home should be is not signed in to.
+        let link = parent.path().join("linked-home");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(account.path(), &link).unwrap();
+        #[cfg(unix)]
+        assert_eq!(start_into(&cli, &[], "/usr/bin:/bin", parent.path(), &link).err(), Some(DeviceLoginError::Unavailable));
+    }
+
+    trait TapMkdir {
+        fn tap_mkdir(self) -> PathBuf;
+    }
+
+    impl TapMkdir for PathBuf {
+        fn tap_mkdir(self) -> PathBuf {
+            std::fs::create_dir_all(&self).unwrap();
+            self
+        }
     }
 
     #[test]

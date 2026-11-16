@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_accounts;
 mod agent_data;
 mod agent_keys;
 #[cfg(feature = "desktop")]
@@ -422,6 +423,8 @@ pub fn run() {
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
             std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
+            // Agent account directories a crash left before they were listed (#980).
+            std::thread::spawn(agent_accounts::sweep);
             // Attachments are shown from the data folder, wherever
             // TERMINALX_HOME put it; the scope in tauri.conf.json only names
             // the default one.
@@ -533,6 +536,17 @@ pub fn run() {
             agent_login_commands::agent_login_import_shell,
             agent_login_commands::agent_login_dismiss_shell,
             agent_login_commands::agent_login_tabs,
+            agent_accounts::commands::agent_accounts_list,
+            agent_accounts::commands::agent_accounts_add_start,
+            agent_accounts::commands::agent_accounts_add_finish,
+            agent_accounts::commands::agent_accounts_add_cancel,
+            agent_accounts::commands::agent_accounts_open_page,
+            agent_accounts::commands::agent_accounts_add_key,
+            agent_accounts::commands::agent_accounts_relabel,
+            agent_accounts::commands::agent_accounts_sign_in_again,
+            agent_accounts::commands::agent_accounts_remove,
+            agent_accounts::commands::agent_accounts_set_default,
+            agent_accounts::commands::agent_accounts_readiness,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
@@ -1199,6 +1213,7 @@ pub fn run() {
                 // A Codex sign-in still open: its CLI is killed and its home wiped before the app goes.
                 #[cfg(feature = "desktop")]
                 commands::shutdown_codex_sign_in();
+                agent_accounts::login::shutdown_all();
                 let state = app.state::<AppState>();
                 state.dictation.shutdown(&state.transcription.engine);
                 state.stats_usage.shutdown();

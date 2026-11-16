@@ -533,7 +533,7 @@ function ProjectGroup({
   const sort = useSidebarSortable(canon(group.path));
   const overviewOpen = nav.view === "project" && !!nav.selectedProject && canon(nav.selectedProject) === canon(group.path);
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
-  // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
+  // The project folds its branches away by the chevron at its row's end, shown on hover and always while folded.
   const [expanded, toggle] = useFold(`project:${canon(group.path)}`, true);
   const open = expanded || filtered;
   const [pipelineOpen, setPipelineOpen] = useState(false);
@@ -644,27 +644,11 @@ function ProjectGroup({
       <DropdownMenu {...menu.root}>
         <div {...menu.surface} className={cn(actionRow, "relative -mx-2 flex h-9 items-center gap-2 px-4 hover:bg-selected/50", overviewOpen && "bg-selected")} title={group.path}>
           {sort.handle}
-          {/* Only the picture (a chevron on hover) folds the project; its name opens the project's overview. */}
-          <button
-            type="button"
-            onClick={toggle}
-            aria-expanded={open}
-            aria-label={open ? `Collapse ${group.name}` : `Expand ${group.name}`}
-            className="flex h-full shrink-0 items-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            <span className="relative size-4 shrink-0">
-              <span className={cn("absolute inset-0 transition-opacity duration-150", open ? "group-hover/row:opacity-0 group-focus-within/row:opacity-0" : "opacity-0")} aria-hidden>
-                {group.project ? <ProjectGlyph project={group.project} /> : <Folder className="size-4 text-faint" />}
-              </span>
-              <ChevronDown
-                className={cn(
-                  "absolute inset-0 size-4 text-muted-foreground transition-[opacity,transform] duration-200",
-                  open ? "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100" : "-rotate-90 opacity-100",
-                )}
-                data-testid="project-fold"
-              />
-            </span>
-          </button>
+          {/* The picture always tells projects apart (PRO-373): never swapped for the chevron. A click on it still folds
+              the project, as before; the keyboard folds with the chevron at the row's end. */}
+          <span aria-hidden onClick={toggle} className="flex h-full shrink-0 items-center">
+            {group.project ? <ProjectGlyph project={group.project} /> : <Folder className="size-4 text-faint" />}
+          </span>
           <button
             type="button"
             onClick={() => (group.project ? openProjectOverview(group.path) : toggle())}
@@ -686,6 +670,20 @@ function ProjectGroup({
               </Button>
             </DropdownMenuTrigger>
           </RowActions>
+          {/* The fold sits at the row's end, after the hover actions, as on the section headers: shown on hover or
+              focus, and always while folded. It keeps its place when hidden so the actions never move onto it. */}
+          <button
+            type="button"
+            onClick={toggle}
+            aria-expanded={open}
+            aria-label={open ? `Collapse ${group.name}` : `Expand ${group.name}`}
+            className={cn(
+              "flex size-5 shrink-0 items-center justify-center rounded-sm text-faint outline-none transition-opacity duration-150 hover:text-muted-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
+              open && "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100 group-has-[[data-state=open]]/row:opacity-100",
+            )}
+          >
+            <ChevronDown className={cn("size-3 transition-transform duration-200", !open && "-rotate-90")} data-testid="project-fold" />
+          </button>
         </div>
         <DropdownMenuContent align="end">
           <DropdownMenuItem onSelect={() => startSessionIn(group.path, null)}>

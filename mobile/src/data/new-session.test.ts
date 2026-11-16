@@ -21,9 +21,9 @@ const options: NewSessionOptions = {
 
 describe("the phone's new-session form", () => {
   it("opens as the desktop's view does: the last project, the first installed agent, its defaults", () => {
-    expect(initialChoices(options)).toEqual({ where: { projectId: "p-repo", useWorktree: true }, agent: "codex", model: "gpt-5.6", effort: "medium", mode: "bypassPermissions", title: "", text: "" });
+    expect(initialChoices(options)).toEqual({ where: { projectId: "p-repo", useWorktree: true }, agent: "codex", model: "gpt-5.6", effort: "medium", mode: "bypassPermissions", account: null, title: "", text: "" });
     expect(initialChoices({ ...options, projects: [] }).where).toEqual({ quick: true });
-    expect(agentDefaults(null)).toEqual({ agent: null, model: "", effort: null });
+    expect(agentDefaults(null)).toEqual({ agent: null, model: "", effort: null, account: null });
   });
 
   it("keeps an effort across models only when the new model offers it", () => {
