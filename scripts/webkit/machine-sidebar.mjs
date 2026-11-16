@@ -246,15 +246,16 @@ for (const colorScheme of ["light", "dark"]) {
     }, { headers, rows, entries });
   }
 
-  // A session row opens the machine's view on it.
+  // A session row opens that session (PRO-347), not the machine's own page.
   {
-    await page.locator('[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"] button').first().click();
-    await page.locator('[data-testid="machine-main"][data-machine="m-mini"]').waitFor();
-    const selected = await page.locator('[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"]').getAttribute("class");
+    const row = '[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"]';
+    await page.locator(`${row} button`).first().click();
+    await page.waitForFunction((row) => /\bbg-selected\b/.test(document.querySelector(row)?.className ?? "") && !!document.querySelector("main"), row);
+    const opened = await page.evaluate(() => ({ session: !!document.querySelector("main") && !document.querySelector('[data-testid="machine-main"]'), main: document.querySelector("main")?.textContent?.slice(0, 200) ?? null }));
     failed += report(`select a machine session (${colorScheme})`, {
-      "the machine's view opens": true,
-      "the row is selected": /\bbg-selected\b/.test(selected ?? ""),
-    });
+      "the session opens in the session view, not the machine's page": opened.session,
+      "the row is selected": true,
+    }, opened);
     await shoot(page, `session-selected-${colorScheme}`);
   }
 
