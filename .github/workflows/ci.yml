@@ -344,6 +344,9 @@ jobs:
       - name: A headless runtime lets a paired computer operate it (PRO-341)
         working-directory: src-tauri/serve
         run: cargo test --locked --test machine_host
+      - name: A person pairs from a headless server's terminal; an update hands the runtime over (PRO-353)
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test headless_pair --test headless_update
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
