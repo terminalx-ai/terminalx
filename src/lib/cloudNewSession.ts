@@ -29,6 +29,7 @@ import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { atLimit } from "@/lib/runningLimit";
+import { idleSuspendChoices } from "@/lib/idleSuspend";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -59,6 +60,8 @@ export interface CloudSessionRequest {
   title?: string;
   /** Started from an issue (#433): named after it, and carried on to a pull request unless `pipeline` is false. */
   issue?: CloudIssueStart;
+  /** A new workspace's idle window, 0 for never (PRO-410); absent or null takes the provider's default. Unused when a workspace is reused. */
+  idleSuspendMinutes?: number | null;
 }
 
 /** What starting a cloud session from an issue adds, sent only to a runtime that granted `pipeline/1`. */
@@ -334,13 +337,14 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     effort: request.effort ?? "",
     mode: request.mode,
     accessMode: "private",
+    idleSuspendMinutes: request.idleSuspendMinutes ?? null,
   };
   const errors = Object.values(validateForm(form));
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
   await preflightCreate(api, form, org);
   const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
-  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, org);
+  const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, org);
   const idempotencyKey = crypto.randomUUID();
   const pending: PendingCreate = {
     idempotencyKey,
@@ -356,6 +360,31 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
     },
   };
   return { orgId, project, form, pending, quote, quota, providerLabel: provider.label };
+}
+
+/** The idle windows a new workspace of an organization may have (PRO-410). */
+export interface CloudIdleOptions {
+  /** Shortest first, then 0 (never) when offered. */
+  choices: number[];
+  /** The provider's default; the server has already brought it under the organization's cap. */
+  defaultMinutes: number;
+  /** The organization's idle cap; null with none, or from an older server. */
+  cap: number | null;
+}
+
+/**
+ * What "Stop when idle" offers for a new workspace in this organization: the
+ * setup of the provider a create would use, as `prepareCloudCreate` picks
+ * it. Nothing is created or quoted.
+ */
+export async function cloudIdleOptions(orgId: string): Promise<CloudIdleOptions> {
+  const provider = await providerFor(orgId);
+  const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, cloudOrgArg(orgId)));
+  return {
+    choices: idleSuspendChoices(setup.allowedIdleSuspendMinutes),
+    defaultMinutes: setup.defaults.idleSuspendMinutes,
+    cap: setup.maxIdleSuspendMinutes ?? null,
+  };
 }
 
 /**

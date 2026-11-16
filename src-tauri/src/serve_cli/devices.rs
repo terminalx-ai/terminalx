@@ -79,6 +79,7 @@ fn list(data: &Path) -> Result<(Option<bool>, Vec<ComputerSummary>)> {
             approved_at: computer.approved_at,
             last_seen_at: computer.last_seen_at,
             connected: false,
+            disconnected_at: computer.disconnected_at,
         })
         .collect();
     Ok((None, computers))
@@ -96,7 +97,20 @@ fn revoke(data: &Path, id: &str) -> Result<i32> {
         let answer = attachment.call(machine_wire::REVOKE, json!({ "id": id }))?;
         answer["revoked"].as_bool().unwrap_or(false)
     } else {
-        Registry::in_data_dir(data).remove(id)?
+        // No runtime to note it: the activity log is written here, as the
+        // runtime would (PRO-357).
+        let registry = Registry::in_data_dir(data);
+        let removed = registry.remove(id)?;
+        if removed {
+            if let Some(dir) = registry.path().parent() {
+                crate::machine_host::activity::Log::in_dir(dir).note(&crate::machine_host::activity::Entry::new(
+                    crate::machine_host::activity::Kind::Revoked,
+                    Some((id, &computer.label)),
+                    None,
+                ))?;
+            }
+        }
+        removed
     };
     if !removed {
         bail!("{} ({id}) was not removed", computer.label);
@@ -162,7 +176,7 @@ mod tests {
     use crate::machine_host::registry::{token_hash, PairedComputer};
 
     fn computer(id: &str, label: &str, connected: bool) -> ComputerSummary {
-        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected, key_id: None, route: None }
+        ComputerSummary { id: id.into(), label: label.into(), platform: Some("macos".into()), approved_at: 1_763_200_000_000, last_seen_at: None, connected, key_id: None, route: None, disconnected_at: None }
     }
 
     #[test]
@@ -191,6 +205,8 @@ mod tests {
                 approved_at: 1,
                 last_seen_at: Some(2),
                 relay_device_id: None,
+                next_token_hash: None,
+                disconnected_at: None,
                 other: Default::default(),
             })
             .unwrap();
@@ -201,7 +217,12 @@ mod tests {
         assert!(!computers[0].connected);
         assert_eq!(revoke(data.path(), "computer-b").unwrap(), 1, "an unknown id is refused");
         assert_eq!(revoke(data.path(), "computer-a").unwrap(), 0);
-        assert!(Registry::in_data_dir(data.path()).list().unwrap().is_empty());
+        let registry = Registry::in_data_dir(data.path());
+        assert!(registry.list().unwrap().is_empty());
+        let logged = crate::machine_host::activity::Log::in_dir(registry.path().parent().unwrap()).recent().unwrap();
+        assert_eq!(logged.len(), 1, "a revoke with no runtime is in the activity log too");
+        assert_eq!(logged[0].kind, crate::machine_host::activity::Kind::Revoked);
+        assert_eq!(logged[0].computer.as_deref(), Some("Sam's MacBook Pro"));
     }
 
     #[test]

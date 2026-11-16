@@ -43,6 +43,8 @@ import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { quoteText } from "@/components/session/CloudNewSession";
+import { IdleSuspendSelect } from "@/components/cloud/IdleSuspendSelect";
+import { idleSuspendChoices, initialIdleSuspend } from "@/lib/idleSuspend";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
@@ -97,10 +99,30 @@ export function CloudCreateWorkspace({
   const agent = useSessionAgent(harnesses, false, null, { value: launch, onChange: setLaunch });
   const pipelineLaunch = usePipelineLaunch(null, pipelineSettings(null), "This session starts on the base checkout. Start a worktree session from the cloud project to automate conflicts.", "Cloud workspaces require a person to merge.");
   const agentId = agent.harness?.id ?? "";
+  // "Stop when idle" (PRO-410): the chosen provider's windows under the
+  // organization's cap. Unreadable, the form has no picker and quotes with
+  // the provider's default, as before.
+  const [idleSetup, setIdleSetup] = useState<{ provider: CloudWorkspaceProviderId; choices: number[]; defaultMinutes: number; cap: number | null } | null>(null);
+  useEffect(() => {
+    const provider = form.provider;
+    if (!provider) return;
+    let live = true;
+    api
+      .cloudWorkspaceSetup(provider)
+      .then((setup) => {
+        if (live) setIdleSetup({ provider, choices: idleSuspendChoices(setup.allowedIdleSuspendMinutes), defaultMinutes: setup.defaults.idleSuspendMinutes, cap: setup.maxIdleSuspendMinutes ?? null });
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [form.provider]);
+  const idleOptions = idleSetup && idleSetup.provider === form.provider && idleSetup.choices.length > 0 ? idleSetup : null;
+  const idleMinutes = idleOptions ? initialIdleSuspend(idleOptions.choices, idleOptions.defaultMinutes, form.idleSuspendMinutes ?? null) : null;
   // What is checked, priced and created: the settings as the pickers show them, never a model or effort they dropped.
   const request = useMemo<CreateForm>(
-    () => ({ ...form, agent: agentId, model: agent.modelId, effort: agent.effort ?? "", mode: agent.mode }),
-    [form, agentId, agent.modelId, agent.effort, agent.mode],
+    () => ({ ...form, idleSuspendMinutes: idleMinutes, agent: agentId, model: agent.modelId, effort: agent.effort ?? "", mode: agent.mode }),
+    [form, idleMinutes, agentId, agent.modelId, agent.effort, agent.mode],
   );
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
@@ -354,6 +376,10 @@ export function CloudCreateWorkspace({
           ]}
         />
       </div>
+
+      {idleOptions && idleMinutes !== null && (
+        <IdleSuspendSelect choices={idleOptions.choices} value={idleMinutes} cap={idleOptions.cap} disabled={busy} onChange={(minutes) => update("idleSuspendMinutes", minutes)} testId="cloud-create-idle" />
+      )}
 
       {error && (
         <div className="flex items-center gap-2 text-xs" role="alert" data-testid="cloud-create-error">

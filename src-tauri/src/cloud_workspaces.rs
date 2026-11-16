@@ -677,6 +677,22 @@ pub struct CloudWorkspaceSetup {
     pub defaults: ProviderSelection,
     pub allowed_idle_suspend_minutes: Vec<i64>,
     pub allowed_retention_days: Vec<i64>,
+    /// The organization's idle cap (PRO-410): the server has already left
+    /// never and every longer window out of `allowed_idle_suspend_minutes`.
+    /// None from a server that does not say, or with no cap.
+    #[serde(default, deserialize_with = "lenient")]
+    pub max_idle_suspend_minutes: Option<i64>,
+}
+
+/// A workspace's idle window and what it may be changed to (PRO-410).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIdleSuspend {
+    pub workspace_id: String,
+    /// Minutes without activity before it is stopped, 0 for never.
+    pub idle_suspend_minutes: Option<i64>,
+    pub allowed_idle_suspend_minutes: Vec<i64>,
+    pub max_idle_suspend_minutes: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -793,6 +809,10 @@ pub struct CloudWorkspace {
     pub created_by: Option<String>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
+    /// Minutes without activity before TerminalX stops it, 0 for never
+    /// (PRO-410); absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub idle_suspend_minutes: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -2869,6 +2889,53 @@ impl CloudWorkspaceService {
             // An answer about another workspace or organization says nothing
             // about whether this one changed.
             if result.id != workspace_id || result.org_id != context.organization_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result)
+        })
+    }
+
+    /// The workspace's idle window and what it may be changed to (PRO-410),
+    /// for whoever may manage it.
+    pub fn idle_suspend(&self, org: Option<&str>, workspace_id: &str) -> Result<WorkspaceIdleSuspend, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: WorkspaceIdleSuspend = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                None,
+                None,
+                RequestRisk::Read,
+            )?;
+            if result.workspace_id != workspace_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    /// How long the workspace may sit idle before it is stopped, 0 for never
+    /// (PRO-410). The server holds it to the provider's windows and the
+    /// organization's cap.
+    pub fn set_idle_suspend(&self, org: Option<&str>, workspace_id: &str, idle_suspend_minutes: i64) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) || idle_suspend_minutes < 0 {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudWorkspace = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                Some(json!({ "idleSuspendMinutes": idle_suspend_minutes })),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            // An answer about another workspace, or one that does not name
+            // the window it now has, says nothing about whether this changed.
+            if result.id != workspace_id || result.org_id != context.organization_id || result.idle_suspend_minutes != Some(idle_suspend_minutes) {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(result)
@@ -5152,6 +5219,7 @@ mod tests {
                     repositories: None,
                     created_by: None,
                     last_activity_at: None,
+                    idle_suspend_minutes: None,
                     revision: None,
                     runtime_activity: None,
                     authority: None,
@@ -6091,6 +6159,63 @@ mod tests {
         assert_eq!((error.code.as_str(), error.status), ("organization_admin_required", Some(403)));
         let (_, service) = test_service("http://127.0.0.1:9");
         assert_eq!(service.set_access(None, "../x", WorkspaceAccessMode::Private).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn set_idle_suspend_posts_the_window_and_checks_the_answer_names_it() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["idleSuspendMinutes"] = json!(0);
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.set_idle_suspend(None, "workspace-1", 0).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert!(captured.text.to_ascii_lowercase().contains("x-terminalx-cloud-workspace-idle-options: never-v1"));
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "idleSuspendMinutes": 0 }));
+        assert_eq!(changed.idle_suspend_minutes, Some(0));
+
+        // An answer that does not name the window asked for (an older
+        // server, another workspace's) is an unknown outcome, not a success.
+        for (key, value) in [("idleSuspendMinutes", json!(15)), ("id", json!("workspace-9"))] {
+            let mut other = workspace.clone();
+            other[key] = value;
+            let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.set_idle_suspend(None, "workspace-1", 0).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, "cloud_workspace_request_outcome_unknown", "{key}");
+        }
+
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.set_idle_suspend(None, "../x", 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.set_idle_suspend(None, "workspace-1", -1).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn idle_suspend_reads_the_window_and_its_choices_for_that_workspace() {
+        let body = json!({
+            "workspaceId": "workspace-1", "idleSuspendMinutes": 15,
+            "allowedIdleSuspendMinutes": [5, 10, 15, 30], "maxIdleSuspendMinutes": 30
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let read = service.idle_suspend(None, "workspace-1").unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert_eq!(read, WorkspaceIdleSuspend {
+            workspace_id: "workspace-1".into(),
+            idle_suspend_minutes: Some(15),
+            allowed_idle_suspend_minutes: vec![5, 10, 15, 30],
+            max_idle_suspend_minutes: Some(30),
+        });
+
+        let mut other = body.clone();
+        other["workspaceId"] = json!("workspace-9");
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.idle_suspend(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
     }
 
     #[test]

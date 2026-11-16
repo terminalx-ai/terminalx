@@ -94,6 +94,29 @@ it("Open settings.json opens the user file, names its broken line, and opens it 
   expect((screen.getByRole("button", { name: "Open settings.json · line 7" }).parentElement as HTMLElement).className).toContain("text-destructive");
 });
 
+it("on a project page the one Open button names and opens the project's own file (PRO-388)", async () => {
+  await boot();
+  const answer = mocks.invoke.getMockImplementation()!;
+  const layers = [
+    { layer: "repositoryLocal", path: "/repo/.terminalx/settings.local.json", displayPath: "/repo/.terminalx/settings.local.json", exists: true, keys: 1, git: "ignored", problem: null },
+    { layer: "repositoryShared", path: "/repo/.terminalx/settings.json", displayPath: "/repo/.terminalx/settings.json", exists: true, keys: 2, git: "committed", problem: null },
+    { layer: "user", path: file.path, displayPath: file.displayPath, exists: true, keys: 0, git: null, problem: null },
+  ];
+  mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => command === "settings_files_list" ? layers : answer(command, args));
+  const { OpenSettingsFileButton } = await import("./SettingSources");
+  render(<OpenSettingsFileButton projectPath="/repo" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open .terminalx/settings.json" }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/repo/.terminalx/settings.json", editor: null }));
+  expect(screen.getAllByRole("button", { name: /^Open / })).toHaveLength(1);
+  openMenu(screen.getByRole("button", { name: "More ways to open .terminalx/settings.json" }));
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Project settings.terminalx/settings.json", "Your local overrides.terminalx/settings.local.json", "Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path",
+  ]);
+  fireEvent.click(within(menu).getByRole("menuitem", { name: /Your settings/ }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
+});
+
 it("a failed Open in reports the failure in an error toast", async () => {
   await boot();
   const { OpenSettingsFileButton } = await import("./SettingSources");

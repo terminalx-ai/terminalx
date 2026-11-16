@@ -362,8 +362,9 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
   failed: "Run failed",
 };
 
-export const PIECE_STATE_LABEL: Record<PieceState, string> = {
+export const PIECE_STATE_LABEL: Record<ShownPieceState, string> = {
   queued: "Queued",
+  waiting: "Waiting",
   running: "Running",
   stalled: "Stalled",
   verifying: "Verifying",
@@ -421,6 +422,27 @@ export function reviewTokens(review: RunReview | undefined): number | null {
 /** The 1-based place of each piece in the plan: what "After" names, as the plan's rows are numbered. */
 export function pieceNumbers(run: Pick<Run, "pieces">): Record<string, number> {
   return Object.fromEntries(run.pieces.map((piece, index) => [piece.id, index + 1]));
+}
+
+/** The pieces a piece still waits for, by id: those it depends on that are not done. A Done piece is never named (PRO-383). */
+export function openDependencies(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "dependsOn">): RunPiece[] {
+  return piece.dependsOn.flatMap((id) => run.pieces.find((other) => other.id === id && other.state !== "done") ?? []);
+}
+
+/** A queued piece held up by a dependency that cannot go on by itself (18.03): blocked, failed or stopped, or held up in turn. */
+export function heldUp(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "state" | "dependsOn">, seen = new Set<string>()): boolean {
+  if (piece.state !== "queued") return false;
+  return openDependencies(run, piece).some((dep) => {
+    if (seen.has(dep.id)) return false;
+    seen.add(dep.id);
+    return ["blocked", "failed", "stopped"].includes(dep.state) || heldUp(run, dep, seen);
+  });
+}
+
+/** A piece's state as the Run view shows it: a queued piece held up by a blocked one is Waiting (18.03). */
+export type ShownPieceState = PieceState | "waiting";
+export function shownPieceState(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "state" | "dependsOn">): ShownPieceState {
+  return heldUp(run, piece) ? "waiting" : piece.state;
 }
 
 const settingsRequests = new Set<() => void>();

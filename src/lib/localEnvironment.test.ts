@@ -5,23 +5,35 @@ describe("local environment paste", () => {
   it("imports ten lines including secrets and equals signs literally", () => {
     const text = Array.from({ length: 10 }, (_, i) => `API_KEY_${i}=secret=${i}`).join("\n");
     const parsed = parseLocalEnv(text);
-    expect(parsed.errors).toEqual([]);
+    expect(parsed.skipped).toEqual([]);
     expect(parsed.inputs).toHaveLength(10);
     expect(parsed.inputs[9]).toEqual({ name: "API_KEY_9", value: "secret=9" });
   });
   it("reports every invalid line without echoing values and keeps valid lines", () => {
-    const { inputs, errors } = parseLocalEnv("# comment\nGOOD=one\nbad=sensitive\nGOOD=duplicate\nTERMINALX_NEXT_TOKEN=secret\nEMPTY=\nEXISTING=value\nNO_EQUALS", ["EXISTING"]);
+    const { inputs, skipped } = parseLocalEnv("# comment\nGOOD=one\nbad=sensitive\nGOOD=duplicate\nTERMINALX_NEXT_TOKEN=secret\nEMPTY=\nEXISTING=value\nNO_EQUALS\n2FA_SEED=x", ["EXISTING"]);
     expect(inputs).toEqual([{ name: "GOOD", value: "one" }, { name: "EMPTY", value: "" }]);
-    expect(errors.map((e) => e.match(/^Line \d+:/)?.[0])).toEqual(["Line 3:", "Line 4:", "Line 5:", "Line 7:", "Line 8:"]);
-    expect(errors.join(" ")).not.toMatch(/sensitive|duplicate|secret=value/);
+    expect(skipped).toEqual([
+      { line: 3, name: "bad", reason: "has lowercase letters" },
+      { line: 4, name: "GOOD", reason: "listed twice" },
+      { line: 5, name: "TERMINALX_NEXT_TOKEN", reason: "reserved by TerminalX" },
+      { line: 7, name: "EXISTING", reason: "already set here" },
+      { line: 8, name: "", reason: "no = sign" },
+      { line: 9, name: "2FA_SEED", reason: "starts with a digit" },
+    ]);
+    expect(JSON.stringify(skipped)).not.toMatch(/sensitive|duplicate|secret|NO_EQUALS/);
+    // A bare base64 token splits at its padding: its body is not shown as a name.
+    expect(parseLocalEnv("dGhpcyBpcyBhIHNlY3JldA==\nsk-Live9xQ=abc").skipped).toEqual([
+      { line: 1, name: "", reason: "has lowercase letters" },
+      { line: 2, name: "", reason: "only A-Z, 0-9 and _ allowed" },
+    ]);
   });
   it("accepts comments, export, CRLF, quoted whitespace and literal substitutions", () => {
     expect(parseLocalEnv("export A=' a b ' # note\r\nB=\"$HOME\"\nC=$(touch something)\nD=hello # comment\nE=url#fragment")).toEqual({ inputs: [
       { name: "A", value: " a b " }, { name: "B", value: "$HOME" }, { name: "C", value: "$(touch something)" }, { name: "D", value: "hello" }, { name: "E", value: "url#fragment" },
-    ], errors: [] });
+    ], skipped: [], lines: [1, 2, 3, 4, 5] });
   });
   it("rejects unterminated quotes, NUL and reserved names", () => {
-    expect(parseLocalEnv("A='oops\nB=bad\0value").errors).toHaveLength(2);
+    expect(parseLocalEnv("A='oops\nB=bad\0value").skipped.map((s) => s.reason)).toEqual(["unmatched quotes", "value has a NUL or is over 64 KiB"]);
     for (const name of ["HOME", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "PATH", "RACCOON", "RACCOON_HOOK_TOKEN", "CODEX_HOME", "TERM", "CLAUDECODE", "lower", "1BAD"]) expect(environmentNameError(name)).toBeTruthy();
     for (const name of ["_KEY", "API_KEY", "PORT", "DATABASE_URL"]) expect(environmentNameError(name)).toBeNull();
   });
