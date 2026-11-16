@@ -11,6 +11,7 @@ import {
   type CloudWorkspace,
   type CloudWorkspaceList,
   type CloudWorkspaceListItem,
+  type CloudWorkspaceQuota,
   type CloudWorkspaceRepositoryInput,
   type CloudWorkspaceSnapshot,
   type OrganizationSummary,
@@ -54,7 +55,8 @@ export interface OrgCatalog {
   /** The organization's selected repositories; null until first listed. */
   repositories: CloudSelectedRepository[] | null;
   repositoriesAt: number | null;
-  quota: { used: number; limit: number } | null;
+  /** The organization's slots as the last list counted them; a limit is absent where there is none (PRO-371). */
+  quota: CloudWorkspaceQuota | null;
   /** When the workspace list last answered; null for never. */
   fetchedAt: number | null;
   /**
@@ -1073,6 +1075,16 @@ function parsePipelines(value: unknown, workspaces: ReadonlySet<string>): Record
   return out;
 }
 
+/**
+ * A saved quota: how many are in use, and the limit where the organization
+ * has one. A quota saved without a limit (PRO-371) is kept; it means no limit.
+ */
+function parseQuota(raw: unknown): CloudWorkspaceQuota | null {
+  if (!isObject(raw) || typeof raw.used !== "number") return null;
+  if (raw.limit === undefined || raw.limit === null) return { used: raw.used };
+  return typeof raw.limit === "number" ? { used: raw.used, limit: raw.limit } : null;
+}
+
 /** A saved catalog, or null for anything this version cannot read. */
 export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "createMemory"> | null {
   if (!isObject(value) || value.version !== CATALOG_VERSION || !isObject(value.orgs)) return null;
@@ -1085,7 +1097,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
       workspaces,
       repositories: Array.isArray(raw.repositories) ? (raw.repositories as CloudSelectedRepository[]) : null,
       repositoriesAt: typeof raw.repositoriesAt === "number" ? raw.repositoriesAt : null,
-      quota: isObject(raw.quota) && typeof raw.quota.used === "number" && typeof raw.quota.limit === "number" ? { used: raw.quota.used, limit: raw.quota.limit } : null,
+      quota: parseQuota(raw.quota),
       fetchedAt: typeof raw.fetchedAt === "number" ? raw.fetchedAt : null,
       sessions: parseSessions(raw.sessions, new Set(workspaces.map((item) => item.workspace.id))),
       pipelines: parsePipelines(raw.pipelines, new Set(workspaces.map((item) => item.workspace.id))),

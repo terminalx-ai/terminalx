@@ -780,11 +780,16 @@ pub struct WorkspaceRuntimeActivity {
 
 /// The organization's workspace slots (§20.1, PRO-76). `used`/`limit` mirror
 /// `running` for desktops that predate it.
+///
+/// A `limit` is absent where the organization has none (PRO-371): the server
+/// leaves the key out, and a null reads the same. It is passed on absent, so
+/// the webview never compares a count with null.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceQuota {
     pub used: u32,
-    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub running: Option<QuotaUsage>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -794,7 +799,8 @@ pub struct CloudWorkspaceQuota {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QuotaUsage {
     pub used: u32,
-    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 /// An optional list field: a value that does not fit its type reads as
@@ -3796,7 +3802,7 @@ mod tests {
                 ("org-4".to_string(), 0, Some("cloud_workspace_unknown_error".to_string())),
             ]
         );
-        assert_eq!(feed.organizations[0].quota.as_ref().map(|quota| (quota.used, quota.limit)), Some((1, 2)));
+        assert_eq!(feed.organizations[0].quota.as_ref().map(|quota| (quota.used, quota.limit)), Some((1, Some(2))));
         // In a whole catalog, a deleted id counts only with a tombstone this desktop was shown.
         assert_eq!(feed.deleted_workspace_ids, vec!["gone-1".to_string()]);
         let text = serde_json::to_string(&feed).unwrap();
@@ -5703,6 +5709,29 @@ mod tests {
         // A pre-PRO-76 quota has no running or total.
         let quota: CloudWorkspaceQuota = serde_json::from_value(json!({ "used": 1, "limit": 2 })).unwrap();
         assert_eq!(serde_json::to_value(quota).unwrap(), json!({ "used": 1, "limit": 2 }));
+    }
+
+    #[test]
+    fn a_quota_without_a_limit_is_passed_on_without_one() {
+        // PRO-371: the server leaves `limit` out where the organization has none.
+        let sent = json!({ "used": 3, "running": { "used": 3 }, "total": { "used": 60 } });
+        let quota: CloudWorkspaceQuota = serde_json::from_value(sent.clone()).unwrap();
+        assert_eq!((quota.limit, quota.running.unwrap().limit, quota.total.unwrap().limit), (None, None, None));
+        assert_eq!(serde_json::to_value(&quota).unwrap(), sent);
+
+        // A null limit reads the same, and never reaches the webview as null.
+        let quota: CloudWorkspaceQuota = serde_json::from_value(json!({ "used": 3, "limit": null, "running": { "used": 3, "limit": null }, "total": { "used": 60, "limit": 100 } })).unwrap();
+        assert_eq!(serde_json::to_value(&quota).unwrap(), json!({ "used": 3, "running": { "used": 3 }, "total": { "used": 60, "limit": 100 } }));
+
+        // One limit set, the other not.
+        let mut list: Value = serde_json::from_str(&org_2_list_body().replace("org-2", "org-1")).unwrap();
+        list["quota"] = json!({ "used": 100, "limit": 100, "running": { "used": 100, "limit": 100 }, "total": { "used": 500 } });
+        let parsed: CloudWorkspaceList = serde_json::from_value(list.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["quota"], list["quota"]);
+
+        // A limit that is not a count is not "no limit": the quota is dropped whole.
+        list["quota"] = json!({ "used": 3, "limit": "many" });
+        assert!(serde_json::from_value::<CloudWorkspaceList>(list).unwrap().quota.is_none());
     }
 
     #[test]

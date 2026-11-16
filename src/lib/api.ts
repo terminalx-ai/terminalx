@@ -1485,12 +1485,21 @@ export interface CloudWorkspaceList {
   quota?: CloudWorkspaceQuota | null;
 }
 
-/** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
-export interface CloudWorkspaceQuota {
+/**
+ * A count against a limit. The organization has no limit where `limit` is
+ * absent (PRO-371): the server leaves the key out, and a null means the same.
+ * Read it with `limitOf` (runningLimit.ts), never by comparing: in JavaScript
+ * `used >= null` is true.
+ */
+export interface CloudLimitUsage {
   used: number;
-  limit: number;
-  running?: { used: number; limit: number };
-  total?: { used: number; limit: number };
+  limit?: number | null;
+}
+
+/** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
+export interface CloudWorkspaceQuota extends CloudLimitUsage {
+  running?: CloudLimitUsage;
+  total?: CloudLimitUsage;
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */

@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Cloud, Loader2 } from "@/icons";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
-import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
+import { errorMessage, type CloudWorkspaceQuota, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
@@ -11,6 +11,7 @@ import type { PreparedCreate } from "@/lib/cloudNewSession";
 import { managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
+import { limitOf } from "@/lib/runningLimit";
 import { useSessionStore } from "@/lib/sessions";
 import type { CloudProject } from "@/types/target";
 
@@ -113,6 +114,15 @@ export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { 
   };
 }
 
+/** How full the organization is before this create: against its limit, or only the count where it has none (PRO-371). */
+export function quotaText(orgName: string, quota: CloudWorkspaceQuota | null): string {
+  // An older server sends no quota at all, so all that can be said is that its limit applies.
+  if (!quota) return `${orgName}'s workspace limit applies; this adds one workspace.`;
+  const limit = limitOf(quota);
+  if (limit !== null) return `${orgName} has ${quota.used} of ${limit} cloud workspaces in use; this adds one.`;
+  return `${orgName} has ${quota.used} cloud workspace${quota.used === 1 ? "" : "s"} in use; this adds one.`;
+}
+
 export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCancel }: { prepared: PreparedCreate; orgName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
   const { quote, quota } = prepared;
   const text = quoteText(quote, prepared.providerLabel);
@@ -122,7 +132,7 @@ export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCance
         <Cloud className="size-4" /> {prepared.project.blank ? `Create the ${prepared.project.fullName} workspace` : `Create a cloud workspace for ${prepared.project.fullName}`}
       </div>
       <p className="text-muted-foreground" data-testid="cloud-create-quota">
-        {quota ? `${orgName} has ${quota.used} of ${quota.limit} cloud workspaces in use; this adds one.` : `${orgName}'s workspace limit applies; this adds one workspace.`}
+        {quotaText(orgName, quota)}
       </p>
       <p className="mt-1 text-muted-foreground">{text.machine}</p>
       <p className="mt-1 text-foreground" data-testid="cloud-create-price">

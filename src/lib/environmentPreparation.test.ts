@@ -73,6 +73,12 @@ describe("offerPreparation", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  it("with no running limit, is not refused however many run (PRO-371)", async () => {
+    mocks.policy.mockResolvedValue({ ...view(7), limit: null });
+    expect(await offerPreparation("local-docker")).toMatchObject({ running: 7, runningLimit: null });
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses when machines are paused, when there is no agent login, or no short idle stop", async () => {
     mocks.policy.mockResolvedValueOnce(view(0, 2, true));
     await expect(offerPreparation("local-docker")).rejects.toMatchObject({ code: "provisioning-paused" });

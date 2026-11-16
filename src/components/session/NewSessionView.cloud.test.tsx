@@ -204,6 +204,24 @@ describe("new session in a cloud project", () => {
     expect(screen.getByTestId("cloud-start-status").textContent).toContain("The session opens when its agent is running");
   });
 
+  it("with no workspace limit, counts what is in use without a limit (PRO-371)", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    // The server leaves `limit` out where the organization has none.
+    flow.prepareCloudCreate.mockResolvedValue({ ...prepared, quota: { used: 60, running: { used: 60 }, total: { used: 75 } } });
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Start the API");
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByTestId("cloud-create-confirm");
+    expect(screen.getByTestId("cloud-create-quota").textContent).toBe("Acme has 60 cloud workspaces in use; this adds one.");
+
+    const { quotaText } = await import("./CloudNewSession");
+    expect(quotaText("Acme", { used: 1, limit: null })).toBe("Acme has 1 cloud workspace in use; this adds one.");
+    expect(quotaText("Acme", { used: 0 })).toBe("Acme has 0 cloud workspaces in use; this adds one.");
+    expect(quotaText("Acme", { used: 1, limit: 2 })).toBe("Acme has 1 of 2 cloud workspaces in use; this adds one.");
+    // An older server sends no quota.
+    expect(quotaText("Acme", null)).toBe("Acme's workspace limit applies; this adds one workspace.");
+  });
+
   it("at the limit, says so and creates nothing", async () => {
     const { CreateRefused } = await import("@/lib/cloudCreate");
     flow.planCloudStart.mockReturnValue({ kind: "create" });

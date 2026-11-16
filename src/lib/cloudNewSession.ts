@@ -1,4 +1,4 @@
-import { api, experimental, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
+import { api, experimental, type CloudWorkspaceProviderId, type CloudWorkspaceQuota, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
@@ -25,6 +25,7 @@ import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { providerLabel } from "@/lib/organizationCompute";
+import { atLimit } from "@/lib/runningLimit";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -238,8 +239,8 @@ export interface PreparedCreate {
   form: CreateForm;
   pending: PendingCreate;
   quote: CloudWorkspaceQuote;
-  /** Non-archived workspaces against the organization's limit; null from an older server. */
-  quota: { used: number; limit: number } | null;
+  /** The organization's workspaces in use, against its limit where it has one; null from an older server. */
+  quota: CloudWorkspaceQuota | null;
   providerLabel: string;
 }
 
@@ -290,13 +291,14 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
 
 /**
  * Everything a new workspace needs before the person confirms the cost: the
- * quota (refused at the limit, sending nothing), the provider, the checks and
+ * quota (refused at the limit, if there is one, sending nothing), the provider, the checks and
  * a quote. Nothing is created here.
  */
 export async function prepareCloudCreate(project: CloudProject, request: CloudSessionRequest): Promise<PreparedCreate> {
   const orgId = project.orgId;
   const quota = getCloudCatalog().orgs[orgId]?.quota ?? null;
-  if (quota && quota.used >= quota.limit) throw new CreateRefused("cloud_workspace_quota_exceeded");
+  // Only against a limit: an organization without one (PRO-371) is never refused here.
+  if (atLimit(quota)) throw new CreateRefused("cloud_workspace_quota_exceeded");
   const provider = await providerFor(orgId);
   const org = cloudOrgArg(orgId);
   const name = project.blank ? project.fullName : titleOf(request.prompt) || project.fullName.split("/").pop() || project.fullName;
