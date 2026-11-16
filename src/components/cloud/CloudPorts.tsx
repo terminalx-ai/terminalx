@@ -68,6 +68,9 @@ export function portErrorMessage(error: unknown, port: number, machine: MachineP
       return machine ? `Ports are forwarded while ${machine.name} is connected.` : STOPPED;
     case "cloud_port_invalid":
       return "Enter a port between 1 and 65535.";
+    // The native forwarder refuses new forwards while the master switch is off (PRO-355).
+    case "cloud_port_forwarding_off":
+      return "Forwarding is off. Turn it on to forward ports to this Mac.";
     case "forbidden":
       return machine ? `You do not have access to ${machine.name}’s ports.` : "You do not have access to this workspace's ports.";
     case "cloud_remote_identity_changed":
