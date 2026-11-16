@@ -45,7 +45,9 @@ import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/l
 import { showRunView } from "@/lib/orchestration";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
-import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { cloudStartError, quoteText, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { PHASES, failureMessage, isClientError, phaseOf } from "@/lib/cloudCreate";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
@@ -158,7 +160,16 @@ export function NewSessionView({
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
-  const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
+  /**
+   * A create whose outcome is not known (the server stopped answering): the
+   * next Create resends this exact request, so its key cannot make a second
+   * workspace (PRO-409).
+   */
+  const unsettledCreate = useRef<PreparedCreate | null>(null);
+  /** The workspace Create just made: the form stays busy until its first session opens or its start fails. */
+  const [launching, setLaunching] = useState<{ orgId: string; workspaceId: string; projectKey: string } | null>(null);
+  const launchSeen = useRef(false);
+  const catalog = useCloudCatalog();
   const [starting, setStarting] = useState<string | null>(null);
   /** An existing branch, not open anywhere, to check out in the session's worktree. */
   const [checkoutBranch, setCheckoutBranch] = useState<string | null>(null);
@@ -325,11 +336,11 @@ export function NewSessionView({
       machine
         ? !!machine.client && !!machine.project && !!harness && (text.trim().length > 0 || !!issue) && !hasImages && !busy && machineSignIn !== "signedOut"
         : cloud
-        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
+        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && cloud.project.selected && cloud.mayStart === true
         : projectless
           ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
           : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue || !!pullRequest) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy && !prMention.attaching,
-    [machine, machineSignIn, cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
+    [machine, machineSignIn, cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -358,7 +369,11 @@ export function NewSessionView({
     if (isRoleRefusal(e)) void refreshAccountRoles(true);
   };
 
-  /** Start in the cloud: reuse or wake a workspace of the project, or prepare a new one for confirmation. */
+  /**
+   * Start in the cloud: reuse or wake a workspace of the project, or create
+   * one. Pressing Create is the decision to create: nothing asks again
+   * (PRO-409), and the button stays busy until the session opens.
+   */
   const createCloud = async () => {
     if (!cloud?.project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
@@ -366,42 +381,82 @@ export function NewSessionView({
     setError(null);
     setLimitOrg(null);
     setPausedFor(null);
-    const plan = planCloudStart(cloud.project);
+    const project = cloud.project;
+    const plan = planCloudStart(project);
+    // Held past this call while a new workspace starts; `followLaunch` opens its session.
+    let held = false;
     try {
       if (plan.kind === "create") {
         setStarting("Checking your organization's limits…");
-        setConfirm(await prepareCloudCreate(cloud.project, cloudRequest()));
+        const request = cloudRequest();
+        const unsettled = unsettledCreate.current;
+        const resend =
+          unsettled &&
+          unsettled.project.key === project.key &&
+          unsettled.form.prompt === request.prompt &&
+          unsettled.form.agent === request.agent &&
+          unsettled.form.model === request.model &&
+          unsettled.form.effort === (request.effort ?? "") &&
+          unsettled.form.mode === request.mode;
+        const prepared = resend ? unsettled : await prepareCloudCreate(project, request);
+        unsettledCreate.current = null;
+        setStarting(`Creating the workspace on ${quoteText(prepared.quote, prepared.providerLabel).machine}…`);
+        let snapshot;
+        try {
+          snapshot = await confirmCloudCreate(prepared);
+        } catch (e) {
+          if (isClientError(e) && e.retryWithSameIdempotencyKey) unsettledCreate.current = prepared;
+          throw e;
+        }
+        setText("");
+        launchSeen.current = false;
+        setLaunching({ orgId: prepared.orgId, workspaceId: snapshot.workspace.id, projectKey: project.key });
+        setStarting("Starting the workspace…");
+        held = true;
       } else {
         setStarting(plan.kind === "wake" ? `Resuming ${plan.node.item.workspace.name}…` : "Starting the session…");
         await startInWorkspace(plan, cloudRequest());
         setText("");
       }
     } catch (e) {
-      showCloudError(e, cloud.project.orgId);
+      showCloudError(e, project.orgId);
     } finally {
-      setStarting(null);
-      setBusy(false);
+      if (!held) {
+        setStarting(null);
+        setBusy(false);
+      }
     }
   };
 
-  const confirmCreate = async () => {
-    if (!confirm) return;
-    setBusy(true);
-    setError(null);
-    setLimitOrg(null);
-    setStarting("Creating the workspace…");
-    try {
-      await confirmCloudCreate(confirm);
-      setConfirm(null);
-      setText("");
-      setStarting("Starting the workspace. The session opens when its agent is running.");
-    } catch (e) {
-      showCloudError(e, confirm.orgId);
+  // The new workspace's start, read from the catalog: where it is, and the
+  // end of the wait (its session is there, it failed, or the form moved on).
+  const launchProjectKey = cloud?.project?.key ?? null;
+  useEffect(() => {
+    if (!launching) return;
+    const release = (failure: string | null = null) => {
+      launchSeen.current = false;
+      setLaunching(null);
       setStarting(null);
-    } finally {
       setBusy(false);
-    }
-  };
+      if (failure) {
+        setErrorOrg(launching.orgId);
+        setError(failure);
+      }
+    };
+    if (launchProjectKey !== launching.projectKey) return release();
+    const item = findCloudWorkspace(catalog, launching.orgId, launching.workspaceId);
+    // Not listed yet; once it was, gone means deleted or archived elsewhere.
+    if (!item) return launchSeen.current ? release() : undefined;
+    launchSeen.current = true;
+    if (item.workspace.launch?.sessionId) return release();
+    const phase = phaseOf(item);
+    if (phase === "failed") return release(failureMessage(item));
+    if (phase === "canceled") return release("The workspace's start was canceled.");
+    // Up with no first session to open (an older server): the sidebar row is the way in.
+    if (phase === "running") return release();
+    const label = PHASES.find((entry) => entry.id === phase)?.label ?? "Starting";
+    setStarting(`Starting the workspace: ${label.toLowerCase()}…`);
+  }, [launching, catalog, launchProjectKey]);
 
   /**
    * Create on the chosen machine: `session.create` with its project, in a new
@@ -625,9 +680,6 @@ export function NewSessionView({
                 }} />
               ))}
             </div>
-          )}
-          {cloud && confirm && (
-            <CloudCreateConfirm prepared={confirm} orgName={cloud.orgName} busy={busy} onConfirm={() => void confirmCreate()} onCancel={() => setConfirm(null)} />
           )}
           {cloud && starting && (
             <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
