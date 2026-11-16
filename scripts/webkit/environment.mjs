@@ -88,9 +88,10 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 try {
-  for (const width of [960, 720]) {
+  // PRO-391: also at the design's 1440 width, in dark and light.
+  for (const [width, colorScheme] of [[1440, "dark"], [1440, "light"], [960, undefined], [720, undefined]]) {
     // The price assertion uses the US currency format, regardless of the VM's locale.
-    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 900 }, { locale: "en-US" });
+    const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height: 900 }, { locale: "en-US", colorScheme });
     await page.evaluate(
       ({ status, recipes }) => {
         window.__ENVIRONMENT_CALLS__ = [];
@@ -114,11 +115,17 @@ try {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     // The section is on the active organization's page (PRO-107), reached from Settings → Account.
     await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
+    // PRO-391: the environment is the Environment tab of Cloud compute.
+    await page.getByRole("tab", { name: "Environment", exact: true }).click();
     const template = page.getByRole("form", { name: "Environment template" });
     await template.waitFor();
     await page.getByRole("region", { name: "Environment recipes" }).waitFor();
-    await page.getByRole("button", { name: "Build version…" }).click();
-    await page.getByRole("listitem", { name: "Version 4" }).getByRole("button", { name: "Show log" }).click();
+    const rows = await page.getByRole("list", { name: "Environment versions" }).evaluate((list) => [...list.children].map((row) => ({ height: row.getBoundingClientRect().height, text: row.textContent })));
+    const unbuilt = await page.getByRole("region", { name: "Unbuilt changes" }).textContent();
+    // The page before anything is opened, as the design draws it.
+    await page.getByTestId("organization-cloud-compute").screenshot({ path: `/tmp/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
+    await page.getByRole("region", { name: "Environment builds" }).getByRole("button", { name: "Build environment" }).click();
+    await page.getByRole("listitem", { name: "Version 4" }).getByRole("button", { name: "View log" }).click();
     await page.getByLabel("Build log of version 4").getByText(/Unable to locate/).waitFor();
     await page.getByRole("button", { name: "Apply…" }).click();
     // PRO-20 part 4: asking to configure with an agent prices a machine and shows the confirmation; it starts none.
@@ -126,7 +133,7 @@ try {
     const before = page.getByLabel("Before the machine starts");
     await before.waitFor();
     await before.getByRole("button", { name: "Show what the agent is asked" }).click();
-    const section = page.locator("div.rounded-lg", { has: page.getByText("Cloud environment", { exact: true }) }).last();
+    const section = page.getByTestId("organization-environment");
     const layout = await section.evaluate((root) => {
       const main = root.closest('[role="main"]') ?? document.body;
       const inside = (element) => {
@@ -148,14 +155,21 @@ try {
         outside: controls.filter((control) => !inside(control)).map((control) => `${control.tagName}:${(control.getAttribute("aria-label") ?? control.textContent ?? "").slice(0, 40)}`),
         overlaps,
         text: root.textContent,
+        small: [...root.querySelectorAll("*")].filter((element) => element.offsetParent !== null && [...element.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()) && parseFloat(getComputedStyle(element).fontSize) < 12).map((element) => element.textContent.slice(0, 30)),
       };
     });
     // Tall enough that the whole section is laid out on screen for the picture.
     await page.setViewportSize({ width, height: 3200 });
     await section.scrollIntoViewIfNeeded();
-    await section.screenshot({ path: `/tmp/pro-20-environment-${width}.png` });
+    await section.screenshot({ path: `/tmp/pro-20-environment-${width}-${colorScheme ?? "default"}.png` });
     const calls = await page.evaluate(() => window.__ENVIRONMENT_CALLS__);
-    failed += report(`environment section at ${width}px`, {
+    failed += report(`environment section at ${width}px${colorScheme ? ` (${colorScheme})` : ""}`, {
+      "no text on the Environment tab is smaller than 12px": layout.small.length === 0,
+      "versions are 44px rows named Environment vN": rows.length === 3 && rows.every((row) => row.height >= 43 && row.height <= 45) && /^Environment v4/.test(rows[0].text),
+      "the active version has an ACTIVE badge and older built ones offer Activate": /Active/.test(rows[1].text) && /Activate/.test(rows[2].text),
+      "a failed version says where it failed, without the error code": /Failed in install script/.test(rows[0].text) && !/cloud_environment_install_failed/.test(layout.text),
+      "times are relative ages or short dates, not locale timestamps": !/\d+\/\d+\/\d{4}/.test(layout.text),
+      "the unbuilt changes bar names what changed": /Unbuilt changes/.test(unbuilt) && /Changed: install script, setup steps/.test(unbuilt),
       "the section does not widen the Settings column": layout.noPageOverflow,
       "every control, table and script stays inside the section": layout.outside.length === 0,
       "no two buttons overlap": layout.overlaps.length === 0,
@@ -167,7 +181,7 @@ try {
       "configuring with an agent asks first, with the price, the running limit and the 60 minutes": /about \$0\.02 an hour/.test(layout.text) && /1 of 3 are running now/.test(layout.text) && /after 60 minutes/.test(layout.text) && /Never edit code, tests or configuration/.test(layout.text),
       "asking starts no machine and stores no recipe": !calls.includes("cloud_workspace_create") && !calls.includes("organization_environment_recipe_propose"),
       "looking and asking sends no build, retry, rollback, apply or save": !calls.some((command) => /^organization_environment_(build|update|version_retry|version_cancel|version_rollback|recipe_apply|recipe_dismiss)$/.test(command)) && !calls.some((command) => /^cloud_(remote_attach|workspace_resume|workspace_create)$/.test(command)),
-    }, { outside: layout.outside, overlaps: layout.overlaps, calls: calls.filter((command) => command.startsWith("organization_environment")) });
+    }, { small: layout.small, outside: layout.outside, overlaps: layout.overlaps, calls: calls.filter((command) => command.startsWith("organization_environment")) });
     await page.close();
   }
   failed += await localEnvironment();

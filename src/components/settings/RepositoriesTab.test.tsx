@@ -13,6 +13,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mock.reveal }));
 vi.mock("@/lib/clipboard", () => ({ copyText: mock.copy }));
 vi.mock("./RepositoryActionsPage", () => ({ RepositoryActionsPage: ({ projectPath }: { projectPath: string }) => <p>Actions page for {projectPath}</p> }));
 vi.mock("./RepositoryPreviewUrlsPage", () => ({ RepositoryPreviewUrlsPage: ({ projectPath }: { projectPath: string }) => <p>Preview URLs page for {projectPath}</p> }));
+vi.mock("./EnvironmentSettings", () => ({ EnvironmentTable: ({ project }: { project: string }) => <p>Variables for {project}</p> }));
 vi.mock("./RepositoryEnvironmentSettings", () => ({ RepositoryEnvironmentSettings: ({ projectPath }: { projectPath: string }) => <p>Environment page for {projectPath}</p> }));
 const project: Project = { path: "/repo", name: "Example", repositorySettings: { filesToCopy: [".env*"] } };
 const result = (patterns = [".env*"], fromIncludeFile = false): RepositoryFilesPreview => ({

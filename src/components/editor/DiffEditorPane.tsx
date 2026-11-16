@@ -2,17 +2,20 @@ import { selectSessionTab } from "@/lib/terminal";
 import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
 import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "@/icons";
+import { Check, Copy, RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
-import { DiffOptions } from "@/components/changes/DiffOptions";
-import { diffMediaKind, FileDiff } from "@/components/changes/FileDiff";
+import { DiffModeToggle, DiffViewOptionsMenu } from "@/components/changes/DiffOptions";
+import { useViewedChanges } from "@/lib/viewedChanges";
+import { copyText } from "@/lib/clipboard";
+import type { ChangedFile } from "@/types/session";
+import { DiffStats, diffMediaKind, FileDiff, PathChip, TOO_LARGE, TooLargeState } from "@/components/changes/FileDiff";
 import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
-import { Segmented } from "@/components/ui/controls";
+import { Checkbox, Segmented } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
-import { editorLinkContext, fileKind, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
+import { editorLinkContext, fileKind, openFile, isMarkdown, setDiffMode, updateDiffRange, type DiffEditorEntry, type DiffMode, type FileEditorEntry } from "@/lib/editors";
 import { localGitSource } from "@/lib/gitSource";
 import { changedSince, useFileSource } from "@/lib/workspaceFiles";
 import { useSessionThreads } from "@/components/changes/ReviewThreads";
@@ -45,6 +48,18 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const [previewed, setPreviewed] = useState(mode === "preview");
   useEffect(() => { if (mode === "entire") setEntire(true); if (mode === "edit") setEditing(true); if (mode === "preview") setPreviewed(true); }, [mode]);
   const fileEntry: FileEditorEntry = { ...entry, kind, name: entry.rel.split("/").pop() ?? entry.rel, viewMode: "source" };
+  // The file as this scope lists it: its +/− for the header and its identity for the Viewed mark.
+  const [changedFile, setChangedFile] = useState<ChangedFile | null>(null);
+  const viewed = useViewedChanges(source.key);
+  const [copied, setCopied] = useState<"done" | "failed" | null>(null);
+  useEffect(() => {
+    if (!range) { setChangedFile(null); return; }
+    let cancelled = false;
+    source.changesBetween(range.base, range.head, options.hideWhitespace)
+      .then((list) => { if (!cancelled) setChangedFile(list.find((file) => file.path === entry.rel) ?? null); })
+      .catch(() => { if (!cancelled) setChangedFile(null); });
+    return () => { cancelled = true; };
+  }, [source, entry.rel, range?.base, range?.head, options.hideWhitespace]);
 
   useEffect(() => {
     if (!range || media) return;
@@ -111,18 +126,33 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   // Like the Changes panel: only a live comparison can be discarded, never a turn or commit snapshot.
   const canDiscard = scope === "all" && !!range && !!source.discard && source.canWrite;
   const binary = pair?.before.includes("\0") || pair?.after.includes("\0");
-  const canEdit = !media && !binary && !!pair && !pair.deleted;
+  const tooLarge = !!pair && (pair.before === TOO_LARGE || pair.after === TOO_LARGE);
+  const canEdit = !media && !binary && !tooLarge && !!pair && !pair.deleted;
+  const openWhole = pair && !pair.deleted ? () => openFile(entry.sessionId, entry.root, entry.rel, undefined, entry.workspaceRoot) : undefined;
+  const copy = pair && !binary && !tooLarge && !pair.deleted ? () => {
+    void copyText(pair.after).then(() => { setCopied("done"); window.setTimeout(() => setCopied(null), 1500); }, () => setCopied("failed"));
+  } : undefined;
+  const viewedStatus = changedFile ? viewed.status(changedFile) : null;
   const modes: { value: DiffMode; label: string }[] = [{ value: "diff", label: "Diff" }, { value: "entire", label: "Entire file" }];
   if (kind !== "text" || isMarkdown(entry.rel)) modes.push({ value: "preview", label: "Preview" });
   if (canEdit) modes.push({ value: "edit", label: "Edit" });
 
   return <div className="flex h-full min-h-0 flex-col" data-testid="diff-editor">
-    <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 py-1">
-      <Segmented aria-label="Diff view" value={mode} onChange={(next) => void setDiffMode(entry.id, next)} options={modes} />
-      <span className="ml-auto truncate text-xs text-faint" title={entry.rel}>{entry.rel}</span>
-      {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
+    {/* One row (design 05.04): the file, its +/−, the view, then copy, layout, options and Viewed. */}
+    <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 text-xs scrollbar-none">
+      <PathChip path={entry.rel} />
+      {changedFile && <DiffStats additions={changedFile.additions} deletions={changedFile.deletions} />}
+      <Segmented aria-label="Diff view" value={mode} onChange={(next) => void setDiffMode(entry.id, next)} options={modes} className="ml-1" />
+      {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" title="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
+      {copy && <Button variant="ghost" size="icon-xs" aria-label="Copy file contents" title="Copy file contents" onClick={copy}>{copied === "done" ? <Check /> : <Copy />}</Button>}
+      {mode === "diff" && !media && !binary && !tooLarge && <DiffModeToggle />}
+      <DiffViewOptionsMenu fileKey={diffFileKey(source.key, entry.rel)} onCopy={copy} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} discardLabel={`Discard changes to ${entry.rel}`} />
+      {changedFile && viewedStatus && <Checkbox className="ml-auto pl-2" label={`Viewed ${entry.rel}`} checked={viewedStatus.viewed} disabled={!changedFile.blobHash}
+        title={!changedFile.blobHash ? "Viewed marks require file identities from the workspace. Update its runtime and reconnect." : viewedStatus.changed ? "Changed since viewed" : undefined}
+        onChange={(on) => viewed.set(changedFile, on)}>Viewed</Checkbox>}
     </div>
-    {mode === "diff" && <DiffOptions />}
+    {copied === "done" && <p role="status" className="sr-only">Copied file</p>}
+    {copied === "failed" && <p role="status" className="px-3 py-1 text-xs text-muted-foreground">Could not copy file. Try again.</p>}
     {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath } : null} base={uncommitted ? undefined : range?.base}
       onClose={() => setDiscarding(false)} onDiscarded={() => void refresh()} />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
@@ -130,7 +160,8 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} onDiscard={canDiscard ? () => setDiscarding(true) : undefined} />
+          : tooLarge ? <TooLargeState path={entry.rel} onOpenFile={openWhole} />
+          : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff chrome={false} source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} />
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
           : pair ? <DiffPane workspace={source.key} path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
