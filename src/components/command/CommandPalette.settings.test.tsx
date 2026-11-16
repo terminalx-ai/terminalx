@@ -183,7 +183,7 @@ describe("settings in the command palette", () => {
       const projects = within(screen.getByRole("group", { name: "Projects" })).getAllByRole("option");
       expect(projects.map((row) => row.textContent)).toEqual(["AlphaScripts, files to copy and workspace cleanup"]);
       fireEvent.click(projects[0]);
-      await waitFor(() => expect(requested).toHaveBeenCalledWith("/alpha"));
+      await waitFor(() => expect(requested).toHaveBeenCalledWith("/alpha", "scripts"));
       expect(onOpenChange).toHaveBeenCalledWith(false);
       expect(onOpenSettings).not.toHaveBeenCalled();
     } finally { stop(); }

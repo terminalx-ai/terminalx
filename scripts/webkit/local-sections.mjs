@@ -81,7 +81,7 @@ try {
 
     await section("Release").getByText("Prepare release notes", { exact: true }).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
-    await page.getByRole("menuitem", { name: /Bugs/ }).click();
+    await page.getByRole("menuitemradio", { name: /Bugs/ }).click();
     await section("Bugs").getByText("Prepare release notes", { exact: true }).waitFor();
     await menu("Bugs", "Move section up");
     assert.equal(await page.locator('[data-local-section]').first().getAttribute('data-local-section'), 'bugs');
@@ -163,8 +163,10 @@ try {
     // A failed move raises the error toast and leaves the session where it was.
     await page.evaluate(() => { window.__PW_FAIL_MOVE__ = true; });
     await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: "Retries", exact: true }));
-    await page.getByText("Something went wrong", { exact: true }).waitFor();
-    await page.getByText("Couldn't move “Fix retry handling” to Retries", { exact: false }).waitFor();
+    // 02.20 (PRO-386): titled with what was not done, where it is now, and Try again.
+    await page.getByText("Couldn't move Fix retry handling to Retries", { exact: true }).waitFor();
+    await page.getByText(/It's back in Release\.$/).waitFor();
+    await page.getByRole("button", { name: "Try again", exact: true }).waitFor();
     await page.evaluate(() => { window.__PW_FAIL_MOVE__ = false; });
     await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
     assert.equal(await inSection("two"), 1);

@@ -192,8 +192,8 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
   fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
-  expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
-  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+  expect(await screen.findByRole("menuitem", { name: /^Remove workspace…/ })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Delete session…" })).toBeTruthy();
 });
 
 describe("renaming a chat in the list", () => {
@@ -214,7 +214,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Copy link", "Share session…", "Issue and pull request", "Archive", "Delete session…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });

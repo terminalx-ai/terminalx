@@ -143,7 +143,12 @@ describe("personal local sections", () => {
     const trigger = await screen.findByRole("menuitem", { name: "Move to section" });
     fireEvent.keyDown(trigger, { key: "ArrowRight" });
     nextSections = [section("Release", ["one"]), section("Bugs", ["two"])];
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Release" }));
+    // 02.19: a heading, each section with its count, a check on the one it is in, and no "Main list".
+    expect(within(screen.getAllByRole("menu").at(-1)!).getByText("Move to section")).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Main list" })).toBeNull();
+    expect(screen.getByRole("menuitemradio", { name: "Bugs" }).textContent).toContain("1");
+    expect(screen.getByRole("menuitemradio", { name: "Release" }).getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Release" }));
     await waitFor(() => expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Session one")).toBeTruthy());
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: "Release" } });
     fireEvent.click(within(screen.getByRole("region", { name: "Release section" })).getByRole("button", { name: "Release" }));
@@ -226,6 +231,7 @@ describe("personal local sections", () => {
     mount();
     expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Web · release")).toBeTruthy();
     fireEvent.contextMenu(screen.getByText("Session one"));
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Copy branch name" }));
     expect(mocks.copyText).toHaveBeenCalledWith("release");
   });

@@ -64,7 +64,7 @@ pub(crate) fn execute(manager: &SessionManager, sink: &dyn EventSink, method: &s
         "restoreWorkspace" => {
             let expected = serde_json::from_value(params["expected"].clone())?;
             let stop = |entry: &SessionEntry| manager.stop_session_confirmed(entry);
-            Ok(serde_json::to_value(crate::workspace_restore::restore(sink, text(&params, "sessionId")?, &expected, params["newBranch"].as_str(), &stop)?)?)
+            Ok(serde_json::to_value(crate::workspace_restore::restore(sink, text(&params, "sessionId")?, &expected, params["newBranch"].as_str(), params["detached"].as_bool().unwrap_or(false), &stop)?)?)
         }
         "scan" => host(manager, |host| {
             let paths: Option<Vec<String>> = serde_json::from_value(params["projectPaths"].clone())?;

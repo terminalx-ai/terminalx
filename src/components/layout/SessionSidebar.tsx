@@ -4,7 +4,7 @@ import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { createContext, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
-import { Archive, ArchiveRestore, CheckSquare, ChevronDown, Copy, Ellipsis, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, Github, Link, Palette, Pencil, Pin, Plus, Settings, SquarePen, Trash2 } from "@/icons";
+import { Archive, ArchiveRestore, ChevronDown, CircleDot, Copy, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, GitPullRequestArrow, Github, Link, Mail, Palette, Pencil, PictureInPicture2, Pin, Plus, Settings, Share2, SquarePen, SquareTerminal, Trash2 } from "@/icons";
 import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -30,7 +30,14 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
+  MenuItemText,
+  MenuKbd,
 } from "@/components/ui/menu";
+import { openSessionShare } from "@/lib/localSharing";
+import { showFloatingWindow } from "@/lib/floating";
+import { isQuickChat } from "@/lib/quickChats";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { SidebarTitlebar } from "./SidebarTitlebar";
@@ -44,8 +51,9 @@ import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { branchMerged, checkoutLabel, conversationBranch } from "@/lib/checkout";
 import { showDetachedRename } from "@/lib/branchToasts";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
-import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, setSessionUnread, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
-import { ROW_ATTRIBUTE, isPicked, pickOnClick, togglePicked, usePickedSessions } from "@/lib/rowSelection";
+import { addProject, archiveSession, archiveSessions, conversationTitle, openProjectOverview, pinSession, removeProject, selectSession, setSessionUnread, setShowArchived, startChat, startFromIn, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
+import { requestProjectSettings } from "@/lib/projectAdded";
+import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { SidebarBulkBar } from "./SidebarBulkBar";
 import { copyText } from "@/lib/clipboard";
 import { openRenameSession, openWorktreeCleanup } from "@/lib/dialogs";
@@ -252,11 +260,15 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const showArchived = store.showArchived && filter.filter === "all";
   const { sections: localSections } = useLocalSections();
   const sectionedSessions = useMemo(() => groupLocalSessions(listed, localSections), [listed, localSections]);
-  const { groups, chats, archivedChats } = useMemo(
+  const { groups: allGroups, chats, archivedChats } = useMemo(
     () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort, order),
     [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort, order],
   );
 
+  // Hide project (02.14): out of the sidebar, its sessions still running. A filter that a hidden project's session
+  // passes still shows it, and the open session keeps its project there.
+  const groups = useMemo(() => allGroups.filter((group) => !group.project?.hidden || filter.active || group.sessions.some((session) => session.id === store.selectedSessionId)), [allGroups, filter.active, store.selectedSessionId]);
+  const hiddenProjects = useMemo(() => projects.filter((project) => project.hidden && !groups.some((group) => canon(group.path) === canon(project.path))), [projects, groups]);
   const run = (action: () => Promise<unknown>) => () => {
     action().then(() => setError(null), (cause) => setError(errorMessage(cause)));
   };
@@ -314,7 +326,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
         {groups.length === 0 && chats.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : groups.length === 0 && chats.length === 0 && archivedChats.length === 0 && localSections.length === 0 ? (
+        ) : groups.length === 0 && hiddenProjects.length === 0 && chats.length === 0 && archivedChats.length === 0 && localSections.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -325,7 +337,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
           </button>
         ) : (
           <>
-            {groups.length > 0 && (
+            {(groups.length > 0 || hiddenProjects.length > 0) && (
               <ListSection id="projects" label={sectioned ? "Local" : "Projects"} actions={<AddProjectMenu run={(action) => run(async () => action.run())()} />}>
                 <SidebarSortList kind="projects" items={groups.map((group) => ({ id: canon(group.path), name: group.name }))}>
                 {groups.map((group) => (
@@ -341,6 +353,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                 ))}
                 </SidebarSortList>
                 <CleanupLine />
+                <HiddenProjects projects={hiddenProjects} />
               </ListSection>
             )}
             {(chats.length > 0 || archivedChats.length > 0) && (
@@ -498,6 +511,11 @@ function ProjectGroup({
   const labels = group.project?.branchLabels ?? {};
   // The project's own checkout is never a placeholder, whatever its branch is called.
   const mainBranch = workspaces.find((workspace) => workspace.isMain)?.branch ?? null;
+  const newSessionKeys = useShortcutKeys("app.newSession");
+  const startFromKeys = useShortcutKeys("app.startFrom");
+  // Its archived chats while Show archived is off: a project with only those has chats, out of the list.
+  const allSessions = useSessionStore().sessions;
+  const hiddenArchived = useMemo(() => (group.archived.length ? 0 : allSessions.filter((session) => session.archived && canon(session.projectPath) === canon(group.path)).length), [allSessions, group.archived.length, group.path]);
   // Told from the branch's name alone, so a row is drawn by its final name from the first paint, not once the checkouts load.
   const placeholders = useMemo(
     () => new Set(Object.values(group.branches).filter((branch) => branch && branch !== mainBranch && isPlaceholderBranch(branch) && !group.project?.branchLabels?.[branch])),
@@ -685,18 +703,28 @@ function ProjectGroup({
             <ChevronDown className={cn("size-3 transition-transform duration-200", !open && "-rotate-90")} data-testid="project-fold" />
           </button>
         </div>
-        <DropdownMenuContent align="end">
+        {/* The designed project menu (02.14): start something, its settings, then how it shows in the sidebar. */}
+        <DropdownMenuContent align="end" className="w-[288px]">
           <DropdownMenuItem onSelect={() => startSessionIn(group.path, null)}>
-            <SquarePen /> New chat in {group.name}
+            <SquarePen /> <span className="min-w-0 flex-1 truncate">New session</span><MenuKbd keys={newSessionKeys} />
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
-            <FolderOpen /> Reveal in Finder
-          </DropdownMenuItem>
+          {group.project && group.project.kind !== "folder" && (
+            <DropdownMenuItem onSelect={() => startFromIn(group.path)}>
+              <GitPullRequestArrow /> <span className="min-w-0 flex-1 truncate">Start from a branch, issue or PR…</span><MenuKbd keys={startFromKeys} />
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
           {group.project && (
             <>
-              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned }).catch(reportError(`Couldn't ${group.project?.pinned ? "unpin" : "pin"} “${group.name}”`))}>
-                <Pin /> {group.project.pinned ? "Unpin project" : "Pin project"}
+              <DropdownMenuItem onSelect={() => requestProjectSettings(group.path, "general")}>
+                <Settings /> Project settings
               </DropdownMenuItem>
+              {group.project.kind !== "folder" && (
+                <DropdownMenuItem onSelect={() => requestProjectSettings(group.path, "scripts")}>
+                  <SquareTerminal /> Scripts and actions
+                </DropdownMenuItem>
+              )}
+              {/* Not in Settings: a project's name, colour and logo, and its issue pipeline, are set from here. */}
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <Palette /> Name and appearance
@@ -705,16 +733,41 @@ function ProjectGroup({
                   <ProjectAppearance project={group.project} />
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
+              {group.project.kind !== "folder" && (
+                <DropdownMenuItem onSelect={() => setPipelineOpen(true)}>
+                  <GitPullRequest /> Issue pipeline…
+                </DropdownMenuItem>
+              )}
             </>
           )}
-          {group.project && group.project.kind !== "folder" && (
-            <DropdownMenuItem onSelect={() => setPipelineOpen(true)}>
-              <GitPullRequest /> Issue pipeline…
-            </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <ExternalLink /> Open in
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-52">
+              <DropdownMenuItem onSelect={() => void Promise.resolve().then(() => revealItemInDir(group.path)).catch(reportError(`Couldn't reveal “${group.name}” in Finder`))}>
+                <FolderOpen /> Finder
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void copyText(group.path).catch(reportError(`Couldn't copy the path of “${group.name}”`))}>
+                <Copy /> Copy path
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          {group.project && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => void updateProject(group.path, { pinned: !group.project?.pinned }).catch(reportError(`Couldn't ${group.project?.pinned ? "unpin" : "pin"} “${group.name}”`))}>
+                <Pin /> {group.project.pinned ? "Unpin project" : "Pin project"}
+              </DropdownMenuItem>
+              <DropdownMenuItem className="items-start" onSelect={() => void updateProject(group.path, { hidden: !group.project?.hidden }).catch(reportError(`Couldn't ${group.project?.hidden ? "show" : "hide"} “${group.name}”`))}>
+                {group.project.hidden ? <Eye className="mt-0.5" /> : <EyeOff className="mt-0.5" />}
+                <MenuItemText label={group.project.hidden ? "Show project" : "Hide project"} hint={group.project.hidden ? "Back in the sidebar" : "Hidden from the sidebar; sessions keep running"} />
+              </DropdownMenuItem>
+            </>
           )}
           <DropdownMenuSeparator />
-          <DropdownMenuItem destructive onSelect={() => void confirmRemoveProject(group)}>
-            <Trash2 /> Remove from TerminalX…
+          <DropdownMenuItem destructive className="items-start" onSelect={() => void confirmRemoveProject(group)}>
+            <Trash2 className="mt-0.5" /> <MenuItemText label="Remove project…" hint="The folder on disk is left as it is." />
           </DropdownMenuItem>
         </DropdownMenuContent>
         {/* Mounted only while open: a row per project would otherwise each hold a dialog. */}
@@ -734,7 +787,21 @@ function ProjectGroup({
         <SidebarSortList items={shown.map(sortBranch)}>
           {shown.map(row)}
         </SidebarSortList>
-        {branches.length === 0 && group.archived.length === 0 && <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>}
+        {branches.length === 0 && group.archived.length === 0 && (hiddenArchived > 0 ? (
+          // Only archived chats (PRO-386): it has chats, they are out of the list. The line shows them.
+          <li>
+            <button
+              type="button"
+              onClick={() => setShowArchived(true)}
+              title="Show archived"
+              data-testid="only-archived"
+              className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              <Archive className="size-3 shrink-0" />
+              <span className="min-w-0 truncate">{hiddenArchived === 1 ? "1 archived chat" : `${hiddenArchived} archived chats`}</span>
+            </button>
+          </li>
+        ) : <li className="flex h-7 items-center pr-2 pl-[calc(0.5rem+var(--indent,0px))] text-[12px] text-faint">{hasSections ? "No chats in the main list" : "No chats yet"}</li>)}
         {more && (
           <li>
             <button
@@ -955,6 +1022,42 @@ function BranchGlyph({ merged, cleanup }: { merged: boolean; cleanup?: HostedSta
 }
 
 /**
+ * Under the projects: the ones hidden from the sidebar (02.14 Hide project), folded into one line. Opened, each
+ * has Show, which puts it back.
+ */
+function HiddenProjects({ projects }: { projects: Project[] }) {
+  const [open, toggle] = useFold("hidden-projects", false);
+  if (!projects.length) return null;
+  return (
+    <div data-testid="hidden-projects" className="mt-1">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="-mx-2 flex h-8 w-[calc(100%+1rem)] items-center gap-2.5 px-4 text-left text-[12.5px] text-faint outline-none hover:bg-selected/50 hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        <EyeOff className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{projects.length === 1 ? "1 hidden project" : `${projects.length} hidden projects`}</span>
+        <ChevronDown className={cn("size-3 shrink-0 transition-transform", !open && "-rotate-90")} />
+      </button>
+      {open && (
+        <ul className="flex flex-col gap-0.5">
+          {projects.map((project) => (
+            <li key={project.path} className={cn(actionRow, "relative -mx-2 flex h-8 items-center gap-2 pl-[calc(1rem+10px)] pr-3 text-muted-foreground hover:bg-selected/50")} title={project.path}>
+              <ProjectGlyph project={project} />
+              <span className="min-w-0 flex-1 truncate text-[12.5px]">{project.name}</span>
+              <Button variant="ghost" size="xs" aria-label={`Show ${project.name} in the sidebar`} onClick={() => void updateProject(project.path, { hidden: false }).catch(reportError(`Couldn't show “${project.name}”`))}>
+                <Eye /> Show
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * Under the projects: how many merged workspaces clean-up kept, as one line that opens the clean-up list. Only
  * while there are some; nothing pops up for them.
  */
@@ -1039,94 +1142,110 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
   const IssueItems = contextMenu ? IssueLinkContextItems : IssueLinkMenuItems;
   const title = conversationTitle(session) || "this conversation";
   const copy = (text: string, what: string) => void copyText(text).catch(reportError(`Couldn't copy ${what}`));
-  const picked = isPicked(ids, usePickedSessions());
   const store = useSessionStore();
   const unread = store.sessions.filter((entry) => ids.includes(entry.id)).some(isUnread);
+  const archiveKeys = useShortcutKeys("session.archive");
   const [error, setError] = useState<string | null>(null);
+  // The designed list (02.13): what the reader does most first, the rest a submenu away. Keys show only where one
+  // is bound: R and P act in this menu, Archive shows the reader's own key for it (none by default).
   return (
     <>
-      {rename && (
-        <Item data-row-key="n" aria-keyshortcuts="N" onSelect={rename}>
-          <Pencil /> Rename…
-        </Item>
-      )}
-      {linkTo && (
-        <>
-          <Sub>
-            <SubTrigger>
-              <FolderInput /> Link to a project
-            </SubTrigger>
-            <SubContent className="w-60">
-              {linkTo.projects.map((project) =>
-                project.kind === "folder" ? (
-                  <Item key={project.path} onSelect={() => linkTo.onMove(project, false)}>
-                    <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
-                  </Item>
-                ) : (
-                  <Sub key={project.path}>
-                    <SubTrigger>
-                      <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
-                    </SubTrigger>
-                    <SubContent>
-                      {/* A worktree first: the project's own checkout is shared with its other conversations. */}
-                      <Item onSelect={() => linkTo.onMove(project, true)}>
-                        <GitBranch /> On a new branch (worktree)
-                      </Item>
-                      <Item onSelect={() => linkTo.onMove(project, false)}>
-                        <FolderOpen /> In its main checkout
-                      </Item>
-                    </SubContent>
-                  </Sub>
-                ),
-              )}
-              {linkTo.projects.length > 0 && <Separator />}
-              <Item onSelect={() => linkTo.onAddProject(false)}>
-                <FolderPlus /> Choose a folder…
-              </Item>
-              <Item onSelect={() => linkTo.onAddProject(true)}>
-                <GitBranch /> Choose a repo, new branch…
-              </Item>
-            </SubContent>
-          </Sub>
-          <Separator />
-        </>
-      )}
-      <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
-      <MoveToLocalSectionItems sessionIds={ids} contextMenu={contextMenu} />
       {session.tabs.length > 0 && <Item data-row-key="r" aria-keyshortcuts="R" onSelect={(event) => {
         event.preventDefault();
         setError(null);
         void setSessionUnread(ids, !unread).catch((cause) => setError(errorMessage(cause)));
       }}>
-        <CheckSquare /> {unread ? "Mark as read" : "Mark as unread"}<span className="ml-auto text-xs text-faint" aria-hidden>R</span>
+        <Mail /> {unread ? "Mark as read" : "Mark as unread"}<MenuKbd keys="R" />
       </Item>}
       {error && <span role="alert" className="block px-2 text-xs text-destructive">{error}</span>}
       <Item data-row-key="p" aria-keyshortcuts="P" onSelect={() => void pinSession(session.id, !session.pinned).catch(reportError(`Couldn't ${session.pinned ? "unpin" : "pin"} “${title}”`))}>
-        <Pin /> {session.pinned ? "Unpin" : "Pin"}
+        <Pin /> {session.pinned ? "Unpin" : "Pin"}<MenuKbd keys="P" />
       </Item>
-      <Separator />
-      <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
-        <FolderOpen /> Reveal in Finder
-      </Item>
-      <Item onSelect={() => copy(session.cwd, `the path of “${title}”`)}>
-        <Copy /> Copy path
-      </Item>
-      {branch && (
-        <Item onSelect={() => copy(branch, `the branch name “${branch}”`)}>
-          <GitBranch /> Copy branch name
+      <ManualStatusMenu sessionId={session.id} status={session.manualStatus} contextMenu={contextMenu} />
+      <MoveToLocalSectionItems sessionIds={ids} home={store.projects.find((project) => project.path === session.projectPath)?.name} contextMenu={contextMenu} />
+      {linkTo && (
+        <Sub>
+          <SubTrigger>
+            <FolderInput /> Link to a project
+          </SubTrigger>
+          <SubContent className="w-60">
+            {linkTo.projects.map((project) =>
+              project.kind === "folder" ? (
+                <Item key={project.path} onSelect={() => linkTo.onMove(project, false)}>
+                  <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
+                </Item>
+              ) : (
+                <Sub key={project.path}>
+                  <SubTrigger>
+                    <ProjectGlyph project={project} /> <span className="truncate">{project.name}</span>
+                  </SubTrigger>
+                  <SubContent>
+                    {/* A worktree first: the project's own checkout is shared with its other conversations. */}
+                    <Item onSelect={() => linkTo.onMove(project, true)}>
+                      <GitBranch /> On a new branch (worktree)
+                    </Item>
+                    <Item onSelect={() => linkTo.onMove(project, false)}>
+                      <FolderOpen /> In its main checkout
+                    </Item>
+                  </SubContent>
+                </Sub>
+              ),
+            )}
+            {linkTo.projects.length > 0 && <Separator />}
+            <Item onSelect={() => linkTo.onAddProject(false)}>
+              <FolderPlus /> Choose a folder…
+            </Item>
+            <Item onSelect={() => linkTo.onAddProject(true)}>
+              <GitBranch /> Choose a repo, new branch…
+            </Item>
+          </SubContent>
+        </Sub>
+      )}
+      <Sub>
+        <SubTrigger>
+          <ExternalLink /> Open in
+        </SubTrigger>
+        <SubContent className="w-56">
+          <Item onSelect={() => void Promise.resolve().then(() => revealItemInDir(session.cwd)).catch(reportError(`Couldn't reveal “${title}” in Finder`))}>
+            <FolderOpen /> Finder
+          </Item>
+          {session.tabs.length > 0 && (
+            <Item onSelect={() => void showFloatingWindow(session.id, session.activeTab).catch(reportError(`Couldn't open “${title}” in a floating window`))}>
+              <PictureInPicture2 /> Floating window
+            </Item>
+          )}
+          <Separator />
+          <Item onSelect={() => copy(session.cwd, `the path of “${title}”`)}>
+            <Copy /> Copy path
+          </Item>
+          {branch && (
+            <Item onSelect={() => copy(branch, `the branch name “${branch}”`)}>
+              <GitBranch /> Copy branch name
+            </Item>
+          )}
+        </SubContent>
+      </Sub>
+      {rename && (
+        <Item data-row-key="n" aria-keyshortcuts="N" onSelect={rename}>
+          <Pencil /> Rename…
         </Item>
       )}
       <Item onSelect={() => void copyShareLink(session.id).catch(reportError(`Couldn't copy a link to “${title}”`))}>
         <Link /> Copy link
       </Item>
-      <Separator />
-      <Item data-row-key="s" aria-keyshortcuts="S" onSelect={() => togglePicked(ids)}>
-        <CheckSquare /> {picked ? "Deselect" : "Select"}
+      <Item onSelect={() => openSessionShare(session.id)}>
+        <Share2 /> Share session…
       </Item>
-      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void archiveSession(session.id, !session.archived).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
-        <Archive /> {session.archived ? "Unarchive" : "Archive"}
-      </Item>
-      <IssueItems session={session} />
+      {!isQuickChat(session) && (
+        <Sub>
+          <SubTrigger>
+            <CircleDot /> Issue and pull request
+          </SubTrigger>
+          <SubContent className="w-60">
+            <IssueItems session={session} />
+          </SubContent>
+        </Sub>
+      )}
       <Separator />
       {session.worktreeRemoved && (
         <Item onSelect={() => openWorkspaceRestore(session.id)}>
@@ -1134,12 +1253,15 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
         </Item>
       )}
       {session.worktreeName && !session.worktreeRemoved && (
-        <Item onSelect={() => openSettle(session)}>
-          <Folder /> Remove workspace, keep conversations…
+        <Item className="items-start" onSelect={() => openSettle(session)}>
+          <Folder className="mt-0.5" /> <MenuItemText label="Remove workspace…" hint="The conversations are kept" />
         </Item>
       )}
+      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
+        <Archive /> {session.archived ? "Unarchive" : "Archive"}<MenuKbd keys={archiveKeys} />
+      </Item>
       <Item destructive onSelect={() => void confirmDeleteSession(session)}>
-        <Trash2 /> Delete…
+        <Trash2 /> Delete session…
       </Item>
     </>
   );

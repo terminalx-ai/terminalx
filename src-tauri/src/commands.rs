@@ -6050,9 +6050,9 @@ pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> Cm
 }
 
 #[tauri::command]
-pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>, detached: Option<bool>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch, "detached": detached.unwrap_or(false) })).map_err(err)
     }).await.map_err(err)?
 }
 

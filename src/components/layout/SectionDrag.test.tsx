@@ -120,8 +120,13 @@ describe("dragging sessions between local sections", () => {
     failMove = true;
     mount();
     await drag(rowItem("two"), 275);
-    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.action)).toContain("Couldn't move “Session two” to Bugs"));
-    expect(toasts.getErrorToasts()[0]!.cause).toContain("another device");
+    // 02.20: titled with what was not done, a plain sentence on why and where it is now, and Try again.
+    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.title)).toContain("Couldn't move Session two to Bugs"));
+    const toast = toasts.getErrorToasts()[0]!;
+    expect(toast.action).toMatch(/^The sidebar changed on another device while you were dragging\. It's back in /);
+    expect(toast.cause).toBe("");
+    expect(toast.copy).toBe(false);
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
     expect(within(region("Bugs")).getByText("Drag sessions here")).toBeTruthy();
   });
 
@@ -169,6 +174,6 @@ describe("dragging sessions in the simple layout", () => {
     failMove = true;
     mount();
     await drag(rowItem("two"), 275);
-    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.action)).toEqual([expect.stringMatching(/^Couldn't move “.+” to Bugs$/)]));
+    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.title)).toEqual([expect.stringMatching(/^Couldn't move .+ to Bugs$/)]));
   });
 });
