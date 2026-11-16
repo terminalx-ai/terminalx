@@ -173,10 +173,18 @@ fn every_account_above_the_threshold_stops_switching() {
         let Decision::Switch { reason, .. } = decision else { unreachable!() };
         assert!(reason.most_room);
     }
-    // A limit error on it says the same.
+    // A limit error on it says the same, however little its windows show:
+    // at its limit it has no room.
     let mut limited = account("a", &[("five_hour", 60.0)]);
     limited.limited = Some(Limited { at: NOW - 30_000, resets_at: Some(NOW + HOUR) });
     assert_eq!(to(&decide(&ask(Why::LimitHit, "a", &[limited, account("b", &[("five_hour", 91.0)])]))), Some("b"));
+    // Another account at its limit too does not stop it: a third still has room.
+    let one_left = [account("a", &[("five_hour", 100.0)]), account("b", &[("five_hour", 100.0)]), account("c", &[("five_hour", 91.0)])];
+    assert_eq!(to(&decide(&ask(Why::LimitHit, "a", &one_left))), Some("c"));
+    // Past the threshold but not at its limit, with another at its limit and
+    // a third past the threshold: a running tab stays.
+    let running = [account("a", &[("five_hour", 93.0)]), account("b", &[("five_hour", 100.0)]), account("c", &[("five_hour", 91.0)])];
+    assert_eq!(decide(&ask(Why::Between, "a", &running)), Decision::Stay(Stay::AllAboveThreshold));
     // Every other account at its limit as well: none is available, and the earliest reset is said.
     let all_out = [account("a", &[("five_hour", 100.0)]), account("b", &[("five_hour", 100.0)])];
     let Decision::Stay(Stay::NoneAvailable { earliest_reset, .. }) = decide(&ask(Why::LimitHit, "a", &all_out)) else { panic!("none available") };

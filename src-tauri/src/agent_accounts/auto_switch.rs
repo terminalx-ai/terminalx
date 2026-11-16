@@ -442,24 +442,30 @@ pub fn decide(ask: &Ask<'_>) -> Decision {
         return Decision::Switch { to: to.id.clone(), reason: Reason { from_label: current.label.clone(), full: from_full, most_room: false } };
     }
 
-    // Nothing has room. Every other usable account past the threshold but
-    // none at its limit: no cycling between them. A new session, or a tab
-    // whose own account is at its limit and so cannot go on, moves to the
-    // one with the most room; any other running tab stays.
+    // Nothing has room under the threshold. The usable accounts past it
+    // but not at their limit can still take a turn.
     let usable: Vec<&Candidate> = others.iter().copied()
         .filter(|candidate| candidate.signed_in && candidate.checked && candidate.kind == Kind::Subscription && fresh(candidate, now) && !candidate.lacks_model)
         .collect();
     let at_limit = |candidate: &Candidate| full(candidate, model, threshold, now).is_some_and(|full| full.at_limit);
-    if !usable.is_empty() && usable.iter().all(|candidate| !at_limit(candidate)) {
-        if ask.why == Why::Launch || from_full.at_limit {
-            let best = usable.iter().copied().max_by(|a, b| room(a, model, now).total_cmp(&room(b, model, now)));
-            if let Some(best) = best.filter(|best| room(best, model, now) > room(current, model, now)) {
-                return Decision::Switch { to: best.id.clone(), reason: Reason { from_label: current.label.clone(), full: from_full, most_room: true } };
-            }
+    let below_limit: Vec<&Candidate> = usable.iter().copied().filter(|candidate| !at_limit(candidate)).collect();
+    let best = below_limit.iter().copied().max_by(|a, b| room(a, model, now).total_cmp(&room(b, model, now)));
+    let most_room = |best: &Candidate| Decision::Switch { to: best.id.clone(), reason: Reason { from_label: current.label.clone(), full: from_full.clone(), most_room: true } };
+    if from_full.at_limit {
+        // Its own account cannot go on (a limit error, or a window at 100 %):
+        // it has no room, so any account below its limit is better, and an
+        // unattended run keeps going.
+        if let Some(best) = best {
+            return most_room(best);
         }
-        if !from_full.at_limit {
-            return Decision::Stay(Stay::AllAboveThreshold);
+    } else if let Some(best) = best {
+        // Past the threshold but able to go on: no cycling between full
+        // accounts. A new session starts where there is the most room; a
+        // running tab stays.
+        if ask.why == Why::Launch && room(best, model, now) > room(current, model, now) {
+            return most_room(best);
         }
+        return Decision::Stay(Stay::AllAboveThreshold);
     }
     let earliest_reset = std::iter::once(current).chain(others.iter().copied())
         .filter(|candidate| candidate.checked && candidate.signed_in)

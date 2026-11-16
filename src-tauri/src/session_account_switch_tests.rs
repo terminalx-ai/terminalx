@@ -261,11 +261,13 @@ fn a_refused_switch_tries_the_next_account_once_then_goes_back() {
     rig.usage(&[(LOCAL, 95.0), (&work, 10.0), (&side, 30.0)]);
     rig.manager.consider_account_switch(rig.session, TAB);
     assert_eq!(rig.account(), work);
+    assert_eq!(rig.outcomes(), [(Outcome::Switched, Some(work.clone()))]);
 
     // Its first turn there: the provider refuses the sign-in.
     rig.turn_starts();
     rig.turn_ends(true);
-    wait("the next account", || rig.account() == side);
+    // The tab's account is written before its restart; the log line after it.
+    wait("the next account", || rig.account() == side && rig.outcomes().len() >= 3);
     assert_eq!(rig.outcomes(), [
         (Outcome::Switched, Some(work.clone())),
         (Outcome::Failed, Some(work.clone())),
@@ -275,7 +277,7 @@ fn a_refused_switch_tries_the_next_account_once_then_goes_back() {
     // That one refuses as well: back on This Mac's login, and no third try.
     rig.turn_starts();
     rig.turn_ends(true);
-    wait("the way back", || rig.account() == LOCAL);
+    wait("the way back", || rig.account() == LOCAL && rig.outcomes().len() >= 4);
     wait("the line saying so", || rig.statuses().iter().any(|text| text.contains("Back on")));
     settle();
     assert_eq!(rig.account(), LOCAL);
