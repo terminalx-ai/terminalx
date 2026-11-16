@@ -135,6 +135,24 @@ impl Computer {
         }
     }
 
+    /// The params of the next `event` notification within `within`; `None`
+    /// when none came or the connection closed first.
+    pub async fn notification(&mut self, event: &str, within: Duration) -> Option<Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match tokio::time::timeout_at(deadline, self.socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
+                    if message["event"] == event {
+                        return Some(message["params"].clone());
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Err(_) | Ok(None) | Ok(Some(Err(_))) => return None,
+            }
+        }
+    }
+
     /// Whether the machine closed this connection within a few seconds.
     pub async fn closed(&mut self) -> bool {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

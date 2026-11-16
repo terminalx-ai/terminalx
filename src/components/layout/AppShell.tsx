@@ -56,6 +56,7 @@ import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialo
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
+import { startAppUpdateResponder } from "@/lib/machineUpdate";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
@@ -289,6 +290,10 @@ export function AppShell() {
   const experimentalSwitches = useExperimentalSettings();
   const machinesOn = experimentalSwitches?.machines === true;
   useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
+  // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
+  useEffect(() => {
+    void startAppUpdateResponder();
+  }, []);
   // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
   const selectedWorkspace = store.selectedCloudWorkspace ?? null;
   const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;

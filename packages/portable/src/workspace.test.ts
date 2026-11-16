@@ -23,6 +23,18 @@ const connected = (generation = 7, capabilities = ["pty/1", "fs/1", "git/1", "se
   authority: "manage",
 });
 
+/** A machine's update status as `machine/3` answers it (PRO-354). */
+const MACHINE_UPDATE = {
+  method: "installer",
+  current: "0.2.29",
+  available: { version: "0.2.33" },
+  checkedAt: 1,
+  blockers: [{ id: "pty-7", kind: "terminal", title: "npm run dev" }],
+  otherComputers: [{ id: "c2", label: "Studio" }],
+  kept: ["0.2.29", "0.2.28"],
+  progress: { phase: "idle" },
+};
+
 /** A runtime with the contract's idempotency and seq rules, behind a droppable link. */
 class FakeRuntime implements WorkspaceTransport {
   up = false;
@@ -253,6 +265,13 @@ class FakeRuntime implements WorkspaceTransport {
         this.cache.set(key!, result);
         return ok(result);
       }
+      case "machine.updateStatus":
+        return ok({ ...MACHINE_UPDATE, checkedAt: params.refresh === true ? 2 : 1 });
+      case "machine.update":
+        if (JSON.stringify(params.confirmedOthers) !== JSON.stringify(["c2"]) || JSON.stringify(params.stop) !== JSON.stringify(["pty-7"])) {
+          return { id: frame.id, ok: false, error: { code: "update_confirm", message: "Confirm the update", data: MACHINE_UPDATE } };
+        }
+        return ok({ ...MACHINE_UPDATE, progress: { phase: "downloading", version: params.version, since: 3 } });
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: this.refusalMessage ? this.refusalMessage.value : frame.method } };
     }
@@ -1076,5 +1095,42 @@ describe("workspace RPC client", () => {
       expect(protocolSource).not.toMatch(/method\("[^"]+", "agent-pty\/1"/);
       client.close();
     });
+  });
+});
+
+describe("machine/3: a machine's update (PRO-354)", () => {
+  it("reads the status, asks to confirm, updates once confirmed, and hears each change", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, () => `req-m3-${Math.random()}`);
+    runtime.connect(["session/1", "machine/1", "machine/2", "machine/3"]);
+    expect(await client.machineUpdateStatus()).toMatchObject({ method: "installer", current: "0.2.29", available: { version: "0.2.33" }, checkedAt: 1 });
+    expect((await client.machineUpdateStatus(true)).checkedAt).toBe(2);
+    expect(runtime.sent.filter((frame) => frame.method === "machine.updateStatus").map((frame) => frame.params)).toEqual([{}, { refresh: true }]);
+    // Blockers and other computers not confirmed: refused with the status to confirm against.
+    const refused = await client.updateMachine({ version: "0.2.33" }).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(WorkspaceRpcError);
+    expect(refused).toMatchObject({ code: "update_confirm", data: { blockers: [{ id: "pty-7" }] } });
+    const started = await client.updateMachine({ version: "0.2.33", stop: ["pty-7"], confirmedOthers: ["c2"] });
+    expect(started.progress).toEqual({ phase: "downloading", version: "0.2.33", since: 3 });
+    const heard: string[] = [];
+    const stop = client.onMachineUpdate((status) => heard.push(status.progress.phase));
+    runtime.deliver({ event: "machine.updateChanged", params: { status: { ...MACHINE_UPDATE, progress: { phase: "handingOver", version: "0.2.33", since: 4 } } } });
+    runtime.deliver({ event: "machine.updateChanged", params: { status: "not one" } });
+    runtime.deliver({ event: "machine.changed", params: {} });
+    stop();
+    runtime.deliver({ event: "machine.updateChanged", params: { status: MACHINE_UPDATE } });
+    expect(heard).toEqual(["handingOver"]);
+    client.close();
+  });
+
+  it("never asks a machine that did not grant machine/3", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, () => `req-m2-${Math.random()}`);
+    runtime.connect(["session/1", "machine/1", "machine/2"]);
+    expect(client.hasCapability("machine/3")).toBe(false);
+    await expect(client.machineUpdateStatus()).rejects.toMatchObject({ code: "capability_not_granted" });
+    await expect(client.updateMachine({ version: "0.2.33" })).rejects.toMatchObject({ code: "capability_not_granted" });
+    expect(runtime.sent.some((frame) => frame.method.startsWith("machine.update"))).toBe(false);
+    client.close();
   });
 });

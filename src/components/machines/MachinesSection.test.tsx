@@ -143,7 +143,7 @@ describe("the Machines section", () => {
     expect(within(section("Mac mini")).getByRole("button").getAttribute("title")).toBe("Lost it 12 seconds ago");
     setState("m1", { state: "offline", lastSeenAt: null, retryInMs: 10_000 });
     expect(label()).toBe(`Offline · seen ${clockTime(MAC_MINI.lastSeenAt!)}`);
-    setState("m1", { state: "needsUpdate", version: "0.2.27" });
+    setState("m1", { state: "needsUpdate", version: "0.2.27", side: "machine" });
     expect(label()).toBe("Needs update");
     setState("m1", { state: "accessRemoved" });
     expect(label()).toBe("Access removed");
@@ -165,6 +165,10 @@ describe("the Machines section", () => {
     );
     expect(machineViewStatus({ state: "connecting", trying: ["lan"] }, "Mac mini")).toBe("Connecting to Mac mini…");
     expect(machineViewStatus({ state: "accessRemoved" }, "Studio")).toBe("Studio no longer allows this Mac. Pair again to reconnect.");
+    // PRO-354's states: which side updates, and a machine handing its runtime over.
+    expect(machineViewStatus({ state: "needsUpdate", version: "0.2.27", side: "machine" }, "Mac mini")).toBe("Mac mini runs an older TerminalX. Update TerminalX there to connect.");
+    expect(machineViewStatus({ state: "needsUpdate", version: "0.2.35", side: "thisMac" }, "Mac mini")).toBe("Mac mini runs a newer TerminalX than this Mac. Update this Mac to connect.");
+    expect(machineViewStatus({ state: "updating", version: "0.2.33", since: 0 }, "Mac mini")).toBe("Mac mini is updating. Back in under a minute. Sessions there keep running.");
   });
 
   it("opens a machine's view in the main slot with its header chip and where commands run", async () => {
@@ -196,7 +200,7 @@ describe("the Machines section", () => {
     // The view is told the machine is offline: it never falls back to the transport's "Reconnecting (attempt 0)".
     expect(mocks.views.at(-1)!.opened.machine!.status).toBe("Mac mini is offline. Sessions there keep running.");
     expect(screen.queryByTestId("machine-path")).toBeNull();
-    setState("m1", { state: "needsUpdate", version: null });
+    setState("m1", { state: "needsUpdate", version: null, side: "machine" });
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Runs an older TerminalX");
 
     // dev-server through the relay: a server icon and the relay path.

@@ -10,7 +10,9 @@ import { bootMachineHost, createMachineCode, machinesApi, revokeComputer, setAll
 import { refreshPairedMachines } from "@/lib/machineConnections";
 import type { MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import { AddMachineDialog } from "./AddMachineDialog";
-import { PlatformIcon, machineSummary, osLabel, shortDate, soft } from "./machineText";
+import { MachinePage } from "./MachinePage";
+import { MachineRow } from "./MachineRow";
+import { PlatformIcon, osLabel, shortDate, soft } from "./machineText";
 
 const heading = "text-[14px] font-semibold";
 const list = "mt-3 overflow-hidden rounded-lg border border-hairline";
@@ -21,6 +23,13 @@ const row = "flex min-h-14 items-center gap-3 border-b border-hairline px-4 py-2
  * 2026-11-15). PRO-349 builds the full page later; this holds the controls.
  */
 export function MachinesSettings() {
+  // A machine's page (21.10) in place of the list; Machines in its breadcrumb comes back.
+  const [page, setPage] = useState<string | null>(null);
+  if (page) return <MachinePage machineId={page} onBack={() => setPage(null)} />;
+  return <MachinesList onOpen={setPage} />;
+}
+
+function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
   const host = useMachineHost();
   useEffect(() => {
     void bootMachineHost();
@@ -49,7 +58,7 @@ export function MachinesSettings() {
       </div>
       <RegisteredSetting setting="machines.yours">
         <section>
-          <YourMachines />
+          <YourMachines onOpen={onOpen} />
         </section>
       </RegisteredSetting>
       <RegisteredSetting setting="machines.computers">
@@ -140,7 +149,7 @@ function PairingCode() {
 }
 
 /** Machines this Mac can operate, read from `machines.json`, and Add a machine. */
-function YourMachines() {
+function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
   const [machines, setMachines] = useState<PairedMachine[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -172,15 +181,7 @@ function YourMachines() {
       {machines && machines.length > 0 && (
         <ul className={list} aria-label="Your machines">
           {machines.map((machine) => (
-            <li key={machine.machineId} className={row} data-testid="paired-machine">
-              <PlatformIcon platform={machine.os.family} className="size-[18px] shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1 leading-5">
-                <div className="truncate text-[13px]">{machine.name}</div>
-                <div className="truncate text-[12px] text-muted-foreground">
-                  {machineSummary(machine.os, machine.version)} · {machine.route === "thisNetwork" ? "Only this network" : "Relay and nearby"} · paired {shortDate(machine.pairedAt)}
-                </div>
-              </div>
-            </li>
+            <MachineRow key={machine.machineId} machine={machine} onOpen={onOpen} />
           ))}
         </ul>
       )}

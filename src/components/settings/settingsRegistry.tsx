@@ -321,7 +321,7 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
     description: "Computers this Mac can operate, and Add a machine.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay"], scope: "user",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "route", "relay", "update", "needs update", "version"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({

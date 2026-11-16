@@ -289,7 +289,7 @@ describe("delivery", () => {
     ];
     const { local } = await modules();
     await local.restoreLocalNotifications(state.connection, "mac");
-    expect(fake.scheduled.map((request) => request.content)).toEqual([{ title: "Done", body: "Finished", subtitle: "TerminalX · Studio MacBook", sound: "default", data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "finished", detailsHidden: false, silent: false } }]);
+    expect(fake.scheduled.map((request) => request.content)).toEqual([{ title: "Done", body: "Finished", subtitle: "Studio MacBook", threadIdentifier: "mac:s-1", sound: "default", data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "finished", detailsHidden: false, silent: false } }]);
     expect(JSON.parse(fake.storage.get("terminalx:notifications:mac")!)).toEqual({ lastSeenSeq: 3, epoch: "e" });
     // A live event already seen is not shown again; a new one is.
     live(state)[0]!.listener({ event: { seq: 3, epoch: "e", title: "Done", body: "Finished", kind: "finished" } });

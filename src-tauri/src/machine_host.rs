@@ -272,6 +272,38 @@ impl MachineHost {
         self.state.lock().unwrap().enabled
     }
 
+    /// The paired computers connected now, but the one connected as
+    /// `caller` (its id on the direct route, its relay device id on the
+    /// relay): `machine/3`'s `otherComputers`. Blocking: reads the registry.
+    pub(crate) fn connected_others(&self, caller: Option<&str>) -> Vec<crate::remote::machine_update::OtherComputer> {
+        let connected: Vec<String> = self.state.lock().unwrap().connections.iter().filter(|(_, connections)| !connections.is_empty()).map(|(id, _)| id.clone()).collect();
+        if connected.is_empty() {
+            return Vec::new();
+        }
+        let computers = self.registry.list().unwrap_or_else(|error| {
+            log::warn!("machine host: read paired computers: {error:#}");
+            Vec::new()
+        });
+        computers
+            .into_iter()
+            .filter(|computer| connected.contains(&computer.id))
+            .filter(|computer| caller.is_none_or(|caller| computer.id != caller && computer.relay_device_id.as_deref() != Some(caller)))
+            .map(|computer| crate::remote::machine_update::OtherComputer { id: computer.id, label: computer.label })
+            .collect()
+    }
+
+    /// A desktop window is attached and serves this runtime's window calls.
+    pub(crate) fn window_available(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.lifetime.as_ref().is_some_and(|lifetime| lifetime.window.available())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     pub fn status(&self) -> Status {
         let state = self.state.lock().unwrap();
         self.status_of(&state)
@@ -941,6 +973,14 @@ impl crate::remote::machine::MachineAccess for HostAccess {
         let endpoints = host.direct_endpoints();
         *cached = Some((std::time::Instant::now(), endpoints.clone()));
         endpoints
+    }
+
+    fn other_computers(&self, caller: Option<&str>) -> Vec<crate::remote::machine_update::OtherComputer> {
+        self.host.upgrade().map(|host| host.connected_others(caller)).unwrap_or_default()
+    }
+
+    fn window_available(&self) -> bool {
+        self.host.upgrade().is_some_and(|host| host.window_available())
     }
 
     fn relay_access(&self, device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, crate::remote::protocol::RpcError>> {
