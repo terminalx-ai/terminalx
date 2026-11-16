@@ -1,0 +1,1 @@
+Screenshots for the mobile review against Superdesign boards 22.01–22.06: each image is the board frame (left) beside the app after the fix (right), taken in the iOS simulator with the phone fixture and placeholder data. Linked from its pull request; not part of the app.
