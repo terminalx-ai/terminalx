@@ -1,4 +1,5 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import { rememberCloudProviders } from "@/lib/cloudProviders";
 import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
@@ -425,7 +426,11 @@ export const api = {
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
-  cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
+  cloudProviders: async () => {
+    const response = await invoke<CloudProviderSummaryResponse>("cloud_providers");
+    rememberCloudProviders(response.providers);
+    return response;
+  },
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
@@ -894,7 +899,6 @@ export interface CloudCatalogFeed {
   deletedWorkspaceIds: string[];
 }
 
-/** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
 export interface CloudMirrorRepository {
   repo: string;
   branch: string | null;
@@ -952,7 +956,11 @@ export interface CloudMirrorPublished {
   takenBack: number;
 }
 
-export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
+/**
+ * A cloud provider's id. Which ones exist is the server's to say (PRO-415):
+ * the app lists, names, draws and asks for them from their descriptors.
+ */
+export type CloudWorkspaceProviderId = string;
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -963,6 +971,46 @@ export interface CloudProviderCapabilities {
   locationSelection: "required" | "automatic";
   sourceSelection: "required" | "optional" | "none";
   pricing: "provider-rate" | "estimate" | "unavailable";
+}
+
+/** One input of a provider's credential, asked for in the app's secure dialog. */
+export interface CloudProviderCredentialField {
+  name: string;
+  /** `secret` is never shown; `text` may be. */
+  kind: "secret" | "text" | string;
+  label: string;
+  helpUrl: string | null;
+}
+
+/** Everything the app shows about a provider, as the server describes it (PRO-415). */
+export interface CloudProviderDescriptor {
+  id: CloudWorkspaceProviderId;
+  label: string;
+  /** A generic glyph word (`ship`, `server`, `cloud`, `container`); see `cloudProviderIcon`. */
+  icon: string;
+  order: number;
+  description: string;
+  billing: string;
+  billedByProvider: boolean;
+  /** False: hidden, listed only while the organization is still connected to it. */
+  listed: boolean;
+  credentialFields: CloudProviderCredentialField[];
+  capabilities: {
+    pauseResumeWithMemory: boolean;
+    stopStart: boolean;
+    snapshots: boolean;
+    exec: boolean;
+    computeRunsUntilStopped: boolean;
+  };
+  offering: {
+    locations: string;
+    sources: string;
+    machineClasses: string;
+    pricingSource: string;
+    suspendedBilling: string;
+  };
+  allowedIdleSuspendMinutes: number[];
+  allowedRetentionDays: number[];
 }
 
 export interface CloudProviderSummary {
@@ -977,6 +1025,8 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+  /** Null from a server older than described providers. */
+  descriptor: CloudProviderDescriptor | null;
 }
 
 export type AgentLoginProvider = "codex" | "claude" | "cursor";
