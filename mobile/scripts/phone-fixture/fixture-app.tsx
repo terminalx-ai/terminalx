@@ -157,6 +157,8 @@ const CONVERSATIONS: Record<string, AgentEvent[]> = {
 
 const MODELS = [{ id: "claude-opus-5-5", label: "Opus 5.5", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }];
 const answer = <T,>(value: T) => ({ ok: true as const, value });
+/** A tab's model and mode, as the Mac reports them (`session.tab`). */
+const TAB = { harness: "claude", model: "claude-opus-5-5", effort: "high", permissionMode: "default", status: "in_progress" };
 /** What Studio MacBook offers; saved as from an earlier connection too, as on a phone that has used it before. */
 const FEATURES = { transcript: 1, sessionControls: 1, closeTab: 1, questions: 1, macSettings: 1, terminal: 1, sendIds: 1 };
 /** The Mac's cursor digest is a SHA-256 in hex. */
@@ -169,7 +171,8 @@ class FixtureConnection {
   private events = new Set<(event: { method: string; params?: unknown }) => void>();
   constructor(private readonly connected: () => boolean) {}
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<{ ok: true; value: T } | { ok: false; refusal: { code: string; message: string } }> {
-    if (!this.connected()) return { ok: false, refusal: { code: "disconnected", message: "Not connected" } };
+    // As the real connection does (`src/transport/connection.ts`): no client, no request.
+    if (!this.connected()) throw new Error("Host is disconnected");
     const reply = (value: unknown) => answer(value as T);
     switch (method) {
       case "sync.capabilities": return reply(FEATURES);
@@ -184,7 +187,7 @@ class FixtureConnection {
       }
       case "session.tail": return reply({ events: [], hasMore: false });
       case "chat.list": return reply({ messages: [] });
-      case "session.tab": return reply({ harness: "claude", model: "claude-opus-5-5", effort: "high", permissionMode: "default", status: "in_progress" });
+      case "session.tab": return reply(TAB);
       case "models.list": return reply(MODELS);
       case "mac.settings": case "mac.setSettings": return reply({ nativeCodex: params.nativeCodex ?? true });
       case "host.describe": return reply({ name: "Studio MacBook" });
@@ -242,7 +245,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     void Promise.all([
       ...Object.entries(CONVERSATIONS).map(([tabId, events]) => writeCache(studio.id, "review", tabId, { events, hasEarlier: false })),
+      // Saved as from an earlier connection, as SessionControls saves them: the composer's row stands while it connects (#983).
       writeSaved(studio.id, "features", FEATURES, cacheEpoch(studio.id)),
+      writeSaved(studio.id, "models", MODELS, cacheEpoch(studio.id)),
+      ...Object.keys(CONVERSATIONS).map((tabId) => writeSaved(studio.id, `tab:${JSON.stringify(["review", tabId])}`, TAB, cacheEpoch(studio.id))),
     ]).then(() => setReady(true));
   }, []);
   const refreshSessions = useCallback(async () => { if (scenario === "slow-refresh") await pause(6_000); }, []);
