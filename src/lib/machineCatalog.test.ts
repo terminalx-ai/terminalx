@@ -304,4 +304,19 @@ describe("machine catalog", () => {
     await flush();
     expect(marks().s1).toEqual(["in_progress", "in_progress"]);
   });
+
+  it("keeps a saved row status's branch and PR while the machine is away, but not its running turn", async () => {
+    const mini = new FakeMachine();
+    mini.projects = [project("P1", "terminalx")];
+    const rowStatus = { tabs: [{ status: "in_progress" as const }], branch: "seats", started: true };
+    mini.sessions = [session("s1", "P1", "Seats", { rowStatus })];
+    catalog.getMachineCatalog();
+    hold({ m1: mini });
+    mini.connect();
+    await flush();
+    expect(catalog.allMachineSessions()[0].rowStatus).toEqual(rowStatus);
+
+    mini.setState({ state: "reconnecting" } as WorkspaceConnectionState);
+    expect(catalog.allMachineSessions()[0].rowStatus).toEqual({ tabs: [{ status: "idle", activity: null }], branch: "seats", started: true });
+  });
 });

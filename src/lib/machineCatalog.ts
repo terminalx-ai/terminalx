@@ -342,7 +342,8 @@ export function buildMachineSessions(machineId: string, entry: MachineCatalogEnt
   const rows: MachineSessionRow[] = [];
   for (const session of entry.sessions) {
     if (!session.projectId) continue;
-    const tabs = session.tabs.map((tab, index) => tabRow(tab, session, index === 0, agents.get(tab.id), entry.unread, entry.source === "live"));
+    const live = entry.source === "live";
+    const tabs = session.tabs.map((tab, index) => tabRow(tab, session, index === 0, agents.get(tab.id), entry.unread, live));
     rows.push({
       key: machineSessionKey(machineId, session.projectId, session.id),
       machineId,
@@ -357,7 +358,8 @@ export function buildMachineSessions(machineId: string, entry: MachineCatalogEnt
       hasMessages: session.hasMessages,
       pinned: session.pinned,
       archived: session.archived,
-      rowStatus: session.rowStatus,
+      // Saved, the row status keeps its branch and PR, but not a turn the machine can no longer confirm is running (as `tabRow`).
+      rowStatus: live || !session.rowStatus ? session.rowStatus : { ...session.rowStatus, tabs: session.rowStatus.tabs.map((tab) => (tab.status === "in_progress" ? { ...tab, status: "idle" as const, activity: null } : tab)) },
       manualStatus: session.manualStatus,
       tabs,
       activeTab: session.activeTab ?? null,

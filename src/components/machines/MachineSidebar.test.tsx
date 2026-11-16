@@ -247,11 +247,16 @@ describe("a machine's sidebar section (PRO-346)", () => {
 
   it("pins and archives a session on the machine from its menu, and offers nothing that only works on this Mac", async () => {
     await mountTwo();
-    fireEvent.click(screen.getByRole("button", { name: "Session menu for Add read markers" }));
+    const titles = () => within(within(section("Mac mini")).getAllByTestId("machine-project")[0]).getAllByTestId("machine-session-row").map((row) => row.getAttribute("title"));
+    expect(titles()).toEqual(["Add read markers", "Bisect the flaky relay e2e"]);
+    fireEvent.click(screen.getByRole("button", { name: "Session menu for Bisect the flaky relay e2e" }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent?.trim());
     expect(items).toEqual(["Rename", "Pin", "Archive"]);
     fireEvent.click(screen.getByRole("menuitem", { name: /Pin/ }));
-    await waitFor(() => expect(mini.updates).toEqual([{ sessionId: "s-read", patch: { pinned: true } }]));
+    await waitFor(() => expect(mini.updates).toEqual([{ sessionId: "s-flaky", patch: { pinned: true } }]));
+    // Pinned, the older session moves above the newer one, as a pinned local row does.
+    await waitFor(() => expect(titles()).toEqual(["Bisect the flaky relay e2e", "Add read markers"]));
+    expect(within(rows("Mac mini")[0]).getByLabelText("Pinned")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Session menu for Bisect the flaky relay e2e" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Archive/ }));
