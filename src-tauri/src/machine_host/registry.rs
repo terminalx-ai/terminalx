@@ -47,7 +47,25 @@ pub struct PairedComputer {
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The record's `grantRequestId`: the account pairing grant it was allowed
+/// through (PRO-349), so a removal on either side ends the other. Absent
+/// when paired by code. Kept among the record's other fields, which every
+/// build keeps when it rewrites the file.
+const GRANT_REQUEST_ID: &str = "grantRequestId";
+
 impl PairedComputer {
+    pub fn grant_request_id(&self) -> Option<&str> {
+        self.other.get(GRANT_REQUEST_ID).and_then(serde_json::Value::as_str)
+    }
+
+    /// Link the record to `grant`, or unlink it.
+    pub fn set_grant_request_id(&mut self, grant: Option<String>) {
+        match grant {
+            Some(grant) => self.other.insert(GRANT_REQUEST_ID.into(), grant.into()),
+            None => self.other.remove(GRANT_REQUEST_ID),
+        };
+    }
+
     /// Whether `token` is this computer's, in constant time.
     pub fn proves(&self, token: &str) -> bool {
         bool::from(self.token_hash.ct_eq(&token_hash(token)))
@@ -179,6 +197,11 @@ impl Registry {
         Ok(())
     }
 
+    /// The computer allowed through the account grant `grant_request_id`.
+    pub fn find_by_grant(&self, grant_request_id: &str) -> Result<Option<PairedComputer>> {
+        Ok(self.read()?.computers.into_iter().find(|computer| computer.grant_request_id() == Some(grant_request_id)))
+    }
+
     /// Remove a computer. Whether it was there.
     pub fn remove(&self, id: &str) -> Result<bool> {
         let removed = self.rewrite(|file| {
@@ -284,6 +307,21 @@ mod tests {
         let ids: Vec<String> = there.list().unwrap().into_iter().map(|computer| computer.id).collect();
         assert_eq!(ids, ["b"], "a touch of a removed computer does not bring it back");
         assert_eq!(there.list().unwrap()[0].last_seen_at, Some(9));
+    }
+
+    #[test]
+    fn a_computer_is_found_by_its_grant_and_an_older_record_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::in_data_dir(dir.path());
+        let mut linked = computer("a", "token-a-token-a-token-a");
+        linked.set_grant_request_id(Some("grant-1".into()));
+        registry.put(linked).unwrap();
+        registry.put(computer("b", "token-b-token-b-token-b")).unwrap();
+        assert_eq!(registry.find_by_grant("grant-1").unwrap().unwrap().id, "a");
+        assert!(registry.find_by_grant("grant-2").unwrap().is_none());
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(registry.path()).unwrap()).unwrap();
+        assert_eq!(written["computers"][0]["grantRequestId"], "grant-1");
+        assert!(written["computers"][1].get("grantRequestId").is_none(), "paired by code: no grant");
     }
 
     #[test]

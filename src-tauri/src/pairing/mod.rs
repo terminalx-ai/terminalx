@@ -10,6 +10,7 @@ mod direct;
 use crate::pairing_fingerprint as fingerprint;
 mod guest;
 mod host_poll;
+mod machine_grants;
 mod machine_route;
 mod mobile;
 use crate::local_runtime::mobile::model;
@@ -50,7 +51,7 @@ use self::crypto::{
 use self::model::{
     AccountMirror, AccountPairingGrant, DeviceEntry, DeviceProvenance, DeviceScope,
     HostBindingPayload, HostMetadata, PairedDeviceConnection, PairingApprovalRequest, PairingCode,
-    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, CAPABILITY, OFFER_TTL_MS,
+    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, OFFER_TTL_MS,
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
@@ -201,13 +202,6 @@ enum PairingConnectionContext {
 }
 
 impl PairingManager {
-    /// "Let other computers operate this Mac" changed (Settings → Machines).
-    /// The host binding advertises `machine-operating.v1` only while it is on,
-    /// so the account directory hears of the change now, not at the next
-    /// heartbeat (terminalx-server `machine-relay-access.md`, "Operating
-    /// capability"). PRO-349 fills this in.
-    pub fn machine_operating_changed(&self) {}
-
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             guest: guest::GuestClient::default(),
@@ -610,7 +604,7 @@ impl PairingManager {
                 display_name: named.name.clone(),
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities: self.host_capabilities(),
             };
             tokio::task::spawn_blocking(move || cloud::register_host(&context, &payload)).await??;
         }
@@ -824,6 +818,7 @@ impl PairingManager {
             self.set_error(format!("Could not save host binding fence: {error:#}"));
             return;
         }
+        let capabilities = self.host_capabilities();
         let payload = HostBindingPayload {
             host_id: keypair.host_id(),
             host_public_key_b64: keypair.public_key_b64(),
@@ -831,7 +826,7 @@ impl PairingManager {
             display_name: display_name.clone(),
             platform: "darwin".into(),
             environment_kind: "native".into(),
-            capabilities: vec![CAPABILITY.into()],
+            capabilities: capabilities.clone(),
         };
         let context_for_bind = context.clone();
         let bind =
@@ -852,7 +847,7 @@ impl PairingManager {
                 display_name,
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities,
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
@@ -873,7 +868,7 @@ impl PairingManager {
         generation: u64,
         grant: AccountPairingGrant,
     ) {
-        if !valid_grant(&grant, context, &relay.relay_host_id, generation) {
+        if !valid_grant(&grant, context, &relay.relay_host_id, generation, "mobile") {
             return;
         }
         let result = self
@@ -1957,13 +1952,14 @@ fn valid_grant(
     context: &AccountContext,
     host_id: &str,
     generation: u64,
+    scope: &str,
 ) -> bool {
     grant.user_id == context.user_id
         && grant.host_id == host_id
         && grant.binding_generation == generation
         && grant.installation_generation > 0
         && grant.associated_data_version == 1
-        && grant.requested_scope == "mobile"
+        && grant.requested_scope == scope
         && grant.state == "pending"
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
