@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { LoaderCircle, Lock } from "@/icons";
 import { cn } from "@/lib/cn";
 import type { MachineConnectionState, MachineRouteKind, MachineRouteUsed, PairedMachine } from "@/types/machines";
-import { PlatformIcon } from "./machineText";
+import { PlatformIcon, clockTime } from "./machineText";
 
 /**
  * How a machine's connection reads (screens 21.01, 21.08 and 21.09): a short
@@ -32,10 +32,7 @@ export function machineTone(state: MachineConnectionState): MachineTone {
   }
 }
 
-/** "14:02": the 24-hour clock the screens use (21.09), whatever the reader's locale. */
-export function clockTime(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-}
+export { clockTime };
 
 /** The machine's last contact: the offline state's, else the record's. */
 function lastSeen(state: MachineConnectionState, machine: PairedMachine | null): number | null {

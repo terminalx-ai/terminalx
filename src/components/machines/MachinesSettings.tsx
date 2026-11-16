@@ -279,7 +279,7 @@ function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
       </div>
       {store.error && <p role="alert" className="mt-2 text-[12.5px] text-destructive">{store.error}</p>}
       {store.machines.length > 0 && (
-        <ul className="mt-2.5 grid gap-2" aria-label="Your machines">
+        <ul className="mt-2.5 grid grid-cols-1 gap-2" aria-label="Your machines">
           {store.machines.map((machine) => (
             <MachineCard key={machine.machineId} machine={machine} onOpen={() => onOpen(machine.machineId)} onRemove={() => setRemoving(machine)} />
           ))}
@@ -438,7 +438,7 @@ function RemoveMachineDialog({ machine, onClose }: { machine: PairedMachine | nu
 function ComputerList({ computers, busy }: { computers: PairedComputer[]; busy: boolean }) {
   if (computers.length === 0) return <p className="mt-3 text-[12.5px] text-faint">No computer can operate this Mac.</p>;
   return (
-    <ul className="mt-2.5 grid gap-2" aria-label="Computers that can operate this Mac">
+    <ul className="mt-2.5 grid grid-cols-1 gap-2" aria-label="Computers that can operate this Mac">
       {computers.map((computer) => (
         <ComputerRow key={computer.id} computer={computer} busy={busy} />
       ))}
