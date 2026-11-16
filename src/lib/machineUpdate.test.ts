@@ -70,6 +70,16 @@ describe("a machine's version view", () => {
     expect(update.machineVersionView(machine, live, null, connectedState(ALL), "0.2.33").shownState).toBe(live);
   });
 
+  it("shows the connection state, not Needs update, once a machine that hid a feature is no longer connected", () => {
+    const machine = pairedMachine({ machineId: "m1", name: "ci-box", version: "0.2.27" });
+    const lastConnected = connectedState(ALL.filter((name) => name !== "ports/1"));
+    for (const state of [{ state: "connecting" }, { state: "offline", since: 1, reason: "" }, { state: "idle" }] as const) {
+      const view = update.machineVersionView(machine, state as never, null, lastConnected, "0.2.33");
+      expect(view.shownState).toBe(state);
+      expect(view.gap).toBeNull();
+    }
+  });
+
   it("keeps Updating while the machine hands over", () => {
     const updating = { state: "updating", version: "0.2.34", since: 5 } as const;
     expect(update.machineVersionView(pairedMachine(), updating, null, { state: "reconnecting", attempt: 1, reason: "", retryInMs: 500 }, "0.2.33").shownState).toBe(updating);

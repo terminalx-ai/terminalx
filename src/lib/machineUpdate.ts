@@ -88,12 +88,16 @@ export interface MachineVersionView {
 
 /** Everything the card, chip and page need to say about a machine's version. */
 export function machineVersionView(machine: PairedMachine | null, state: MachineConnectionState, client: WorkspaceRpcClient | null, clientState: WorkspaceConnectionState, ours: string | null): MachineVersionView {
-  const granted = grantedBy(clientState);
+  // What the machine grants is known only while it is connected: a link
+  // that dropped says nothing about it, so a machine that was hiding a
+  // feature shows Connecting, Reconnecting or Offline, not Needs update.
+  const live = state.state === "direct" || state.state === "relay";
+  const granted = live ? grantedBy(clientState) : null;
   const runtimeVersion = clientState.state === "connected" && clientState.runtimeVersion ? clientState.runtimeVersion : null;
   const version = runtimeVersion ?? (state.state === "needsUpdate" ? state.version : null) ?? machine?.version ?? null;
   const gap = machineVersionGap(state, granted, version, ours);
   const newer = !gap && !!granted && machineIsNewer(version, ours);
-  const shownState: MachineConnectionState = gap && state.state !== "needsUpdate" && state.state !== "updating" ? { state: "needsUpdate", version: gap.version, side: gap.side } : state;
+  const shownState: MachineConnectionState = gap && live ? { state: "needsUpdate", version: gap.version, side: gap.side } : state;
   return { machine, state, client, granted, version, ours, gap, newer, shownState };
 }
 
