@@ -257,7 +257,7 @@ describe("personal sections of cloud projects (PRO-23)", () => {
   it("survive a restart, per account and organization, in their order", async () => {
     const { getPrefs, setPrefs } = await import("./prefs");
     expect(getPrefs().cloudSections).toEqual({});
-    const sections = { "a@example.com": { "org-a": [{ id: "s2", name: "Parked", projects: ["blank/notes"] }, { id: "s1", name: "Active", projects: ["github.com/acme/api"] }] } };
+    const sections = { "a@example.com": { "org-a": [{ id: "s2", name: "Parked", projects: ["blank/notes"], workspaces: ["w1"], icon: "🚀", sort: "name" as const, collapsed: true }, { id: "s1", name: "Active", projects: ["github.com/acme/api"] }] } };
     setPrefs({ cloudSections: sections });
     vi.resetModules();
     const reloaded = await import("./prefs");
