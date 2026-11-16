@@ -1,4 +1,5 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { DropdownMenu as Prim } from "radix-ui";
 import { ChevronDown, TriangleAlert } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import {
@@ -22,8 +23,9 @@ import { AccountRadioItems } from "./SessionAgentControls";
 
 /**
  * Agent, model, effort and permissions behind one quiet button: `Opus 5.5
- * High · Ask every time`. The menu holds the agent and the efforts inline, the
- * models and permissions one level in. The mode is always on the button, so
+ * High · Ask every time`. The menu is the session composer's: an Agent, a
+ * Model and an Effort row, each naming what is chosen and opening its choices
+ * beside it, then Permissions. The mode is always on the button, so
  * what the agent may do unasked is never a menu away (PRO-162); Bypass is
  * marked as a warning and Plan in the composer's plan colour.
  */
@@ -63,26 +65,27 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           <ChevronDown className="size-3.5 shrink-0 text-faint" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[15rem]">
-        <DropdownMenuLabel>Agent</DropdownMenuLabel>
-        {harnesses.map((h) => {
-          const state = readiness?.[h.id]?.state;
-          const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
-          const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
-          return <DropdownMenuItem key={h.id} disabled={unavailable} onSelect={() => selectHarness(h.id)}>
-            <AgentMark id={h.id} decorative brand />
-            <span>{h.name}</span>
-            {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
-          </DropdownMenuItem>
-        })}
+      {/* `overflow-visible`: the Agent and Effort choices are drawn from inside this menu (ChoiceRow). */}
+      <DropdownMenuContent align="start" className="min-w-[15rem] overflow-visible">
+        <ChoiceRow label="Agent" value={harness?.name ?? "None"} testId="agent-menu-agent" className="min-w-[14rem]">
+          {harnesses.map((h) => {
+            const state = readiness?.[h.id]?.state;
+            const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
+            const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
+            return <DropdownMenuItem key={h.id} disabled={unavailable} onSelect={() => selectHarness(h.id)}>
+              <AgentMark id={h.id} decorative brand />
+              <span>{h.name}</span>
+              {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
+            </DropdownMenuItem>
+          })}
+        </ChoiceRow>
 
         {/* Only an agent with more than one account offers the choice (#980). */}
         {harness && accounts && account && (
           <>
-            <DropdownMenuSeparator />
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                <span>Account</span>
+                <span className="flex-1">Account</span>
                 <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{account.label}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="min-w-[14rem]">
@@ -94,11 +97,10 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
 
         {harness && (model || unavailableModel || allowDefaultEffort) && (
           <>
-            <DropdownMenuSeparator />
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <span>Model</span>
-                <span className="ml-auto max-w-[10rem] truncate pl-3 text-[11px] text-faint">{modelText}</span>
+              <DropdownMenuSubTrigger data-testid="agent-menu-model">
+                <span className="flex-1">Model</span>
+                <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{modelText}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="min-w-[12rem] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
                 <DropdownMenuRadioGroup value={modelId} onValueChange={selectModel}>
@@ -123,9 +125,7 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
         )}
 
         {harness && model && model.efforts.length > 0 && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Effort</DropdownMenuLabel>
+          <ChoiceRow label="Effort" value={effortText ?? "Default"} testId="agent-menu-effort" className="min-w-[12rem]">
             <DropdownMenuRadioGroup value={effort ?? ""} onValueChange={selectEffort}>
               {allowDefaultEffort && <DropdownMenuRadioItem value="">Default</DropdownMenuRadioItem>}
               {model.efforts.map((e) => (
@@ -134,14 +134,14 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>
-          </>
+          </ChoiceRow>
         )}
 
         <DropdownMenuSeparator />
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
-            <span>Permissions</span>
-            <span className="ml-auto pl-3 text-[11px] text-faint">{permission?.label ?? mode}</span>
+            <span className="flex-1">Permissions</span>
+            <span className="ml-auto pl-3 text-[12px] text-faint">{permission?.label ?? mode}</span>
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent className="min-w-[14rem]">
             <DropdownMenuRadioGroup value={mode} onValueChange={selectMode}>
@@ -156,5 +156,49 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
         </DropdownMenuSub>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * The Agent and Effort rows: what is chosen, and its choices beside the row.
+ * They open like any submenu, but stay mounted inside the menu's own element
+ * (hidden until their row opens them) instead of in a layer of their own: the
+ * agents and efforts remain part of the one menu, which is how IssuesView's
+ * tests pick them. Two things a submenu mounted on opening gets for free are
+ * done here. Mounted with the menu, the list is a layer below it, which a
+ * modal menu takes the pointer from: `pointerEvents` gives it back. And a
+ * list opened from the keyboard takes the focus once it is shown.
+ */
+function ChoiceRow({ label, value, testId, className, children }: { label: string; value: string; testId: string; className?: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const list = useRef<HTMLDivElement>(null);
+  const byKey = useRef(false);
+  useEffect(() => {
+    if (open && byKey.current) list.current?.focus();
+    byKey.current = false;
+  }, [open]);
+  return (
+    <DropdownMenuSub open={open} onOpenChange={setOpen}>
+      <DropdownMenuSubTrigger
+        data-testid={testId}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight" || e.key === "Enter" || e.key === " ") byKey.current = true;
+        }}
+      >
+        <span className="flex-1">{label}</span>
+        <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{value}</span>
+      </DropdownMenuSubTrigger>
+      <Prim.SubContent
+        ref={list}
+        forceMount
+        role="group"
+        collisionPadding={8}
+        avoidCollisions
+        style={{ pointerEvents: "auto" }}
+        className={cn("z-(--z-menu) overflow-hidden rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline data-[state=closed]:hidden data-[state=open]:animate-fade-in", className)}
+      >
+        {children}
+      </Prim.SubContent>
+    </DropdownMenuSub>
   );
 }

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@/lib/api";
 import type { HarnessInfo } from "@/types/session";
@@ -62,5 +62,30 @@ describe("the new-session chip shows the permission mode (PRO-162)", () => {
     expect(shown.querySelector("[data-icon]")).not.toBeNull();
     expect(shown.getAttribute("title")).toBe("The agent runs commands and edits files without asking");
     expect(chip.getAttribute("aria-label")).toBe("Opus High, Bypass permissions");
+  });
+});
+
+describe("the picker's rows (PRO-397)", () => {
+  it("has an Agent, a Model and an Effort row, each naming what is chosen and opening its choices", async () => {
+    fireEvent.click(await renderChip());
+    const menu = await screen.findByRole("menu");
+    const rows = within(menu).getAllByRole("menuitem").filter((row) => row.getAttribute("aria-haspopup") === "menu");
+    expect(rows.map((row) => row.textContent)).toEqual(["AgentClaude Code", "ModelOpus", "EffortHigh", "PermissionsAsk every time"]);
+    // The agents and the efforts are behind their rows, not listed in the menu itself.
+    const agents = within(menu).getByRole("group", { name: /^Agent/ });
+    const efforts = within(menu).getByRole("group", { name: /^Effort/ });
+    expect(agents.getAttribute("data-state")).toBe("closed");
+    expect(efforts.getAttribute("data-state")).toBe("closed");
+    expect(agents.className).toContain("data-[state=closed]:hidden");
+
+    fireEvent.keyDown(screen.getByTestId("agent-menu-effort"), { key: "ArrowRight" });
+    await waitFor(() => expect(efforts.getAttribute("data-state")).toBe("open"));
+    expect(within(efforts).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Low", "High"]);
+    // Opened from the keyboard, the list takes the focus.
+    await waitFor(() => expect(efforts.contains(document.activeElement)).toBe(true));
+
+    fireEvent.click(within(efforts).getByRole("menuitemradio", { name: "Low" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(screen.getByTestId("agent-effort").textContent).toBe("Low");
   });
 });
