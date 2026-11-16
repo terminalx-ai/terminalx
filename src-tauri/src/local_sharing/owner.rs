@@ -282,6 +282,7 @@ pub(crate) fn execute(
                 blocked: HashSet::new(),
                 approved: HashSet::new(),
                 used_by: None,
+                access: Default::default(),
             },
         );
         share.record(&actor.user_id, "link-created", json!({"linkId":id}), now());
@@ -319,6 +320,11 @@ pub(crate) fn execute(
         }
         "remove" => {
             share.remove(text(&params, "linkId")?, text(&params, "userId")?, now())?;
+            Ok(share.snapshot(now(), true))
+        }
+        "access" => {
+            let role: Role = serde_json::from_value(params["role"].clone())?;
+            share.set_role(text(&params, "linkId")?, text(&params, "userId")?, role, now())?;
             Ok(share.snapshot(now(), true))
         }
         "approve" => {

@@ -82,8 +82,10 @@ describe("the new-tab button", () => {
     expect(strip().compareDocumentPosition(plus) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(plus);
     const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual(["Claude Code", "Codex", "Gemininot installed", "Terminalon this computer", "Browser"]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal on this computer" }));
+    // PRO-381 (03.29): each agent's chat says where it opens; Terminal and Browser need no hint.
+    expect(screen.getByText("New tab").textContent).toBe("New tab");
+    expect(items.map((item) => item.textContent)).toEqual(["Claude Code chatSame worktreeCtrlT", "Codex chatSame worktree", "Gemini chatNot installed", "Terminal", "BrowserCtrlShiftB"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal" }));
     await flush();
     expect(backend.callsOf("pty_spawn").at(-1)).toMatchObject({ cwd: FEATURE, title: "Terminal 2" });
     // A tab opened from here goes to the end of the row.
@@ -223,7 +225,7 @@ describe("the local new-tab menu (PRO-291)", () => {
     const started = vi.spyOn(agent, "startOnOpen").mockRejectedValueOnce("codex exited while starting\nerror: unexpected argument '--yolo' found");
     render(<TabsHarness />);
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex chat" }));
     await flush();
     await flush();
     expect(backend.callsOf("add_tab")).toHaveLength(1);

@@ -73,6 +73,7 @@ mod organization_workspace_config;
 pub mod computer;
 mod control;
 mod cloud_control;
+mod machine_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
@@ -314,6 +315,34 @@ fn offer_settings_link(app: &tauri::AppHandle, link: desktop_links::SettingsLink
     }
 }
 
+/// Tells the webview a tab link (PRO-381) is waiting, as for a setting link.
+#[cfg(feature = "desktop")]
+const TAB_LINK_REQUESTED: &str = "tab_link_requested";
+
+#[cfg(feature = "desktop")]
+fn offer_tab_link(app: &tauri::AppHandle, link: desktop_links::TabLink) {
+    app.state::<desktop_links::PendingTabLink>().set(link);
+    if let Err(error) = app.emit(TAB_LINK_REQUESTED, ()) {
+        log::warn!("tell the webview about a tab link: {error}");
+    }
+}
+
+/// The tab link waiting for the webview, once: `{ sessionId, tabId }`, or null.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_take(pending: tauri::State<'_, desktop_links::PendingTabLink>) -> Option<desktop_links::TabLink> {
+    pending.take()
+}
+
+/// The link that opens a chat tab, in this build's scheme: the tab menu's "Copy link to this tab".
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_for(app: tauri::AppHandle, session_id: String, tab_id: String) -> Result<String, String> {
+    desktop_links::DesktopLinks::for_identifier(&app.config().identifier)
+        .tab_link_url(&session_id, &tab_id)
+        .ok_or_else(|| "this tab has no link".to_owned())
+}
+
 /// The setting link waiting for the webview, once: `{ id, enable }` and
 /// nothing else of the URL, or null when none is.
 #[cfg(feature = "desktop")]
@@ -416,6 +445,7 @@ pub fn run() {
         .manage(floating::Floating::default())
         .manage(state)
         .manage(desktop_links::PendingSettingsLink::default())
+        .manage(desktop_links::PendingTabLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .manage(machines.clone())
@@ -463,6 +493,7 @@ pub fn run() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
                         else if let Some(link) = links.settings_link(&url) { offer_settings_link(&app_handle, link); }
+                        else if let Some(link) = links.tab_link(&url) { offer_tab_link(&app_handle, link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -474,6 +505,9 @@ pub fn run() {
                             } else if let Some(link) = links.settings_link(&url) {
                                 log::info!("received TerminalX settings link");
                                 offer_settings_link(&app_handle, link);
+                            } else if let Some(link) = links.tab_link(&url) {
+                                log::info!("received TerminalX tab link");
+                                offer_tab_link(&app_handle, link);
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -745,6 +779,8 @@ pub fn run() {
             commands::session_share_change,
             commands::session_join_pending,
             settings_link_take,
+            tab_link_take,
+            tab_link_for,
             commands::session_guest_join,
             commands::session_guest_send,
             commands::session_guest_leave,

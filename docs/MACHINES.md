@@ -838,6 +838,12 @@ the pull request that adds it.
 | `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
 | `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
 | `machine.rotateCredential` | `machine/5` | Served | Manage only; a fresh device token for the paired computer that asks, kept beside its own until it connects with it ([Trust model](#trust-model), PRO-357) |
+| `machine.browse` | `machine/6` | Served | Manage only; folder names under the home directory of the runtime's user, never a file's contents (PRO-351, [A machine's projects](#as-built-pro-351-a-machines-projects-from-another-computer)) |
+| `machine.addProject` | `machine/6` | Served | Manage only; a folder under that home becomes a project |
+| `machine.removeProject` | `machine/6` | Served | Manage only; names the project; its folder and worktrees stay on disk |
+| `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
+| `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
+| `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1423,6 +1429,95 @@ keeps `namedHere: true`, so the name the machine gives itself in
 
 **Remove** is `machines_remove`, as on the card (PRO-349).
 
+### As built (PRO-351): a machine's projects from another computer
+
+The machine's page lists its **Projects** (screen 21.10): each with its folder
+and how many sessions it has, and a menu with "Remove project". "Add a
+project" opens a dialog (screen 21.11) with two tabs: "Folder on <machine>"
+browses the machine's folders, and "Clone from GitHub" clones a repository
+there. Before this a machine's projects were the ones someone added while
+sitting at it, and `fs/1` stays inside a project, so it cannot browse for one.
+
+`machine/6` adds six methods. Only a runtime that serves its machine grants
+it, and every method is the manager's: a paired computer has operating
+rights (decision 5); a session-scoped participant has none of them. (PRO-357
+takes `machine/5`.)
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.browse` | `{ path? }` | `{ home, path, parent, entries, truncated }` |
+| `machine.addProject` | `{ path }` | `{ project }` |
+| `machine.removeProject` | `{ projectId }` | `{ removed: true }` |
+| `machine.cloneProject` | `{ repository, parent }` | `{ clone }` |
+| `machine.cloneStatus` | `{ cloneId }` | `{ clone }` |
+| `machine.cloneCancel` | `{ cloneId }` | `{ clone }` |
+
+**Browse.** `path` is absolute; without it, the home directory of the user
+the runtime runs as. `home` is that directory, `path` the folder listed
+(canonical), and `parent` the folder above it, or null at `home`.
+
+- Only below `home`. The path is resolved (symbolic links followed) before
+  it is checked, so a link that leads out is refused with `path_forbidden`,
+  and so is any path outside `home`. A path that is missing or not a folder
+  is `not_found`.
+- Folder names only. `entries` are the folders directly inside `path`, in
+  name order (case folded), each `{ name, path, git, projectId }`. A file is
+  never listed and nothing is read from one. Hidden folders (a name starting
+  with `.`) and links that lead outside `home` are left out.
+- `git` is `{ branch, github }` for a Git repository, else null: `branch` is
+  read from `HEAD` (null when detached), `github` says whether `origin` is on
+  github.com. Both are read from the repository's own files, with no `git`
+  process per folder.
+- `projectId` is set when the folder already is a project (archived ones
+  too), so the dialog can say "Already a project".
+- At most 500 entries, so a reply fits the relay's frame; `truncated` says
+  some were left out.
+
+**Add.** `path` follows the same rules as `browse`. The folder becomes a
+project (`store::projects::ensure`, as `projects.add` on the control socket)
+and the runtime emits `projects_changed`, so `machine.changed` brings it to
+the sidebar and the new-session form of every connected computer, and the
+machine's own window shows it. A folder that already is a project is
+returned as it is. `projectId` comes from the path, so a folder removed and
+added again gets its old id back, and this computer's pins and order with it.
+
+**Remove.** The project leaves the machine's store and `projects_changed` is
+emitted. Its folder, its worktrees and its sessions' records stay on disk;
+nothing is deleted. The page asks first when the project has sessions.
+
+**Clone.** `repository` is `owner/name` on GitHub or a repository URL, as the
+local clone takes it (`project_start::parse_source`); `parent` is an absolute
+folder under `home` (rules as `browse`), and the clone lands in
+`<parent>/<name>`. It runs on the machine with its own git sign-in and never
+prompts (`project_start::clone_repository`): it is made in a staging folder
+beside its place and moved in whole, so one that fails or is canceled leaves
+nothing behind. Once it is whole the folder is added as a project, as Add
+does. A clone takes longer than a call may, so `machine.cloneProject` answers
+at once with the clone, and the page asks `machine.cloneStatus` every second
+until it ends. `clone` is `{ cloneId, repository, path, state, stage,
+percent, project, error }`:
+
+- `state` is `cloning`, `done`, `failed` or `canceled`.
+- `stage` and `percent` are git's progress while cloning.
+- `project` is the added project once `done`.
+- `error` is `{ code, message }` when `failed`, with the local clone's codes:
+  `invalid-source`, `invalid-destination`, `destination-exists`,
+  `access-denied`, `network`, `timed-out`, `disk-full` or `failed`. A folder
+  already holding a clone of the same repository is added as it is.
+- The runtime keeps a finished clone's status for ten minutes, so a page that
+  reconnects can still read how it ended; an unknown `cloneId` is
+  `not_found`.
+
+**Errors** use the protocol's codes: `invalid_params` for a missing or
+relative path, `path_forbidden`, `not_found`, and `invalid_project` when the
+store refuses the folder (a local mirror of a cloud workspace).
+
+**The page.** Projects show once the machine is connected; without
+`machine/6` they are listed with no Add or Remove, and the page names the
+machine and says to update it. A project's session count is the sessions of
+that machine with its `projectId`. Like the rest of Machines, it stays behind
+Settings → Experimental → Machines until PRO-360.
+
 ### Versions and updates (PRO-354)
 
 The laptop and the machine update on their own, so two versions meet all the
@@ -1704,6 +1799,15 @@ which runs in a child process because data privacy is one switch per process.
 - **An expired computer's account grant** ends when the operating computer
   removes the machine, as it is asked to on "Access removed"; the machine ends
   its connections and relay credential itself.
+- **Agents on the operating computer can operate its paired machines** through
+  the `terminalx` CLI (PRO-356), with the rights pairing gave the computer.
+  That is the ticket's purpose (a lead session on one computer driving
+  sessions on another). The control is the person's switch, Settings →
+  Experimental → Machines, read in native code before any `machine.*` command
+  reaches the window; its description says agents can use it. Unlike cloud
+  control there is no second switch: nothing is billed, and the machines are
+  the person's own. A run's worker may not pair a machine or start a session
+  on one.
 
 ### As built (PRO-357)
 
@@ -1967,6 +2071,57 @@ the "Port 5173 forwarded to 127.0.0.1:5173" toast.
 
 **Open** opens the address in this Mac's built-in browser (decision 7); the
 browser runs here, and only the stream crosses.
+
+### As built (PRO-356): the command line
+
+`terminalx machines list|status|add|remove` and `--machine <name or id>` on
+`projects list`, `sessions list|create|rename|archive|unarchive`, `tabs list`,
+`send`, `read`, `wait`, `permissions` and `worktrees list|delete`. A session's
+`machine:` key (decision 8) routes `send`, `read`, `wait`, `tabs`, `rename`
+and `archive` without `--machine`. `sessions list --all-machines` lists this
+computer's sessions (`machine: null`) and every paired machine's. Without any
+of these, every command sends the request it sent before. The full guide is
+`skill-guides/terminalx-cli.md`, "Paired machines".
+
+**No new protocol.** The CLI never opens a network connection. It sends
+`machine.<action>` over the control socket; the runtime hands it to the
+attached desktop (`local_runtime::window::supported`), and a runtime with no
+desktop answers `unsupported`.
+
+- **Native first** (`src-tauri/src/machine_control.rs`): the desktop refuses
+  everything with `machines_disabled` while Experimental → Machines is off.
+  `list`, `status`, `add` (`Machines::inspect` and `pair`, waiting for Allow)
+  and `remove` (as Settings → Machines → Remove) are answered here. `add`
+  takes two calls: the first shows the fingerprint and contacts nothing
+  (`fingerprint_confirmation_required`); the second names it with
+  `--fingerprint` and pairs, so the person compares it with the machine's
+  approval before pressing Allow, as with the dialog. For every
+  other action it resolves the machine (id, `machine:` key, or a name in any
+  case: `machine_unknown`, `ambiguous_selector`) and refuses at once by the
+  owner's state: `reconnecting` and `offline` are `machine_offline`, and
+  `needsUpdate`, `updating`, `accessRemoved` and `disconnected` have codes of
+  their own. `idle` and `connecting` go on. A `machine:` key in the params
+  must name the same machine.
+- **Then the window** (`machine_control_request`, answered through
+  `cloud_control_reply`; `src/lib/machineControl.ts`) runs it over the
+  machine's one connection with the code the machine views use: the catalog
+  for lists, `createMachineSession` for a new session (one
+  `clientRequestId` per `--idempotency-key`), live `session.send` and
+  `session.decide` (`agent-commands/1`), a replayed `session.subscribe` for
+  `read` and `wait` (the cloud wait's `settledReason`), `session.update` for
+  rename and archive, and `cleanup.scan` / `cleanup.remove` for worktrees. A
+  machine this window does not hold yet is attached and given 10 s; a
+  machine still not connected is `machine_offline`. A namespace the machine
+  did not grant is `machine_unsupported`, naming its version.
+- **Waits** are asked in calls of at most 30 s, as cloud waits are, so a
+  caller that goes away leaves nothing running.
+- **Limits.** A run's worker is refused `machines add|remove` and
+  `sessions create --machine` (`forbidden`; also in `orchestration::guard`
+  `RULES`): a session it starts locally is marked a worker as it is made, and
+  one on a machine cannot be. Orchestration runs with workers on another
+  machine stay out of scope (decision 7). Issue starts from the CLI, renaming
+  a machine's worktree, and `sessions report|usage|status|show` stay on this
+  computer.
 
 ### As built (PRO-358): two machines end to end in CI
 

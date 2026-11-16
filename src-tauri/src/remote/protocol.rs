@@ -100,7 +100,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -318,6 +318,16 @@ pub const METHODS: &[Method] = &[
     // beside the current one until it connects with it. Not idempotent: a
     // repeat makes another token, and the computer keeps the last it saved.
     method("machine.rotateCredential", "machine/5", Manage, false),
+    // PRO-351: a machine's projects from another computer. Each changes the
+    // machine's store or names its folders, so all are the manager's. Not
+    // idempotent: a browse reads the moment, add/remove answer as the store
+    // now stands, and each clone is a new one.
+    method("machine.browse", "machine/6", Manage, false),
+    method("machine.addProject", "machine/6", Manage, false),
+    method("machine.removeProject", "machine/6", Manage, false),
+    method("machine.cloneProject", "machine/6", Manage, false),
+    method("machine.cloneStatus", "machine/6", Manage, false),
+    method("machine.cloneCancel", "machine/6", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -347,6 +357,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/3" => &["machine.updateStatus", "machine.update"],
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
         "machine/5" => &["machine.rotateCredential"],
+        "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
@@ -501,6 +512,7 @@ pub(crate) fn leak_code(code: &str) -> &'static str {
         "update_confirm",
         "update_busy",
         "update_unavailable",
+        "invalid_project",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }
@@ -709,6 +721,23 @@ mod tests {
         for code in ["update_confirm", "update_busy", "update_unavailable"] {
             assert_eq!(leak_code(code), code);
         }
+    }
+
+    /// PRO-351: `machine/6` is offered by a machine only, and every one of
+    /// its methods is the manager's.
+    #[test]
+    fn machine_6_adds_a_machines_projects_for_the_manager_only() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/6") && machine.contains(&"machine/4"));
+        assert!(!workspace.contains(&"machine/6"));
+        assert!(machine.contains(&"machine/5"), "machine/5 (PRO-357) is served beside it");
+        for name in ["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("machine/6", Manage, false), "{name}");
+        }
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/4"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/4"], "an older desktop is not handed machine/6");
+        assert_eq!(leak_code("invalid_project"), "invalid_project");
     }
 
     #[test]

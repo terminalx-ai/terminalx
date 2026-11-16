@@ -67,7 +67,7 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByText("Check the terminal for a pending decision, or stop the session.")).toBeTruthy();
   });
 
-  it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
+  it("keeps hook context through transcript replay and names an explicit workdir but not the session directory the header already names (PRO-382)", () => {
     // The real Codex PreToolUse event has Bash + command, not the original
     // exec_command arguments the previous UI-only fixture supplied.
     const event: AgentEvent = JSON.parse(`{
@@ -77,8 +77,8 @@ describe("session recovery UI smoke", () => {
         "reason":"Approval is required because this session is set to Ask every time.", "options":[]}
     }`);
     const { rerender } = render(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
-    expect(screen.getByText("/workspace/app")).toBeTruthy();
-    expect(screen.getByText(/Session directory:/)).toBeTruthy();
+    expect(screen.queryByText("/workspace/app")).toBeNull();
+    expect(screen.queryByText(/Session directory:/)).toBeNull();
     expect(screen.getByTestId("permission-reason").textContent).toBe("Approval is required because this session is set to Ask every time.");
     expect(screen.queryByTestId("permission-agent-note")).toBeNull();
     if (event.payload.type !== "permission_requested") throw new Error("permission fixture");
@@ -97,7 +97,7 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByTestId("permission-detail").textContent).toBe(command);
     expect(screen.getByText("/workspace/app")).toBeTruthy();
     expect(screen.getByText("Run the focused regression test")).toBeTruthy();
-    expect(screen.getByText("Waiting for permission to run a command")).toBeTruthy();
+    expect(screen.getByText("Run a command")).toBeTruthy();
   });
 
   it("shows capacity recovery, model selection, then a permission request with allow, deny and stop", () => {
@@ -109,7 +109,7 @@ describe("session recovery UI smoke", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "available" } });
     expect(p.onRetry).toHaveBeenCalledWith("available");
     rerender(<RecoveryBanner {...p} waiting asks={[ask]} />);
-    expect(screen.getByText(/Waiting for permission to run a command/)).toBeTruthy();
+    expect(screen.getByText(/^Run a command$/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /^Allow/ }));
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     fireEvent.click(screen.getByRole("button", { name: "Stop session" }));

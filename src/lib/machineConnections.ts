@@ -124,12 +124,13 @@ function applyEvent(view: MachineConnectionView) {
   } else if (linked(before)) {
     dropMachineConnected(view.machineId);
   }
-  // A machine paired in another window, or one whose `machine.describe` just
-  // renamed it or moved its last-seen time: read the records again. Before the
-  // first read has answered, that read brings them.
+  // A machine paired in another window or from the command line, one removed
+  // from there (its owner reports idle as it stops), or one whose
+  // `machine.describe` just renamed it or moved its last-seen time: read the
+  // records again. Before the first read has answered, that read brings them.
   if (!state.ready) return;
   const unknown = !state.machines.some((machine) => machine.machineId === view.machineId);
-  if (unknown || (linked(view.state) && !linked(before))) void refreshPairedMachines();
+  if (unknown || view.state.state === "idle" || (linked(view.state) && !linked(before))) void refreshPairedMachines();
 }
 
 function listenOnce(): Promise<void> {
