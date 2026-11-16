@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type RuntimeAgent, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import type { ModelInfo } from "@/lib/api";
 import { modelOptionText } from "@/lib/models";
-import { usePickerModels } from "./cloudModels";
+import { machineAgentSignInReason, usePickerModels } from "./cloudModels";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 
 const opus: ModelInfo = { id: "opus", label: "Opus", harness: "claude", alias: true, resolved: "claude-opus-5-5", efforts: [], defaultEffort: null, acceptsImages: true, isDefault: true, upgrade: null, description: null };
@@ -85,5 +85,21 @@ describe("workspace model discovery", () => {
     await waitFor(() => expect(read).toHaveBeenCalled());
     expect(result.current.models.map((m) => m.id)).toEqual(["opus"]);
     expect(modelOptionText(result.current.models[0], result.current.models)).toBe("Opus (latest)");
+  });
+});
+
+describe("an agent not signed in on a machine (PRO-350)", () => {
+  const codex = (signIn?: RuntimeAgent["signIn"]): RuntimeAgent => ({ id: "codex", name: "Codex", caps: {}, modes: [], defaultMode: "", models: [], ...(signIn ? { signIn } : {}) });
+
+  it("names the agent and the machine, and says where to sign in", () => {
+    expect(machineAgentSignInReason([codex("signedOut")], "codex", "dev-server")).toBe("Codex is not signed in on dev-server. Sign in from its machine page.");
+  });
+
+  it("says nothing when it is signed in, could not be told, or the runtime does not say", () => {
+    expect(machineAgentSignInReason([codex("signedIn")], "codex", "dev-server")).toBeNull();
+    expect(machineAgentSignInReason([codex("unknown")], "codex", "dev-server")).toBeNull();
+    expect(machineAgentSignInReason([codex()], "codex", "dev-server")).toBeNull();
+    expect(machineAgentSignInReason(null, "codex", "dev-server")).toBeNull();
+    expect(machineAgentSignInReason([codex("signedOut")], "claude", "dev-server")).toBeNull();
   });
 });

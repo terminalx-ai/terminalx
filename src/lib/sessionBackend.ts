@@ -101,6 +101,11 @@ export interface SessionBackend {
   caps: SessionBackendCaps;
   /** Why writes are off, shown wherever they would be. Null while they are allowed. */
   readOnlyReason: string | null;
+  /**
+   * Why a send waits (a machine that is away, 21.09): the composer keeps what
+   * is typed and sends nothing until it is null. Absent where sends never wait.
+   */
+  sendHeldReason?: string | null;
   /** The session id the agent event logs are keyed by (the runtime's own id for a cloud session). */
   logSessionId: string;
   /** Start showing a tab: load its log (local), or its checkpoint and live stream (cloud). Returns the cleanup. */
@@ -156,9 +161,10 @@ export interface SessionBackend {
   /**
    * Cloud only (PRO-78): why the tab's agent has no way to sign in in its
    * workspace, as the runtime last said, and the organization whose Agent
-   * logins fix it. Null when it can sign in.
+   * logins fix it; on a machine (PRO-347) the machine's name instead, where
+   * it is signed in. Null when it can sign in.
    */
-  signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string } | null;
+  signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string; machine?: string } | null;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /** The workspace client for model discovery, independent of collaboration capabilities. */

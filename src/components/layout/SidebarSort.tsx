@@ -71,8 +71,8 @@ export const useInSidebarDragScope = () => useContext(ScopeContext) !== null;
 /** Status groups retain the shared header/count/fold, each with an isolated drag scope.
  * Cloud callers use StatusGroups directly and never acquire local drag handles.
  */
-export function SortableStatusGroups({ sessions, children, scope }: { sessions: SessionEntry[]; children: (session: SessionEntry) => ReactNode; scope?: string }) {
-  return <StatusGroups sessions={sessions} scope={scope} renderGroup={(rows, content) =>
+export function SortableStatusGroups({ sessions, children, scope, onAdd }: { sessions: SessionEntry[]; children: (session: SessionEntry) => ReactNode; scope?: string; onAdd?: () => void }) {
+  return <StatusGroups sessions={sessions} scope={scope} onAdd={onAdd} renderGroup={(rows, content) =>
     <SidebarSortList items={rows.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{content}</SidebarSortList>
   }>{children}</StatusGroups>;
 }
@@ -88,7 +88,7 @@ export function SortableStatusGroups({ sessions, children, scope }: { sessions: 
  */
 export function SidebarDragScope({ children, main = true, mainTarget = false, moves: allowMoves = true }: {
   children: ReactNode;
-  /** The whole scope is the main list's drop zone (ChatListSidebar). */
+  /** The whole scope is the main list's drop zone (the flat and status layouts). */
   main?: boolean;
   /** Only the sections are inside: a "Drop here to move to the main list" target follows them while a sectioned session is held. */
   mainTarget?: boolean;
@@ -397,7 +397,7 @@ export function useSidebarSectionDrag(section: { id: string; name: string }, sor
     <button type="button" ref={sort.setActivatorNodeRef} {...sort.attributes} {...sort.listeners}
       aria-label={`Reorder section ${section.name}`} title="Drag to reorder sections, or press Space"
       onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-      className="flex size-5 shrink-0 touch-none cursor-grab items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing group-hover/section:opacity-100">
+      className="flex size-5 shrink-0 touch-none cursor-grab items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing group-hover/row:opacity-100">
       <GripVertical className="size-3" />
     </button>
   ) : null;

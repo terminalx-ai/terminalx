@@ -14,7 +14,10 @@ export function sidebarProjectOf(session: Pick<SessionEntry, "kind" | "projectPa
 }
 
 /** Preserve the sidebar's message chronology for Updated; both orders keep pins first. */
-export function compareSidebarSessions(a: SessionEntry, b: SessionEntry, sort: SidebarSort): number {
+/** What the sidebar orders by: a local session, or any row with the same fields (a machine session, PRO-346). */
+export type SidebarOrderable = Pick<SessionEntry, "id" | "pinned" | "created" | "lastMessageAt" | "hasMessages">;
+
+export function compareSidebarSessions(a: SidebarOrderable, b: SidebarOrderable, sort: SidebarSort): number {
   if (sort !== "created") return compareMessageActivity(a, b, a.id, b.id);
   return Number(b.pinned) - Number(a.pinned)
     || (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0)

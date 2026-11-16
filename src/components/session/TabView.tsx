@@ -4,6 +4,7 @@ import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQu
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
+import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
@@ -15,6 +16,7 @@ import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, SignInNotice, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
@@ -30,6 +32,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { getTerminalState, openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
+import { MachineMessage } from "@/components/machines/MachineMessage";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
@@ -894,6 +897,8 @@ export function TabView({
             if (viewError) clearTabViewError(tab.id);
             setDraft(tab.id, v);
             if (collabLive && v) presenceTyping(shared!.key);
+            // Not switched to another account while the person types here (#981).
+            if (local && v) noteComposerTyping(session.id, tab.id);
           }}
           onSend={send}
           sentAfter={sentAfter}
@@ -934,7 +939,8 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
+          heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
         />
         </>
@@ -1043,7 +1049,14 @@ export function TabView({
         </Button>
       </div>
     )}
-    {signIn && <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />}
+    {signIn && (signIn.machine ? (
+      // A machine's agent signs in there, from its page (21.09), not through an organization's logins.
+      <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="machine-agent-sign-in">
+        <MachineMessage kind="signIn" name={signIn.machine} agent={cloudAgentLabel(tab.harness)} />
+      </div>
+    ) : (
+      <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />
+    ))}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
     {earlier.length > 0 && (
       // The tab held other conversations before this one: another agent was run in its terminal, or the same one on something else.

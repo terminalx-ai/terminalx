@@ -18,7 +18,7 @@ describe("sections behind an Experimental switch", () => {
 describe("Settings → Machines behind Experimental → Machines (PRO-342)", () => {
   it("is hidden, and none of its rows findable, unless experimental.machines is on", () => {
     const rows = settingsInSection("machines");
-    expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.pairingCode", "machines.yours", "machines.computers"]);
+    expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.thisMac", "machines.pairingCode", "machines.yours", "machines.computers"]);
     try {
       noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true, localVmTasks: true });
       expect(settingsSectionOffered("machines")).toBe(false);

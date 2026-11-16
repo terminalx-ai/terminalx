@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSecondsLeft } from "@/components/pairing/pairingText";
 import { errorMessage } from "@/lib/api";
 import { machinesApi } from "@/lib/machines";
+import { dismissMachineToast, noteMachinePairFailed } from "@/lib/machineToasts";
 import { MACHINE_CODE_PREFIX, type InspectedMachineCode, type MachinePairingFailure, type MachineRoute, type PairedMachine } from "@/types/machines";
 
 /** What went wrong, and whether the same code may be tried again. */
@@ -58,7 +59,23 @@ export function useMachinePairing({ askOnRead, onPaired }: { askOnRead: boolean;
   const inspected = "inspected" in step ? step.inspected : null;
   const remaining = useSecondsLeft(inspected?.expiresAt ?? null);
 
+  // A pairing that fails while the person is away from this window (at the other
+  // computer, choosing Allow) also says so as a toast (21.09); the next attempt,
+  // or closing the dialog, takes it back.
+  const failedToast = useRef<string | null>(null);
+  const clearFailedToast = () => {
+    if (failedToast.current) dismissMachineToast(failedToast.current);
+    failedToast.current = null;
+  };
+  useEffect(() => clearFailedToast, []);
+  const toastFailure = (found: InspectedMachineCode, reason: MachinePairingFailure, text: string) => {
+    if (typeof document === "undefined" || document.hasFocus()) return;
+    const copy = failureCopy(reason, found.machine.name);
+    failedToast.current = noteMachinePairFailed(found.machine.name, copy.detail, copy.retry ? () => void pair(text, found) : null);
+  };
+
   const pair = async (text: string, found: InspectedMachineCode) => {
+    clearFailedToast();
     const mine = ++attempt.current;
     waitingNow.current = true;
     setStep({ kind: "waiting", inspected: found });
@@ -68,6 +85,7 @@ export function useMachinePairing({ askOnRead, onPaired }: { askOnRead: boolean;
       if (!result.paired) {
         if (result.reason === "cancelled") return;
         setStep({ kind: "failed", inspected: found, reason: result.reason });
+        toastFailure(found, result.reason, text);
         return;
       }
       let machine = result.machine;

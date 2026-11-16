@@ -171,7 +171,9 @@ describe("settings in the command palette", () => {
     fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("account"));
+    // PRO-401: the pages are in design 07.05's order, General first.
+    expect(pages.slice(0, 8).map((row) => row.id.replace("palette:settings-page:", ""))).toEqual(["general", "account", "appearance", "shortcuts", "integrations", "devices", "agents", "environment"]);
+    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("general"));
   });
 
   it("lists each project under the pages, and opens that project's settings", async () => {
@@ -207,22 +209,22 @@ describe("settings in the command palette", () => {
     const { input } = palette();
     await narrowToSettings(input);
     fireEvent.keyDown(input, { key: "Backspace" });
-    expect(await screen.findByRole("group", { name: "Views and commands" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "App" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
     await narrowToSettings(input);
     fireEvent.click(screen.getByRole("tab", { name: "All" }));
     expect(input.getAttribute("placeholder")).not.toBe("Search settings…");
-    expect(await screen.findByRole("group", { name: "Views and commands" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "App" })).toBeTruthy();
   });
 
   it("narrows to commands under Actions and keeps the query across tabs", async () => {
     const { input } = palette();
     fireEvent.change(input, { target: { value: "theme" } });
     await screen.findByRole("group", { name: "Settings" });
-    expect(screen.getByRole("group", { name: "Views and commands" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "App" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Actions" }));
     expect((input as HTMLInputElement).value).toBe("theme");
-    expect(input.getAttribute("placeholder")).toBe("Search views and commands…");
+    expect(input.getAttribute("placeholder")).toBe("Search actions…");
     await waitFor(() => expect(groupIds()).toEqual(["palette-group-commands"]));
     expect(screen.getAllByRole("option").every((option) => option.id.startsWith("command:"))).toBe(true);
     fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
@@ -252,7 +254,7 @@ describe("settings in the command palette", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
     rerender(<CommandPalette open={false} {...props} />);
     rerender(<CommandPalette open {...props} />);
-    expect(await screen.findByRole("group", { name: "Views and commands" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "App" })).toBeTruthy();
     expect(screen.getByLabelText("Command palette search").getAttribute("placeholder")).not.toBe("Search settings…");
     expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
   });

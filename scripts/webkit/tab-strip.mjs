@@ -129,7 +129,7 @@ async function app(fixture, viewport) {
   // the branch's latest session: the first one, whose tabs the checks count and
   // whose issue, automation and pipeline chips the header shows.
   const list = (await sidebar(page)).locator('[data-testid="conversation-list"]');
-  await list.getByRole("button", { name: /^raccoon\/438-browser-style-tab-strip, 2 sessions$/ }).click();
+  await list.getByRole("button", { name: /^raccoon\/438-browser-style-tab-strip, / }).click();
   // Attached, not visible: the narrowest header draws the row as its menu alone.
   await page.locator('[data-testid="workspace-tab-strip"] [role="tab"]').first().waitFor({ state: "attached" });
   await page.waitForTimeout(250);

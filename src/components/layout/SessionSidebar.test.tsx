@@ -51,7 +51,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const rowsIn = (element: HTMLElement) => within(element).getAllByRole("listitem").map((row) => row.querySelector("[title]")?.getAttribute("title"));
 
 async function boot(list: SessionEntry[]) {
@@ -69,32 +69,32 @@ describe("new-chat entry points", () => {
     expect(screen.getByRole("button", { name: "main, Talk here", description: /Status: In review$/ })).toBeTruthy();
   });
 
-  it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
+  it("opens the composer from the New session destination and a project's +, without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
-    mount();
-    const titlebar = screen.getByTestId("sidebar-titlebar");
-    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
-    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
+    const onNewSession = vi.fn();
+    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+    // The titlebar only hides the sidebar: New session and Search are destinations (02.01).
+    expect(within(screen.getByTestId("sidebar-titlebar")).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Hide sidebar"]);
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Destinations" })).getByRole("button", { name: "New session" }));
+    expect(onNewSession).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "New chat in web" }));
     expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });
 
-describe("Home navigation (PRO-183)", () => {
+describe("Overview navigation (PRO-183, PRO-384)", () => {
   it.each(["simple", "list"] as const)("returns from a session in the %s sidebar", async (sidebarLayout) => {
     await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
     prefs.setPrefs({ sidebarLayout });
     store.selectSession("here");
     mount();
-    const home = screen.getByRole("button", { name: "Home" });
+    const home = screen.getByRole("button", { name: /^Overview/ });
     expect(home.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(home);
 
-    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().view).toBe("agents");
     expect(store.getSessionStore().selectedSessionId).toBeNull();
     expect(home.getAttribute("aria-pressed")).toBe("true");
     expect(store.getSessionStore().sessions).toHaveLength(1);
@@ -444,7 +444,7 @@ describe("the conversation list", () => {
     expect(screen.getByRole("region", { name: "Chats" }).querySelectorAll("[data-agent-id]")).toHaveLength(0);
   });
 
-  it("gathers the conversations on one branch under it, and shows a project's latest few branches before View all", async () => {
+  it("gathers the conversations on one branch under it, and lists all of a project's branches (no View all)", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([
       session("m1", "/repos/web", at(9)),
@@ -460,9 +460,8 @@ describe("the conversation list", () => {
     expect(within(web).getByText("Talk m1")).toBeTruthy();
     expect(within(web).getByText("Talk m2")).toBeTruthy();
 
-    expect(within(web).queryByRole("button", { name: "b1, Talk w1" })).toBeNull();
-    fireEvent.click(within(web).getByRole("button", { name: "View all" }));
     expect(within(web).getByRole("button", { name: "b1, Talk w1" })).toBeTruthy();
+    expect(within(web).queryByRole("button", { name: "View all" })).toBeNull();
   });
 
   it("keeps a branch to one row, for whichever of its sessions is open, when its sessions are tabs in the tab bar", async () => {
@@ -471,16 +470,15 @@ describe("the conversation list", () => {
     await boot([session("m1", "/repos/web", at(9)), session("m2", "/repos/web", at(8), { tabs: [{ id: "m2-tab", title: "Talk m2", harness: "claude", model: "", permissionMode: "auto", status: "waiting", created: "", modified: "" }] })]);
     mount();
     const web = screen.getByRole("group", { name: "web" });
-    // Not a count with the sessions under it: one row, named by the branch, that opens its latest session.
-    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
-    expect(within(web).queryByText("Talk m1")).toBeNull();
-    expect(within(web).queryByText("Talk m2")).toBeNull();
+    // Not a count with the sessions under it: one row, read out by its branch and named by its latest session, that opens it.
+    const main = within(web).getByRole("button", { name: "main, Talk m1" });
+    expect(within(web).getAllByText(/^Talk m/)).toHaveLength(1);
     // The row's state is the most pressing among them: its mark, with no label on the row.
     expect(main.querySelector("[data-session-status]")?.getAttribute("data-status-label")).toBe("Needs you");
     expect(within(main).queryByText("Needs you")).toBeNull();
     fireEvent.click(main);
-    expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
-    expect(within(web).queryByText("Talk m1")).toBeNull();
+    expect(within(web).getByRole("button", { name: "main, Talk m1" }).getAttribute("aria-current")).toBe("true");
+    expect(within(web).getAllByText(/^Talk m/)).toHaveLength(1);
     expect(store.getSessionStore().selectedSessionId).toBe("m1");
   });
 
@@ -493,14 +491,14 @@ describe("the conversation list", () => {
     mount();
     const web = screen.getByRole("group", { name: "web" });
     // The branch's row stands for the sessions whose tabs are in its row of tabs.
-    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const main = within(web).getByRole("button", { name: "main, Talk m2" });
     const bare = within(web).getByRole("button", { name: /^Session m1/ });
     fireEvent.click(bare);
     expect(store.getSessionStore().selectedSessionId).toBe("m1");
     expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
     expect(main.getAttribute("aria-current")).toBeNull();
     // The branch's row opens a session with tabs: the latest of them.
-    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
+    fireEvent.click(within(web).getByRole("button", { name: "main, Talk m2" }));
     expect(store.getSessionStore().selectedSessionId).toBe("m2");
     expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
@@ -513,11 +511,14 @@ describe("the conversation list", () => {
     expect(within(screen.getByTestId("conversation-list")).getByRole("button", { name: /Start a chat/ })).toBeTruthy();
   });
 
-  it("names the app's destinations above the conversations, Home first", async () => {
+  it("names the app's destinations above the conversations as 02.01 does, with their shortcuts", async () => {
     await boot([]);
     mount();
     const destinations = screen.getByRole("toolbar", { name: "Destinations" });
-    expect(within(destinations).getAllByRole("button").map((button) => button.textContent)).toEqual(["Home", "Dashboard", "Issues", "Automations"]);
+    const ownText = (button: HTMLElement) => [...button.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("");
+    expect(within(destinations).getAllByRole("button").map(ownText)).toEqual(["Overview", "New session", "Search", "Automations", "Issues"]);
+    // A key chip on the first three, as bound now; none on the others.
+    expect(within(destinations).getAllByRole("button").map((button) => !!button.querySelector("kbd"))).toEqual([true, true, true, false, false]);
     expect(destinations.compareDocumentPosition(screen.getByTestId("conversation-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
@@ -1014,14 +1015,9 @@ describe("row extras and unread reminders (PRO-179)", () => {
     await boot([row]);
     prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
     mount();
-    if (sidebarLayout === "simple") {
-      // A working row ends in its time, as 02.04 draws it; its lines show once it stops.
-      await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
-      expect(screen.queryByText("+12")).toBeNull();
-    } else {
-      // The chat list keeps its own time column, and its lines beside it.
-      expect(await screen.findByText("+12")).toBeTruthy();
-    }
+    // A working row ends in its time, as 02.04 draws it, in either layout; its lines show once it stops.
+    await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
+    expect(screen.queryByText("+12")).toBeNull();
     expect(store.getSessionStore().selectedSessionId).not.toBe("background");
     additions = 27;
     await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
@@ -1100,10 +1096,9 @@ describe("custom order (PRO-169)", () => {
     await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
     mount();
     fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
-    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Sort by: Updated" }), { key: "ArrowRight" });
-    expect(screen.queryByRole("menuitemcheckbox", { name: "Custom order" })).toBeNull();
     expect((await screen.findByRole("menuitemradio", { name: "Updated" })).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Custom" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Custom order" }).getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Custom order" }));
     // The handle names the displayed conversation, not its hidden generated branch.
     await screen.findByRole("button", { name: "Reorder Talk older" });
     const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
@@ -1111,12 +1106,12 @@ describe("custom order (PRO-169)", () => {
     act(() => prefs.setPrefs({ sidebarLayout: "list" }));
     await screen.findByRole("button", { name: "Reorder Talk older" });
     expect(rowIds()).toEqual(["older", "recent"]);
+    // Updated and Created are one choice; Custom order is a checkbox beside them, and checked it wins.
     const choose = async (current: string, next: string) => {
       fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
-      fireEvent.keyDown(await screen.findByRole("menuitem", { name: `Sort by: ${current}` }), { key: "ArrowRight" });
-      const choices = await Promise.all(["Updated", "Created", "Custom"].map((name) => screen.findByRole("menuitemradio", { name })));
-      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current]);
-      fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+      const choices = [...await Promise.all(["Updated", "Created"].map((name) => screen.findByRole("menuitemradio", { name }))), screen.getByRole("menuitemcheckbox", { name: "Custom order" })];
+      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current === "Custom" ? "Custom order" : current]);
+      fireEvent.click(next === "Custom" ? screen.getByRole("menuitemcheckbox", { name: "Custom order" }) : screen.getByRole("menuitemradio", { name: next }));
       await waitFor(() => expect(prefs.getPrefs().sidebarSort).toBe(next.toLowerCase()));
     };
     await choose("Custom", "Created");

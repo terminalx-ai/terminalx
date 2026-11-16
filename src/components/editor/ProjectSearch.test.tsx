@@ -7,7 +7,7 @@ const { invoke, ask } = vi.hoisted(() => ({ invoke: vi.fn(), ask: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children, Kbd: ({ children }: { children: React.ReactNode }) => <kbd>{children}</kbd> }));
 
 const { ProjectSearch } = await import("./ProjectSearch");
 const { openProjectSearch } = await import("@/lib/projectSearch");
@@ -141,12 +141,45 @@ describe("ProjectSearch", () => {
     fireEvent.change(screen.getByPlaceholderText("Search in project"), { target: { value: "archive_script" } });
     await screen.findByText("No matches for “archive_script”");
     expect(screen.getByText("0 matches")).toBeTruthy();
-    expect(screen.getByText("Match case and Whole word are on.")).toBeTruthy();
+    // PRO-401: the same text is there once the toggles are off, so the message names what they hide.
+    await waitFor(() => expect(screen.getByText(/^Match case and Whole word are on\./).textContent).toBe("Match case and Whole word are on. The code uses foo; try turning them off."));
+    expect(screen.queryByRole("button", { name: /^Search for/ })).toBeNull();
     expect(screen.getByText("Toggles stay on for the next search")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Turn off Match case and Whole word" }));
     await screen.findByText("src/a.ts");
     expect(invoke).toHaveBeenLastCalledWith("search_text", expect.objectContaining({ query: "archive_script", caseSensitive: false, wholeWord: false, regex: false }));
     expect(screen.getByRole("button", { name: "Match case" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("says the name the code uses when the query is written another way, and searches for it", async () => {
+    invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command !== "search_text") throw new Error(`Unexpected command: ${command}`);
+      if (args.query === "archiveScript") return { hits: [hit("src/scripts.ts", 4, "run(archiveScript);", [[4, 17]])], files: 1, capped: false };
+      // Its words, with or without a separator, in any case: found inside a longer line.
+      if (args.regex && args.query === "archive[_\\-. ]?script" && !args.caseSensitive && !args.wholeWord) return { hits: [hit("src/scripts.ts", 4, "run(archiveScript);", [[4, 17]])], files: 1, capped: false };
+      return { hits: [], files: 0, capped: false };
+    });
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    fireEvent.click(await screen.findByRole("button", { name: "Match case" }));
+    fireEvent.change(screen.getByPlaceholderText("Search in project"), { target: { value: "archive_script" } });
+    await screen.findByText("No matches for “archive_script”");
+    await waitFor(() => expect(screen.getByText(/^Match case is on\./).textContent).toBe("Match case is on. The code uses archiveScript."));
+    fireEvent.click(screen.getByRole("button", { name: "Search for archiveScript" }));
+    await screen.findByText("src/scripts.ts");
+    expect((screen.getByPlaceholderText("Search in project") as HTMLInputElement).value).toBe("archiveScript");
+  });
+
+  it("has no Replace control beside the search field, and the replace row closes itself", async () => {
+    render(<ProjectSearch sessionId="s1" root="/repo" />);
+    openWith("f");
+    await screen.findByPlaceholderText("Search in project");
+    expect(screen.queryByLabelText("Show replace")).toBeNull();
+    expect(screen.queryByLabelText("Hide replace")).toBeNull();
+    openWith("h");
+    expect(await screen.findByLabelText("Replace with")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Hide replace"));
+    await waitFor(() => expect(screen.queryByLabelText("Replace with")).toBeNull());
   });
 
   it("offers no toggle hint when nothing is on", async () => {

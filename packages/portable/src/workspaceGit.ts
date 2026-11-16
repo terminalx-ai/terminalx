@@ -216,6 +216,12 @@ export interface RuntimeResources {
   memory: { totalBytes: number; availableBytes: number } | null;
   /** The disk that holds the workspace; null when it could not be asked. */
   storage: { totalBytes: number; availableBytes: number; totalInodes: number; availableInodes: number } | null;
+  /**
+   * The processor (PRO-350): its logical cores, and how busy all of them
+   * were, 0 to 1, since the previous call (null on the first, which has
+   * nothing to compare with). Absent from an older runtime.
+   */
+  cpu?: { cores: number; usage: number | null } | null;
   observedAt: number;
 }
 

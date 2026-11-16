@@ -63,6 +63,8 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { CloudPortsView } from "@/components/cloud/CloudPorts";
+import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
+import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
@@ -151,12 +153,16 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
         <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
       )
     : null;
+  // A machine session's terminals are the machine's, under the panel (21.08).
+  const dock = cloud.machine ? <MachineTerminalDock cloud={cloud} /> : undefined;
   if (!cloud.fileSource) {
     return (
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
-          {cloud.locked === "deleted"
+          {cloud.machine
+            ? `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
+            : cloud.locked === "deleted"
             ? "This workspace was deleted. Its changes, files and Git went with it, and any previews that were open ended."
             : cloud.locked
               ? "Changes, Files and Git are only shown to people this workspace is shared with."
@@ -173,6 +179,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
             {ports(false)}
           </section>
         )}
+        {dock}
       </aside>
     );
   }
@@ -195,6 +202,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
+      dock={dock}
     />
   );
 }
@@ -429,6 +437,8 @@ export function SessionView({
   // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
   const backend = cloud?.backend ?? localSessionBackend(session.id);
+  // A session on a paired machine (PRO-347): the cloud views, with the machine's chip, strips and terminal dock.
+  const machine = cloud?.machine;
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
@@ -472,7 +482,8 @@ export function SessionView({
   const savedPanes = [...(savedLayout.panes ?? [])].sort((a, b) => Number(b.id === savedLayout.focusedPane) - Number(a.id === savedLayout.focusedPane));
   const restored = !cloud && !compact ? savedPanes.flatMap((pane) => candidates.filter((tab) => tabKey(tab.kind, tab.id) === pane.active))[0] : undefined;
   const requested = followedSelection(session, terminals.selected[session.id] ?? restored);
-  const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
+  // A machine's terminals are in the side panel's dock, never a tab of the main area.
+  const terminalIds = local ? shellPanes.map((pane) => pane.id) : machine ? [] : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
   // the tab it shows until this person picks another (or that tab closes), so a tab someone else
@@ -575,7 +586,10 @@ export function SessionView({
 
   useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
-    else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
+    else if (machine && cloud && cloudTerminals.length) {
+      selectCloudTerminal(cloud.workspaceKey, cloudTerminals[cloudTerminals.length - 1].id);
+      setPrefs({ panelOpen: true, panelTerminalOpen: true });
+    } else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   // What the session's agents have used, at API list prices (PRO-273), beside
   // where it is; Settings → Experimental → Session cost.
@@ -603,8 +617,10 @@ export function SessionView({
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {identityPath && githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(identityPath)} />}
+            {/* A machine session names its machine first, with how it is reached (21.08); the sidebar names its project. */}
+            {machine && cloud && <MachineSessionChip cloud={cloud} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
-            {!(cloud && cloud.projectName === session.title) && (
+            {!machine && !(cloud && cloud.projectName === session.title) && (
               <>
                 <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : quick ? "A quick chat: it has no project" : project?.name} data-testid="session-project">
                   {cloud ? cloud.projectName : quick ? sessionProjectName(session, project) : (project?.name ?? "project")}
@@ -761,7 +777,7 @@ export function SessionView({
                   : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
               </span>
             )}
-            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
+            {cloud && !machine && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -791,8 +807,8 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
-            {(!stripRow || compact) && !cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && (
+            {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
@@ -807,7 +823,7 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            {activeTab && terminalOffer && !terminalOffer.available && (
+            {activeTab && terminalOffer && !terminalOffer.available && !(machine && !compact) && (
               // Not offered here (an older runtime, or an agent with no terminal): the switch stays in its place, off, and says why.
               <WithTooltip label={terminalOffer.reason ?? undefined}>
                 <Button
@@ -841,6 +857,19 @@ export function SessionView({
         </header>
         {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
         {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
+        {machine && cloud && !compact && (
+          <MachineSessionStrips
+            session={session}
+            selected={selected}
+            cloud={cloud}
+            newTab={<TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
+            terminalView={
+              activeTab && terminalOffer?.available
+                ? { on: activeInTerminal, disabled: switching, toggle: () => void toggleTabView(session, activeTab, viewPlace) }
+                : null
+            }
+          />
+        )}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (
           <WorkspaceTabStrip
@@ -852,7 +881,7 @@ export function SessionView({
             trailing={compact ? undefined : <TabActions key={session.id} session={session} selected={selected} />}
           />
         )}
-        {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
+        {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {local && !cloud && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
@@ -907,7 +936,7 @@ export function SessionView({
                   )}
                 </div>
               ))}
-              {cloud && cloud.client && cloudTerminals.map((terminal) => (
+              {cloud && !machine && cloud.client && cloudTerminals.map((terminal) => (
                 <div
                   key={terminal.id}
                   id={tabPanelId({ kind: "terminal", id: terminal.id })}
@@ -953,7 +982,16 @@ export function SessionView({
                     <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
                   ) : (
                     // One state at a time: stopped, loading, or empty (with what this person can do about it).
-                    cloud.asleep ? (
+                    machine ? (
+                      !cloud.connected ? (
+                        <span data-testid="machine-session-loading">{machine.state.state === "offline" ? `${machine.name} isn't reachable.` : `Connecting to ${machine.name}…`}</span>
+                      ) : (
+                        <>
+                          <span>No tabs in this session</span>
+                          <span className="text-xs text-faint">Add an agent tab, or open a terminal on {machine.name} from the side panel.</span>
+                        </>
+                      )
+                    ) : cloud.asleep ? (
                       <>
                         <span>Workspace stopped</span>
                         <span className="text-xs text-faint">

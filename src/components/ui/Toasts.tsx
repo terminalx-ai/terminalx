@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AlertCircle, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, TriangleAlert, X } from "@/icons";
+import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
@@ -22,7 +23,9 @@ export function Toasts() {
       <WorkspaceSetupToasts />
       <AgentLoginToasts />
       <SettingsLinkToasts />
+      <MachineToasts />
       {notices.map((n) => {
+        if (n.action === "open") return <MachineNoticeCard key={n.id} notice={n} />;
         const tab = store.sessions.find((s) => s.id === n.sessionId)?.tabs.find((t) => t.id === n.tabId);
         const Icon = n.kind === "started" ? Play : n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;
         return (
