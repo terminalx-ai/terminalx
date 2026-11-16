@@ -622,10 +622,11 @@ pub fn actor(params: &Value) -> Result<Actor> {
 /// - `terminal`: `openTerminal`, and observations whose output says the pane's size.
 /// - `closeTab`: `closeTab`, closing a tab as the desktop's tab strip does.
 /// - `questions`: `questions`, answering an agent's question as the desktop's card does (#979).
+/// - `sessionAccounts`: `create` takes an `account` and starts the session on it (#980).
 /// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
 ///   resolves setup and archive scripts and the archive timeout from them.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -930,6 +931,9 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
         title: Option<String>,
         #[serde(default)]
         prompt: String,
+        /// The agent account the phone chose (#980); none starts on the agent's default, as before accounts.
+        #[serde(default)]
+        account: Option<String>,
     }
     use crate::session_ops::{NewQuickChat, NewSession, NewTab};
     let p: Create = serde_json::from_value(params.clone()).context("Invalid new session request.")?;
@@ -945,8 +949,9 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
     // The title a session started from the window gets: the prompt's first line.
     let title = p.title.filter(|title| !title.trim().is_empty())
         .or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
+    let account = p.account.as_deref().filter(|id| !id.trim().is_empty());
     let entry = match (p.quick, p.project_id) {
-        (true, None) => crate::session_ops::create_quick_chat_blocking(&**manager.sink(), NewQuickChat { parent: None, section_id: None, title, cwd: None, tab: Some(tab) })
+        (true, None) => crate::session_ops::create_quick_chat_blocking_on(&**manager.sink(), NewQuickChat { parent: None, section_id: None, title, cwd: None, tab: Some(tab) }, account)
             .map_err(|error| anyhow::anyhow!(error))?,
         (false, Some(id)) => {
             let project = crate::store::projects::by_public_id(&id)?;
@@ -964,7 +969,7 @@ fn create_session(manager: &crate::session::SessionManager, params: &Value) -> R
                 orchestrate: false,
             };
             crate::session_ops::validate_session_target(&req).map_err(|error| anyhow::anyhow!(error))?;
-            crate::session_ops::create_session_blocking(&**manager.sink(), req).map_err(|error| anyhow::anyhow!(error))?
+            crate::session_ops::create_session_blocking_on(&**manager.sink(), req, account).map_err(|error| anyhow::anyhow!(error))?
         }
         _ => bail!("Choose a project or a quick chat for the new session."),
     };

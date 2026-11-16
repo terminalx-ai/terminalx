@@ -18,6 +18,7 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, PERMISSION_MODES, modeIsUnguarded, modelGroups, modelNote, runningModelName } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
+import { AccountRadioItems } from "./SessionAgentControls";
 
 /**
  * Agent, model, effort and permissions behind one quiet button: `Opus 5.5
@@ -27,7 +28,7 @@ import type { useSessionAgent } from "@/lib/useSessionAgent";
  * marked as a warning and Plan in the composer's plan colour.
  */
 export function AgentMenu({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
-  const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
+  const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
   const menu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modelText = unavailableModel ? `Unavailable: ${unavailableModel}` : (model ? runningModelName(model) : (harness?.name ?? "Agent"));
   const effortText = effort ? (EFFORT_LABEL[effort] ?? effort) : null;
@@ -42,13 +43,14 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           type="button"
           disabled={disabled}
           data-testid="agent-menu"
-          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}, ${modeText}`}
-          title={`${harness?.name ?? "Agent"} · ${modeText}`}
+          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}${account ? ` on ${account.label}` : ""}, ${modeText}`}
+          title={`${harness?.name ?? "Agent"}${account ? ` · ${account.label}` : ""} · ${modeText}`}
           className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-[13px] text-foreground transition-colors hover:bg-veil-raised disabled:opacity-50"
         >
           {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
           <span className="truncate" data-testid="agent-model">{modelText}</span>
           {effortText && <span className="shrink-0 text-muted-foreground" data-testid="agent-effort">{effortText}</span>}
+          {account && <span className="min-w-0 max-w-[9rem] truncate text-[12px] text-muted-foreground" data-testid="agent-account">{account.label}</span>}
           <span
             data-testid="agent-mode"
             className={cn("flex shrink-0 items-center gap-1 text-[11.5px]", bypass ? "text-warning" : mode === "plan" ? "text-info" : "text-muted-foreground")}
@@ -73,6 +75,22 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
             {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
           </DropdownMenuItem>
         })}
+
+        {/* Only an agent with more than one account offers the choice (#980). */}
+        {harness && accounts && account && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <span>Account</span>
+                <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{account.label}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-[14rem]">
+                <AccountRadioItems accounts={accounts.accounts} value={account.id} onValueChange={selectAccount} />
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </>
+        )}
 
         {harness && (model || unavailableModel || allowDefaultEffort) && (
           <>

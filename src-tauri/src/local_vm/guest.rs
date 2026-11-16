@@ -1482,7 +1482,7 @@ impl Guest {
             .context(
                 "Retained Codex rollout is missing; recovery will not start a new conversation",
             )?,
-            "claude" => crate::harness::claude::transcript::locate(&entry.cwd, provider)
+            "claude" => crate::agent_data::locate_claude(tab, &entry.cwd, provider)
                 .context("Guest Claude transcript home is missing")?,
             _ => bail!("Unsupported provider recovery"),
         };

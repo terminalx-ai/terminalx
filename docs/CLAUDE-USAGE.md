@@ -223,6 +223,49 @@ meter, "stale" or "expired" beside its percentage, "(last known)" in the
 details. A Codex window past its reset reads "Window expired — awaiting update",
 never "100% used · Resets in now".
 
+## Usage per account (#980)
+
+With several Claude Code or Codex accounts (docs/AGENT-ACCOUNTS.md), the
+top-level `windows` stay This Mac's login's, read, judged and gated exactly as
+above, and the snapshot gains `accounts`: one entry per listed account of every
+agent that has more than one, in Settings' order, each the core's
+`AgentAccountUsage` (`accountId`, `label`, `windows`, `error`, `unavailable`)
+plus `agent`, since `local` and `api-key` are ids every agent has. With one
+account per agent `accounts` is empty and not sent, so nothing changes.
+`status/usage/accounts.rs` does this:
+
+- **Own credential.** An added Claude account is read with the token in the
+  generic-password item Claude Code keys to its directory,
+  `Claude Code-credentials-<h>` (`claude_dir::keychain_service`), through the
+  same `security find-generic-password -w`; when there is no such item, its
+  directory's `.credentials.json`; a timed-out or failed Keychain read
+  outranks an emptied file, as for `local`. The person's unsuffixed item is
+  never read for an account. A Codex account is asked through
+  `account/rateLimits/read` of an app-server whose `CODEX_HOME` is its own
+  directory. TerminalX never refreshes, writes or copies a token; a login that
+  has expired shows as that account's error until the agent refreshes it.
+- **Own gates.** Each account has its own in-flight flag, backoff (Claude one
+  minute to four hours, Codex 30 seconds to fifteen minutes, Retry-After
+  honoured) and error. One account's failure shows "Usage unavailable" for it
+  alone; its last windows stay, as `local`'s do. The button clears a local
+  (credential) pause, never a provider one.
+- **Cadence.** Accounts with a running tab (the launch registry,
+  `agent_keys::running`) are asked at the automatic interval; idle ones at
+  most every fifteen minutes; a window past its reset is asked again at once;
+  the button asks every account. Accounts are asked together, after `local`'s
+  refresh, so a slow account delays neither `local` nor another.
+- **Matching.** A Claude account's reply goes through the same `judge` as
+  `local`'s, against that account's windows only; a Codex reply replaces that
+  account's windows. Live status-line usage from a tab on an added account is
+  still refused for the top-level windows (its account differs) and is not
+  used for the account: its endpoint poll is the account's source.
+- **Shown.** An `apiKey` account is `unavailable` with no `error`: no
+  subscription windows. `local`'s entry repeats the top-level windows and its
+  refresh error. Logs name an account by its opaque id, never its label, and
+  never carry a token. The tab's context popover names the tab's account,
+  shows its windows and its login's plan, then each other account under its
+  label; Stats shows every account's windows under its label.
+
 ## Validation and remaining live check
 
 Automated coverage includes controlled-clock rollover, changed/identical samples,

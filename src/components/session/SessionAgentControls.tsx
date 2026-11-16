@@ -16,6 +16,34 @@ import {
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, runningModelName } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
+import type { AgentAccount } from "@/lib/agentAccounts";
+
+/** The accounts to start on, each with what makes it a different sign-in. */
+export function AccountMenuContent({ accounts, value, onValueChange }: { accounts: AgentAccount[]; value: string; onValueChange: (id: string) => void }) {
+  return (
+    <DropdownMenuContent align="start" className="min-w-[14rem] max-w-[var(--radix-dropdown-menu-content-available-width)]">
+      <DropdownMenuLabel>Account</DropdownMenuLabel>
+      <AccountRadioItems accounts={accounts} value={value} onValueChange={onValueChange} />
+    </DropdownMenuContent>
+  );
+}
+
+/** One radio row per account: its label, and a note for the default, an API key or a sign-in that is gone. */
+export function AccountRadioItems({ accounts, value, onValueChange }: { accounts: AgentAccount[]; value: string; onValueChange: (id: string) => void }) {
+  return (
+    <DropdownMenuRadioGroup value={value} onValueChange={onValueChange}>
+      {accounts.map((option) => {
+        const note = option.missing ? "sign in again" : option.isDefault ? "default" : option.kind === "apiKey" ? "API key" : null;
+        return (
+          <DropdownMenuRadioItem key={option.id} value={option.id} disabled={option.missing} className="whitespace-normal">
+            <span className="min-w-0 truncate">{option.label}</span>
+            {note ? <span className="ml-auto pl-3 text-[12px] text-faint">{note}</span> : null}
+          </DropdownMenuRadioItem>
+        );
+      })}
+    </DropdownMenuRadioGroup>
+  );
+}
 
 /**
  * Agent, model, effort and permission mode for a new session or agent tab.
@@ -29,8 +57,9 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
   /** Stretch the pills across their row, each name left and its chevron right, so the row is as wide as what is under it. */
   fill?: boolean;
 }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
   const agentMenu = useRowMenu();
+  const accountMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
   const modeMenu = useRowMenu();
@@ -58,6 +87,19 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {/* Only an agent with more than one account offers the choice (#980). */}
+      {harness && accounts && account && (
+        <DropdownMenu {...accountMenu.root}>
+          <DropdownMenuTrigger asChild {...accountMenu.trigger}>
+            <Button variant="secondary" size="sm" className={pill} title="Account" aria-label={`Account: ${account.label}`} disabled={disabled}>
+              <span className="truncate">{account.label}</span>
+              <ChevronDown className="text-faint" />
+            </Button>
+          </DropdownMenuTrigger>
+          <AccountMenuContent accounts={accounts.accounts} value={account.id} onValueChange={selectAccount} />
+        </DropdownMenu>
+      )}
 
       {harness && (model || unavailableModel || allowDefaultEffort) && (
         <DropdownMenu {...modelMenu.root}>

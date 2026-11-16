@@ -41,7 +41,7 @@ import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
-import { useModels } from "@/lib/models";
+import { modelLabel, useModels } from "@/lib/models";
 import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -52,6 +52,7 @@ import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
+import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/components/session/AccountSwitch";
 
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
@@ -317,6 +318,8 @@ export function TabView({
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
+  const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
   const busyNotice = live ? sendNotice ?? busyRefused : null;
   useEffect(() => {
@@ -779,6 +782,7 @@ export function TabView({
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}
+        accounts={tab.providerSessionId ? { choices: recovery === "signed_out" ? accountSwitch.targets : accountSwitch.withRoom, switching: accountSwitch.switching, error: accountSwitch.error, onSwitch: (account) => void accountSwitch.switchTo(account) } : null}
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}
         signInPending={loginPending === loginIncident && !loginIncident.cancelled}
         onSignIn={signInAgent ? () => void requestSignIn() : undefined}
@@ -861,6 +865,8 @@ export function TabView({
           </div>
         ) : (
         <>
+        <AccountSwitchNote tabId={tab.id} reportedModel={transcript.model} modelName={(id) => modelLabel(tab.harness, id)} />
+        {recovery !== "signed_out" && <AccountGoneNotice gone={accountSwitch.gone} targets={tab.providerSessionId ? accountSwitch.targets : []} switching={accountSwitch.switching} error={accountSwitch.error} onSwitch={(account) => void accountSwitch.switchTo(account)} />}
         {banner("composer")}
         {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">

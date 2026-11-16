@@ -31,7 +31,7 @@ import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/l
 import { TabView } from "./TabView";
 import { WorkspacePanes } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
-import { TabActions } from "./TabStrip";
+import { TabAccountLabel, TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
@@ -676,6 +676,8 @@ export function SessionView({
                 </button>
               </WithTooltip>
             )}
+            {/* The account the open tab's agent runs on, only when that agent has several (#980). */}
+            {local && !cloud && activeTab && <TabAccountLabel tab={activeTab} className={cn("ml-1 max-w-40 shrink-0 truncate text-[12px] text-muted-foreground", HEADER_TIGHT)} />}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
             {/* Autopilot is set up in the Branch tab; the header shows it only while it runs (docs/AUTOPILOT-PLACEMENT.md). */}
@@ -846,6 +848,7 @@ export function SessionView({
             selected={selected}
             readOnlyReason={backend.readOnlyReason}
             hideSingle={compact}
+            accounts={local && !cloud}
             trailing={compact ? undefined : <TabActions key={session.id} session={session} selected={selected} />}
           />
         )}

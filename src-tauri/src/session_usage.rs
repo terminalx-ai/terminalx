@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::harness::{claude, codex};
+use crate::harness::codex;
 use crate::stats::{self, PricedRequest};
 use crate::store::index::{self, SessionEntry, TabEntry};
 
@@ -156,8 +156,11 @@ fn claude_files(transcript: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn codex_rollout(id: &str) -> Option<PathBuf> {
-    [codex::home::managed_root().ok(), codex::home::user_root()]
+/// Codex rollout `id`: in the managed home of the added account the tab runs
+/// on first (#980), whose `sessions` is shared with the default managed
+/// home, then the default managed home and the person's own.
+fn codex_rollout(tab: &TabEntry, id: &str) -> Option<PathBuf> {
+    [crate::agent_data::codex_account_home_of(tab), codex::home::managed_root().ok(), codex::home::user_root()]
         .into_iter()
         .flatten()
         .find_map(|home| codex::home::find_rollout(&home, id))
@@ -169,15 +172,17 @@ pub trait Transcripts {
     fn codex(&self, id: &str) -> Option<PathBuf>;
 }
 
-/// The agents' own folders, as the app runs them.
-pub struct AgentHomes;
+/// The agents' own folders for one tab, as the app runs it: those of the
+/// agent account it runs on (#980), then the person's own, where every
+/// account's shared `projects` and `sessions` lead.
+pub struct AgentHomes<'t>(pub &'t TabEntry);
 
-impl Transcripts for AgentHomes {
+impl Transcripts for AgentHomes<'_> {
     fn claude(&self, cwd: &str, id: &str) -> Option<PathBuf> {
-        claude::transcript::locate(cwd, id)
+        crate::agent_data::locate_claude(self.0, cwd, id)
     }
     fn codex(&self, id: &str) -> Option<PathBuf> {
-        codex_rollout(id)
+        codex_rollout(self.0, id)
     }
 }
 
@@ -226,7 +231,7 @@ pub fn read_tab(cwd: &str, tab: &TabEntry, homes: &dyn Transcripts) -> Option<Ta
 pub fn refresh_tab(session_id: &str, tab_id: &str) -> anyhow::Result<Option<SessionEntry>> {
     let session = index::get(session_id)?;
     let Some(tab) = session.tabs.iter().find(|tab| tab.id == tab_id) else { return Ok(None) };
-    let Some(usage) = read_tab(&session.cwd, tab, &AgentHomes) else { return Ok(None) };
+    let Some(usage) = read_tab(&session.cwd, tab, &AgentHomes(tab)) else { return Ok(None) };
     store(session_id, tab_id, usage)
 }
 
@@ -237,7 +242,7 @@ pub fn refresh_session(session_id: &str) -> anyhow::Result<(SessionEntry, bool)>
     let session = index::get(session_id)?;
     let (mut latest, mut changed) = (session.clone(), false);
     for tab in &session.tabs {
-        if let Some(usage) = read_tab(&session.cwd, tab, &AgentHomes) {
+        if let Some(usage) = read_tab(&session.cwd, tab, &AgentHomes(tab)) {
             if let Some(updated) = store(session_id, &tab.id, usage)? {
                 latest = updated;
                 changed = true;
