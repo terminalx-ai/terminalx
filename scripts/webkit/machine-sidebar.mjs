@@ -216,6 +216,34 @@ for (const colorScheme of ["light", "dark"]) {
     await shoot(page, `two-machines-${colorScheme}`);
   }
 
+  // The overview: machine sessions in the table, a Where column naming each machine, and the All machines menu with a count per machine.
+  {
+    await page.getByRole("button", { name: /^Dashboard/ }).first().click();
+    await page.getByRole("button", { name: "Table", exact: true }).click();
+    const table = page.getByRole("table", { name: "Sessions", exact: true });
+    await table.locator("tbody tr[data-session]").first().waitFor();
+    const headers = (await table.locator("thead th").allTextContents()).map((text) => text.trim());
+    const whereIndex = headers.indexOf("Where");
+    const rows = await table.locator("tbody tr[data-session]").evaluateAll((trs, index) => trs.map((tr) => ({ key: tr.dataset.session, where: tr.children[index]?.textContent?.trim() ?? "" })), whereIndex);
+    const whereOf = (key) => rows.find((row) => row.key === key)?.where;
+    await shoot(page, `overview-table-${colorScheme}`);
+    await page.getByRole("button", { name: /All machines/ }).click();
+    const items = page.getByRole("menuitem");
+    await items.first().waitFor();
+    const entries = (await items.allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+    // Past the menu's open animation, so the shot shows it as it rests.
+    await page.waitForTimeout(400);
+    await shoot(page, `overview-machines-menu-${colorScheme}`);
+    await page.keyboard.press("Escape");
+    const count = (name) => Number(entries.find((entry) => entry.startsWith(name))?.slice(name.length).trim());
+    failed += report(`overview (${colorScheme})`, {
+      "the table has a Where column": whereIndex >= 0,
+      "machine sessions are listed with their machine's name": whereOf("machine:m-mini:p-tx:s-flaky") === "Mac mini" && whereOf("machine:m-server:p-tx2:s-cache") === "dev-server",
+      "the menu offers every machine and this Mac": ["All machines", "This Mac", "Mac mini", "dev-server"].every((name) => entries.some((entry) => entry.startsWith(name))),
+      "each machine has its session count": count("Mac mini") === rows.filter((row) => row.where === "Mac mini").length && count("dev-server") === rows.filter((row) => row.where === "dev-server").length && count("Mac mini") > 0,
+    }, { headers, rows, entries });
+  }
+
   // A session row opens the machine's view on it.
   {
     await page.locator('[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"] button').first().click();
