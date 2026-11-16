@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { PrActivity, PrConversation as Conversation, PrConversationAccess, PrConversationAction } from "@terminalx/portable/workspaceGit";
+import type { PrActivity, PrConversation as Conversation, PrConversationAccess, PrConversationAction, PrReviewer } from "@terminalx/portable/workspaceGit";
 import type { GitSource } from "@/lib/gitSource";
 import type { SessionPr } from "@/lib/sessionPrs";
 import { usePref } from "@/lib/prefs";
@@ -24,6 +24,8 @@ const stateLabel = (state: string) => labels[state] ?? state.toLowerCase().repla
 type ConversationProps = {
   source: Pick<GitSource, "conversation" | "cloud" | "canWrite" | "errorMessage">; row: SessionPr; active: boolean; refresh: number;
   onEdited: (title: string, body: string) => void;
+  /** Who reviews it and how many threads are open, for the PR's header line (PRO-394). */
+  onSummary?: (summary: { reviewers: PrReviewer[]; unresolvedThreads: number }) => void;
 };
 type ConversationAccess = { client?: PrConversationAccess; error?: string };
 
@@ -41,8 +43,13 @@ export function PrConversation(props: ConversationProps) {
   return <ConversationContent key={selected.current.generation} {...props} access={access} />;
 }
 
-function ConversationContent({ source, row, active, refresh, onEdited, access }: ConversationProps & { access: ConversationAccess }) {
+function ConversationContent({ source, row, active, refresh, onEdited, onSummary, access }: ConversationProps & { access: ConversationAccess }) {
   const [data, setData] = useState<Conversation | null>(null);
+  const summarise = useRef(onSummary);
+  summarise.current = onSummary;
+  useEffect(() => {
+    if (data) summarise.current?.({ reviewers: data.reviewers, unresolvedThreads: data.unresolvedThreads });
+  }, [data?.reviewers, data?.unresolvedThreads]);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -167,13 +174,13 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
   if (!source.conversation) return null;
   return <div className="mt-3 flex min-w-0 flex-col gap-4 text-xs" aria-label={`Conversation for PR #${row.pr!.number}`} aria-busy={loading || working}>
     {actionError && <div role="alert" className="rounded-md bg-destructive/10 p-2 text-destructive">{actionError}</div>}
-    {(access.error || error) && <div role="alert" className="rounded-md bg-destructive/10 p-2 text-destructive">{access.error || error}<Button size="xs" variant="ghost" disabled={working || loading} onClick={() => setRevision((value) => value + 1)}>Retry</Button></div>}
+    {(access.error || error) && <div role="alert" className="rounded-md bg-destructive/10 p-2 text-destructive">{access.error || error}<Button size="xs" className="text-xs" variant="ghost" disabled={working || loading} onClick={() => setRevision((value) => value + 1)}>Retry</Button></div>}
     {!data && !error && !access.error && <p className="text-faint">Loading conversation…</p>}
     {data && <>
       <section aria-label="Reviewers">
         <div className="flex items-center justify-between gap-2">
           <h3 className="font-medium">Reviewers · {data.reviewers.length}</h3>
-          {canApprove && <Button size="xs" variant="secondary" disabled={working} onClick={() => setApproval(data.viewer)}>Approve</Button>}
+          {canApprove && <Button size="xs" className="text-xs" variant="secondary" disabled={working} onClick={() => setApproval(data.viewer)}>Approve</Button>}
         </div>
         <Dialog open={approval !== null && approval === data.viewer && canApprove} onOpenChange={(show) => { if (!show) setApproval(null); }}>
           <DialogContent>
@@ -191,8 +198,8 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
             <span className="min-w-0 break-all">{reviewer.login}</span>
             <span className="text-faint">{stateLabel(reviewer.state)}</span>
             {editable && open && reviewer.kind !== "bot" && <span className="ml-auto flex gap-1">
-              {!reviewer.requested && reviewer.kind === "user" && <Button size="xs" variant="ghost" disabled={working} aria-label={`Re-request review from ${reviewer.login}`} onClick={() => void act({ kind: "request", login: reviewer.login, team: false })}>Re-request</Button>}
-              {reviewer.requested && <Button size="xs" variant="ghost" disabled={working} aria-label={`Remove reviewer ${reviewer.login}`} onClick={() => void act({ kind: "remove", login: reviewer.login, team: reviewer.kind === "team" })}>Remove</Button>}
+              {!reviewer.requested && reviewer.kind === "user" && <Button size="xs" className="text-xs" variant="ghost" disabled={working} aria-label={`Re-request review from ${reviewer.login}`} onClick={() => void act({ kind: "request", login: reviewer.login, team: false })}>Re-request</Button>}
+              {reviewer.requested && <Button size="xs" className="text-xs" variant="ghost" disabled={working} aria-label={`Remove reviewer ${reviewer.login}`} onClick={() => void act({ kind: "remove", login: reviewer.login, team: reviewer.kind === "team" })}>Remove</Button>}
             </span>}
           </li>)}
         </ul>
@@ -202,7 +209,7 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
           {searchError && <p role="alert" className="mt-1 text-destructive">{searchError}</p>}
           {query.trim().length >= 2 && !searching && !searchError && <ul aria-label="Reviewer search results" className="mt-1 space-y-1">
             {candidates.map((login) => <li key={login} className="flex flex-wrap items-center justify-between gap-2">
-              <span className="min-w-0 break-all">{login}</span><Button size="xs" variant="secondary" aria-label={`Request ${login}`} disabled={working || data.reviewers.some((reviewer) => reviewer.requested && reviewer.login.toLowerCase() === login.toLowerCase())} onClick={() => void act({ kind: "request", login, team: false })}>Request</Button>
+              <span className="min-w-0 break-all">{login}</span><Button size="xs" className="text-xs" variant="secondary" aria-label={`Request ${login}`} disabled={working || data.reviewers.some((reviewer) => reviewer.requested && reviewer.login.toLowerCase() === login.toLowerCase())} onClick={() => void act({ kind: "request", login, team: false })}>Request</Button>
             </li>)}
             {!candidates.length && <li className="text-faint">No matching users.</li>}
           </ul>}
@@ -210,7 +217,7 @@ function ConversationContent({ source, row, active, refresh, onEdited, access }:
       </section>
       <section aria-label="Description">
         <div className="mb-2 flex items-center justify-between gap-2"><h3 className="font-medium">Description</h3>
-          {editable && !editing && <Button size="xs" variant="ghost" onClick={() => { setTitle(data.title); setBody(data.body); setEditBase({ title: data.title, body: data.body }); setEditing(true); }}>Edit title and description</Button>}
+          {editable && !editing && <Button size="xs" className="text-xs" variant="ghost" onClick={() => { setTitle(data.title); setBody(data.body); setEditBase({ title: data.title, body: data.body }); setEditing(true); }}>Edit title and description</Button>}
         </div>
         {editing ? <form className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); if (editBase) void act({ kind: "edit", title: title.trim(), body, expectedTitle: editBase.title, expectedBody: editBase.body }); }}>
           <input aria-label="Pull request title" value={title} onChange={(event) => setTitle(event.target.value)} disabled={working} className="h-8 rounded-md border border-hairline bg-transparent px-2" />
@@ -254,6 +261,6 @@ const ActivityItem = memo(function ActivityItem({ item }: { item: PrActivity }) 
     </div>
     {item.kind === "force_push" ? <p className="font-mono text-faint">{item.before?.slice(0, 7) ?? "unknown"} → {item.after?.slice(0, 7) ?? "unknown"}</p>
       : nearby ? <Markdown text={long && !expanded ? `${preview}\n\n…` : item.body} remoteImages={false} webLinksOnly /> : <div className="h-16" />}
-    {long && <Button size="xs" variant="ghost" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "Show less" : "Show more"}</Button>}
+    {long && <Button size="xs" className="text-xs" variant="ghost" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "Show less" : "Show more"}</Button>}
   </div>;
 });

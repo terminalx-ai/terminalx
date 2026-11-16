@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { AlertCircle, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, TriangleAlert, X } from "@/icons";
+import { AlertCircle, Check, CheckCircle2, CircleX, Copy, ExternalLink, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, TriangleAlert, X } from "@/icons";
 import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
@@ -148,6 +148,7 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
             {action.icon === "branch" ? <GitBranch className="size-3.5" /> : null}
             {action.icon === "branch-plus" ? <GitBranchPlus className="size-3.5" /> : null}
+            {action.icon === "external" ? <ExternalLink className="size-3.5" /> : null}
             {action.label}
           </button>
         ))}

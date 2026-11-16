@@ -1,3 +1,4 @@
+import { noteChangesCount } from "@/lib/panelMarks";
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -168,7 +169,12 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
         const work = await source.reviewRange(null, true);
         return { range: { base: work.base, head: work.head }, files: await source.changesBetween(work.base, work.head, hideWhitespace) };
       })();
-      if (!cancelled) { setResult({ range, target, files, ...merge, mergeWork }); setError(null); }
+      if (!cancelled) {
+        setResult({ range, target, files, ...merge, mergeWork });
+        setError(null);
+        // The panel's tab row counts the branch's files (PRO-394): All changes against the default comparison is that.
+        if (choice.scope === "all" && !choice.target) noteChangesCount(source.key, files.length);
+      }
     };
     void read().catch((e) => {
       if (!cancelled) { setResult(null); setError(source.errorMessage(e)); }

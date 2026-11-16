@@ -68,7 +68,7 @@ try {
     await tab(page, "gemini tab").click();
 
     // Apply's check is held; the scope moves to Uncommitted meanwhile; then the check passes.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
     await page.getByText(/Against main/).waitFor();
     await page.getByLabel("Comparison target").fill("release");
     await page.getByRole("button", { name: "Apply", exact: true }).click();

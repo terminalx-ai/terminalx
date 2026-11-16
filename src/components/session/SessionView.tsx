@@ -514,7 +514,11 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
-  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: activeTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!activeTab && !isTerminalTab(activeTab) });
+  // With a check's log (or another review tab) on screen, Fix errors still goes to the session's
+  // agent: its last chat tab, so the log tab's hand-off bar has somewhere to send (PRO-394).
+  const fixTab = selected?.kind === "agent" ? activeTab
+    : session.tabs.find((tab) => tab.id === session.activeTab && !isTerminalTab(tab)) ?? session.tabs.find((tab) => !isTerminalTab(tab));
+  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!fixTab && !isTerminalTab(fixTab) });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -885,9 +889,10 @@ export function SessionView({
 
         {local && !cloud && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
-        {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
-          <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
-          {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
+        {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
+        {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
+          <span className="min-w-0 flex-1 text-muted-foreground">{checkFix.busy ? "Collecting failed check logs…" : checkFix.notice}</span>
+          {!checkFix.busy && <Button size="sm" variant="ghost" className="h-6" onClick={checkFix.clear}>Dismiss</Button>}
         </div>}
         {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
         <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>

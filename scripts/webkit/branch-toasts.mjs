@@ -73,7 +73,7 @@ try {
     const dialog = await page.getByRole("dialog").count();
 
     // A comparison branch that is gone.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
     await page.getByText(/Against origin\/main/).waitFor();
     await page.getByLabel("Comparison target").fill(GONE);
     await page.getByRole("button", { name: "Apply", exact: true }).click();
