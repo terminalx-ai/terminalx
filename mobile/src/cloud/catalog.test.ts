@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError } from "./api";
-import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, WATCH_POLL_MS } from "./catalog";
+import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle } from "./catalog";
 import { keyItemName } from "./keys";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
 
 const HELD = "terminalx.cloud.held.v1";
+const TITLES = "terminalx.cloud.titles.v1";
 
-function harness() {
-  const secrets = new Map<string, string>();
-  const blobs = new Map<string, string>();
+/** A phone's storage, kept across runs of the app when passed to the next harness. */
+function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, string> } = {}) {
+  const secrets = phone.secrets ?? new Map<string, string>();
+  const blobs = phone.blobs ?? new Map<string, string>();
   const api = {
     organizations: vi.fn(async () => [{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "admin" }]),
     workspaces: vi.fn(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-old", { lastActivityAt: 5 }), item("ws-new", { lastActivityAt: 9 })] : [], tombstones: [] as { id: string; orgId: string; deletedAt: number; expiresAt: number }[] })),
@@ -19,6 +21,7 @@ function harness() {
     cancelCommand: vi.fn(),
     checkpoints: vi.fn(async () => []),
     checkpoint: vi.fn(async () => null),
+    resume: vi.fn(async (orgId: string, workspaceId: string) => ({ workspace: { ...item(workspaceId).workspace, orgId, state: "resuming" }, operation: { id: "op-1", state: "queued", action: "resume" } })),
   };
   const catalog = new CloudCatalog({
     api: api as never,
@@ -35,9 +38,11 @@ function harness() {
     blobs.set(`terminalx:cloud-outbox:${orgId}:${workspaceId}`, "{}");
     secrets.set(HELD, JSON.stringify([...JSON.parse(secrets.get(HELD) ?? "[]"), [orgId, workspaceId]]));
   };
-  /** The workspace keys on the phone (the list of what is held is kept beside them). */
-  const keys = () => [...secrets.keys()].filter((name) => name !== HELD);
-  return { catalog, api, secrets, blobs, keep, keys };
+  /** The workspace keys on the phone (the list of what is held, and the titles, are kept beside them). */
+  const keys = () => [...secrets.keys()].filter((name) => name !== HELD && name !== TITLES);
+  /** What is kept for workspaces in plain storage: the last list read is not one workspace's. */
+  const kept = () => [...blobs.keys()].filter((name) => name !== SAVED_LIST);
+  return { catalog, api, secrets, blobs, keep, keys, kept };
 }
 
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
@@ -100,13 +105,13 @@ describe("the phone's cloud catalog", () => {
     h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-old")] : [], tombstones: orgId === "org-1" ? [{ id: "ws-new", orgId: "org-1", deletedAt: 1, expiresAt: 2 }] : [] }));
     await h.catalog.refresh();
     expect(h.keys()).toEqual([keyItemName({ organizationId: "org-1", workspaceId: "ws-old" })]);
-    expect([...h.blobs.keys()].filter((name) => name.includes("ws-new"))).toEqual([]);
-    expect([...h.blobs.keys()].filter((name) => name.includes("ws-old"))).toHaveLength(2);
+    expect(h.kept().filter((name) => name.includes("ws-new"))).toEqual([]);
+    expect(h.kept().filter((name) => name.includes("ws-old"))).toHaveLength(2);
     // Access to ws-old is taken away: it just stops being listed.
     h.api.workspaces.mockImplementation(async () => ({ workspaces: [], tombstones: [] }));
     await h.catalog.refresh();
     expect(h.keys()).toEqual([]);
-    expect([...h.blobs.keys()]).toEqual([]);
+    expect(h.kept()).toEqual([]);
     expect(h.secrets.get(HELD)).toBe("[]");
   });
 
@@ -117,7 +122,7 @@ describe("the phone's cloud catalog", () => {
     h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]);
     await h.catalog.refresh();
     expect(h.keys()).toEqual([]);
-    expect([...h.blobs.keys()].some((name) => name.includes("ws-x"))).toBe(false);
+    expect(h.kept().some((name) => name.includes("ws-x"))).toBe(false);
   });
 
   it("leaves nothing on the phone after sign-out", async () => {
@@ -162,7 +167,7 @@ describe("the phone's cloud catalog", () => {
     const release = h.catalog.retain("org-1", "ws-new");
     await vi.waitFor(() => expect(h.catalog.workspace("org-1", "ws-new")).toBeNull());
     await vi.waitFor(() => expect(h.keys()).toEqual([]));
-    expect([...h.blobs.keys()].some((name) => name.includes("ws-new"))).toBe(false);
+    expect(h.kept().some((name) => name.includes("ws-new"))).toBe(false);
     release();
   });
 
@@ -177,7 +182,7 @@ describe("the phone's cloud catalog", () => {
     expect(h.catalog.workspace("org-1", "ws-new")).not.toBeNull();
     expect(h.catalog.access("org-1", "ws-new")).toBe("not-shared");
     expect(h.keys()).toEqual([]);
-    expect([...h.blobs.keys()]).toEqual([]);
+    expect(h.kept()).toEqual([]);
   });
 
   it("keeps what it holds when an older server reports no member list (role none, listed false)", async () => {
@@ -391,5 +396,124 @@ describe("the phone's cloud catalog", () => {
     const h = harness();
     await Promise.all([h.catalog.refresh(), h.catalog.refresh()]);
     expect(h.api.organizations).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what the phone keeps of the list between runs (#988)", () => {
+  it("shows the last list at once next time, and opens nothing by it until the list is read again", async () => {
+    const first = harness();
+    await first.catalog.refresh();
+    const saved = JSON.parse(first.blobs.get(SAVED_LIST)!);
+    expect(saved.organizations.map((entry: { organization: { name: string } }) => entry.organization.name)).toEqual(["Acme", "Beta"]);
+
+    // The next run: the list is read again, slowly.
+    const next = harness({ secrets: first.secrets, blobs: first.blobs });
+    let answer: (value: unknown) => void = () => undefined;
+    next.api.organizations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve as never; }));
+    const reading = next.catalog.refresh();
+    await next.catalog.restored;
+    const shown = next.catalog.getSnapshot();
+    expect(shown).toMatchObject({ saved: true, refreshedAt: null });
+    expect(shown.organizations[0].workspaces.map((entry) => entry.workspace.id)).toEqual(["ws-new", "ws-old"]);
+    // Shown, but who may open it is not known yet.
+    expect(next.catalog.access("org-1", "ws-new")).toBe("unknown");
+    answer([{ orgId: "org-1", name: "Acme", role: "member" }]);
+    await reading;
+    expect(next.catalog.getSnapshot()).toMatchObject({ saved: false, refreshedAt: 42 });
+    expect(next.catalog.access("org-1", "ws-new")).toBe("ok");
+    // The organization the account left is gone from what is kept, too.
+    expect(JSON.parse(next.blobs.get(SAVED_LIST)!).organizations).toHaveLength(1);
+  });
+
+  it("does not put an old list over one already read, and keeps none it cannot read", async () => {
+    const blobs = new Map([[SAVED_LIST, JSON.stringify({ v: 1, organizations: [{ organization: { orgId: "org-9", name: "Old", role: "member" }, workspaces: [] }] })]]);
+    const h = harness({ blobs });
+    await h.catalog.refresh();
+    await h.catalog.restored;
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.name)).toEqual(["Acme", "Beta"]);
+    const broken = harness({ blobs: new Map([[SAVED_LIST, "{not json"]]) });
+    await broken.catalog.restored;
+    expect(broken.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [] });
+  });
+
+  it("learns a workspace's generated title from its agent tab, keeps it beside the keys, and forgets it with the workspace", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const session = h.catalog.session("org-1", "ws-new");
+    vi.spyOn(session, "getSnapshot").mockReturnValue({ ...session.getSnapshot(), tabs: [{ tabId: "t1", sessionId: "s1", title: "Checkout redesign", status: "idle", source: "checkpoint", pendingPermissions: [], events: [], truncated: false, noKey: false, continuous: false }] });
+    session.listChanged();
+    expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-new")!)).toBe("Checkout redesign");
+    expect(workspaceTitle(h.catalog.getSnapshot(), h.catalog.workspace("org-1", "ws-old")!)).toBe("ws-old");
+    await vi.waitFor(() => expect(JSON.parse(h.secrets.get(TITLES) ?? "{}")).toEqual({ "org-1/ws-new": "Checkout redesign" }));
+    // It comes from the encrypted conversation: never in plain storage.
+    expect([...h.blobs.values()].some((value) => value.includes("Checkout redesign"))).toBe(false);
+
+    // The next run shows it in the list before anything is opened.
+    const next = harness({ secrets: h.secrets, blobs: h.blobs });
+    await next.catalog.restored;
+    expect(next.catalog.getSnapshot().titles).toEqual({ "org-1/ws-new": "Checkout redesign" });
+
+    // Access taken away: the title goes with the rest.
+    next.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-old")] : [], tombstones: [] }));
+    next.keep("org-1", "ws-new");
+    await next.catalog.refresh();
+    expect(next.catalog.getSnapshot().titles).toEqual({});
+    expect(JSON.parse(next.secrets.get(TITLES)!)).toEqual({});
+    h.catalog.close();
+  });
+
+  it("removes the kept list and titles when the person signs out", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.secrets.set(TITLES, JSON.stringify({ "org-1/ws-new": "Checkout redesign" }));
+    await h.catalog.signOut();
+    expect(h.blobs.has(SAVED_LIST)).toBe(false);
+    expect(h.secrets.has(TITLES)).toBe(false);
+    // And a phone signed out before it was read shows nothing kept.
+    const next = harness({ secrets: h.secrets, blobs: h.blobs });
+    await next.catalog.restored;
+    expect(next.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [], titles: {} });
+  });
+});
+
+describe("starting a stopped workspace from the phone (#988)", () => {
+  it("asks the server to resume it, shows it starting at once, and follows the list until it runs", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const release = h.catalog.retain("org-1", "ws-new");
+    const seen: string[] = [];
+    h.catalog.subscribe(() => seen.push(h.catalog.workspace("org-1", "ws-new")?.state ?? "none"));
+    // The server lists it as resuming once it took the request.
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-new", { state: "resuming" }), item("ws-old")] : [], tombstones: [] }));
+    h.api.workspaces.mockClear();
+    const starting = h.catalog.start("org-1", "ws-new");
+    await starting;
+    expect(h.api.resume).toHaveBeenCalledWith("org-1", "ws-new");
+    // Nothing was queued to wake it: the start was asked for by itself.
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    // Shown starting from the server's answer, before the list was read again.
+    expect(seen[0]).toBe("resuming");
+    expect(h.api.workspaces).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("resuming");
+    // Starting: the list is read every few seconds until it runs.
+    h.api.workspaces.mockClear();
+    await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 10);
+    expect(h.api.workspaces).toHaveBeenCalled();
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-new", { state: "ready" }), item("ws-old")] : [], tombstones: [] }));
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+    await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 10);
+    expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("ready");
+    // Running: the open screen connects by itself, with nothing more asked of the person.
+    await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new", "mobile-1", expect.anything()));
+    release();
+  });
+
+  it("passes on the server's refusal for someone who may not start it", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_manager_required", 403));
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ code: "cloud_workspace_manager_required" });
+    expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("suspended");
   });
 });
