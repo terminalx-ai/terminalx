@@ -13,9 +13,9 @@ import {
   missingMachineFeatures,
 } from "./machineFeatures";
 
-// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–4.
+// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–4 and machine/6.
 const WITHHELD = ["keys/1", "mirror/1", "collab/1"];
-const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4"];
+const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/6"];
 const without = (...names: string[]) => CURRENT.filter((name) => !names.includes(name));
 const connected = { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 4 } as const;
 
@@ -89,5 +89,17 @@ describe("machine features", () => {
     expect(machineHasFeature(CURRENT, "machine/4")).toBe(true);
     expect(machineFeatureMessage("dev-server", "0.2.33", feature)).toBe("dev-server runs TerminalX 0.2.33. Update it to sign in its agents from here.");
     expect(missingMachineFeatures(without("machine/4")).map((entry) => entry.id)).toEqual(["agentSetup"]);
+  });
+
+  it("hides Add a project and Remove project on a machine without machine/6 (PRO-351)", () => {
+    const feature = machineFeature("machine/6")!;
+    expect(feature).toEqual({ id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" });
+    expect(machineHasFeature(without("machine/6"), "machine/6")).toBe(false);
+    expect(machineHasFeature(CURRENT, "machine/6")).toBe(true);
+    expect(machineFeatureMessage("dev-server", "0.2.33", feature)).toBe("dev-server runs TerminalX 0.2.33. Update it to add and remove its projects from here.");
+    expect(missingMachineFeatures(without("machine/6")).map((entry) => entry.id)).toEqual(["projects"]);
+    expect(machineFeaturesMessage("dev-server", "0.2.33", missingMachineFeatures(without("machine/4", "machine/6")))).toBe(
+      "dev-server runs TerminalX 0.2.33. Update it to sign in its agents and add and remove its projects from here.",
+    );
   });
 });

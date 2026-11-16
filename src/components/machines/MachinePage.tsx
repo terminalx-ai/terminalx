@@ -5,11 +5,13 @@ import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { refreshPairedMachines } from "@/lib/machineConnections";
 import { machineHasFeature } from "@/lib/machineFeatures";
+import { useMachineProjects } from "@/lib/machineCatalog";
 import { renameMachine } from "@/lib/machinePage";
 import { useMachineUpdateEntry, useMachineVersion, type MachineVersionView } from "@/lib/machineUpdate";
 import type { MachineUpdateMethod, PairedMachine } from "@/types/machines";
 import { MachineIcon, MachineStateMark, machineTone, routeText, toneText } from "./connectionStatus";
 import { MachinePageAgents } from "./MachinePageAgents";
+import { MachinePageProjects } from "./MachinePageProjects";
 import { MachinePageResources } from "./MachinePageResources";
 import { RemoveMachineDialog } from "./RemoveMachineDialog";
 import { MachineVersionBanner } from "./MachineUpdate";
@@ -70,13 +72,14 @@ export function machineMetaLine(view: MachineVersionView, method: MachineUpdateM
  * how it is reached, its key label and Rename; the version section saying
  * what is hidden and which side updates (PRO-354); its agents with their
  * sign-ins, Install and Sign in on the machine, and its resources (PRO-350);
- * and Remove. Its projects are PRO-351.
+ * its projects, with Add a project and Remove project (PRO-351); and Remove.
  */
 export function MachinePage({ machineId, onBack }: { machineId: string; onBack: () => void }) {
   const view = useMachineVersion(machineId);
   const entry = useMachineUpdateEntry(machineId);
   const [renaming, setRenaming] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const catalog = useMachineProjects(machineId);
   const machine = view.machine;
   if (!machine) {
     return (
@@ -92,6 +95,8 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
   const meta = machineMetaParts(view, entry.status?.method ?? null);
   // Install and Sign in on the machine need `machine/4`; without it the agents show and nothing is offered.
   const setupGranted = machineHasFeature(view.granted ?? [], "machine/4") && !!view.granted;
+  // Adding and removing projects need `machine/6`; without it the projects are listed and nothing is offered.
+  const projectsGranted = machineHasFeature(view.granted ?? [], "machine/6") && !!view.granted;
   return (
     <div className="grid gap-6" data-testid="machine-page" data-machine={machineId}>
       <div className="grid gap-5">
@@ -138,6 +143,7 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
         <MachineVersionBanner machineId={machineId} view={view} />
       </div>
       <MachinePageAgents machine={machine} client={view.client} connected={connected} setupGranted={setupGranted} />
+      <MachinePageProjects machine={machine} client={view.client} connected={connected} manage={projectsGranted} projects={catalog.projects} ready={catalog.entry?.source === "live"} />
       <MachinePageResources name={machine.name} client={view.client} connected={connected} />
       <section className="flex items-center gap-6 border-t border-hairline pt-4" data-testid="machine-remove" aria-label="Remove this machine">
         <div className="min-w-0 flex-1">

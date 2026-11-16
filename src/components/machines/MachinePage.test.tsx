@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcError, type PtyHandlers, type PtyInfo, type RuntimeAgentsReport, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { RuntimeResources } from "@terminalx/portable/workspaceGit";
+import type { MachineProjectNode, MachineSessionRow } from "@/lib/machineCatalog";
 import type { MachineConnectionState, MachineUpdateStatus, PairedMachine } from "@/types/machines";
 import { pairedMachine } from "./machineFixtures.test-utils";
 
@@ -13,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(async (_command: string, _args?: unknown): Promise<unknown> => null),
   refreshPairedMachines: vi.fn(async () => undefined),
   instances: new Map<string, unknown>(),
+  // The machine's catalog entry as `useMachineProjects` gives it: its projects and their sessions.
+  catalog: { entry: undefined as unknown, projects: [] as unknown[], sessions: [] as unknown[] },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: async () => "0.2.33" }));
@@ -27,6 +30,10 @@ vi.mock("@/lib/machineConnections", () => ({
     connection: store.connections[machineId] ?? null,
     attachError: null,
   }),
+}));
+vi.mock("@/lib/machineCatalog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/machineCatalog")>()),
+  useMachineProjects: () => mocks.catalog,
 }));
 vi.mock("@/lib/updates", () => ({
   checkForUpdate: vi.fn(),
@@ -59,7 +66,7 @@ const { MachinePage } = await import("./MachinePage");
 const { resetMachineUpdateForTests } = await import("@/lib/machineUpdate");
 const { resetMachineAgentSetupForTests } = await import("@/lib/machineAgentSetup");
 
-const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4"];
+const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/6"];
 const OLDER = ALL.filter((capability) => capability !== "machine/4");
 const LIVE: MachineConnectionState = { state: "relay", route: { kind: "relay", endpoint: null }, since: 1, rttMs: 20 };
 const GB = 1_000_000_000;
@@ -136,6 +143,7 @@ const agentRow = (id: string) => screen.getAllByTestId("machine-agent").find((ro
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.instances.clear();
+  mocks.catalog = { entry: undefined, projects: [], sessions: [] };
   mocks.invoke.mockImplementation(async () => null);
   resetMachineUpdateForTests();
   resetMachineAgentSetupForTests();
@@ -346,6 +354,52 @@ describe("the machine's resources (21.10)", () => {
     view.unmount();
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reads()).toBe(2);
+  });
+});
+
+describe("the machine's projects (21.10, PRO-351)", () => {
+  const project = (name: string) => ({ projectId: `${name}`.replace(/[^A-Za-z0-9]/g, "").padEnd(16, "0"), name, path: `/home/paresh/code/${name}`, kind: "git", defaultBranch: "main", archived: false });
+  const node = (name: string, sessions: number): MachineProjectNode => {
+    const p = project(name);
+    return {
+      key: `machine:${DEV.machineId}:${p.projectId}` as MachineProjectNode["key"],
+      machineId: DEV.machineId,
+      project: p,
+      sessions: Array.from({ length: sessions }, (_, index) => ({ projectId: p.projectId, sessionId: `s${index}` }) as unknown as MachineSessionRow),
+    };
+  };
+  const live = () => {
+    mocks.catalog = { entry: { source: "live" }, projects: [node("tx-review-lab", 2), node("terminalx-server", 0)], sessions: [] };
+  };
+
+  it("lists them between Agents and Resources, each with its folder and sessions, with Add a project", async () => {
+    live();
+    attach(DEV, fakeClient());
+    render(<MachinePage machineId={DEV.machineId} onBack={() => undefined} />);
+    const section = screen.getByTestId("machine-projects-section");
+    const order = [...screen.getByTestId("machine-page").querySelectorAll("section")].map((el) => el.getAttribute("aria-label"));
+    expect(order.indexOf("Projects")).toBe(order.indexOf("Agents") + 1);
+    expect(order.indexOf("Resources")).toBe(order.indexOf("Projects") + 1);
+    const rows = within(section).getAllByTestId("machine-page-project");
+    expect(rows.map((row) => within(row).getByTestId("machine-project-sessions").textContent)).toEqual(["2 sessions", "No sessions"]);
+    expect(within(rows[0]).getByTestId("machine-project-path").textContent).toBe("/home/paresh/code/tx-review-lab");
+    expect(within(section).getByRole("button", { name: "Add a project" })).toBeTruthy();
+    expect(within(section).getByRole("button", { name: "More for tx-review-lab on dev-server" })).toBeTruthy();
+  });
+
+  it("lists them with no Add or menus on a machine without machine/6", async () => {
+    live();
+    attach(DEV, fakeClient({ capabilities: ALL.filter((capability) => capability !== "machine/6") }));
+    render(<MachinePage machineId={DEV.machineId} onBack={() => undefined} />);
+    const section = screen.getByTestId("machine-projects-section");
+    expect(within(section).getAllByTestId("machine-page-project")).toHaveLength(2);
+    expect(within(section).queryByRole("button")).toBeNull();
+  });
+
+  it("waits for the machine before listing them", () => {
+    attach(DEV, fakeClient());
+    render(<MachinePage machineId={DEV.machineId} onBack={() => undefined} />);
+    expect(within(screen.getByTestId("machine-projects-section")).getByText("Reading its projects…")).toBeTruthy();
   });
 });
 
