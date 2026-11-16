@@ -2257,7 +2257,7 @@ mod tests {
         let repo = store::projects::public_id("/repos/raccoon");
         let offered: HashSet<String> = [repo.clone()].into();
         let one = crate::agent_accounts::AgentAccounts { agent: "claude", accounts: vec![phone_account("local", "This Mac's login", false)],
-            default_account: "local".into(), project_defaults: Default::default() };
+            default_account: "local".into(), project_defaults: Default::default(), auto_switch: Default::default() };
         assert_eq!(phone_accounts(&one, &offered), None, "with one account the reply is as before accounts");
 
         let several = crate::agent_accounts::AgentAccounts {
@@ -2272,6 +2272,7 @@ mod tests {
                 ("/repos/raccoon".to_string(), "0123456789abcdef".to_string()),
                 ("/repos/archived".to_string(), "0123456789abcdef".to_string()),
             ].into(),
+            auto_switch: Default::default(),
         };
         let reply = phone_accounts(&several, &offered).unwrap();
         assert_eq!(reply["defaultAccount"], "local");

@@ -352,6 +352,10 @@ enum Scope {
 /// the events that say so at once.
 const MACHINE_CHANGE_POLL: Duration = Duration::from_secs(5);
 
+/// How often a machine reads its update record and status again, besides
+/// the changes it makes itself (`machine/3`).
+const UPDATE_STATUS_POLL: Duration = Duration::from_secs(2);
+
 pub struct WorkspaceRpc {
     scope: Scope,
     /// The generation the relay host registered with; offsets and cursors
@@ -400,6 +404,9 @@ pub struct WorkspaceRpc {
     machine_changed: Arc<tokio::sync::Notify>,
     /// The machine host's direct endpoints and relay access (`machine/2`).
     machine_access: OnceLock<Arc<dyn machine::MachineAccess>>,
+    /// The machine's version and updates (`machine/3`, PRO-354); absent on
+    /// a workspace runtime, or one whose data directory cannot be named.
+    machine_updates: Mutex<Option<Arc<super::machine_update::MachineUpdates>>>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
@@ -436,7 +443,12 @@ impl WorkspaceRpc {
         terminals: Arc<Terminals>,
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
+        let has_window = identity.has_window;
         let rpc = Self::serving(Scope::Machine { projects: machine::Projects::default(), identity }, generation, sink.clone(), terminals, sessions);
+        match super::machine_update::Environment::of_this_runtime(has_window) {
+            Ok(environment) => rpc.serve_updates(super::machine_update::MachineUpdates::new(environment, sink.clone())),
+            Err(error) => log::warn!("machine/3: this runtime cannot report its updates: {error:#}"),
+        }
         // A project added or removed here, and Settings (which holds the name).
         for event in ["projects_changed", "settings_file_changed"] {
             let notify = rpc.machine_changed.clone();
@@ -491,6 +503,7 @@ impl WorkspaceRpc {
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             machine_changed: Arc::new(tokio::sync::Notify::new()),
             machine_access: OnceLock::new(),
+            machine_updates: Mutex::new(None),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -737,6 +750,88 @@ impl WorkspaceRpc {
 
     fn direct_endpoints(&self) -> Vec<String> {
         self.machine_access.get().map(|access| access.direct_endpoints()).unwrap_or_default()
+    }
+
+    /// Serve `machine/3` from `updates`, and send `machine.updateChanged`
+    /// to `machine/3` connections whenever the status changes: the helper's
+    /// record (read every [`UPDATE_STATUS_POLL`]), a release check, the
+    /// blockers and the connected computers.
+    fn serve_updates(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        // One watcher, whichever updates it serves (a test replaces them):
+        // woken to take its first look at the new ones now.
+        if let Some(previous) = self.machine_updates.lock().unwrap().replace(Arc::new(updates)) {
+            previous.changed.notify_one();
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let weak = Arc::downgrade(self);
+        runtime.spawn(async move {
+            // What was sent last, and from which updates.
+            let mut last: Option<(usize, String)> = None;
+            loop {
+                // Held only while it looks: the runtime may drop meanwhile.
+                let Some(rpc) = weak.upgrade() else { return };
+                let fingerprint = tokio::task::spawn_blocking(move || rpc.update_fingerprint()).await.ok().flatten();
+                if fingerprint.is_some() && fingerprint != last {
+                    // The first look at these updates only sets what later
+                    // ones compare with.
+                    if last.as_ref().zip(fingerprint.as_ref()).is_some_and(|(last, now)| last.0 == now.0) {
+                        let Some(rpc) = weak.upgrade() else { return };
+                        let _ = tokio::task::spawn_blocking(move || rpc.broadcast_update_status()).await;
+                    }
+                    last = fingerprint;
+                }
+                let Some(notify) = weak.upgrade().and_then(|rpc| rpc.updates()).map(|updates| updates.changed.clone()) else { return };
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(UPDATE_STATUS_POLL) => {}
+                }
+            }
+        });
+    }
+
+    /// The status as nobody in particular sees it, and which updates said it.
+    fn update_fingerprint(&self) -> Option<(usize, String)> {
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        self.updates().map(|updates| (Arc::as_ptr(&updates) as usize, updates.fingerprint(access)))
+    }
+
+    fn updates(&self) -> Option<Arc<super::machine_update::MachineUpdates>> {
+        self.machine_updates.lock().unwrap().clone()
+    }
+
+    /// `machine.updateChanged`: each `machine/3` connection gets the status
+    /// as it sees it (the other computers are everyone but itself).
+    fn broadcast_update_status(&self) {
+        let Some(updates) = self.updates() else { return };
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        for peer in self.live_peers().into_iter().filter(|peer| peer.granted(machine::MACHINE_3)) {
+            let status = updates.status(Some(&peer.device_id), access);
+            peer.notify(super::machine_update::CHANGED, json!({ "status": status }));
+        }
+    }
+
+    /// `machine.updateStatus` and `machine.update` (`machine/3`). Blocking.
+    fn machine_update_call(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        if !self.is_machine() {
+            return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+        }
+        let updates = self.updates().ok_or_else(|| RpcError::new("update_unavailable", "this runtime cannot tell how it was installed"))?;
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        match method {
+            "machine.updateStatus" => updates.update_status(params, &peer.device_id, access),
+            _ => updates.update(params, &peer.device_id, access),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_machine_updates_for_tests(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        self.serve_updates(updates);
+    }
+
+    #[cfg(test)]
+    pub(super) fn machine_updates_for_tests(&self) -> Arc<super::machine_update::MachineUpdates> {
+        self.updates().expect("machine/3 is served")
     }
 
     /// `machine.describe`, with `directEndpoints` (`machine/2`).
@@ -1334,6 +1429,7 @@ impl WorkspaceRpc {
                 Scope::Machine { .. } => machine::projects(),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
+            "machine.updateStatus" | "machine.update" => self.machine_update_call(peer, method, &params),
             "cleanup.scan" => self.cleanup_scan(),
             "cleanup.size" => self.cleanup_size(peer, params),
             "cleanup.cancel" => self.cleanup_cancel(peer),
@@ -1364,6 +1460,9 @@ impl WorkspaceRpc {
             "session.create" => {
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
+                }
+                if params.get("baseRef").is_some_and(|base| !base.is_null()) && !peer.granted("session-base/1") {
+                    return Err(RpcError::new("capability_not_granted", "Choosing the branch a session starts from was not negotiated."));
                 }
                 // On a machine, refused here without `machine/1` or a project.
                 if self.is_machine() {
@@ -2782,8 +2881,13 @@ impl WorkspaceRpc {
             /// `machine/1`: the project the session runs in.
             #[serde(default)]
             project_id: Option<String>,
+            /// `session-base/1` (PRO-348): the branch the new worktree is cut
+            /// from, as `git.branches` lists it; the default branch without it.
+            #[serde(default)]
+            base_ref: Option<String>,
         }
         let mut p: Params = parse(params)?;
+        let base_ref = p.base_ref.take().filter(|_| p.use_worktree).map(|base| check_base_ref(&base)).transpose()?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
@@ -2848,7 +2952,7 @@ impl WorkspaceRpc {
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
-                base_ref: None,
+                base_ref,
                 checkout_branch: None,
                 checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
@@ -3971,6 +4075,29 @@ fn default_cols() -> u16 {
 
 fn default_rows() -> u16 {
     24
+}
+
+/// A base branch for `session.create` (`session-base/1`): a branch name as
+/// `git.branches` lists it, never something git could read as an option or a
+/// revision expression. Whether it exists is git's to say when the worktree
+/// is cut.
+fn check_base_ref(base: &str) -> Result<String, RpcError> {
+    let base = base.trim();
+    let valid = !base.is_empty()
+        && base.len() <= 255
+        && !base.starts_with('-')
+        && !base.starts_with('/')
+        && !base.ends_with('/')
+        && !base.ends_with(".lock")
+        && !base.contains("..")
+        && !base.contains("@{")
+        && !base.contains("//")
+        && base.chars().all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+    if valid {
+        Ok(base.to_string())
+    } else {
+        Err(RpcError::invalid("baseRef is not a branch name"))
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {

@@ -14,7 +14,7 @@ export type LocalSectionEdit =
   | { kind: "reorder"; id: string; by: -1 | 1 }
   | { kind: "move"; sessionIds: string[]; sectionId: string | null };
 
-type SectionDialog = { kind: "create"; sessionIds?: string[] } | { kind: "rename" | "emoji" | "delete"; section: LocalSection } | { kind: "move"; sessionIds: string[] };
+type SectionDialog = { kind: "create"; sessionIds?: string[] } | { kind: "rename" | "emoji" | "delete"; section: LocalSection };
 let state: LocalSectionState & { error: string | null; dialog: SectionDialog | null } = { revision: 0, sections: [], error: null, dialog: null };
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };

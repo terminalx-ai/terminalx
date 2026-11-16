@@ -19,11 +19,12 @@ import type { useSessionAgent } from "@/lib/useSessionAgent";
 import type { AgentAccount } from "@/lib/agentAccounts";
 
 /** The accounts to start on, each with what makes it a different sign-in. */
-export function AccountMenuContent({ accounts, value, onValueChange }: { accounts: AgentAccount[]; value: string; onValueChange: (id: string) => void }) {
+export function AccountMenuContent({ accounts, value, onValueChange, note = null }: { accounts: AgentAccount[]; value: string; onValueChange: (id: string) => void; note?: string | null }) {
   return (
     <DropdownMenuContent align="start" className="min-w-[14rem] max-w-[var(--radix-dropdown-menu-content-available-width)]">
       <DropdownMenuLabel>Account</DropdownMenuLabel>
       <AccountRadioItems accounts={accounts} value={value} onValueChange={onValueChange} />
+      {note && <p className="max-w-[18rem] px-2 pt-1 pb-1.5 text-[12px] leading-snug text-muted-foreground" data-testid="account-choice-reason">{note}</p>}
     </DropdownMenuContent>
   );
 }
@@ -57,7 +58,7 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
   /** Stretch the pills across their row, each name left and its chevron right, so the row is as wide as what is under it. */
   fill?: boolean;
 }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount, accountReason } = selection;
   const agentMenu = useRowMenu();
   const accountMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
@@ -92,12 +93,14 @@ export function SessionAgentControls({ selection, pipeline, disabled = false, fi
       {harness && accounts && account && (
         <DropdownMenu {...accountMenu.root}>
           <DropdownMenuTrigger asChild {...accountMenu.trigger}>
-            <Button variant="secondary" size="sm" className={pill} title="Account" aria-label={`Account: ${account.label}`} disabled={disabled}>
+            <Button variant="secondary" size="sm" className={pill} title={accountReason ? `Chosen automatically: ${accountReason}` : "Account"}
+              aria-label={accountReason ? `Account: ${account.label}, chosen automatically: ${accountReason}` : `Account: ${account.label}`} disabled={disabled}>
               <span className="truncate">{account.label}</span>
+              {accountReason && <span className="shrink-0 text-[11px] text-faint" data-testid="account-chosen-automatically">auto</span>}
               <ChevronDown className="text-faint" />
             </Button>
           </DropdownMenuTrigger>
-          <AccountMenuContent accounts={accounts.accounts} value={account.id} onValueChange={selectAccount} />
+          <AccountMenuContent accounts={accounts.accounts} value={account.id} onValueChange={selectAccount} note={accountReason ? `Chosen automatically: ${accountReason}.` : null} />
         </DropdownMenu>
       )}
 

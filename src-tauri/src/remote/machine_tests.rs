@@ -176,6 +176,55 @@ async fn one_connection_lists_three_projects_and_starts_a_session_in_each() {
     assert!(call(&m.rpc, &peer, "lifecycle.resources", json!({})).await.is_ok());
 }
 
+/// `git` in `dir`, which must succeed.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// New session on a machine (PRO-348): `session.create` cuts a worktree of the
+/// named project from the chosen branch (`session-base/1`), and a resend of
+/// the same request is the same session, never a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_is_cut_from_the_chosen_branch_once() {
+    let m = machine_rpc();
+    let (path, id) = project(&m.path("code"), "api");
+    git(&path, &["add", "README.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "readme"]);
+    git(&path, &["checkout", "-qb", "feature"]);
+    std::fs::write(path.join("FEATURE.md"), "only on feature\n").unwrap();
+    git(&path, &["add", "FEATURE.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "feature"]);
+    git(&path, &["checkout", "-q", "main"]);
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|granted| granted == "session-base/1"), "{hello}");
+    let request = json!({ "agent": "claude", "model": "opus", "title": "From feature", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-from-feature" });
+    let made = call(&m.rpc, &peer, "session.create", request.clone()).await.unwrap();
+    let cwd = PathBuf::from(made["session"]["cwd"].as_str().unwrap());
+    assert_ne!(cwd, path, "a worktree of its own: {made}");
+    assert!(cwd.join("FEATURE.md").is_file(), "cut from feature: {made}");
+    assert!(!path.join("FEATURE.md").exists(), "the project's own checkout stays on main");
+    // The same request again (a resend after a dropped connection) is answered with the same session.
+    let again = call(&m.rpc, &peer, "session.create", request).await.unwrap();
+    assert_eq!(again["sessionId"], made["sessionId"]);
+    let sessions = call(&m.rpc, &peer, "session.list", json!({})).await.unwrap();
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1, "{sessions}");
+    // Without a worktree there is nothing to cut, and the base is not used.
+    let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
+    assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);
+    // Never something git could read as an option or a revision expression.
+    for bad in ["-x", "main..feature", "feature@{1}", "a b", "", "HEAD~1"] {
+        let refused = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": bad, "clientRequestId": format!("create-bad-{}", bad.len()) })).await;
+        assert_eq!(code(refused), "invalid_params", "{bad:?}");
+    }
+    // A client that did not ask for `session-base/1` cannot name a base.
+    let (older, _) = Peer::new("computer-2".into(), Authority::Manage);
+    let want: Vec<&str> = protocol::served(true).into_iter().filter(|name| *name != "session-base/1").collect();
+    call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
+    let refused = call(&m.rpc, &older, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-older" })).await;
+    assert_eq!(code(refused), "capability_not_granted");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let m = machine_rpc();
@@ -321,4 +370,267 @@ async fn a_new_project_or_name_is_announced_to_machine_connections() {
     .await
     .is_err(), "a connection without machine/1 is not told");
     drop(web);
+}
+
+// ------------------------------------------------- machine/3 (PRO-354)
+
+use crate::remote::machine_update::{self as updates, Blocker, Environment, MachineUpdates, OtherComputer, Progress, Record};
+
+/// The host side of `machine/3` a test controls: who else is connected and
+/// whether a window is attached, as `machine_host`'s `HostAccess` reports.
+struct Host {
+    others: Vec<OtherComputer>,
+    window: bool,
+}
+
+impl machine::MachineAccess for Host {
+    fn direct_endpoints(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn relay_access(&self, _device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
+        Box::pin(async { Ok(json!({ "relay": null })) })
+    }
+    fn other_computers(&self, caller: Option<&str>) -> Vec<OtherComputer> {
+        self.others.iter().filter(|computer| Some(computer.id.as_str()) != caller).cloned().collect()
+    }
+    fn window_available(&self) -> bool {
+        self.window
+    }
+}
+
+fn no_blockers() -> Vec<Blocker> {
+    Vec::new()
+}
+
+/// What `runtime.handover.plan` names for an agent mid-turn.
+fn an_agent_mid_turn() -> Vec<Blocker> {
+    vec![Blocker::of(&json!({ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "claude" }))]
+}
+
+fn no_network(_: &semver::Version) -> anyhow::Result<Option<semver::Version>> {
+    anyhow::bail!("this test checks no releases")
+}
+
+/// A headless install of 0.0.1 (`~/.terminalx/current -> versions/0.0.1`).
+fn installer(m: &Machine) -> PathBuf {
+    let root = m.path("install");
+    std::fs::create_dir_all(root.join("versions/0.0.1")).unwrap();
+    std::fs::write(root.join("versions/0.0.1/terminalx-serve"), "old").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("versions/0.0.1", root.join("current")).unwrap();
+    root
+}
+
+fn environment(m: &Machine, install_root: Option<PathBuf>, has_window: bool, blockers: fn() -> Vec<Blocker>) -> Environment {
+    let data_dir = m.path("data");
+    std::fs::create_dir_all(data_dir.join("run")).unwrap();
+    Environment { data_dir, install_root, has_window, helper: None, blockers, check: no_network }
+}
+
+/// `m` serving `machine/3` from `env`, with `host` as its machine host.
+fn serving(m: &Machine, env: Environment, host: Host) -> Arc<MachineUpdates> {
+    m.rpc.set_machine_updates_for_tests(MachineUpdates::new(env, m.sink.clone()));
+    m.rpc.set_machine_access(Arc::new(host));
+    m.rpc.machine_updates_for_tests()
+}
+
+fn refused(result: Result<Value, (String, String)>) -> (String, String) {
+    result.expect_err("expected a refusal")
+}
+
+/// The whole error, with its data.
+async fn failure(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params: Value) -> Value {
+    let response = rpc.handle(peer, &json!({ "id": "1", "method": method, "params": params })).await;
+    assert_eq!(response["ok"], false, "{response}");
+    response["error"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_status_has_the_contract_s_shape() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let served = serving(&m, environment(&m, Some(root.clone()), false, no_blockers), Host { others: Vec::new(), window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/3")), "{hello}");
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    let fields: std::collections::BTreeSet<&str> = status.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(fields, ["available", "blockers", "checkedAt", "current", "kept", "method", "otherComputers", "progress"].into_iter().collect());
+    assert_eq!(status["method"], "installer");
+    assert_eq!(status["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["available"], json!({ "version": "9.9.9" }));
+    assert!(status["checkedAt"].is_i64());
+    assert_eq!(status["blockers"], json!([]));
+    assert_eq!(status["otherComputers"], json!([]));
+    assert_eq!(status["kept"], json!(["0.0.1"]));
+    assert_eq!(status["progress"], json!({ "phase": "idle" }));
+
+    // Not installed by the installer: unmanaged, and no update from here.
+    let m2 = machine_rpc();
+    serving(&m2, environment(&m2, Some(m2.path("no-install")), false, no_blockers), Host { others: Vec::new(), window: false });
+    let (peer2, _events2, _) = computer(&m2.rpc).await;
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!((status["method"].as_str(), status["available"].is_null(), status["checkedAt"].is_null()), (Some("unmanaged"), true, true));
+    assert_eq!(status["kept"], json!([env!("CARGO_PKG_VERSION")]));
+    let error = failure(&m2.rpc, &peer2, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_unavailable", "{error}");
+    assert_eq!(error["data"]["method"], "unmanaged", "the refusal carries the status");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_3_is_granted_only_when_asked_for() {
+    let m = machine_rpc();
+    let (older, _events) = Peer::new("computer-old".into(), Authority::Manage);
+    let hello = call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/2", "session/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["session/1", "machine/1", "machine/2"]), "a machine/2 desktop is served exactly as before");
+    assert_eq!(code(call(&m.rpc, &older, "machine.updateStatus", json!({})).await), "capability_not_granted");
+    // A newer desktop asking for a namespace this runtime does not have
+    // learns its version and what it offers.
+    let (newer, _events) = Peer::new("computer-new".into(), Authority::Manage);
+    let error = failure(&m.rpc, &newer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/9"] })).await;
+    assert_eq!(error["code"], "update_required");
+    assert_eq!(error["data"]["runtimeVersion"], env!("CARGO_PKG_VERSION"));
+    assert!(error["data"]["offered"].as_array().unwrap().contains(&json!("machine/3")), "{error}");
+    // A participant reads the status but does not update.
+    let (viewer, _events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/3"] })).await.unwrap();
+    assert_eq!(code(call(&m.rpc, &viewer, "machine.update", json!({ "version": "9.9.9" })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_asks_first_about_work_it_stops_and_other_computers() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let others = vec![OtherComputer { id: "studio".into(), label: "Studio's MacBook".into() }];
+    let served = serving(&m, environment(&m, Some(root), false, an_agent_mid_turn), Host { others, window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["blockers"], json!([{ "id": "tab:s1/t1", "kind": "turn", "title": "claude in tab t1" }]));
+    assert_eq!(status["otherComputers"], json!([{ "id": "studio", "label": "Studio's MacBook" }]), "every connected computer but the caller");
+
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_confirm");
+    assert!(error["message"].as_str().unwrap().contains("claude in tab t1"), "{error}");
+    assert_eq!(error["data"]["blockers"][0]["id"], "tab:s1/t1", "the refusal carries the status");
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"] })).await;
+    assert_eq!(error["code"], "update_confirm", "the other computers are asked about too");
+    assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
+    // Confirmed before Studio connected: the computers shown then were others, so it asks again.
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["air"] })).await;
+    assert_eq!(error["code"], "update_confirm", "a computer not shown before is named first");
+    assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "confirmedOthers": "studio" })).await), "invalid_params");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.8.0", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await), "update_unavailable", "only the release on offer");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "stop": "tab:s1/t1" })).await), "invalid_params");
+    assert!(read_update_record(&m).progress == Progress::Idle, "nothing was started");
+
+    // Agreed to both: it starts. This runtime has no binary of its own to
+    // run the helper from, so it says the update could not start.
+    let (code, message) = refused(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await);
+    assert_eq!(code, "internal", "{message}");
+    match read_update_record(&m).progress {
+        Progress::Failed { version, running, rolled_back, .. } => assert_eq!((version.as_str(), running.as_str(), rolled_back), ("9.9.9", env!("CARGO_PKG_VERSION"), false)),
+        other => panic!("expected failed, got {other:?}"),
+    }
+}
+
+fn read_update_record(m: &Machine) -> Record {
+    updates::read_record(&updates::status_path(&m.path("data")))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_update_at_a_time() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let served = serving(&m, environment(&m, Some(root), false, no_blockers), Host { others: Vec::new(), window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    // A helper of this machine's runs (this process stands in for its pid).
+    let running = Record { progress: Progress::Trial { version: "9.9.9".into(), since: updates::now_ms() }, from: Some("0.0.1".into()), helper_pid: Some(std::process::id()), ..Record::default() };
+    updates::write_record(&updates::status_path(&m.path("data")), &running).unwrap();
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_busy");
+    assert_eq!(error["data"]["progress"], json!({ "phase": "trial", "version": "9.9.9", "since": running_since(&running) }));
+}
+
+fn running_since(record: &Record) -> i64 {
+    match record.progress {
+        Progress::Trial { since, .. } => since,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desktop_machine_asks_its_window_to_update_the_app() {
+    let m = machine_rpc();
+    serving(&m, environment(&m, None, true, no_blockers), Host { others: Vec::new(), window: false });
+    let (peer, mut events, _) = computer(&m.rpc).await;
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!((status["method"].as_str(), status["available"].is_null()), (Some("app"), true), "nothing offered until the window has checked");
+    // Let the watcher read what is there before anything changes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The window checked: nothing newer.
+    updates::report(&m.path("data"), &json!({ "phase": "upToDate" })).unwrap();
+    let changed = next_event(&mut events, "machine.updateChanged").await;
+    assert!(changed["status"]["checkedAt"].is_i64(), "{changed}");
+    assert_eq!(changed["status"]["available"], Value::Null);
+
+    // No window attached: the app cannot update itself now.
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "0.9.0" })).await), "update_unavailable");
+
+    let m2 = machine_rpc();
+    let mut published2 = m2.sink.subscribe();
+    serving(&m2, environment(&m2, None, true, no_blockers), Host { others: Vec::new(), window: true });
+    let (peer2, _events2, _) = computer(&m2.rpc).await;
+    let started = call(&m2.rpc, &peer2, "machine.update", json!({ "version": "0.9.0" })).await.unwrap();
+    assert_eq!(started["progress"]["phase"], "appUpdating");
+    assert_eq!(started["progress"]["version"], "0.9.0");
+    let requested = loop {
+        match published2.recv().await {
+            Ok(event) if &*event.event == updates::REQUESTED_EVENT => break event.payload.to_string(),
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(error) => panic!("the event stream ended: {error}"),
+        }
+    };
+    assert_eq!(requested, r#"{"version":"0.9.0"}"#);
+    assert_eq!(code(call(&m2.rpc, &peer2, "machine.update", json!({ "version": "0.9.0" })).await), "update_busy");
+    // The window reports each step; a failure is said, with what runs.
+    updates::report(&m2.path("data"), &json!({ "phase": "installing" })).unwrap();
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["progress"]["step"], "installing");
+    updates::report(&m2.path("data"), &json!({ "phase": "failed", "message": "The download was interrupted." })).unwrap();
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["progress"], json!({ "phase": "failed", "version": "0.9.0", "at": status["progress"]["at"], "message": "The download was interrupted.", "running": env!("CARGO_PKG_VERSION"), "rolledBack": false }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_connection_is_told_of_changes_without_itself_as_another_computer() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let others = vec![OtherComputer { id: "computer-1".into(), label: "This one".into() }, OtherComputer { id: "studio".into(), label: "Studio".into() }];
+    serving(&m, environment(&m, Some(root), false, no_blockers), Host { others, window: false });
+    let (_peer, mut events, _) = computer(&m.rpc).await;
+    let (older, mut older_events) = Peer::new("computer-old".into(), Authority::Manage);
+    call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/2"] })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let failed = Record {
+        progress: Progress::Failed { version: "9.9.9".into(), at: 1, message: "TerminalX 9.9.9 did not come up after the handover.".into(), running: "0.0.1".into(), rolled_back: true },
+        ..Record::default()
+    };
+    updates::write_record(&updates::status_path(&m.path("data")), &failed).unwrap();
+    let changed = next_event(&mut events, "machine.updateChanged").await;
+    assert_eq!(changed["status"]["progress"]["rolledBack"], true);
+    assert_eq!(changed["status"]["otherComputers"], json!([{ "id": "studio", "label": "Studio" }]), "{changed}");
+    assert!(tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match older_events.recv().await {
+                Some(value) if value["event"] == "machine.updateChanged" => return,
+                Some(_) => continue,
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .is_err(), "a connection without machine/3 is not told");
 }

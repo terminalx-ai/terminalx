@@ -162,10 +162,16 @@ describe("personal local sections", () => {
     const palette = render(<CommandPalette open onOpenChange={() => {}} onOpenSettings={() => {}} onCreated={() => {}} />);
     fireEvent.change(screen.getByLabelText("Command palette search"), { target: { value: "Move to section" } });
     fireEvent.click(await screen.findByRole("option", { name: /Move to section/ }));
-    await waitFor(() => expect(local.getLocalSections().dialog?.kind).toBe("move"));
+    // PRO-401: a view of the palette, not a dialog, and it opens on the section the session is in.
+    expect(local.getLocalSections().dialog).toBeNull();
+    const current = await screen.findByRole("option", { name: /^Release/ });
+    expect(current.getAttribute("aria-selected")).toBe("true");
+    expect(current.textContent).toBe("Release1 session");
+    expect(within(current).getByLabelText("Current section")).toBeTruthy();
+    nextSections = [section("Release")];
+    fireEvent.click(screen.getByRole("option", { name: /^Remove from section/ }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: null } }));
     palette.unmount();
-    nextSections = [section("Release")]; await submit("Move");
-    expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: null } });
     fireEvent.click(screen.getByRole("button", { name: "New session in Release" }));
     expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, newSessionSectionId: "Release" });
     act(() => store.closeNewSession());

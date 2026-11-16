@@ -71,6 +71,7 @@ export function RightPanel({
   terminals = false,
   computer = false,
   browser = false,
+  dock,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -113,6 +114,8 @@ export function RightPanel({
   computer?: boolean;
   /** A local session's panel: the Browser tab, the workspace's pages beside the chat, shared with the agent. */
   browser?: boolean;
+  /** Terminals that are not this computer's, docked below the tabs instead (a machine session's, PRO-347). */
+  dock?: ReactNode;
 }) {
   const prefs = usePrefs();
   // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
@@ -373,6 +376,7 @@ export function RightPanel({
         </div>
       </div>
       {terminals && sessionId && <TerminalDock sessionId={sessionId} cwd={cwd} />}
+      {dock}
     </aside>
   );
 }

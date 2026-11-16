@@ -23,6 +23,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   running turn. Live only: it is never queued, receipted or resent.
 /// - `session-repository/1`: `session.create.repository` carries the selected
 ///   identity and advertised directory; mismatch/missing checkout fails closed.
+/// - `session-base/1` (PRO-348): `session.create.baseRef` names the branch a
+///   new worktree is cut from; without it the project's default branch is.
 /// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
@@ -77,8 +79,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 25] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+pub const CAPABILITIES: [&str; 26] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
 ];
 
@@ -98,7 +100,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -299,6 +301,12 @@ pub const METHODS: &[Method] = &[
     method("machine.projects", "machine/1", Participate, false),
     // PRO-345: a paired computer's relay invite (docs/MACHINES.md).
     method("machine.relayAccess", "machine/2", Manage, false),
+    // PRO-354: what version the machine runs and what it could update to,
+    // read by anyone who operates it; updating it is the manager's. Not
+    // idempotent: an update is decided against the state of the moment
+    // (blockers, other computers, one already under way).
+    method("machine.updateStatus", "machine/3", Participate, false),
+    method("machine.update", "machine/3", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -309,7 +317,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
         "git/1" => &["git."],
-        "session/1" | "session/2" | "session/3" | "session-repository/1" => &["session."],
+        "session/1" | "session/2" | "session/3" | "session-repository/1" | "session-base/1" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
         "keys/1" => &["keys."],
@@ -325,6 +333,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "ports/1" => &["ports."],
         "machine/1" => &["machine."],
         "machine/2" => &["machine.relayAccess"],
+        "machine/3" => &["machine.updateStatus", "machine.update"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
@@ -386,9 +395,13 @@ pub fn failure(id: &str, error: &RpcError) -> Value {
 /// `rpc.hello`: the intersection of what the client wants and what this
 /// runtime offers (`offered`: [`served`], less `agent-commands/1` beside a
 /// mailbox). No overlap at all is `update_required`.
+///
+/// `update_required` carries `{ runtimeVersion, offered }` (PRO-354), so a
+/// client can tell whether the runtime or it is the older one.
 pub fn negotiate(params: &Value, offered: &[&str]) -> Result<Vec<String>, RpcError> {
+    let update_required = |message: String| RpcError::new("update_required", message).with_data(json!({ "runtimeVersion": env!("CARGO_PKG_VERSION"), "offered": offered }));
     if params.get("protocol").and_then(Value::as_str) != Some(PROTOCOL) {
-        return Err(RpcError::new("update_required", format!("this runtime speaks {PROTOCOL}")));
+        return Err(update_required(format!("this runtime speaks {PROTOCOL}")));
     }
     let wanted: Vec<&str> = params
         .get("want")
@@ -400,7 +413,7 @@ pub fn negotiate(params: &Value, offered: &[&str]) -> Result<Vec<String>, RpcErr
     let granted: Vec<String> =
         offered.iter().filter(|capability| wanted.contains(capability)).map(|capability| capability.to_string()).collect();
     if granted.is_empty() {
-        return Err(RpcError::new("update_required", "no namespace version in common with this runtime"));
+        return Err(update_required("no namespace version in common with this runtime".into()));
     }
     Ok(granted)
 }
@@ -472,6 +485,9 @@ pub(crate) fn leak_code(code: &str) -> &'static str {
         "outcome_unknown",
         "unpushed",
         "lease_held",
+        "update_confirm",
+        "update_busy",
+        "update_unavailable",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }
@@ -652,6 +668,33 @@ mod tests {
         for name in ["machine.describe", "machine.projects"] {
             let method = find_method(name).unwrap();
             assert_eq!((method.capability, method.authority, method.idempotent), ("machine/1", Participate, false), "{name}");
+        }
+    }
+
+    /// PRO-354: `machine/3` is offered by a machine only, adds to
+    /// `machine/2`, and `update_required` says which side is older.
+    #[test]
+    fn machine_3_adds_updates_and_update_required_names_the_runtime() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/3") && machine.contains(&"machine/2") && machine.contains(&"machine/1"));
+        assert!(!workspace.contains(&"machine/3"));
+        let status = find_method("machine.updateStatus").unwrap();
+        assert_eq!((status.capability, status.authority, status.idempotent), ("machine/3", Participate, false));
+        let update = find_method("machine.update").unwrap();
+        assert_eq!((update.capability, update.authority, update.idempotent), ("machine/3", Manage, false));
+        // A machine/2 client is granted what it asked for, and nothing of machine/3.
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/2"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/2"]);
+        let refused = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/9"]}), &machine).unwrap_err();
+        assert_eq!(refused.code, "update_required");
+        let data = refused.data.clone().expect("update_required carries data");
+        assert_eq!(data["runtimeVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(data["offered"], json!(machine));
+        let wrong = negotiate(&json!({"protocol": "terminalx-workspace-rpc/2", "want": ["machine/1"]}), &machine).unwrap_err();
+        assert_eq!(wrong.data.unwrap()["runtimeVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(failure("1", &refused)["error"]["data"]["runtimeVersion"], env!("CARGO_PKG_VERSION"), "the data goes out with the error");
+        for code in ["update_confirm", "update_busy", "update_unavailable"] {
+            assert_eq!(leak_code(code), code);
         }
     }
 

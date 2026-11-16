@@ -175,7 +175,8 @@ export function ago(at: number, now: number): string {
   return unit(Math.floor(days / 365), "year");
 }
 
-function iconFor(name: string, account: AccountHost | null): MachineIcon {
+/** A machine's mark: a server for SSH or Linux, a laptop by its name, else a desktop. */
+export function iconFor(name: string, account: AccountHost | null): MachineIcon {
   if (account?.environmentKind === "ssh" || account?.platform === "linux") return "server";
   return /book|laptop/i.test(name) ? "laptop" : "desktop";
 }

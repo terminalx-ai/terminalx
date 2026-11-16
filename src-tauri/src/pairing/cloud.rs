@@ -9,8 +9,26 @@ use crate::account::AccountContext;
 use super::diagnostics::Category;
 use super::model::{
     AccountPairingEnvelope, AccountPairingGrant, AccountPairingRevocation, HostBindingPayload,
-    CAPABILITY,
 };
+
+/// Which grants a host poll lists. Without `requestedScope` the account
+/// service lists only `mobile` ones, which is all a window before PRO-349
+/// understands; `runtime` ones are for the machine host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantScope {
+    Mobile,
+    Runtime,
+}
+
+impl GrantScope {
+    /// The query that follows `bindingGeneration`. Mobile sends none, as before.
+    fn query(self) -> &'static str {
+        match self {
+            Self::Mobile => "",
+            Self::Runtime => "&requestedScope=runtime",
+        }
+    }
+}
 
 const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
 /// Debug builds only: the relay director of a local or staging stack, e.g. the
@@ -138,7 +156,7 @@ fn verify_guest_at(base: &str, token: &str) -> Result<crate::local_sharing::Pers
 /// accepts only "live" or "exited" and treats a "live" as current for 90 s,
 /// so the caller sends one only while the control channel is answering;
 /// otherwise the binding lapses to "unverifiable" on its own.
-pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
+pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation: u64, capabilities: &[String]) -> Result<()> {
     request_unit(
         base,
         &format!("/v1/desktop/host-account-bindings/{host_id}/heartbeat"),
@@ -146,7 +164,7 @@ pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation
         Some(json!({
             "bindingGeneration": generation,
             "reachability": "live",
-            "capabilities": [CAPABILITY]
+            "capabilities": capabilities
         })),
         &context.access_token,
     )
@@ -167,10 +185,12 @@ pub fn pending_grants(
     context: &AccountContext,
     host_id: &str,
     generation: u64,
+    scope: GrantScope,
 ) -> Result<Vec<AccountPairingGrant>> {
+    let query = scope.query();
     request_json::<GrantList>(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests?bindingGeneration={generation}"),
+        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests?bindingGeneration={generation}{query}"),
         "GET",
         None,
         &context.access_token,
@@ -213,15 +233,36 @@ pub fn pending_revocations(
     context: &AccountContext,
     host_id: &str,
     generation: u64,
+    scope: GrantScope,
 ) -> Result<Vec<AccountPairingRevocation>> {
+    let query = scope.query();
     request_json::<RevocationList>(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}"),
+        &format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}{query}"),
         "GET",
         None,
         &context.access_token,
     )
     .map(|response| response.revocations)
+}
+
+/// This Mac removed the computer allowed through `request_id`: the grant ends
+/// and its envelope is deleted. No revocation is queued for this host, which
+/// has already applied it. Repeating it is harmless (`idempotent: true`).
+pub fn revoke_host_grant(
+    base: &str,
+    context: &AccountContext,
+    host_id: &str,
+    request_id: &str,
+    generation: u64,
+) -> Result<()> {
+    request_unit(
+        base,
+        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/revoke"),
+        "POST",
+        Some(json!({ "bindingGeneration": generation, "reason": "host-removed" })),
+        &context.access_token,
+    )
 }
 
 pub fn acknowledge_revocation(
@@ -559,16 +600,16 @@ mod tests {
             relay_entitled: true,
             generation: 1,
         };
-        assert!(pending_grants(&server.base, &context, "synthetic-host", 3).unwrap().is_empty());
-        heartbeat(&server.base, &context, "synthetic-host", 3).unwrap();
-        let error = pending_revocations(&server.base, &context, "synthetic-host", 3).unwrap_err();
+        assert!(pending_grants(&server.base, &context, "synthetic-host", 3, GrantScope::Mobile).unwrap().is_empty());
+        heartbeat(&server.base, &context, "synthetic-host", 3, &[super::super::model::CAPABILITY.into()]).unwrap();
+        let error = pending_revocations(&server.base, &context, "synthetic-host", 3, GrantScope::Mobile).unwrap_err();
         assert_eq!(error.downcast_ref::<CloudHttpError>().map(|error| error.0), Some(429));
         assert_eq!(error.downcast_ref::<RetryAfter>(), Some(&RetryAfter(Duration::from_secs(7))));
         assert_eq!(
             super::super::diagnostics::Failure::from_error(&error).category,
             Category::RateLimited
         );
-        assert!(pending_grants(&server.base, &context, "synthetic-host", 3).unwrap().is_empty());
+        assert!(pending_grants(&server.base, &context, "synthetic-host", 3, GrantScope::Mobile).unwrap().is_empty());
 
         let requests = server.requests();
         assert_eq!(
@@ -579,8 +620,53 @@ mod tests {
         assert!(requests.iter().all(|request| request.authorization == "Bearer synthetic-access-token"));
         assert_eq!(
             requests[1].body,
-            Some(json!({ "bindingGeneration": 3, "reachability": "live", "capabilities": [CAPABILITY] }))
+            Some(json!({ "bindingGeneration": 3, "reachability": "live", "capabilities": [super::super::model::CAPABILITY] }))
         );
+    }
+
+    #[test]
+    fn runtime_grants_and_revocations_ask_for_their_scope_and_a_host_removal_names_the_grant() {
+        use super::fixture::{KeepAliveServer, Reply};
+        let server = KeepAliveServer::start(|request| {
+            let path = request.path.as_str();
+            if path.contains("/pairing-grant-requests?") {
+                Reply::ok(r#"{"requests":[{"userId":"u","hostId":"h","clientInstallationId":"i","grantRequestId":"g","bindingGeneration":3,"installationGeneration":1,"clientEphemeralPublicKey":"k","associatedDataVersion":1,"associatedData":"a","requestedScope":"runtime","expiresAt":"2099-01-01T00:00:00Z","state":"pending"}]}"#)
+            } else if path.contains("/revocations?") {
+                Reply::ok(r#"{"revocations":[{"revocationId":"r","userId":"u","hostId":"h","clientInstallationId":"i","grantRequestId":"g","bindingGeneration":3}]}"#)
+            } else {
+                Reply::ok(r#"{"grant":{},"idempotent":false,"correlationId":"c"}"#)
+            }
+        });
+        let context = AccountContext {
+            access_token: "synthetic-access-token".into(),
+            user_id: "u".into(),
+            email: "fixture@example.invalid".into(),
+            display_name: "Fixture".into(),
+            profile_id: "synthetic-profile".into(),
+            organization_id: "synthetic-org".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        let grants = pending_grants(&server.base, &context, "h", 3, GrantScope::Runtime).unwrap();
+        assert_eq!(grants[0].requested_scope, "runtime");
+        let revocations = pending_revocations(&server.base, &context, "h", 3, GrantScope::Runtime).unwrap();
+        assert_eq!(revocations[0].grant_request_id, "g");
+        pending_grants(&server.base, &context, "h", 3, GrantScope::Mobile).unwrap();
+        revoke_host_grant(&server.base, &context, "h", "g", 3).unwrap();
+        let requests = server.requests();
+        let paths: Vec<_> = requests.iter().map(|request| request.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/v1/desktop/host-account-bindings/h/pairing-grant-requests?bindingGeneration=3&requestedScope=runtime",
+                "/v1/desktop/host-account-bindings/h/revocations?bindingGeneration=3&requestedScope=runtime",
+                "/v1/desktop/host-account-bindings/h/pairing-grant-requests?bindingGeneration=3",
+                "/v1/desktop/host-account-bindings/h/pairing-grant-requests/g/revoke",
+            ],
+            "the mobile poll is unchanged"
+        );
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].body, Some(json!({ "bindingGeneration": 3, "reason": "host-removed" })));
     }
 
     #[test]

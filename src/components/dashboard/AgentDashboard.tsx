@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ListFilter, Search, X } from "@/icons";
+import { Check, ChevronDown, Cloud, Laptop, ListFilter, Monitor, Search, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
-import { AgentCard, AgentCardSkeleton, CloudAgentCard } from "@/components/dashboard/AgentCard";
+import { AgentCard, AgentCardSkeleton, CloudAgentCard, MachineAgentCard } from "@/components/dashboard/AgentCard";
+import { MachineIcon, MachineStateMark } from "@/components/machines/connectionStatus";
 import { useHotkey } from "@/lib/hotkeys";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries } from "@/lib/summaries";
@@ -12,7 +13,7 @@ import {
   COLUMNS,
   DASHBOARD_STATES,
   filterSessions,
-  TABLE_COLUMNS,
+  tableColumns,
   toggleTableColumn,
   nextDashboardSort,
   sortDashboardRows,
@@ -23,25 +24,41 @@ import {
   toggleFilter,
   type DashboardState,
   type DashboardFilters,
+  type DashboardSort,
 } from "@/lib/dashboard";
 import { usePref } from "@/lib/prefs";
+import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
 import { loadRosterIn, usePeople } from "@/lib/cloudPeople";
 import { useDashboardPrs } from "@/lib/dashboardPrs";
-import { SessionTable, type SessionTableRow, type SessionTableHandle } from "./SessionTable";
+import { SessionTable, type SessionPlace, type SessionTableRow, type SessionTableHandle } from "./SessionTable";
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
+import { isMachineDashboardSession, machineAttentionTab, openMachineSession, useMachineDashboard, useMachineDashboardEnabled, type MachineDashboardSession } from "@/lib/machineDashboard";
+import { useMachineConnections } from "@/lib/machineConnections";
+import { machineSectionKey } from "@/types/target";
 import type { SessionEntry } from "@/types/session";
 import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 
-/** A card: a local session, or a cloud one (PRO-23 CS-19) in the same columns. */
-type CardSession = (SessionEntry | CloudDashboardSession) & { ownerId?: string | null };
+/** A card: a local session, a cloud one (PRO-23 CS-19) or one on a paired machine (PRO-346), in the same columns. */
+type CardSession = (SessionEntry | CloudDashboardSession | MachineDashboardSession) & { ownerId?: string | null };
 
 function openCard(session: CardSession) {
   // A cloud card opens its session on the tab that wants the reader, and only looks: nothing wakes it.
   if (isCloudDashboardSession(session)) openCloudSession(session.key, attentionTab(session)?.tabId);
+  // A machine card opens its session in the machine's view.
+  else if (isMachineDashboardSession(session)) openMachineSession(session.key);
   else selectSession(session.id);
+}
+
+/** The All machines menu's choice: every session, this Mac's, the cloud's, or one machine's (`machine:<id>`). */
+type Place = "all" | "local" | "cloud" | `machine:${string}`;
+
+function placeOf(session: CardSession): Exclude<Place, "all"> {
+  if (isCloudDashboardSession(session)) return "cloud";
+  if (isMachineDashboardSession(session)) return machineSectionKey(session.machineId);
+  return "local";
 }
 
 /**
@@ -71,17 +88,45 @@ export function AgentDashboard() {
   const cloud = useCloudDashboard(true);
   const { visibleIds } = useOrganizationVisibility();
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
-  const sessions = useMemo<CardSession[]>(() => [...store.sessions.map((session) => ({ ...session, ownerId: "local" })), ...visibleCloud], [store.sessions, visibleCloud]);
-  const localLive = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
+  // Sessions on paired machines (PRO-346): none while Experimental → Machines is off.
+  const machinesOn = useMachineDashboardEnabled();
+  const machineSessions = useMachineDashboard(true);
+  const { machines: pairedMachines, states: machineStates } = useMachineConnections();
+  // The Where column and the All machines menu, only with Machines on and a machine paired: otherwise the overview is as it was.
+  const showWhere = machinesOn && pairedMachines.length > 0;
+  const [placeChoice, setPlace] = useState<Place>("all");
+  const place: Place = showWhere && (placeChoice === "all" || placeChoice === "local" || placeChoice === "cloud" || pairedMachines.some((m) => machineSectionKey(m.machineId) === placeChoice)) ? placeChoice : "all";
+  const everywhere = useMemo<CardSession[]>(() => [
+    ...store.sessions.map((session) => ({ ...session, ownerId: "local" })),
+    ...visibleCloud,
+    ...(showWhere ? machineSessions : []),
+  ], [store.sessions, visibleCloud, showWhere, machineSessions]);
+  const sessions = useMemo(() => (place === "all" ? everywhere : everywhere.filter((session) => placeOf(session) === place)), [everywhere, place]);
+  // The menu's counts: sessions with an agent that are not archived, wherever the other filters stand.
+  const placeCounts = useMemo(() => {
+    const counts = new Map<Place, number>();
+    for (const session of everywhere) {
+      if (session.archived || !session.tabs.length) continue;
+      const at = placeOf(session);
+      counts.set(at, (counts.get(at) ?? 0) + 1);
+      counts.set("all", (counts.get("all") ?? 0) + 1);
+    }
+    return counts;
+  }, [everywhere]);
+  const hasCloud = visibleCloud.length > 0;
+  const machineById = useMemo(() => new Map(pairedMachines.map((machine) => [machine.machineId, machine])), [pairedMachines]);
+  const localLive = useMemo(() => sessions.filter((s) => !isCloudDashboardSession(s) && !isMachineDashboardSession(s) && !s.archived && s.tabs.length > 0), [sessions]);
   const summarySessions = useMemo(() => store.sessions.filter((s) => s.tabs.length && (!s.archived || filters.columns.includes("archived"))), [store.sessions, filters.columns]);
   const summaries = useSessionSummaries(summarySessions, store.loaded && preferences.view === "board");
-  const cloudLive = useMemo(() => visibleCloud.filter((s) => !s.archived && s.tabs.length > 0), [visibleCloud]);
+  const remoteLive = useMemo(() => sessions.filter((s) => (isCloudDashboardSession(s) || isMachineDashboardSession(s)) && !s.archived && s.tabs.length > 0), [sessions]);
   // Cloud projects to filter by and name: `cloud:<orgId>:<identity>` → "acme/api · Acme".
   const cloudProjects = useMemo(() => {
     const names = new Map<string, string>();
     for (const s of visibleCloud) names.set(s.projectKey, `${s.projectName} · ${s.orgName}`);
+    // A machine's projects the same way: `machine:<machineId>:<projectId>` → "terminalx · Mac mini".
+    if (showWhere) for (const s of machineSessions) names.set(s.projectKey, `${s.projectName} · ${s.machineName}`);
     return names;
-  }, [visibleCloud]);
+  }, [visibleCloud, showWhere, machineSessions]);
 
   // Quick chats have no project. They are named, searched and filtered as one group, under a key no path can be.
   const quickPaths = useMemo(() => new Set(store.sessions.filter(isQuickChat).map((s) => s.projectPath)), [store.sessions]);
@@ -114,7 +159,12 @@ export function AgentDashboard() {
   useEffect(() => {
     for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
   }, [orgs]);
-  const prs = useDashboardPrs(filtered, preferences.view === "table");
+  // Pull requests are this Mac's index: a machine's sessions are not in it.
+  const prSessions = useMemo(() => filtered.filter((s) => !isMachineDashboardSession(s)), [filtered]);
+  const prs = useDashboardPrs(prSessions, preferences.view === "table");
+  const columns = tableColumns(showWhere);
+  // A sort by Where while it is not offered falls back to the default.
+  const sort: DashboardSort = !showWhere && preferences.sort.column === "where" ? DEFAULT_DASHBOARD_PREFERENCES.sort : preferences.sort;
 
   // Agents to filter by: the ones actually in use, plus whatever is installed.
   const harnesses = useMemo(() => {
@@ -124,7 +174,7 @@ export function AgentDashboard() {
   }, [sessions, store.harnesses]);
   const agentName = useCallback(
     (s: CardSession) => {
-      const tab = isCloudDashboardSession(s) ? attentionTab(s) : (s.tabs.find((t) => t.id === s.activeTab) ?? s.tabs[0]);
+      const tab = isCloudDashboardSession(s) ? attentionTab(s) : isMachineDashboardSession(s) ? machineAttentionTab(s) : (s.tabs.find((t) => t.id === s.activeTab) ?? s.tabs[0]);
       if (!tab) return "Agent";
       return tab.title ?? store.harnesses.find((h) => h.id === tab.harness)?.name ?? tab.harness;
     },
@@ -134,7 +184,9 @@ export function AgentDashboard() {
   const workspaceByPath = useMemo(() => new Map(Object.values(store.workspaces ?? {}).flat().map((workspace) => [workspace.path, workspace])), [store.workspaces]);
   const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
   const tableRows = useMemo<SessionTableRow[]>(() => preferences.view === "table" ? sortDashboardRows(filtered.map((session) => {
-    const local = !isCloudDashboardSession(session);
+    const local = !isCloudDashboardSession(session) && !isMachineDashboardSession(session);
+    const at: SessionPlace = isCloudDashboardSession(session) ? { kind: "cloud" }
+      : isMachineDashboardSession(session) ? { kind: "machine", machine: machineById.get(session.machineId) ?? null } : { kind: "local" };
     const workspace = local && !session.worktreeRemoved ? workspaceByPath.get(session.cwd) : undefined;
     const recorded = [...(prs.get(session.id) ?? [])].sort((a, b) => a.number - b.number || a.url.localeCompare(b.url));
     const additions = workspace ? workspace.branchAdditions ?? workspace.additions : null;
@@ -145,6 +197,7 @@ export function AgentDashboard() {
       status: DASHBOARD_STATES.find((state) => state.id === (session.archived ? "archived" : sessionColumn(session)))!.label,
       name: session.title,
       project: projectName(session.projectPath),
+      ...(showWhere ? { where: isMachineDashboardSession(session) ? session.machineName : at.kind === "cloud" ? "Cloud" : "This Mac", place: at } : {}),
       branch: session.worktreeRemoved ? session.removedWorkspace?.branch ?? null : session.branch ?? null,
       agent: [...new Set(session.tabs.map((tab) => harnessNames.get(tab.harness) ?? tab.harness))].join(", "),
       pr: recorded[0]?.number ?? null,
@@ -155,7 +208,7 @@ export function AgentDashboard() {
       updated: session.modified,
       created: session.created ?? null,
     };
-  }), preferences.sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, preferences.sort, preferences.view]);
+  }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, sort, preferences.view, showWhere, machineById]);
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
@@ -198,7 +251,7 @@ export function AgentDashboard() {
     return true;
   });
 
-  const total = localLive.length + cloudLive.length + (filters.columns.includes("archived") ? sessions.filter((s) => s.archived && s.tabs.length).length : 0);
+  const total = localLive.length + remoteLive.length + (filters.columns.includes("archived") ? sessions.filter((s) => s.archived && s.tabs.length).length : 0);
   const loading = !store.loaded || (preferences.view === "board" && summaries.loading && total > 0);
 
   return (
@@ -215,16 +268,38 @@ export function AgentDashboard() {
           ))}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {showWhere && <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant={place === "all" ? "ghost" : "secondary"} size="sm" className="gap-1.5">
+                <Monitor />
+                {placeLabel(place, machineById)}
+                <ChevronDown className="size-3 text-faint" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <PlaceItem label="All machines" icon={<Monitor />} count={placeCounts.get("all") ?? 0} selected={place === "all"} onSelect={() => setPlace("all")} />
+              <DropdownMenuSeparator />
+              <PlaceItem label="This Mac" icon={<Laptop />} count={placeCounts.get("local") ?? 0} selected={place === "local"} onSelect={() => setPlace("local")} />
+              {pairedMachines.map((machine) => {
+                const key = machineSectionKey(machine.machineId);
+                return (
+                  <PlaceItem key={key} label={machine.name} icon={<MachineIcon machine={machine} />} count={placeCounts.get(key) ?? 0} selected={place === key} onSelect={() => setPlace(key)}
+                    mark={<MachineStateMark state={machineStates[machine.machineId] ?? { state: "idle" }} />} />
+                );
+              })}
+              {hasCloud && <PlaceItem label="Cloud" icon={<Cloud />} count={placeCounts.get("cloud") ?? 0} selected={place === "cloud"} onSelect={() => setPlace("cloud")} />}
+            </DropdownMenuContent>
+          </DropdownMenu>}
           {preferences.view === "table" && <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="sm">Columns</Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
-              {TABLE_COLUMNS.map(({ id, label }) => (
+              {columns.map(({ id, label }) => (
                 <DropdownMenuCheckboxItem key={id}
                   checked={!preferences.hiddenColumns.includes(id)}
-                  disabled={!preferences.hiddenColumns.includes(id) && preferences.hiddenColumns.length === TABLE_COLUMNS.length - 1}
+                  disabled={!preferences.hiddenColumns.includes(id) && columns.every((column) => column.id === id || preferences.hiddenColumns.includes(column.id))}
                   onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setPreferences({ ...preferences, hiddenColumns: toggleTableColumn(preferences.hiddenColumns, id) })}>
+                  onCheckedChange={() => setPreferences({ ...preferences, hiddenColumns: toggleTableColumn(preferences.hiddenColumns, id, columns) })}>
                   {label}
                 </DropdownMenuCheckboxItem>
               ))}
@@ -348,8 +423,8 @@ export function AgentDashboard() {
       </header>
 
       {preferences.view === "table" ? (
-        <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort}
-          onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(preferences.sort, column) })}
+        <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={sort} where={showWhere}
+          onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(sort, column) })}
           selectedId={cursor} onFocus={setCursor}
           onOpen={(id) => {
             const session = filtered.find((s) => s.id === id);
@@ -362,7 +437,18 @@ export function AgentDashboard() {
           {boardColumns.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
               {shown[c.id].map((s) =>
-                isCloudDashboardSession(s) ? (
+                isMachineDashboardSession(s) ? (
+                  <MachineAgentCard
+                    key={s.id}
+                    session={s}
+                    machine={machineById.get(s.machineId) ?? null}
+                    column={c.id}
+                    agentName={agentName(s)}
+                    focused={cursor === s.id}
+                    onFocus={() => setCursor(s.id)}
+                    onOpen={() => openCard(s)}
+                  />
+                ) : isCloudDashboardSession(s) ? (
                   <CloudAgentCard
                     key={s.id}
                     session={s}
@@ -395,6 +481,29 @@ export function AgentDashboard() {
         </div>
       </div>}
     </div>
+  );
+}
+
+/** The All machines button's label: the choice, by name. */
+function placeLabel(place: Place, machines: ReadonlyMap<string, { name: string }>): string {
+  if (place === "all") return "All machines";
+  if (place === "local") return "This Mac";
+  if (place === "cloud") return "Cloud";
+  return machines.get(place.slice("machine:".length))?.name ?? "All machines";
+}
+
+/** One choice in the All machines menu: icon, name, state mark for a machine, and its session count. */
+function PlaceItem({ label, icon, mark, count, selected, onSelect }: { label: string; icon: ReactNode; mark?: ReactNode; count: number; selected: boolean; onSelect: () => void }) {
+  return (
+    <DropdownMenuItem onSelect={onSelect} aria-current={selected || undefined} data-place-count={count}>
+      {icon}
+      <span className="min-w-0 truncate">{label}</span>
+      {mark}
+      <span className="ml-auto flex items-center gap-1.5 text-[11px] text-faint tabular-nums">
+        {count}
+        <Check aria-hidden className={cn("size-3.5", !selected && "invisible")} />
+      </span>
+    </DropdownMenuItem>
   );
 }
 

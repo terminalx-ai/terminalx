@@ -872,7 +872,7 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
                 let permit = manager.mobile.permit(actor, string("connection")?, session, tab)?;
                 phone_send(manager, actor, grant, (session, tab), permit, text.clone(), &text, images, None)?
             }
-            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab), false)?)?,
             // "Continue in new session": a new tab in this session with the
             // chosen agent and settings, handed the prompt the phone built from
             // `prepareContinuation`. It goes as any phone message (the sender
