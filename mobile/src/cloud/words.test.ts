@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
-import { codeText, connectionLine, leaseLine, outboxLine, presenceLine } from "./words";
+import { codeText, connectionLine, leaseLine, listStatus, outboxLine, presenceLine, rolePhrase, whoCanStart } from "./words";
 
 const nameOf = (userId: string | null | undefined) => ({ "u-alice": "Alice", "u-bob": "Bob" })[userId ?? ""] ?? "Someone";
 const lease = (holderId: string, expiresAt = 2_000) => ({ tabId: "t1", holderId, acquiredAt: 0, expiresAt });
@@ -53,18 +53,53 @@ describe("sharing, in words", () => {
 describe("connectionLine reflects the role, not only the socket (#475)", () => {
   const connected: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "", capabilities: [], authority: "participate" };
   it("says Live only for someone with a role", () => {
-    expect(connectionLine(connected, "ready", null, false, { role: "driver", checking: false })).toEqual({ tone: "live", text: "Live · end-to-end encrypted" });
+    expect(connectionLine(connected, "ready", null, false, { role: "driver", checking: false })).toEqual({ tone: "live", text: "Live · end-to-end encrypted", short: "Live" });
     expect(connectionLine(connected, "ready", null, false, { role: "viewer", checking: false }).tone).toBe("live");
   });
   it("says there is no access when the runtime gives none, whatever the socket", () => {
-    expect(connectionLine(connected, "ready", null, false, { role: "none", checking: false })).toEqual({ tone: "warn", text: "No access: this workspace is not shared with you." });
+    expect(connectionLine(connected, "ready", null, false, { role: "none", checking: false })).toEqual({ tone: "warn", text: "No access: this workspace is not shared with you.", short: "No access" });
   });
   it("says access is being checked while the runtime has no member list", () => {
-    expect(connectionLine(connected, "ready", null, false, { role: "driver", checking: true })).toEqual({ tone: "idle", text: "Checking your access…" });
+    expect(connectionLine(connected, "ready", null, false, { role: "driver", checking: true })).toEqual({ tone: "idle", text: "Checking your access…", short: "Checking access…" });
   });
   it("says a refused open in words, not Live", () => {
     const line = connectionLine({ state: "stopped" }, "ready", { kind: "api", code: "cloud_workspace_not_found", unreachable: false }, false, { role: "none", checking: false });
     expect(line.tone).toBe("warn");
     expect(line.text).not.toMatch(/Live/);
+  });
+});
+
+describe("a stopped workspace, in words (#988)", () => {
+  it("never says what the conversation holds: the body says that", () => {
+    const stopped = connectionLine({ state: "suspended" }, "suspended", null);
+    expect(stopped).toEqual({ tone: "idle", text: "Stopped", short: "Stopped" });
+    expect(connectionLine({ state: "suspended" }, "archived", null).text).toBe("Archived");
+    for (const state of ["suspended", "archived", "resuming", "suspending", "ready"]) {
+      const line = connectionLine({ state: "suspended" }, state, null);
+      expect(`${line.text} ${line.short}`).not.toMatch(/saved|conversation|nothing/i);
+    }
+    expect(connectionLine({ state: "suspended" }, "resuming", null).short).toBe("Starting…");
+  });
+
+  it("puts the role as a phrase for the line under the title, and says who may start it", () => {
+    expect(rolePhrase("manager")).toBe("You are a manager");
+    expect(rolePhrase("driver")).toBe("You can send");
+    expect(rolePhrase("viewer")).toBe("You can view");
+    expect(rolePhrase("none")).toBeNull();
+    expect(rolePhrase(null)).toBeNull();
+    expect(whoCanStart("Alice")).toBe("Alice, its creator, or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+    expect(whoCanStart(null)).toBe("Its creator or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+  });
+
+  it("says a workspace in the list as the Sessions list says a session", () => {
+    expect(listStatus({ state: "ready", runtimeActivity: { activeTurns: 1 } })).toEqual({ words: "Working", mark: "working" });
+    expect(listStatus({ state: "ready", runtimeActivity: { activeTurns: 1, pendingApprovals: 1 } })).toEqual({ words: "Needs your answer", mark: "needs" });
+    expect(listStatus({ state: "ready", runtimeActivity: { pendingApprovals: 3 } }).words).toBe("3 waiting for an answer");
+    expect(listStatus({ state: "ready" })).toEqual({ words: "Running", mark: "running" });
+    expect(listStatus({ state: "suspended" })).toEqual({ words: "Stopped", mark: "idle" });
+    expect(listStatus({ state: "resuming" })).toEqual({ words: "Starting", mark: "changing" });
+    expect(listStatus({ state: "attention-required" })).toEqual({ words: "Needs attention", mark: "attention" });
+    // A stopped workspace's last report of work is not work now.
+    expect(listStatus({ state: "suspended", runtimeActivity: { activeTurns: 2, pendingApprovals: 1 } }).words).toBe("Stopped");
   });
 });

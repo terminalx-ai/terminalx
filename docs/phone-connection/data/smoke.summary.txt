@@ -1,0 +1,5 @@
+smoke-1.jsonl: keepAliveMs 30000, span 1.7 min, sent 7, answered 7, failed 0, connection lost 3
+  round trip ms: median 30, p90 95
+  lost after 3 s connected, path direct: relay_outer_1001 (reason "Stream end encountered", not clean)
+  lost after 6 s connected, path direct: relay_outer_1001 (reason "Stream end encountered", not clean)
+  lost after 30 s connected, path direct: relay_outer_1001 (reason "Stream end encountered", not clean)

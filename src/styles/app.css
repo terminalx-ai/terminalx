@@ -366,9 +366,14 @@
   border-top: 1px solid var(--hairline);
   margin: 1em 0;
 }
+/* A table is as wide as its columns want, and never narrower than the transcript (#1009). Its wrapper scrolls
+   sideways when that is wider than the transcript; columns are not squeezed to fit, so an ETA, a PR number or a
+   status stays on one line. A column of prose is held to a readable measure by the cells' max-width and wraps
+   inside it. */
 .prose-chat table {
   border-collapse: collapse;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   font-size: 13px;
 }
 .prose-chat th,
@@ -377,6 +382,15 @@
   padding: 0.35em 0.6em;
   text-align: left;
   vertical-align: top;
+  max-width: 22em;
+  /* Words break only at the edge of that measure, not to make the table narrower. */
+  overflow-wrap: break-word;
+}
+/* A URL, a path or a hash breaks anywhere, so one cell cannot make its column wider than the measure. */
+.prose-chat td code,
+.prose-chat td a,
+.prose-chat th code,
+.prose-chat th a {
   overflow-wrap: anywhere;
 }
 .prose-chat th {

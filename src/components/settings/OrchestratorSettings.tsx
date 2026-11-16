@@ -5,8 +5,8 @@ import { EFFORT_LABEL, modeLabel, PERMISSION_MODES } from "@/lib/models";
 import { ROUTE_EFFORTS } from "@/lib/orchestration";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { useSessionStore } from "@/lib/sessions";
-import type { Cap, OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
-import { RegisteredSetting } from "./settingsRegistry";
+import type { AutoDecide, Cap, OrchestratorPatch, OrchestratorSettings as Settings } from "@/types/orchestration";
+import { RegisteredSetting, type SettingId } from "./settingsRegistry";
 import { RoutingTableSettings } from "./RoutingTableSettings";
 
 /** The most pieces the setting takes (`MAX_PIECE_LIMIT` in store/settings.rs). */
@@ -149,6 +149,14 @@ const DEFAULT_CEILING = 85;
 /** What the window level says when it is off, here and in a repository. */
 const CEILING_OFF = "Off: a run can use the whole window";
 
+/** What a run decides on its own (#1004), each a switch that is on unless turned off. */
+const AUTO_SWITCHES = [
+  { key: "reaskVerifier", setting: "orchestrator.reaskVerifier", label: "Ask the reviewer again when it gives no verdict" },
+  { key: "acceptBaseFailures", setting: "orchestrator.acceptBaseFailures", label: "Accept a piece whose only failing check also fails on the base" },
+  { key: "leadWhenLadderEnds", setting: "orchestrator.leadWhenLadderEnds", label: "Hand a piece to the lead when no higher model is left" },
+  { key: "resumeAfterReset", setting: "orchestrator.resumeAfterReset", label: "Go on when the usage window resets" },
+] as const satisfies readonly { key: keyof AutoDecide; setting: SettingId; label: string }[];
+
 /** A titled group of rows on a raised card, as design 18.05 has them. */
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -226,6 +234,14 @@ export function OrchestratorTab() {
         <CardRow><RegisteredSetting setting="orchestrator.reviewDiffLines"
           control={<NumberField wide min={1} max={MAX_DIFF_LINES} label="Changed lines a result is accepted at without a verifier, at most" value={settings?.reviewDiffLines} disabled={!ready} onSave={(lines) => void save({ reviewDiffLines: lines })} />}
         /></CardRow>
+      </Card>
+      <Card title="Deciding on its own">
+        <p className="border-b border-hairline px-4 py-2 text-xs leading-relaxed text-muted-foreground">Some stops have one clear, safe next step. With these on, a run takes it without waiting for you, and lists what it did in the Run view and in the lead's messages. You are still asked about a change of scope, a window past the level above, and a check that fails only with the piece's change.</p>
+        {AUTO_SWITCHES.map(({ key, setting, label }) => (
+          <CardRow key={key}><RegisteredSetting setting={setting}
+            control={<Switch aria-label={label} checked={settings?.[key] ?? true} disabled={!ready} onCheckedChange={(on) => void save({ [key]: on })} />}
+          /></CardRow>
+        ))}
       </Card>
       <RegisteredSetting setting="orchestrator.routing">
         <div><RoutingTableSettings settings={settings} save={(patch) => void save(patch)} /></div>
