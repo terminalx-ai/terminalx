@@ -34,6 +34,9 @@ pub struct Project {
     pub logo: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    /// Left out of the sidebar; its sessions keep running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     #[serde(default)]
     pub archived: bool,
     /// How a session started from an issue is carried on to a pull request, a
@@ -331,6 +334,8 @@ pub struct ProjectPatch {
     #[serde(default)]
     pub pinned: Option<bool>,
     #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
     pub archived: Option<bool>,
     #[serde(default)]
     pub issue_pipeline: Option<IssuePipelineSettings>,
@@ -391,6 +396,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(v) = patch.pinned {
         p.pinned = v;
+    }
+    if let Some(v) = patch.hidden {
+        p.hidden = v;
     }
     if let Some(v) = patch.archived {
         p.archived = v;
@@ -593,7 +601,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, hidden: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -621,7 +629,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, hidden: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -714,6 +722,26 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["projects"][0]["futureField"], serde_json::json!(["kept"]));
         assert_eq!(saved["projects"][0]["pinned"], true);
+    }
+
+    #[test]
+    fn a_hidden_patch_round_trips_through_the_store() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        assert!(!project.hidden);
+        let path = crate::store::root().unwrap().join("projects.json");
+        let saved = || -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        assert!(saved()["projects"][0].get("hidden").is_none(), "a shown project stores nothing");
+        let patch: ProjectPatch = serde_json::from_value(serde_json::json!({"hidden": true})).unwrap();
+        assert!(update(&project.path, patch).unwrap().hidden);
+        assert_eq!(saved()["projects"][0]["hidden"], true);
+        assert!(list().unwrap().0[0].hidden);
+        assert_eq!(serde_json::to_value(&list().unwrap().0[0]).unwrap()["hidden"], true);
+        // Another patch leaves it hidden; only an explicit false shows it again.
+        assert!(update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap().hidden);
+        assert!(!update(&project.path, ProjectPatch { hidden: Some(false), ..Default::default() }).unwrap().hidden);
+        assert!(saved()["projects"][0].get("hidden").is_none());
     }
 
     #[test]
