@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Loader2, Lock, LogIn, Monitor, RotateCw, Server } from "@/icons";
+import { CheckCircle2, LoaderCircle, Lock, LogIn, Monitor, RotateCw, Server } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
@@ -195,7 +195,7 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
       </div>
     );
   } else if (!directory) {
-    body = <div className="mt-3 flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden /> Reading your account…</div>;
+    body = <div className="mt-3 flex items-center gap-2 text-[12.5px] text-muted-foreground"><LoaderCircle className="size-4 animate-spin" aria-hidden /> Reading your account…</div>;
   } else if (directory.installation !== "ready") {
     body = (
       <p role="status" className={cn(soft, "mt-3")}>
@@ -232,7 +232,7 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
                   <span className="shrink-0 text-[12.5px] whitespace-nowrap text-faint">Offline</span>
                 ) : mine && !asking?.error ? (
                   <Button size="sm" variant="outline" onClick={cancelAsking}>
-                    <Loader2 className="animate-spin" /> Cancel
+                    <LoaderCircle className="animate-spin" /> Cancel
                   </Button>
                 ) : (
                   <Button size="sm" variant={machine.hostId === firstOnline ? "default" : "outline"} disabled={!!asking && !asking.error} onClick={() => void connect(machine)}>
@@ -269,7 +269,7 @@ function AccountPairing({ pairing, name, onBack, onClose, onDone }: { pairing: M
       <div className="grid grid-cols-[minmax(0,1fr)_260px] max-[699px]:grid-cols-1" data-testid="account-pairing">
         <div className="grid min-w-0 content-start gap-3 p-5">
           {step.kind === "inspecting" || !inspected ? (
-            <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden /> Reading {name}’s answer…</div>
+            <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><LoaderCircle className="size-4 animate-spin" aria-hidden /> Reading {name}’s answer…</div>
           ) : (
             <div className="flex items-center gap-3 rounded-lg border border-hairline px-3 py-2.5" data-testid="machine-card">
               <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-well">
@@ -306,7 +306,7 @@ function AccountPairing({ pairing, name, onBack, onClose, onDone }: { pairing: M
           )}
           {step.kind === "waiting" && (
             <div className="flex items-center gap-2 text-[12.5px] text-info" role="status">
-              <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
+              <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
             </div>
           )}
           {failure && (

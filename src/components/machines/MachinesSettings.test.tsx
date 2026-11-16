@@ -95,6 +95,9 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(computers.textContent).toContain("Connected now");
     expect(computers.textContent).toContain("macOS · Direct on this network · approved Nov 3");
     expect(computers.textContent).toContain("7587·7BB4");
+    // A Mac has the icon the sidebar and the machine's view give it, and Add a machine is the page's primary button (PRO-398).
+    expect(computers.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
+    expect(screen.getByRole("button", { name: "Add a machine" }).className).toContain("bg-primary");
   });
 
   it("gives each machine a card with its state, system, version, route and key label", async () => {
@@ -151,7 +154,12 @@ describe("Settings → Machines (screen 21.02)", () => {
     await waitFor(() => expect(operate.hasAttribute("disabled")).toBe(false));
     fireEvent.click(operate);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_set_allow_operating", { enabled: true }));
-    fireEvent.click(await screen.findByRole("button", { name: "Create pairing code" }));
+    const create = await screen.findByRole("button", { name: "Create pairing code" });
+    // The code is made with the computers that can operate this Mac: nothing sits between This Mac and Your machines (PRO-398).
+    const yours = screen.getByRole("heading", { name: "Your machines" });
+    expect(yours.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Computers that can operate this Mac" }).compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(create);
     const code = await screen.findByTestId("machine-pairing-code");
     expect(code.textContent).toContain(CODE.code);
     expect(code.textContent).toMatch(/Expires in [45]:\d\d · works once/);
