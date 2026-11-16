@@ -6,10 +6,12 @@
 //!   re-emit its `machine_host_changed` as [`HOST_CHANGED_EVENT`].
 //! - On the operating computer, this module decodes a code, shows the
 //!   fingerprint, pairs ([`pair`]) and keeps the machine ([`store`], with the
-//!   device token in the Keychain, [`secrets`]).
+//!   device token in the Keychain, [`secrets`]), then connects to it
+//!   ([`connect`], PRO-345).
 //!
 //! The shapes are `src/types/machines.ts`.
 
+pub mod connect;
 pub mod pair;
 pub mod secrets;
 pub mod store;
@@ -58,7 +60,7 @@ pub struct InspectedMachineCode {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub enum MachinePairResult {
-    Paired { paired: bool, machine: PairedMachine },
+    Paired { paired: bool, machine: Box<PairedMachine> },
     NotPaired { paired: bool, reason: &'static str, message: String },
 }
 
@@ -176,6 +178,8 @@ impl Machines {
             route,
             paired_at: now,
             last_seen_at: Some(now),
+            last_route: None,
+            relay: None,
             other: Default::default(),
         };
         let keep = self.clone();
@@ -187,7 +191,7 @@ impl Machines {
         })
         .await??;
         log::info!("machines: paired with machine {}", machine.machine_id);
-        Ok(MachinePairResult::Paired { paired: true, machine })
+        Ok(MachinePairResult::Paired { paired: true, machine: Box::new(machine) })
     }
 
     pub fn cancel_pairing(&self) {
@@ -338,9 +342,18 @@ pub async fn machines_list(machines: tauri::State<'_, Arc<Machines>>) -> CmdResu
 }
 
 #[tauri::command]
-pub async fn machines_set_route(machine_id: String, route: MachineRoute, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<PairedMachine> {
+pub async fn machines_set_route(
+    machine_id: String,
+    route: MachineRoute,
+    machines: tauri::State<'_, Arc<Machines>>,
+    connections: tauri::State<'_, Arc<connect::MachineConnections>>,
+) -> CmdResult<PairedMachine> {
     let machines = machines.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machines.set_route(&machine_id, route)).await.map_err(err)?.map_err(err)
+    let id = machine_id.clone();
+    let updated = tauri::async_runtime::spawn_blocking(move || machines.set_route(&id, route)).await.map_err(err)?.map_err(err)?;
+    // A relay link "Only this network" no longer allows closes now.
+    connections.route_changed(&machine_id);
+    Ok(updated)
 }
 
 #[cfg(test)]

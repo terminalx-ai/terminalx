@@ -88,6 +88,8 @@ const SLOW_METHODS: &[&str] = &[
     "fs.search",
     // Lists every file of every repository.
     "mirror.manifest",
+    // Asks the relay for an invite (PRO-345).
+    "machine.relayAccess",
 ];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.
@@ -365,12 +367,38 @@ pub struct RelayHost {
     devices_path: Option<PathBuf>,
     /// A machine's paired computers and phones (PRO-341).
     routes: Mutex<Option<Arc<dyn MachineRoutes>>>,
+    /// The live registration and the director it came from, while registered.
+    registered: Mutex<Option<(Live, String)>>,
+}
+
+/// A single-use relay invite for one device of this host, with where to use
+/// it (`machine.relayAccess`, docs/MACHINES.md "As built (PRO-345)").
+#[derive(Clone, Debug)]
+pub struct RelayInvite {
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    pub relay_host_id: String,
+    pub invite_token: String,
+    pub invite_expires_at: i64,
 }
 
 /// What a machine adds to its relay host (docs/MACHINES.md, "How PRO-341
 /// builds it"): the computers it paired are admitted by their relay device id
 /// and token, and a connection for any other device is a phone, which goes
 /// to the window.
+/// The machine refused a paired computer's device token or key on the relay.
+#[derive(Debug)]
+struct ComputerRefused;
+
+impl std::fmt::Display for ComputerRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("device token refused")
+    }
+}
+
+impl std::error::Error for ComputerRefused {}
+
 /// Each method may read the registry file, so the relay host calls them off
 /// its async tasks.
 pub trait MachineRoutes: Send + Sync + 'static {
@@ -404,7 +432,7 @@ impl RelayHost {
                 Err(error) => log::warn!("relay host: could not read the device list: {error}"),
             }
         }
-        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path, routes: Mutex::new(None) })
+        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path, routes: Mutex::new(None), registered: Mutex::new(None) })
     }
 
     /// Whether the device list is on disk (or there is no disk to keep it on).
@@ -452,6 +480,45 @@ impl RelayHost {
 
     fn routes(&self) -> Option<Arc<dyn MachineRoutes>> {
         self.routes.lock().unwrap().clone()
+    }
+
+    /// Whether the relay registration is live now.
+    pub fn is_registered(&self) -> bool {
+        self.registered.lock().unwrap().is_some()
+    }
+
+    /// A fresh single-use invite for `relay_device_id`, through the live
+    /// registration's `invite-create`. `None` while not registered.
+    pub async fn invite(&self, relay_device_id: &str) -> Result<Option<RelayInvite>> {
+        let Some((live, director_url)) = self.registered.lock().unwrap().clone() else { return Ok(None) };
+        if !valid_opaque_id(relay_device_id) {
+            bail!("invalid relay device id");
+        }
+        let (respond, receive) = oneshot::channel();
+        live.commands
+            .send(ControlCommand::CreateInvite { device_id: relay_device_id.to_string(), respond })
+            .map_err(|_| anyhow!("relay control is offline"))?;
+        let (invite_token, invite_expires_at) = tokio::time::timeout(CONNECT_TIMEOUT, receive).await??.context("create invite")?;
+        Ok(Some(RelayInvite {
+            director_url,
+            cell_url: live.cell_url.clone(),
+            assignment_epoch: live.assignment_epoch,
+            relay_host_id: self.keypair.host_id(),
+            invite_token,
+            invite_expires_at,
+        }))
+    }
+
+    /// End a device's relay credentials (`device-revoke`) and close its
+    /// relay connections. Nothing to send while not registered: the relay
+    /// then admits nobody for this host anyway.
+    pub fn revoke_device(&self, relay_device_id: &str) {
+        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
+            let _ = live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() });
+        }
+        for cancel in self.state.lock().unwrap().connections.remove(relay_device_id).unwrap_or_default() {
+            let _ = cancel.send(());
+        }
     }
 
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
@@ -544,7 +611,9 @@ impl RelayHost {
         // Attachments are answered off the control task: an invite round-trips
         // through this same socket.
         let refresher = tokio::spawn(self.clone().refresh_loop(live.clone(), session.director_url.clone(), identity.runtime_generation));
+        *self.registered.lock().unwrap() = Some((live.clone(), session.director_url.clone()));
         let result = self.control_loop(&mut socket, &mut command_rx, &live).await;
+        *self.registered.lock().unwrap() = None;
         refresher.abort();
         result
     }
@@ -937,7 +1006,20 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let (device, computer) = self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await?;
+        let (device, computer) = match self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await {
+            Ok(admitted) => admitted,
+            Err(error) if error.is::<ComputerRefused>() => {
+                // As on the direct route: the reason, sealed, then `4401`, so
+                // a revoked computer stops retrying instead of taking the
+                // relay for unreachable (docs/MACHINES.md "As built (PRO-345)").
+                let refused = json!({ "type": "pairing_refused", "v": 1, "reason": "code-inactive" });
+                let _ = send_sealed(&mut socket, &mut session, &refused).await;
+                let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 4401.into(), reason: "credential refused".into() };
+                let _ = socket.close(Some(frame)).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
@@ -982,7 +1064,7 @@ impl RelayHost {
             let (device_id, token, key) = (relay_device_id.to_string(), token.to_string(), client_key_b64.to_string());
             let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, &key, cancel))
                 .await??
-                .ok_or_else(|| anyhow!("device token refused"))?;
+                .ok_or(ComputerRefused)?;
             let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
             return Ok((device, Some((computer_id, tracked))));
         }

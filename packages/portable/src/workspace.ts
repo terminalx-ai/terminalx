@@ -64,13 +64,16 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * the matching action.
  */
 export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
-export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
+/** Offered only by a runtime that serves every project of its machine (docs/MACHINES.md). */
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2"] as const;
+export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
  * Methods served only under a specific namespace version. Every other method
  * needs any version of the namespace it is named after.
  */
 export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> = {
+  "machine.relayAccess": "machine/2",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -184,6 +187,13 @@ export type WorkspaceConnectionState =
       authority: "manage" | "participate";
       /** The person behind this connection; only from a runtime that granted `collab/1`. */
       you?: WorkspaceYou | null;
+      /**
+       * Which link carries the connection (a machine, docs/MACHINES.md "As built
+       * (PRO-345)"). A new number while connected is a new E2EE session, e.g.
+       * the relay handed over to a direct route: every subscription resumes from
+       * its cursor, and requests already sent are still answered on the old one.
+       */
+      link?: number;
     };
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
@@ -1480,14 +1490,19 @@ export class WorkspaceRpcClient {
   }
 
   private changeState(state: WorkspaceConnectionState): void {
-    const wasConnected = this.state.state === "connected";
+    const previous = this.state;
+    const wasConnected = previous.state === "connected";
+    // Connected on another link: the old link's subscriptions are gone, but it
+    // stays open a little to answer what was already sent on it.
+    const newLink = wasConnected && state.state === "connected" && state.link !== undefined && state.link !== previous.link;
     this.state = state;
     if (wasConnected && state.state !== "connected") {
       this.unrouted = [];
       for (const dropped of [...this.dropWaiters]) dropped();
       this.dropWaiters.clear();
     }
-    if (state.state === "connected" && !wasConnected) {
+    if (newLink) this.unrouted = [];
+    if (state.state === "connected" && (!wasConnected || newLink)) {
       // A new E2EE session: every server-side subscription is gone.
       for (const subscription of this.subscriptions.values()) {
         subscription.serverId = undefined;

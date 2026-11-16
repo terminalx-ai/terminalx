@@ -98,7 +98,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -297,6 +297,8 @@ pub const METHODS: &[Method] = &[
     // serves its machine has them.
     method("machine.describe", "machine/1", Participate, false),
     method("machine.projects", "machine/1", Participate, false),
+    // PRO-345: a paired computer's relay invite (docs/MACHINES.md).
+    method("machine.relayAccess", "machine/2", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -322,6 +324,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/3" => &["session.attach"],
         "ports/1" => &["ports."],
         "machine/1" => &["machine."],
+        "machine/2" => &["machine.relayAccess"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }

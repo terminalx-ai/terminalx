@@ -101,10 +101,82 @@ export interface PairedMachine {
   os: MachineOs;
   version: string;
   publicKeyB64: string;
+  /** The machine's latest direct addresses (from its code, then from `machine.describe`). */
   directEndpoints: string[];
   route: MachineRoute;
   pairedAt: number;
   lastSeenAt: number | null;
+  /** The route that last worked; null before the first connection (PRO-345). */
+  lastRoute?: MachineRouteUsed | null;
+  /** Where this computer reaches the machine through the relay; null without a relay credential. Never the credential. */
+  relay?: MachineRelayInfo | null;
+}
+
+/**
+ * The connection to a machine (PRO-345, docs/MACHINES.md "As built
+ * (PRO-345)"). One supervisor per machine owns it.
+ */
+
+/** How a route reaches the machine: a direct address on this network, a Tailscale address, or the relay. */
+export type MachineRouteKind = "lan" | "tailscale" | "relay";
+
+/** One route as used: `endpoint` is the direct `ws://…/machine/1` address, null for the relay. */
+export interface MachineRouteUsed {
+  kind: MachineRouteKind;
+  endpoint: string | null;
+}
+
+export interface MachineRelayInfo {
+  directorUrl: string;
+  cellUrl: string;
+  assignmentEpoch: number;
+  relayHostId: string;
+  relayDeviceId: string;
+  /** The account that obtained the credential; the relay is used only while it is signed in. */
+  userId: string;
+}
+
+/**
+ * - `idle`: not attached; nothing touches the network.
+ * - `connecting`: the first round of routes is being tried.
+ * - `direct`: connected on this network or Tailscale (`route.kind` says which).
+ * - `relay`: connected through TerminalX Relay.
+ * - `reconnecting`: a link was lost less than 30 s ago.
+ * - `offline`: no route answered for 30 s; it keeps retrying every 10 s at most.
+ * - `needsUpdate`: the runtime does not serve `machine/1`.
+ * - `accessRemoved`: the machine refused this computer's credential; nothing retries until "Try again".
+ *
+ * `localNetworkDenied`: macOS refused Local Network access to a `lan` address.
+ */
+export type MachineConnectionState =
+  | { state: "idle" }
+  | { state: "connecting"; trying: MachineRouteKind[]; localNetworkDenied?: boolean }
+  | {
+      state: "direct" | "relay";
+      route: MachineRouteUsed;
+      /** When this link was established (ms since epoch). */
+      since: number;
+      /** End-to-end round trip of the last `machine.describe`; null until measured. */
+      rttMs: number | null;
+      localNetworkDenied?: boolean;
+    }
+  | {
+      state: "reconnecting";
+      /** When the link was lost (ms since epoch): "Lost it 12 seconds ago". */
+      lostAt: number;
+      attempt: number;
+      retryInMs: number;
+      trying: MachineRouteKind[];
+      localNetworkDenied?: boolean;
+    }
+  | { state: "offline"; lastSeenAt: number | null; retryInMs: number; localNetworkDenied?: boolean }
+  | { state: "needsUpdate"; version: string | null }
+  | { state: "accessRemoved" };
+
+/** `machines_connections` and the `machines_connection_changed` event. */
+export interface MachineConnectionView {
+  machineId: string;
+  state: MachineConnectionState;
 }
 
 /**

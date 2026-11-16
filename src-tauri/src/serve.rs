@@ -1064,7 +1064,9 @@ fn start_relay_host(
             }
         };
         // The machine's direct listener serves this same RPC.
+        // Paired computers get relay access through its registration (PRO-345).
         if let (true, Some(machine)) = (serves_machine, crate::machine_host::installed()) {
+            machine.use_relay(&host);
             machine.use_rpc(host.rpc());
         }
         let mut status = host.status();

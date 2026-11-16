@@ -189,6 +189,15 @@ impl Registry {
         Ok(removed.is_some())
     }
 
+    /// The computer's relay device id, given once (`machine.relayAccess`,
+    /// PRO-345): the one it has, else `fresh`. `None` when it is not paired.
+    pub fn give_relay_device(&self, id: &str, fresh: &str) -> Result<Option<String>> {
+        self.rewrite(|file| {
+            let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(None) };
+            Ok(Some(computer.relay_device_id.get_or_insert_with(|| fresh.to_string()).clone()))
+        })
+    }
+
     /// Note when a computer last connected.
     /// A computer removed meanwhile, by any process, stays removed.
     pub fn touch(&self, id: &str, at: i64) -> Result<()> {

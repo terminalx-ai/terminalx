@@ -48,6 +48,7 @@ const { sessionStore } = vi.hoisted(() => ({
     harnesses: [],
     selectedSessionId: null,
     selectedAutomationId: null as string | null,
+    selectedCloudWorkspace: null as string | null,
     view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "stats" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
@@ -97,8 +98,13 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeycaps: () => () => [],
 }));
 // PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
-const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
-vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, machines: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, machines: runShortcut.machines }) }));
+// PRO-345: paired machines stay attached while Experimental → Machines is on.
+const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
+vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
+vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
+vi.mock("@/components/cloud/CloudWorkspaceMain", () => ({ CloudWorkspaceMain: ({ workspaceKey }: { workspaceKey: string }) => <main data-testid="cloud-workspace-main" data-key={workspaceKey} /> }));
 vi.mock("@/lib/orchestration", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/orchestration")>()),
   showRunView: runShortcut.showRunView,
@@ -218,7 +224,11 @@ beforeEach(() => {
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
   sessionStore.selectedSessionId = null;
   sessionStore.selectedAutomationId = null;
+  sessionStore.selectedCloudWorkspace = null;
   sessionStore.view = "new";
+  runShortcut.machines = false;
+  machineConnections.start.mockClear();
+  machineConnections.stop.mockClear();
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
 });
 
@@ -229,6 +239,37 @@ afterEach(async () => {
   forgetSettingToasts();
   dismissUnknownSettingLink();
   await closeAllEditors("checkout:/outside/feature");
+});
+
+describe("a paired machine in the main slot (PRO-345)", () => {
+  it("keeps machines attached while Machines is on and shows the selected machine's view", async () => {
+    runShortcut.machines = true;
+    sessionStore.selectedCloudWorkspace = "machine:m1";
+    sessionStore.view = "welcome";
+    const { unmount } = render(<AppShell />);
+    expect((await screen.findByTestId("machine-main")).getAttribute("data-key")).toBe("machine:m1");
+    expect(screen.queryByTestId("cloud-workspace-main")).toBeNull();
+    expect(machineConnections.start).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(machineConnections.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("with Machines off attaches nothing and never routes a machine key to a cloud workspace", async () => {
+    sessionStore.selectedCloudWorkspace = "machine:m1";
+    sessionStore.view = "welcome";
+    render(<AppShell />);
+    await waitFor(() => expect(screen.queryByText("Loading view…")).toBeNull());
+    expect(screen.queryByTestId("machine-main")).toBeNull();
+    expect(screen.queryByTestId("cloud-workspace-main")).toBeNull();
+    expect(machineConnections.start).not.toHaveBeenCalled();
+  });
+
+  it("still shows a cloud workspace in the same slot", async () => {
+    sessionStore.selectedCloudWorkspace = "cloud:org:w1";
+    sessionStore.view = "welcome";
+    render(<AppShell />);
+    expect((await screen.findByTestId("cloud-workspace-main")).getAttribute("data-key")).toBe("cloud:org:w1");
+  });
 });
 
 describe("new-session right panel", () => {

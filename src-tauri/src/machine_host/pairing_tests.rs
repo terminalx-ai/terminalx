@@ -212,7 +212,7 @@ async fn a_computer_pairs_by_code_once_the_machine_allows_it() {
     assert_eq!(machine.machine_id, rig.keypair.host_id());
     assert_eq!(machine.public_key_b64, rig.keypair.public_key_b64());
     assert_eq!(machine.route, MachineRoute::ThisNetwork);
-    assert_eq!(machines.list().unwrap(), vec![machine.clone()]);
+    assert_eq!(machines.list().unwrap(), vec![(*machine).clone()]);
     assert!(machines.inspect(&encoded).unwrap().already_paired);
     use crate::keychain::SecretStore as _;
     let kept = keychain.get("ai.terminalx.test.machines", &format!("machine:{}", machine.machine_id)).unwrap();

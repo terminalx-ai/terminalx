@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage, invoke } from "@/lib/api";
 import type {
   InspectedMachineCode,
+  MachineConnectionView,
   MachineHostView,
   MachinePairingCode,
   MachinePairResult,
@@ -27,6 +28,10 @@ export const machinesApi = {
   cancelPairing: () => invoke<unknown>("machines_cancel_pairing"),
   list: () => invoke<PairedMachine[]>("machines_list"),
   setRoute: (machineId: string, route: MachineRoute) => invoke<unknown>("machines_set_route", { machineId, route }),
+  /** Every paired machine's connection state (PRO-345); `idle` when not attached. */
+  connections: () => invoke<MachineConnectionView[]>("machines_connections"),
+  /** "Try again": nudge the machine's owner; after access removed or needs update it tries once more. */
+  reconnect: (machineId: string) => invoke<unknown>("machines_reconnect", { machineId }),
 };
 
 interface MachineHostState {

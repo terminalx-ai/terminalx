@@ -347,6 +347,7 @@ pub fn run() {
     let workspace_config = Arc::new(organization_workspace_config::WorkspaceConfigService::new(account.clone()));
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
+    let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -407,6 +408,7 @@ pub fn run() {
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .manage(machines.clone())
+        .manage(machine_connections.clone())
         .setup(move |app| {
             #[cfg(unix)]
             match app.path().app_log_dir() {
@@ -435,6 +437,7 @@ pub fn run() {
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
+            machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -652,7 +655,9 @@ pub fn run() {
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
-            cloud_remote::cloud_remote_attach_dev,
+            machines::connect::machine_remote_attach,
+            machines::connect::machines_connections,
+            machines::connect::machines_reconnect,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
@@ -1152,6 +1157,10 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 if chat_windows::is_chat_window(window.label()) {
                     let _ = window.app_handle().emit_to("main", "chat_window_closed", window.label());
+                }
+                // Its machine connections: a closed window runs no cleanup (PRO-345).
+                if let Some(remote) = window.try_state::<Arc<cloud_remote::CloudRemote>>() {
+                    remote.release_holder(window.label());
                 }
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
