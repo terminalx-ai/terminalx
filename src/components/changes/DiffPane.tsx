@@ -7,7 +7,7 @@ import { locateReview, reviewInDiff } from "@/lib/reviewAnchors";
 import type { ReviewAnchor, ReviewComment } from "@/lib/reviewComments";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
@@ -127,7 +127,8 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
   useEffect(() => { controller.current?.update(); }, [commentsKey]);
   const draftHere = attached.some((c) => c.id === REVIEW_DRAFT_ID) && mounts.has(REVIEW_DRAFT_ID);
   const placeDraft = review?.placeDraft;
-  useEffect(() => draftHere && placeDraft ? placeDraft() : undefined, [draftHere, placeDraft]);
+  // Before paint: a slow diff may already show the draft above it, and the two cards must never both be on screen.
+  useLayoutEffect(() => draftHere && placeDraft ? placeDraft() : undefined, [draftHere, placeDraft]);
   return <div className={cn("flex flex-col", !stacked && "h-full min-h-0")}>
     {selection && commentable && <div className="flex shrink-0 items-center gap-2 px-2 py-1 text-[11px] text-muted-foreground">
       <Button size="xs" variant="secondary" disabled={review?.busy} onClick={() => review?.start(selection)} title="⌘/Ctrl Shift M on a line also adds a comment; Shift-click + for a range">Comment on selection</Button>
