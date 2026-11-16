@@ -563,6 +563,22 @@ describe("every organization live (CS-18)", () => {
     expect(prepared.providerLabel).toBe("Box");
   });
 
+  // PRO-372: an organization made in the web console, not the active one, whose Boat connection has new machines paused.
+  it("says new machines are paused there, not that the provider is unavailable, when the server refuses its setup for that", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.box.v1": true, "cloud.workspaces.provider.hetzner.v1": true } } } : org,
+      ),
+    };
+    mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
+      throw { code: provider === "box" ? "cloud_provider_creation_disabled" : "cloud_provider_connection_required" };
+    });
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Box" });
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box", "hetzner"]);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
   it("skips Machine0 when the server hides it, even where its provider flag is on", async () => {
     mocks.status = {
       ...mocks.status,

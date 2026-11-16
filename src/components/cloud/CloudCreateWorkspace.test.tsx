@@ -407,6 +407,15 @@ describe("CloudCreateWorkspace in an organization whose provider was connected i
     expect(screen.getByTestId("cloud-create-no-provider").textContent).toContain("new machines are paused");
   });
 
+  it("says so when the server still does not offer the provider after new machines are allowed", async () => {
+    mocked.cloudProviders.mockResolvedValue({ providers: [boat("disabled-for-create")] });
+    mocked.cloudProviderSetCreationEnabled.mockResolvedValue(boat("disabled-for-create"));
+    await fill();
+    fireEvent.click(screen.getByRole("button", { name: "Allow new machines" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("New machines are allowed for this organization, but Boat isn't offered for new workspaces right now. Try again later.");
+    expect(mocked.cloudProviderSetCreationEnabled).toHaveBeenCalledWith("box", "rev-1", true);
+  });
+
   it("tells a member that an owner or admin allows them, with nothing to press", async () => {
     account.role = "member";
     mocked.cloudProviders.mockResolvedValue({ providers: [boat("disabled-for-create", false)] });

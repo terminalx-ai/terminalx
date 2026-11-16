@@ -1,7 +1,7 @@
-import type { CloudProviderSummary } from "@/lib/api";
+import { api, type CloudProviderSummary } from "@/lib/api";
 import { defaultOrgId } from "@/lib/cloudCatalog";
 import { getAccount } from "@/lib/account";
-import { CreateRefused, PROVIDER_CREATION_PAUSED, listedNames, usableProviders } from "@/lib/cloudCreate";
+import { CreateRefused, PROVIDER_CREATION_PAUSED, PROVIDER_NOT_OFFERED, listedNames, usableProviders } from "@/lib/cloudCreate";
 
 // Machine0 is hidden while Boat is the launch provider (saas
 // CLOUD_MACHINE0_ENABLED, 2026-10-17). A server that offers it says so in the
@@ -47,8 +47,31 @@ export function listedProviders(providers: CloudProviderSummary[], orgId?: strin
  */
 export function noProviderRefusal(providers: CloudProviderSummary[], orgId?: string | null): CreateRefused {
   const paused = pausedProviders(providers, orgId);
-  if (paused.length) return new CreateRefused(PROVIDER_CREATION_PAUSED, listedNames(paused.map((provider) => provider.displayName)));
+  if (paused.length) return new ProvidersPaused(paused);
   const attention = providers.filter((provider) => provider.availability === "attention-required" && (provider.id !== "machine0" || machine0Offered(orgId)));
   if (attention.length) return new CreateRefused("cloud_provider_connection_attention_required", listedNames(attention.map((provider) => provider.displayName)));
   return new CreateRefused("cloud_provider_connection_required");
+}
+
+/** No provider to use because new machines are paused on these, connected ones: the refusal carries them, so a manager can allow them in place. */
+export class ProvidersPaused extends CreateRefused {
+  constructor(public readonly providers: CloudProviderSummary[]) {
+    super(PROVIDER_CREATION_PAUSED, listedNames(providers.map((provider) => provider.displayName)));
+  }
+}
+
+/**
+ * Allow new machines on a paused provider of the active organization (owners
+ * and admins), then read its providers again. When the server still pauses
+ * it, its own capability says no (an environment switch or a pilot list), not
+ * the setting: refused with PROVIDER_NOT_OFFERED so the reader is told, rather
+ * than the button seeming to do nothing.
+ */
+export async function allowNewMachines(provider: CloudProviderSummary): Promise<CloudProviderSummary[]> {
+  const revision = getAccount().status.context?.revision;
+  if (!revision) throw new CreateRefused("active_organization_required");
+  await api.cloudProviderSetCreationEnabled(provider.id, revision, true);
+  const { providers } = await api.cloudProviders();
+  if (!usableProviders(providers).some((item) => item.id === provider.id)) throw new CreateRefused(PROVIDER_NOT_OFFERED, provider.displayName);
+  return providers;
 }

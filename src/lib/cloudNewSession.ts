@@ -6,6 +6,9 @@ import { takeStartedPipeline } from "@/lib/cloudPipelines";
 import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChanging, rememberCreatedWorkspace, subscribeCloudCatalog } from "@/lib/cloudCatalog";
 import {
   CreateRefused,
+  PROVIDER_CREATION_PAUSED,
+  SERVER_CREATION_DISABLED,
+  listedNames,
   createWorkspace,
   personLaunchInput,
   phaseOf,
@@ -276,16 +279,20 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
   }
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
   const offered = (provider: CloudWorkspaceProviderId) => flags[`cloud.workspaces.provider.${provider}.v1`] === true && (provider !== "machine0" || machine0Offered(orgId));
+  // Connected here with new machines paused (PRO-372): named if no other provider is usable.
+  const paused: string[] = [];
   for (const id of PROVIDER_ORDER.filter(offered)) {
     try {
       return { id, label: providerLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
     } catch (error) {
-      // Only "not connected here" moves on to the next provider; anything else
-      // (not an admin, offline, rate-limited) is the real answer and is shown.
+      // Only "not connected here" or "paused here" moves on to the next provider;
+      // anything else (not an admin, offline, rate-limited) is the real answer and is shown.
       const code = error && typeof error === "object" && "code" in error ? (error as { code: unknown }).code : null;
-      if (code !== "cloud_provider_connection_required") throw error;
+      if (code === SERVER_CREATION_DISABLED) paused.push(providerLabel(id));
+      else if (code !== "cloud_provider_connection_required") throw error;
     }
   }
+  if (paused.length) throw new CreateRefused(PROVIDER_CREATION_PAUSED, listedNames(paused));
   throw new CreateRefused("cloud_provider_connection_required");
 }
 

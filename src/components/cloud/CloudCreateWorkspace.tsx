@@ -36,7 +36,7 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
-import { providerActionMessage } from "@/components/settings/ProviderControls";
+import { AllowNewMachines } from "./AllowNewMachines";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
@@ -124,42 +124,19 @@ export function CloudCreateWorkspace({
       .catch((e: unknown) => setRepositoriesError(errorCode(e)));
   }, []);
 
-  const loadProviders = useCallback(
-    () =>
-      api
-        .cloudProviders()
-        .then((result) => {
-          setProviders(result.providers);
-          const usable = creatableProviders(result.providers);
-          setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
-        })
-        .catch((e: unknown) => setLoadError(errorCode(e))),
-    [],
-  );
+  const showProviders = useCallback((list: CloudProviderSummary[]) => {
+    setProviders(list);
+    const usable = creatableProviders(list);
+    setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
+  }, []);
 
   useEffect(() => {
     loadRepositories();
-    void loadProviders();
-  }, [loadRepositories, loadProviders]);
-
-  // A provider connected with its new machines paused (PRO-112, PRO-372) is
-  // allowed right here by whoever may manage it, without a trip to Settings.
-  const [allowing, setAllowing] = useState(false);
-  const [allowError, setAllowError] = useState<string | null>(null);
-  const allow = async (provider: CloudProviderSummary) => {
-    const revision = getAccount().status.context?.revision;
-    if (!revision) return;
-    setAllowing(true);
-    setAllowError(null);
-    try {
-      await api.cloudProviderSetCreationEnabled(provider.id, revision, true);
-      await loadProviders();
-    } catch (e) {
-      setAllowError(providerActionMessage(e));
-    } finally {
-      setAllowing(false);
-    }
-  };
+    api
+      .cloudProviders()
+      .then((result) => showProviders(result.providers))
+      .catch((e: unknown) => setLoadError(errorCode(e)));
+  }, [loadRepositories, showProviders]);
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
@@ -251,7 +228,7 @@ export function CloudCreateWorkspace({
     >
       {loadError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}).</p>}
       {providers && usable.length === 0 && (
-        <NoProvider providers={providers} organizationId={organizationId} busy={allowing} error={allowError} onAllow={(provider) => void allow(provider)} />
+        <NoProvider providers={providers} organizationId={organizationId} onAllowed={showProviders} />
       )}
 
       <label className="flex flex-col gap-1 text-xs">
@@ -599,41 +576,16 @@ function lastReached(snapshot: CloudWorkspaceSnapshot): number {
  * with (PRO-372): paused new machines come with the button that allows them,
  * for whoever may manage the provider.
  */
-function NoProvider({
-  providers,
-  organizationId,
-  busy,
-  error,
-  onAllow,
-}: {
-  providers: CloudProviderSummary[];
-  organizationId: string;
-  busy: boolean;
-  error: string | null;
-  onAllow: (provider: CloudProviderSummary) => void;
-}) {
+function NoProvider({ providers, organizationId, onAllowed }: { providers: CloudProviderSummary[]; organizationId: string; onAllowed: (providers: CloudProviderSummary[]) => void }) {
   const refusal = noProviderRefusal(providers);
-  const allowable = pausedProviders(providers).filter((provider) => provider.canManage);
-  const canAllow = allowable.length > 0 && Boolean(getAccount().status.context?.revision);
+  const paused = pausedProviders(providers);
+  const canAllow = paused.some((provider) => provider.canManage) && Boolean(getAccount().status.context?.revision);
   // The provider's own `canManage` answers who may allow it; the role is the fallback for the rest.
   const manages = canAllow || managesOrganization(getAccount().status, organizationId);
   return (
     <div className="flex flex-col gap-2 text-xs" data-testid="cloud-create-no-provider">
       <p className="text-muted-foreground">{canAllow ? creationPausedText(refusal.detail) : createErrorMessage(refusal.code, refusal.detail, manages)}</p>
-      {canAllow && (
-        <div className="flex flex-wrap gap-2">
-          {allowable.map((provider) => (
-            <Button key={provider.id} type="button" size="sm" disabled={busy} onClick={() => onAllow(provider)}>
-              {busy ? <Loader2 className="animate-spin" /> : allowable.length > 1 ? `Allow new machines on ${provider.displayName}` : "Allow new machines"}
-            </Button>
-          ))}
-        </div>
-      )}
-      {error && (
-        <p className="text-red-500" role="alert">
-          {error}
-        </p>
-      )}
+      <AllowNewMachines providers={paused} onAllowed={onAllowed} />
     </div>
   );
 }

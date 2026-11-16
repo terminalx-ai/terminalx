@@ -167,6 +167,16 @@ export function listedNames(names: readonly string[]): string {
  */
 export const PROVIDER_CREATION_PAUSED = "cloud_provider_creation_paused";
 
+/**
+ * New machines were allowed on the provider, and the server still does not
+ * offer it for new workspaces (its own capability, not the organization's
+ * setting). The detail names the provider.
+ */
+export const PROVIDER_NOT_OFFERED = "cloud_provider_not_offered_for_create";
+
+/** The server's refusal of a create on a provider whose new machines are paused for the organization (PRO-372). */
+export const SERVER_CREATION_DISABLED = "cloud_provider_creation_disabled";
+
 /** Where an organization's compute provider is connected, paused and allowed. */
 const COMPUTE_PLACE = "Settings → Organizations, under Cloud compute";
 
@@ -515,6 +525,9 @@ export function createErrorMessage(code: string, detail: string | null = null, m
     const paused = creationPausedText(detail);
     return manages ? `${paused} Allow them in ${COMPUTE_PLACE}.` : `${paused} An owner or admin can allow them in ${COMPUTE_PLACE}.`;
   }
+  if (code === SERVER_CREATION_DISABLED) return createErrorMessage(PROVIDER_CREATION_PAUSED, detail, manages);
+  if (code === PROVIDER_NOT_OFFERED)
+    return `New machines are allowed for this organization, but ${detail ?? "the compute provider"} isn't offered for new workspaces right now. Try again later.`;
   // Only an owner or admin connects one; anyone else is told who can.
   if (code === "cloud_provider_connection_required" && manages === false)
     return `No compute provider is connected for this organization. An owner or admin connects one in ${COMPUTE_PLACE}.`;

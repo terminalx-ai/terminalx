@@ -139,6 +139,12 @@ describe("createWorkspace", () => {
     );
   });
 
+  it("explains the server's paused refusal as paused", () => {
+    expect(createErrorMessage("cloud_provider_creation_disabled", "Boat", false)).toBe(
+      "Boat is connected, but new machines are paused for this organization. An owner or admin can allow them in Settings → Organizations, under Cloud compute.",
+    );
+  });
+
   it("tells a member who connects a compute provider, and an owner or admin to connect one", () => {
     expect(createErrorMessage("cloud_provider_connection_required", null, false)).toBe(
       "No compute provider is connected for this organization. An owner or admin connects one in Settings → Organizations, under Cloud compute.",
