@@ -696,6 +696,7 @@ pub fn run() {
             machines::machines_cancel_pairing,
             machines::machines_list,
             machines::machines_set_route,
+            machines::machines_app_update_report,
             commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,

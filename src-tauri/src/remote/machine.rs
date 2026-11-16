@@ -30,6 +30,11 @@ pub const MACHINE: &str = "machine/1";
 /// (docs/MACHINES.md, "As built (PRO-345)").
 pub const MACHINE_2: &str = "machine/2";
 
+/// `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
+/// `machine.updateChanged` notification (docs/MACHINES.md, "Versions and
+/// updates (PRO-354)"; `machine_update.rs`).
+pub const MACHINE_3: &str = "machine/3";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -99,6 +104,14 @@ pub trait MachineAccess: Send + Sync + 'static {
     /// relay): `{ relay: {…} }` with a fresh single-use invite, or
     /// `{ relay: null }` with no relay registration.
     fn relay_access(&self, device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>>;
+    /// The paired computers connected now, other than the one connected as
+    /// `caller` (a paired computer's id on the direct route, its relay
+    /// device id on the relay); every one when `caller` is `None`
+    /// (`machine/3` `otherComputers`).
+    fn other_computers(&self, caller: Option<&str>) -> Vec<super::machine_update::OtherComputer>;
+    /// A desktop window is attached to this runtime now, so the app on this
+    /// machine can run its updater (`machine/3`, `method: "app"`).
+    fn window_available(&self) -> bool;
 }
 
 /// `macos` or `linux`, as Rust names them.

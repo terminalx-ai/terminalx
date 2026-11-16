@@ -829,6 +829,8 @@ the pull request that adds it.
 | `machine.describe` | `machine/1` | Served | Only a runtime that serves its machine; see [machine/1](#machine1) |
 | `machine.projects` | `machine/1` | Served | As `machine.describe` |
 | `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
+| `machine.updateStatus` | `machine/3` | Served | The machine's version and what it could update to (PRO-354, [Versions and updates](#versions-and-updates-pro-354)) |
+| `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1357,6 +1359,45 @@ window that is not running cannot update; `machine.update` then answers
 on its link: from `handingOver` until the machine answers again (at most
 3 minutes), a lost link is the state `{ state: "updating", version, since }`
 ("Updating · Back in under a minute", 21.09), not `reconnecting`.
+
+**As built, the runtime (PRO-354).** `src-tauri/src/remote/machine_update.rs`
+serves the two methods; `src-tauri/src/serve_cli/update.rs` is the helper.
+
+- `machine/3` is in `protocol::served(true)` beside `machine/1` and
+  `machine/2`; a client that does not ask for it is served as before.
+  `update_required` from `rpc.hello` carries `data: { runtimeVersion, offered }`
+  for every refusal, including a protocol mismatch.
+- `machine.update` is not idempotent (no `clientRequestId`): it is decided
+  against the moment's blockers, computers and progress. Besides the
+  refusals above, an `installer` machine answers `update_unavailable` for a
+  `version` other than `available.version` (checking first when it has not
+  yet), and an `app` machine when no window is attached. Every refusal's
+  `data` is the status.
+- A blocker's `id` is `tab:<sessionId>/<tabId>` for an agent, `pane:<pane>`
+  for a terminal, else `<kind>:<title>`; `title` is the work's own title,
+  else `<harness> in tab <tabId>`. The helper names the plan's work the same
+  way, so `stop` reaches `runtime.handover` as the work it names.
+- `otherComputers` comes from the machine host: computers with a live
+  connection, less the caller (its computer id on the direct route, its relay
+  device id on the relay). The desktop app's own window is not a computer.
+- The record `<data>/run/machine-update.json` (0600) is `{ progress, from,
+  helperPid, appAvailable, appCheckedAt }`. A runtime reading it settles what
+  is over: a helper phase whose helper is gone (or never started within a
+  minute) becomes `updated` when this runtime runs that version, else
+  `failed`; `appUpdating` becomes `updated` once the runtime runs the
+  requested version, and `failed` after 30 minutes without it. Each phase's
+  `since` is when that phase began. The runtime reads the record every 2 s
+  and sends `machine.updateChanged` to each `machine/3` connection with the
+  status as that connection sees it; a runtime that just took over sends
+  only later changes, so a computer that reconnects asks once.
+- `machines_app_update_report` takes an optional `available` (the version
+  the app's updater offers, `null` when none), which becomes the `app`
+  machine's `available` and `checkedAt`. `upToDate` sets `progress` back to
+  `idle`; `failed` records `failed` with `rolledBack: false`. The desktop
+  forwards each report as `runtime.machineUpdate.report` with its window's
+  attachment (`epoch`, `lease`), which the runtime checks.
+- `terminalx-serve update` run by a person takes the same steps and writes
+  the same record, and refuses while another update is under way.
 
 **Compatibility matrix.** CI runs this build against the previous two
 released runtimes (the two newest `v*` releases before this version): this
