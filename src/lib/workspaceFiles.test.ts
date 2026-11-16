@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "@terminalx/portable/workspace";
 
-vi.mock("@/lib/api", () => ({ fs: {}, api: {} }));
+const localFs = vi.hoisted(() => ({ writeText: vi.fn(async () => 2), createText: vi.fn(async () => 1) }));
+vi.mock("@/lib/api", () => ({ fs: localFs, api: {} }));
 
-const { cloudFileSource } = await import("./workspaceFiles");
+const { cloudFileSource, localFileSource } = await import("./workspaceFiles");
+
+describe("localFileSource.writeText", () => {
+  it("creates exclusively when the base says the file must not exist, and overwrites otherwise", async () => {
+    const source = localFileSource("/repos/alpha");
+    expect(await source.writeText("docs/new.md", "", null)).toEqual({ version: "1" });
+    expect(localFs.createText).toHaveBeenCalledWith("/repos/alpha/docs/new.md", "");
+    expect(localFs.writeText).not.toHaveBeenCalled();
+    expect(await source.writeText("docs/new.md", "text", undefined)).toEqual({ version: "2" });
+    expect(localFs.writeText).toHaveBeenCalledWith("/repos/alpha/docs/new.md", "text");
+  });
+});
 
 const connected: WorkspaceConnectionState = {
   state: "connected",

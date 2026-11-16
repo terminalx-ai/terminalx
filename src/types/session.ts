@@ -497,6 +497,10 @@ export interface BranchInfo {
   name: string;
   current: boolean;
   remote: boolean;
+  /** When its tip was committed (RFC 3339). Absent on older runtimes. */
+  updated?: string;
+  /** Who wrote its tip commit. Absent on older runtimes. */
+  author?: string;
 }
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";

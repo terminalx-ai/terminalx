@@ -514,6 +514,11 @@ body:has([role="alertdialog"]) [data-star-reminder] {
    left every dialog appearing and vanishing at once. */
 @utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 @utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+/* A side sheet (`placement="right"`) slides in from the window's right edge instead. */
+@keyframes sheet-in { from { opacity: 0.6; transform: translateX(100%); } to { opacity: 1; transform: none; } }
+@keyframes sheet-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(40%); } }
+@utility animate-sheet-in { animation: sheet-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-sheet-out { animation: sheet-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
 @utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
 @utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
 
