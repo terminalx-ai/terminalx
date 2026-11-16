@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlus, X } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
-import { CloudAgentsView } from "./CloudAgents";
+import { type AgentFocus, type AgentProjects, CloudAgentsView } from "./CloudAgents";
 import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
@@ -32,6 +32,7 @@ import { useTheme } from "@/lib/theme";
 import { cloudProviderName } from "@/lib/cloudSession";
 import { MachineIcon } from "@/components/machines/connectionStatus";
 import type { PairedMachine } from "@/types/machines";
+import { WorkspacePlaceProvider, type MachinePlace } from "./workspacePlace";
 
 /**
  * The view of one cloud workspace (its terminals, agent tab, files and Git)
@@ -50,10 +51,11 @@ export interface OpenedWorkspace {
   waking?: boolean;
   /**
    * Set for a paired machine: its record, and what its own connection says
-   * while the view is not connected. The view then names the machine and
-   * never shows the transport's words for a cloud workspace.
+   * while the view is not connected (a sentence, and a word for a chip). Every
+   * tab then names the machine and never shows the transport's words for a
+   * cloud workspace.
    */
-  machine?: { record: PairedMachine; status: string };
+  machine?: { record: PairedMachine; status: string; label: string };
 }
 
 /** A cloud provider's display name. */
@@ -113,7 +115,31 @@ export function ExecutionLocation({ provider, name }: { provider: string | null;
 
 type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" } | { kind: "ports" };
 
-export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = false }: { opened: OpenedWorkspace; state: WorkspaceConnectionState; agentRequest?: number; initialAgent?: boolean }) {
+type WorkspaceViewProps = {
+  opened: OpenedWorkspace;
+  state: WorkspaceConnectionState;
+  agentRequest?: number;
+  initialAgent?: boolean;
+  /** A session to show in the agent view (a machine session row, PRO-346): its tab, or its first one. */
+  focusAgent?: AgentFocus | null;
+  /** A paired machine's projects, which a new agent tab is created in (PRO-346). */
+  agentProjects?: AgentProjects | null;
+};
+
+/** The view, with the machine it runs on (if it is one) known to every tab. */
+export function WorkspaceView(props: WorkspaceViewProps) {
+  const { name } = props.opened;
+  const status = props.opened.machine?.status;
+  const label = props.opened.machine?.label;
+  const place = useMemo<MachinePlace | null>(() => (status === undefined || label === undefined ? null : { name, status, label }), [name, status, label]);
+  return (
+    <WorkspacePlaceProvider value={place}>
+      <WorkspaceViewBody {...props} />
+    </WorkspacePlaceProvider>
+  );
+}
+
+function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = false, focusAgent = null, agentProjects = null }: WorkspaceViewProps) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
@@ -121,6 +147,9 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
   const { terminals, selected } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: initialAgent ? "agent" : "terminal" });
   useEffect(() => { if (agentRequest > 0) setView({ kind: "agent" }); }, [agentRequest]);
+  useEffect(() => { if (focusAgent) setView({ kind: "agent" }); }, [focusAgent?.sessionId]);
+  // The sidebar's + on a machine: the agent view, with its new-agent form open.
+  useEffect(() => { if (agentProjects?.request) setView({ kind: "agent" }); }, [agentProjects?.request?.nonce]);
   // This window asked for a wake (a command went out) and it has neither connected nor failed yet.
   // Not latched: a wake that fails, like a Resume refused at the running limit, reads stopped again.
   const [woke, setWoke] = useState(false);
@@ -402,6 +431,8 @@ export function WorkspaceView({ opened, state, agentRequest = 0, initialAgent = 
           waking={waking}
           collabKey={key}
           active={view.kind === "agent"}
+          focus={focusAgent}
+          projects={agentProjects}
         />
       </div>
       {/* Mounted once first shown, then kept: open files and unsaved text stay. */}

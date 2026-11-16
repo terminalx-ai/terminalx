@@ -9,6 +9,7 @@ import { SettingsFiles } from "./SettingsFiles";
 import { ValueSource } from "./ValueSource";
 import { RegisteredSetting } from "./settingsRegistry";
 import { repositoryInputClass, useRepositoryMutation } from "./repositoryEditor";
+import { isLocalKey } from "@/types/target";
 
 export function LayeredConfiguration() {
   const { projects } = useSessionStore();
@@ -20,7 +21,7 @@ export function LayeredConfiguration() {
     <div className="flex flex-col gap-1 text-sm"><label htmlFor={repositoryId}>Repository</label>
       <select id={repositoryId} className={repositoryInputClass} value={project} onChange={(e) => setProject(e.target.value)}>
         <option value="">User settings</option>
-        {projects.filter((p) => p.kind !== "folder" && !p.path.startsWith("cloud:") && !p.archived).map((p) => <option value={p.path} key={p.path}>{p.name}</option>)}
+        {projects.filter((p) => p.kind !== "folder" && isLocalKey(p.path) && !p.archived).map((p) => <option value={p.path} key={p.path}>{p.name}</option>)}
       </select>
     </div>
     <ConfigurationEditor key={project} project={project || null} />

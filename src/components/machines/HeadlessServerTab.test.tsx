@@ -33,6 +33,7 @@ beforeEach(() => {
     if (command === "machines_cancel_pairing") return null;
     if (command === "machines_set_route") return null;
     if (command === "copy_text") return null;
+    if (command === "machines_account_list") return { signedIn: false };
     throw new Error(`unexpected ${command}`);
   });
 });
@@ -55,7 +56,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
   it("shows the intro, three numbered steps, the On the server panel with placeholders, and the footer", async () => {
     const { dialog } = openHeadless();
     expect(within(dialog).getByRole("tab", { name: "Headless server" }).getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).queryByText("On your account")).toBeNull();
+    expect(within(dialog).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["On your account", "Pairing code", "Headless server"]);
     expect(within(dialog).getByText(/^A server runs TerminalX without a window\. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here\.$/)).toBeTruthy();
 
     const steps = within(within(dialog).getByTestId("headless-server").querySelector("ol")!).getAllByRole("listitem");
@@ -88,7 +89,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     expect([...note.querySelectorAll("code")].map((code) => code.textContent)).toEqual(["claude", "codex login --device-auth"]);
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeTruthy();
     expect((within(dialog).getByRole("button", { name: "Continue" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(["machine_name"]);
+    expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command !== "machines_account_list")).toEqual(["machine_name"]);
   });
 
   it("copies the install and pair commands", async () => {
@@ -201,6 +202,9 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
   it("moves between tabs with the arrow keys", () => {
     render(<AddMachineDialog open onOpenChange={vi.fn()} />);
     const dialog = screen.getByRole("dialog", { name: "Add a machine" });
+    expect(within(dialog).getByRole("tab", { name: "On your account" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(within(dialog).getByRole("tablist"), { key: "ArrowRight" });
+    expect(within(dialog).getByRole("tab", { name: "Pairing code" }).getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(within(dialog).getByRole("tablist"), { key: "ArrowRight" });
     expect(within(dialog).getByRole("tab", { name: "Headless server" }).getAttribute("aria-selected")).toBe("true");
     expect(within(dialog).getByTestId("headless-server")).toBeTruthy();

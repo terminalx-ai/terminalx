@@ -1,12 +1,14 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
-import { useCallback, useEffect, useState } from "react";
-import { Bot, Loader2, Plus, X } from "@/icons";
+import { useCallback, useEffect, useState, useRef } from "react";
+import { Bot, ChevronDown, Folder, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { LinkedText } from "@/components/chat/LinkedText";
 import { Composer } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { runningLimitReached } from "@/lib/runningLimit";
 import { useAccount } from "@/lib/account";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
@@ -28,6 +30,7 @@ import {
   configureCloudAgentTab,
   discardPendingConfig,
   createCloudAgentTab,
+  getCloudAgents,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
   errorText,
@@ -55,8 +58,31 @@ import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
+import { useMachinePlace } from "./workspacePlace";
 import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
+
+/** A session to bring to the front of the agent view: its tab, or (null) the session's first tab. */
+export interface AgentFocus {
+  sessionId: string;
+  tabId: string | null;
+}
+
+/**
+ * The projects a new agent tab may be created in: a paired machine's
+ * (PRO-346), where `session.create` needs a `projectId`. A cloud workspace has
+ * none and passes nothing.
+ */
+export interface AgentProjects {
+  projects: { projectId: string; name: string }[];
+  /** The project the form starts on when opened with + Agent: the focused session's. */
+  preferred: string | null;
+  /** Open the form on this project (the sidebar's +); spent once the form has opened. */
+  request: { projectId: string; nonce: number } | null;
+  onRequestTaken: () => void;
+  /** A session was created in a project: the machine selects its row. */
+  onCreated: (sessionId: string, projectId: string) => void;
+}
 
 /**
  * The agent tabs of a cloud workspace (PRO-22). Tabs and transcripts show
@@ -73,6 +99,8 @@ export function CloudAgentsView({
   waking = false,
   collabKey,
   active: shown = true,
+  focus = null,
+  projects = null,
 }: {
   scope: CloudAgentScope;
   client: WorkspaceRpcClient;
@@ -87,12 +115,17 @@ export function CloudAgentsView({
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
   active?: boolean;
+  /** Bring this session's tab to the front once it is listed; a later change of focus does it again. */
+  focus?: AgentFocus | null;
+  /** A machine's projects: the new-agent form picks one. */
+  projects?: AgentProjects | null;
 }) {
   const snapshot = useCloudAgents(scope);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const connected = state.state === "connected";
+  const machine = useMachinePlace();
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
   const key = collabKey ?? `cloud:${scope.organizationId}:${scope.workspaceId}`;
   const collab = useCollab(key);
@@ -120,7 +153,27 @@ export function CloudAgentsView({
     };
   }, [generation, client, scope.organizationId, scope.workspaceId]);
 
+  // The sidebar's + on a machine opens the form on the project it chose.
+  const [formProject, setFormProject] = useState<string | null>(null);
+  const requestNonce = projects?.request?.nonce ?? null;
+  useEffect(() => {
+    if (!projects?.request) return;
+    setFormProject(projects.request.projectId);
+    setCreating(true);
+    projects.onRequestTaken();
+  }, [requestNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const tabs = snapshot.tabs;
+  // Applied once per focus, when its tab is listed: choosing another tab afterwards is not undone by later updates.
+  const focused = useRef<string | null>(null);
+  const focusKey = focus ? `${focus.sessionId}/${focus.tabId ?? ""}` : null;
+  useEffect(() => {
+    if (!focus || focused.current === focusKey) return;
+    const tab = (focus.tabId ? tabs.find((item) => item.tabId === focus.tabId) : undefined) ?? tabs.find((item) => item.info.sessionId === focus.sessionId);
+    if (!tab) return;
+    focused.current = focusKey;
+    setSelected(tab.tabId);
+  }, [focusKey, tabs]);
   const active = tabs.find((tab) => tab.tabId === selected) ?? tabs[0] ?? null;
 
   // Others see which agent tab this person is on.
@@ -172,7 +225,15 @@ export function CloudAgentsView({
           </div>
         ))}
         {manage && (
-          <Button size="sm" variant="ghost" aria-label="New agent tab" onClick={() => setCreating((open) => !open)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label="New agent tab"
+            onClick={() => {
+              if (!creating) setFormProject(projects?.preferred ?? null);
+              setCreating((open) => !open);
+            }}
+          >
             <Plus className="size-3.5" /> Agent
           </Button>
         )}
@@ -180,6 +241,9 @@ export function CloudAgentsView({
       {creating && manage && (
         <NewAgentForm
           client={workspaceState === "suspended" || workspaceState === "archived" ? null : client}
+          projects={projects?.projects ?? null}
+          project={formProject}
+          onProject={setFormProject}
           onCancel={() => setCreating(false)}
           onCreate={async (params) => {
             setError(null);
@@ -187,6 +251,8 @@ export function CloudAgentsView({
               const tabId = await createCloudAgentTab(scope, client, params);
               setSelected(tabId);
               setCreating(false);
+              const sessionId = getCloudAgents(scope).tabs.find((tab) => tab.tabId === tabId)?.info.sessionId;
+              if (params.projectId && sessionId) projects?.onCreated(sessionId, params.projectId);
             } catch (e) {
               setError(errorText(e));
             }
@@ -214,9 +280,11 @@ export function CloudAgentsView({
           {!snapshot.loaded ? (
             <Loader2 className="size-4 animate-spin" />
           ) : manage ? (
-            "No agent tabs in this workspace yet. Start one with + Agent."
+            machine ? `No agent tabs on ${machine.name} yet. Start one with + Agent.` : "No agent tabs in this workspace yet. Start one with + Agent."
           ) : connected ? (
-            "No agent tabs in this workspace."
+            machine ? `No agent tabs on ${machine.name}.` : "No agent tabs in this workspace."
+          ) : machine ? (
+            `Agent tabs appear here once ${machine.name} is connected or has saved conversations.`
           ) : (
             "Agent tabs appear here once the workspace is connected or has saved conversations."
           )}
@@ -252,15 +320,21 @@ function StatusBar({
   // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
   const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
   const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
+  // On a paired machine the chip follows the machine's own state: Offline, not the transport's Reconnecting.
+  const machine = useMachinePlace();
+  const connection = machine && state.state !== "connected" ? machine.label : connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connection} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip
-        label="Workspace"
-        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
-        testId="cloud-agent-provisioning"
-      />
+      {/* A paired machine is not provisioned, woken or put to sleep from here: it has no such state to show. */}
+      {!machine && (
+        <Chip
+          label="Workspace"
+          value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
+          testId="cloud-agent-provisioning"
+        />
+      )}
     </div>
   );
 }
@@ -465,11 +539,18 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
 /** Another agent in this workspace, with the same launch settings New Session offers for the cloud. */
 function NewAgentForm({
   client,
+  projects = null,
+  project = null,
+  onProject,
   onCreate,
   onCancel,
 }: {
   client: WorkspaceRpcClient | null;
-  onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => Promise<void>;
+  /** A machine's projects: one must be chosen before the agent can start. */
+  projects?: AgentProjects["projects"] | null;
+  project?: string | null;
+  onProject?: (projectId: string) => void;
+  onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string; projectId?: string }) => Promise<void>;
   onCancel: () => void;
 }) {
   const { harnesses } = useSessionStore();
@@ -479,25 +560,57 @@ function NewAgentForm({
   const pipelineLaunch = usePipelineLaunch(null, pipelineSettings(null), "This session starts on the base checkout. Start a worktree session from the cloud project to automate conflicts.", "Cloud workspaces require a person to merge.");
   const { harness, modelId, effort, mode } = selection;
   const [busy, setBusy] = useState(false);
+  // A project the machine no longer lists is no choice.
+  const chosen = projects ? (projects.find((entry) => entry.projectId === project) ?? (projects.length === 1 ? projects[0] : null)) : null;
+  const missingProject = !!projects && !chosen;
   return (
     <form
       className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-hairline px-3 py-2 text-xs"
       data-testid="cloud-agent-new"
+      data-project={chosen?.projectId}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!harness) return;
+        if (!harness || missingProject) return;
         setBusy(true);
-        void onCreate({ agent: harness.id, model: modelId || undefined, effort, mode }).finally(() => setBusy(false));
+        void onCreate({ agent: harness.id, model: modelId || undefined, effort, mode, ...(chosen ? { projectId: chosen.projectId } : {}) }).finally(() => setBusy(false));
       }}
     >
+      {projects && <ProjectPicker projects={projects} chosen={chosen} onProject={(id) => onProject?.(id)} />}
       <SessionAgentControls selection={selection} pipeline={pipelineLaunch} />
-      <Button size="sm" type="submit" disabled={busy || !harness}>
+      <Button size="sm" type="submit" disabled={busy || !harness || missingProject} title={missingProject ? "Choose a project first" : undefined}>
         Start agent
       </Button>
       <Button size="sm" type="button" variant="ghost" onClick={onCancel}>
         Cancel
       </Button>
     </form>
+  );
+}
+
+/** Which of a machine's projects the new agent starts in. */
+function ProjectPicker({ projects, chosen, onProject }: { projects: AgentProjects["projects"]; chosen: AgentProjects["projects"][number] | null; onProject: (projectId: string) => void }) {
+  const menu = useRowMenu();
+  return (
+    <DropdownMenu {...menu.root}>
+      <DropdownMenuTrigger asChild {...menu.trigger}>
+        <Button variant="secondary" size="sm" className="min-w-0 max-w-full shrink gap-1.5" title="Project" aria-label={chosen ? `Project: ${chosen.name}` : "Choose a project"} data-testid="agent-project">
+          <Folder className="size-3.5 text-faint" />
+          <span className="truncate">{chosen?.name ?? "Choose a project"}</span>
+          <ChevronDown className="text-faint" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+        <DropdownMenuLabel>Project</DropdownMenuLabel>
+        {projects.length === 0 && <DropdownMenuLabel className="font-normal text-faint">This machine lists no projects.</DropdownMenuLabel>}
+        <DropdownMenuRadioGroup value={chosen?.projectId ?? ""} onValueChange={onProject}>
+          {projects.map((entry) => (
+            <DropdownMenuRadioItem key={entry.projectId} value={entry.projectId}>
+              <span className="truncate">{entry.name}</span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

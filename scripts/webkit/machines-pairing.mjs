@@ -259,7 +259,7 @@ try {
       const section = await settings.getByTestId("machines-settings").evaluate((el) => {
         const style = (node) => (node ? { size: parseFloat(getComputedStyle(node).fontSize), weight: Number(getComputedStyle(node).fontWeight), height: node.getBoundingClientRect().height } : null);
         const button = (label) => [...el.querySelectorAll("button")].find((node) => node.textContent.trim() === label) ?? null;
-        const leaf = (label) => [...el.querySelectorAll("div")].find((node) => node.children.length === 0 && node.textContent === label) ?? null;
+        const leaf = (label) => [...el.querySelectorAll("h3, div")].find((node) => node.children.length === 0 && node.textContent === label) ?? null;
         const add = button("Add a machine");
         const create = button("Create a new code");
         const yours = leaf("Your machines");
@@ -288,7 +288,8 @@ try {
         "the intro and the Your machines line are the screen's": section.text.includes("Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.")
           && section.text.includes("Computers this Mac can operate. Each one appears as a section in the sidebar."),
         "section headings are 14 px semibold": section.headings.every((heading) => heading?.size === 14 && heading.weight === 600),
-        "Add a machine is the primary button with +, beside Your machines": !!section.add && section.add.primary && section.add.plus && section.add.besideHeading && section.add.height >= 30,
+        // The screen draws it h-8: 32 px, the app's default button.
+        "Add a machine is the primary button with +, 32 px tall, beside Your machines": !!section.add && section.add.primary && section.add.plus && section.add.besideHeading && Math.abs(section.add.height - 32) <= 0.5,
         "no pairing code sits between the switch and Your machines": section.codeAfterYours,
         "a Mac has the monitor icon": section.macIcons.length > 0 && section.macIcons.every((icon) => icon === "monitor"),
         "Revoke is 13 px": section.revoke?.size === 13,

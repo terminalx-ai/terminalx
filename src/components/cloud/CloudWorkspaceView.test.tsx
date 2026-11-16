@@ -215,12 +215,20 @@ describe("the cloud workspace view", () => {
       machineId: "m1", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5",
       directEndpoints: [], route: "relayAndNearby" as const, pairedAt: 1, lastSeenAt: 1,
     };
-    const opened = { connection: fakeConnection("m1"), name: "Mac mini", provider: null, workspaceState: null, machine: { record, status: "Mac mini is offline. Sessions there keep running." } };
+    const status = "Mac mini isn’t reachable. Sessions there keep running.";
+    const opened = { connection: fakeConnection("m1"), name: "Mac mini", provider: null, workspaceState: null, machine: { record, status, label: "Offline" } };
+    integration.realAgents = true;
     // Offline reaches the transport as a reconnect with attempt 0.
     const { rerender } = render(<WorkspaceView opened={opened} state={{ state: "reconnecting", attempt: 0, reason: "offline", retryInMs: 10_000 } as never} />);
-    expect(screen.getByTestId("workspace-connection-status").textContent).toBe("Mac mini is offline. Sessions there keep running.");
-    expect(document.body.textContent).not.toContain("Reconnecting (attempt");
+    expect(screen.getByTestId("workspace-connection-status").textContent).toBe(status);
     expect(document.body.textContent).toContain("Terminals appear once Mac mini is connected.");
+    // Every tab speaks from the machine's state and names the machine: the Agent and Ports tabs as well (Files and Git need the real api module here; WebKit covers them).
+    fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toBe("Connection: Offline");
+    fireEvent.click(screen.getByRole("tab", { name: "Ports" }));
+    expect(screen.getByTestId("cloud-ports-restarting").textContent).toContain(status);
+    expect(screen.queryByTestId("cloud-agent-provisioning")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Reconnecting|\(attempt|workspace/i);
 
     listed = [];
     rerender(<WorkspaceView opened={opened} state={connectedState() as never} />);

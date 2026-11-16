@@ -6,6 +6,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } fr
 import { minutesSeconds } from "@/components/pairing/pairingText";
 import { cn } from "@/lib/cn";
 import { MACHINE_CODE_PREFIX, type MachineRoute, type PairedMachine } from "@/types/machines";
+import { AccountTab } from "./AccountTab";
 import { HeadlessServerTab } from "./HeadlessServerTab";
 import { FingerprintBox, PlatformIcon, machineSummary, sectionLabel, soft } from "./machineText";
 import { failureCopy, useMachinePairing, type MachinePairing } from "./useMachinePairing";
@@ -24,28 +25,31 @@ export function routeHint(route: MachineRoute, name: string): string {
     : `Reaches ${name} only on this network or through Tailscale. The connection is end-to-end encrypted.`;
 }
 
-/** Screen 21.04 (Pairing code) and 21.06 (Headless server); On your account comes with its own ticket. */
+/** Screens 21.03 (On your account), 21.04 (Pairing code) and 21.06 (Headless server). */
 export function AddMachineDialog({ open, onOpenChange, onPaired }: { open: boolean; onOpenChange: (open: boolean) => void; onPaired?: (machine: PairedMachine) => void }) {
   if (!open) return null;
   return <AddMachine onClose={() => onOpenChange(false)} onPaired={onPaired} />;
 }
 
-type AddTab = "pairingCode" | "headless";
+type AddTab = "account" | "pairingCode" | "headless";
 const TABS: { value: AddTab; label: string }[] = [
+  { value: "account", label: "On your account" },
   { value: "pairingCode", label: "Pairing code" },
   { value: "headless", label: "Headless server" },
 ];
 
 function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (machine: PairedMachine) => void }) {
-  const [tab, setTab] = useState<AddTab>("pairingCode");
+  const [tab, setTab] = useState<AddTab>("account");
   // Each tab keeps its own code; leaving a tab cancels a pairing it is waiting on.
+  const byAccount = useMachinePairing({ askOnRead: true, onPaired });
   const byCode = useMachinePairing({ askOnRead: true, onPaired });
   const headless = useMachinePairing({ askOnRead: false, onPaired });
-  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ pairingCode: null, headless: null });
+  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ account: null, pairingCode: null, headless: null });
+  const pairingOf = (which: AddTab) => (which === "account" ? byAccount : which === "pairingCode" ? byCode : headless);
 
   const choose = (next: AddTab) => {
     if (next === tab) return;
-    (tab === "pairingCode" ? byCode : headless).cancel();
+    pairingOf(tab).cancel();
     setTab(next);
   };
   const onTabKey = (event: React.KeyboardEvent) => {
@@ -58,6 +62,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
   };
 
   const close = () => {
+    byAccount.cancel();
     byCode.cancel();
     headless.cancel();
     onClose();
@@ -65,7 +70,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
 
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width={tab === "headless" ? "max-w-[820px]" : "max-w-[720px]"} showClose={false} className="gap-0 p-0" data-testid="add-machine">
+      <DialogContent width={tab === "headless" ? "max-w-[820px]" : tab === "account" ? "max-w-[640px]" : "max-w-[720px]"} showClose={false} className="gap-0 p-0" data-testid="add-machine">
         <header className="flex h-14 items-center gap-2.5 border-b border-hairline px-5">
           <Monitor className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 leading-4">
@@ -104,7 +109,13 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
           </div>
         </div>
         <div role="tabpanel" id={`add-machine-panel-${tab}`}>
-          {tab === "pairingCode" ? <PairingCodeTab pairing={byCode} onClose={close} onDone={onClose} /> : <HeadlessServerTab pairing={headless} onClose={close} onDone={onClose} />}
+          {tab === "account" ? (
+            <AccountTab pairing={byAccount} onClose={close} onDone={onClose} onUseCode={() => choose("pairingCode")} />
+          ) : tab === "pairingCode" ? (
+            <PairingCodeTab pairing={byCode} onClose={close} onDone={onClose} />
+          ) : (
+            <HeadlessServerTab pairing={headless} onClose={close} onDone={onClose} />
+          )}
         </div>
       </DialogContent>
     </Dialog>

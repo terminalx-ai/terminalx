@@ -10,7 +10,7 @@ import type { MachineConnectionState, MachineConnectionView } from "@/types/mach
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   handlers: new Map<string, ((event: { payload: unknown }) => void)[]>(),
-  views: [] as { opened: { name: string; provider: string | null; workspaceState: string | null; connection: { target: unknown }; machine?: { record: { machineId: string }; status: string } }; state: { state: string } }[],
+  views: [] as { opened: { name: string; provider: string | null; workspaceState: string | null; connection: { target: unknown }; machine?: { record: { machineId: string }; status: string; label: string } }; state: { state: string } }[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 vi.mock("@/lib/cloudTerminals", () => ({ detachCloudTerminals: vi.fn(), errorCode: () => "unknown" }));
-vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: { state: "signed-out" } }) }));
+vi.mock("@/lib/account", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/account")>()), getAccount: () => ({ status: { state: "signed-out" } }) }));
 vi.mock("@/lib/terminal", () => ({
   closeSessionShells: vi.fn(), dropSessionTerminals: vi.fn(), dropTabTerminals: vi.fn(),
   setArchivedTerminalSessions: vi.fn(), setSelectedAgent: vi.fn(),
@@ -41,7 +41,7 @@ const sessions = await import("@/lib/sessions");
 const experimental = await import("@/lib/experimentalSettings");
 const api = await import("@/lib/api");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
-const { clockTime, machineViewStatus } = await import("./connectionStatus");
+const { clockTime, machineViewLabel, machineViewStatus } = await import("./connectionStatus");
 
 const MAC_MINI = pairedMachine({ machineId: "m1", name: "Mac mini", lastSeenAt: Date.parse("2026-11-15T14:02:00") });
 const DEV_SERVER = pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } });
@@ -156,13 +156,23 @@ describe("the Machines section", () => {
   });
 
   it("says what a machine's view shows while it is not connected, from the machine's own state (PRO-398)", () => {
-    expect(machineViewStatus({ state: "offline", lastSeenAt: null, retryInMs: 10_000 }, "Mac mini")).toBe("Mac mini is offline. Sessions there keep running.");
+    // The words of screen 21.09.
+    expect(machineViewStatus({ state: "offline", lastSeenAt: null, retryInMs: 10_000 }, "Mac mini")).toBe("Mac mini isn’t reachable. Sessions there keep running.");
     expect(machineViewStatus({ state: "reconnecting", lostAt: 0, attempt: 0, retryInMs: 500, trying: ["lan", "relay"] }, "Mac mini")).toBe(
-      "Reconnecting to Mac mini. Trying this network, then Relay. Sessions there keep running.",
+      "Reconnecting to Mac mini. Trying this network, then Relay. The agent keeps working there.",
     );
+    // Each route keeps its own name, in the order it is tried: Tailscale is not "this network".
     expect(machineViewStatus({ state: "reconnecting", lostAt: 0, attempt: 3, retryInMs: 500, trying: ["tailscale"] }, "Mac mini")).toBe(
-      "Reconnecting to Mac mini. Trying this network. Sessions there keep running.",
+      "Reconnecting to Mac mini. Trying Tailscale. The agent keeps working there.",
     );
+    expect(machineViewStatus({ state: "reconnecting", lostAt: 0, attempt: 3, retryInMs: 500, trying: ["relay", "tailscale", "lan"] }, "Mac mini")).toBe(
+      "Reconnecting to Mac mini. Trying this network, Tailscale, then Relay. The agent keeps working there.",
+    );
+    expect(machineViewStatus({ state: "reconnecting", lostAt: 0, attempt: 3, retryInMs: 500, trying: [] }, "Mac mini")).toBe("Reconnecting to Mac mini. The agent keeps working there.");
+    // The word a tab's connection chip shows: the machine's state, never the transport's.
+    expect(machineViewLabel({ state: "offline", lastSeenAt: 1, retryInMs: 10_000 })).toBe("Offline");
+    expect(machineViewLabel({ state: "reconnecting", lostAt: 0, attempt: 0, retryInMs: 500, trying: [] })).toBe("Reconnecting");
+    expect(machineViewLabel({ state: "relay", route: { kind: "relay", endpoint: null }, since: 0, rttMs: null })).toBe("Connecting");
     expect(machineViewStatus({ state: "connecting", trying: ["lan"] }, "Mac mini")).toBe("Connecting to Mac mini…");
     expect(machineViewStatus({ state: "accessRemoved" }, "Studio")).toBe("Studio no longer allows this Mac. Pair again to reconnect.");
     // PRO-354's states: which side updates, and a machine handing its runtime over.
@@ -179,7 +189,7 @@ describe("the Machines section", () => {
     expect(within(section("Mac mini")).getByRole("button").getAttribute("aria-current")).toBe("page");
     await screen.findByTestId("workspace-view");
     const opened = mocks.views.at(-1)!.opened;
-    expect(opened).toMatchObject({ name: "Mac mini", provider: null, workspaceState: null, machine: { record: { machineId: "m1" }, status: "Connecting to Mac mini…" } });
+    expect(opened).toMatchObject({ name: "Mac mini", provider: null, workspaceState: null, machine: { record: { machineId: "m1" }, status: "Connecting to Mac mini…", label: "Connecting" } });
     expect(opened.connection.target).toEqual({ kind: "machine", machineId: "m1" });
 
     const chip = screen.getByTestId("machine-chip");
@@ -198,7 +208,7 @@ describe("the Machines section", () => {
     expect(screen.getByTestId("machine-chip").textContent).toBe("Mac miniOffline");
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Sessions there keep running");
     // The view is told the machine is offline: it never falls back to the transport's "Reconnecting (attempt 0)".
-    expect(mocks.views.at(-1)!.opened.machine!.status).toBe("Mac mini is offline. Sessions there keep running.");
+    expect(mocks.views.at(-1)!.opened.machine).toMatchObject({ status: "Mac mini isn’t reachable. Sessions there keep running.", label: "Offline" });
     expect(screen.queryByTestId("machine-path")).toBeNull();
     setState("m1", { state: "needsUpdate", version: null, side: "machine" });
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Runs an older TerminalX");

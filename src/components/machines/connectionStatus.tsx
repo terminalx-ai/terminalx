@@ -101,13 +101,17 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
   }
 }
 
-/** The routes a reconnect is trying, as the view says them (21.09): "Trying this network, then Relay." */
+const ROUTE_WORDS: Record<MachineRouteKind, string> = { lan: "this network", tailscale: "Tailscale", relay: "Relay" };
+
+/**
+ * The routes a reconnect is trying, in the order it tries them (21.09):
+ * "Trying this network, then Relay." Each route keeps its own name, as
+ * {@link routeText} does: Tailscale is not "this network".
+ */
 function tryingText(trying: MachineRouteKind[]): string | null {
-  const direct = trying.some((kind) => kind !== "relay");
-  const relay = trying.includes("relay");
-  if (direct && relay) return "Trying this network, then Relay.";
-  if (direct) return "Trying this network.";
-  return relay ? "Trying Relay." : null;
+  const routes = (["lan", "tailscale", "relay"] as const).filter((kind) => trying.includes(kind)).map((kind) => ROUTE_WORDS[kind]);
+  if (routes.length === 0) return null;
+  return `Trying ${routes.length === 1 ? routes[0] : `${routes.slice(0, -1).join(", ")}, then ${routes[routes.length - 1]}`}.`;
 }
 
 /**
@@ -118,9 +122,9 @@ function tryingText(trying: MachineRouteKind[]): string | null {
 export function machineViewStatus(state: MachineConnectionState, name: string): string {
   switch (state.state) {
     case "reconnecting":
-      return [`Reconnecting to ${name}.`, tryingText(state.trying), "Sessions there keep running."].filter(Boolean).join(" ");
+      return [`Reconnecting to ${name}.`, tryingText(state.trying), "The agent keeps working there."].filter(Boolean).join(" ");
     case "offline":
-      return `${name} is offline. Sessions there keep running.`;
+      return `${name} isn’t reachable. Sessions there keep running.`;
     case "needsUpdate":
       // PRO-354: the newer side says which computer updates.
       return state.side === "thisMac" ? `${name} runs a newer TerminalX than this Mac. Update this Mac to connect.` : `${name} runs an older TerminalX. Update TerminalX there to connect.`;
@@ -134,6 +138,11 @@ export function machineViewStatus(state: MachineConnectionState, name: string): 
       // Connecting, or the link is up and the view's own channel is opening.
       return `Connecting to ${name}…`;
   }
+}
+
+/** {@link machineViewStatus} in a word or two, for a tab's connection chip: the chip's own label, or Connecting while the view's channel opens. */
+export function machineViewLabel(state: MachineConnectionState): string {
+  return state.state === "direct" || state.state === "relay" ? "Connecting" : machineStateLabel(state, null);
 }
 
 /** "Direct over Tailscale", "Direct on this network" or "Through TerminalX Relay". */

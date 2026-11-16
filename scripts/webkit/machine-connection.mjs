@@ -16,9 +16,9 @@
 // no UI text is mono. With Machines off, the section is not there at all.
 //
 // PRO-398: while the view is not connected it speaks from the machine's own
-// state (an offline machine is offline and its sessions keep running, never
-// the transport's "Reconnecting (attempt 0)…") and names the machine, not a
-// workspace; the last-seen time is on the 24-hour clock; Connecting and
+// state (an offline machine isn't reachable and its sessions keep running,
+// never the transport's "Reconnecting (attempt 0)…") and names the machine,
+// not a workspace, on every tab: Terminal, Agent, Files, Git and Ports; the last-seen time is on the 24-hour clock; Connecting and
 // Reconnecting turn an arc; the "Runs on" strip is 36 px tall; and a Mac has
 // one icon in the sidebar, the chip and the strip.
 //
@@ -110,9 +110,9 @@ const STATES = [
   { id: "direct-tailscale", state: { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.2:6768/machine/1" }, since: 0, rttMs: 9 }, label: "Direct", hint: "On this network or Tailscale", path: "Direct over Tailscale · 9 ms" },
   { id: "relay", state: { state: "relay", route: { kind: "relay", endpoint: null }, since: 0, rttMs: 41 }, label: "Relay", hint: "Through TerminalX Relay", path: "Through TerminalX Relay · 41 ms" },
   { id: "reconnecting", state: () => ({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 2, retryInMs: 500, trying: ["lan", "relay"] }), label: "Reconnecting", hint: /^Lost it 1[2-4] seconds ago$/,
-    status: "Reconnecting to Mac mini. Trying this network, then Relay. Sessions there keep running.", spins: true },
+    status: "Reconnecting to Mac mini. Trying this network, then Relay. The agent keeps working there.", spins: true, chip: "Reconnecting" },
   { id: "offline", state: { state: "offline", lastSeenAt: LAST_SEEN, retryInMs: 10_000 }, label: "Offline", sidebarLabel: "Offline · seen 14:02", hint: "Sessions there keep running",
-    status: "Mac mini is offline. Sessions there keep running." },
+    status: "Mac mini isn’t reachable. Sessions there keep running.", chip: "Offline" },
   { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27", side: "machine" }, label: "Needs update", hint: "Runs an older TerminalX", status: "Mac mini runs an older TerminalX. Update TerminalX there to connect." },
   { id: "updating", state: () => ({ state: "updating", version: "0.2.33", since: Date.now() - 5_000 }), label: "Updating", hint: "Back in under a minute",
     status: "Mac mini is updating. Back in under a minute. Sessions there keep running.", spins: true },
@@ -206,8 +206,7 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
           "the strip is 36 px tall": !!m.strip && Math.abs(m.strip.height - 36) <= SLACK,
           ...(expected.status ? { [`the view says: ${expected.status}`]: m.status === expected.status } : {}),
           "the view never shows the transport's attempt counter": !/\(attempt \d+\)/.test(m.mainText),
-          "the status and the empty terminal area name the machine, not a workspace":
-            !/workspace/i.test(`${m.status ?? ""} ${m.noTerminals ?? ""}`) && (m.noTerminals === null || m.noTerminals.includes("Mac mini")),
+          "the view names the machine and never calls it a workspace": !/workspace/i.test(m.mainText) && (m.noTerminals === null || m.noTerminals.includes("Mac mini")),
           ...(expected.spins
             ? { "Connecting, Reconnecting and Updating turn an arc, not a burst": m.mark === "loader-circle" && m.sidebarMark === "loader-circle" }
             : { "a settled state has a dot": m.mark === null && m.sidebarMark === null }),
@@ -217,6 +216,36 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
         { ...m, small, mono, texts: undefined },
       );
       await page.screenshot({ path: join(shots, `${expected.id}-${viewportName}-${colorScheme}.png`) });
+
+      // The other tabs say the same as the header chip, and name the machine.
+      if (expected.chip) {
+        const main = page.locator('[data-testid="machine-main"]');
+        const said = {};
+        for (const tab of ["Agent", "Files", "Git", "Ports"]) {
+          await main.getByRole("tab", { name: tab, exact: true }).click();
+          await page.waitForTimeout(100);
+          said[tab] = await main.evaluate((node) => ({
+            text: node.textContent,
+            connection: node.querySelector('[data-testid="cloud-agent-connection"]')?.textContent ?? null,
+            provisioning: !!node.querySelector('[data-testid="cloud-agent-provisioning"]'),
+          }));
+          if (tab === "Agent") await page.screenshot({ path: join(shots, `${expected.id}-agent-${viewportName}-${colorScheme}.png`) });
+        }
+        const transportWords = expected.id === "offline" ? /Reconnecting|\(attempt \d+\)|workspace/i : /\(attempt \d+\)|workspace/i;
+        failed += report(
+          `machine ${expected.id}, other tabs (${name})`,
+          {
+            [`the Agent tab's connection chip says ${expected.chip}`]: said.Agent.connection === `Connection: ${expected.chip}`,
+            "the Agent tab has no Workspace chip": said.Agent.provisioning === false,
+            "Files waits for the machine by name": said.Files.text.includes("Files appear once Mac mini is connected."),
+            "Git waits for the machine by name": said.Git.text.includes("Git appears once Mac mini is connected."),
+            "Ports says what the machine's state is": said.Ports.text.split(expected.status).length - 1 >= 2,
+            "no tab shows the transport's words or calls the machine a workspace": Object.values(said).every((tab) => !transportWords.test(tab.text)),
+          },
+          said,
+        );
+        await main.locator('[role="tablist"] [role="tab"]').first().click().catch(() => {});
+      }
     }
     await page.close();
   }
