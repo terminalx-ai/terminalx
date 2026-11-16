@@ -74,6 +74,22 @@ describe("the shortcut registry", () => {
     expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
   });
 
+  // PRO-397: the title bar's '…' menu draws ⌘I on Link issue, ⇧⌘C on Copy link and ⇧⌘A on Archive session. Those keys
+  // are other actions', so the rows are actions with no default keys, and the menu shows whatever the reader gives them.
+  it("gives the session menu's rows actions of their own, with no keys taken from another action", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      for (const id of ["session.linkIssue", "session.copyLink", "session.archive"] as const) expect(keymap[id], id).toEqual([]);
+      expect(keymap["session.toggleTerminalView"]).toEqual(["mod+shift+t"]);
+      const owner = (chord: string) => SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes(chord)).map((entry) => entry.id);
+      expect(owner("mod+i")).toEqual(["app.issues"]);
+      expect(owner("mod+shift+c")).toEqual(["git.createPr"]);
+      expect(owner("mod+shift+a")).toEqual(["app.agentDashboard"]);
+    }
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.linkIssue")).toMatchObject({ group: "Session", label: "Link an issue to the session" });
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.copyLink")).toMatchObject({ group: "Session", label: "Copy a link to the session" });
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");

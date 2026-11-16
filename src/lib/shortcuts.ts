@@ -81,6 +81,9 @@ const ACTIONS = [
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
+  // The title bar's '…' menu (PRO-397). No keys by default: the design's ⌘I is Issues' and ⇧⌘C is Create pull request's.
+  { id: "session.linkIssue", label: "Link an issue to the session", group: "Session", keys: [] },
+  { id: "session.copyLink", label: "Copy a link to the session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
   // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
