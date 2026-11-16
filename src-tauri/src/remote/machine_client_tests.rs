@@ -717,3 +717,27 @@ async fn choosing_only_this_network_closes_a_relay_link_at_once() {
     assert!(watch.quiet(Duration::from_millis(300)).await.iter().all(|said| !matches!(said, Said::Machine(MachineConnectionState::Reconnecting { .. }))));
     supervisor.stop();
 }
+
+#[tokio::test]
+async fn a_closed_window_lets_go_so_turning_machines_off_in_the_last_one_stops_the_owner() {
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Connect)]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    let owners = Owners::default();
+    let start_owner = || {
+        let (events, _) = mpsc::unbounded_channel();
+        Ok(("machine-1".to_string(), MachineSupervisor::start(MACHINE, env.clone(), script.clone(), events, Arc::new(|_: &MachineConnectionView| {}))))
+    };
+    owners.attach(MACHINE, "main", start_owner).unwrap();
+    owners.attach(MACHINE, "chat-1", || panic!("a second owner started")).unwrap();
+    let owner = owners.get(MACHINE).unwrap();
+    assert!(owner.holds("main") && owner.holds("chat-1"));
+    assert!(!owner.holds("chat-2"), "a window that never attached holds nothing");
+
+    // The chat window closes without detaching: its hold goes with it.
+    assert!(!owner.release(Some("chat-1")), "the main window still holds it");
+    assert!(!owner.holds("chat-1"));
+    assert!(!owner.is_stopped());
+    // Machines off in the main window: the last hold goes, and the owner stops.
+    assert!(owner.release(Some("main")));
+    assert!(owner.is_stopped());
+}

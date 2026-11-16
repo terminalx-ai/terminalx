@@ -1155,6 +1155,10 @@ pub fn run() {
                 if chat_windows::is_chat_window(window.label()) {
                     let _ = window.app_handle().emit_to("main", "chat_window_closed", window.label());
                 }
+                // Its machine connections: a closed window runs no cleanup (PRO-345).
+                if let Some(remote) = window.try_state::<Arc<cloud_remote::CloudRemote>>() {
+                    remote.release_holder(window.label());
+                }
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {

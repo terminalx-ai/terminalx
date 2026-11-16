@@ -183,6 +183,27 @@ impl CloudRemote {
         }
     }
 
+    /// A window closed: it lets go of every machine connection it held, and
+    /// those nobody else holds end. A closed window runs no cleanup of its
+    /// own, so without this its hold would keep a machine connecting after
+    /// Experimental → Machines is off.
+    pub fn release_holder(&self, holder: &str) {
+        let ended: Vec<Attached> = {
+            let mut connections = self.connections.lock().unwrap();
+            let held: Vec<String> = connections
+                .iter()
+                .filter(|(_, attached)| matches!(&attached.supervisor, Handle::Machine(supervisor) if supervisor.holds(holder)))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let last: Vec<String> = held.into_iter().filter(|id| matches!(&connections[id].supervisor, Handle::Machine(supervisor) if supervisor.release(Some(holder)))).collect();
+            last.into_iter().filter_map(|id| connections.remove(&id)).collect()
+        };
+        for attached in ended {
+            attached.ports.shutdown();
+            attached.supervisor.stop();
+        }
+    }
+
     pub fn close_log(&self) -> Arc<ConnectionCloseLog> {
         self.closes.clone()
     }

@@ -1113,7 +1113,8 @@ a web view that attaches to a live connection (a second window, or the same
 one after a reload) is not left waiting for the next change. Every web view
 that attached it holds the connection, by its webview label (a reload holds
 again under the same label). `cloud_remote_detach` lets go for the calling web
-view, and the owner stops when the last holder lets go. Sleep, wake, a network change, a route probe and "Try again"
+view, a window that closes lets go of everything it held (it runs no cleanup
+of its own), and the owner stops when the last holder lets go. Sleep, wake, a network change, a route probe and "Try again"
 only nudge that owner. Wake is a wall-clock jump of more than 3 s against the
 monotonic clock (checked every second); a network change is a change in the
 set of interface addresses (checked every 2 s). A nudge while connected checks

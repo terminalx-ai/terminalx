@@ -772,6 +772,11 @@ impl MachineSupervisor {
         true
     }
 
+    /// Whether the web view `holder` holds this connection.
+    pub fn holds(&self, holder: &str) -> bool {
+        self.shared.holders.lock().unwrap().contains(holder)
+    }
+
     /// Let go for `holder` (every holder when `None`). Stops the owner when
     /// nobody holds it any more, and says whether it did.
     pub fn release(&self, holder: Option<&str>) -> bool {
