@@ -159,9 +159,14 @@ struct State {
     streams: HashMap<String, Stream>,
     early: HashMap<String, Early>,
     settings: PortSettings,
-    /// Ports auto-forward has seen listening since it was turned on; `None`
-    /// until its first list, which only records what already listens.
+    /// The ports auto-forward's last list reported listening; `None` until its
+    /// first list, which only records what already listens. A port missing
+    /// from a later list is forgotten, so a server that stops and starts again
+    /// is new to it.
     seen: Option<HashSet<u16>>,
+    /// Ports the person stopped while auto-forward was on: not taken again
+    /// while they keep listening, forgotten once a list no longer has them.
+    stopped: HashSet<u16>,
     /// The active organization when auto-forward was turned on.
     auto_scope: Option<String>,
     /// Stops the auto-forward reader while one runs.
@@ -365,6 +370,7 @@ impl PortForwarder {
         if forget_settings {
             state.settings = PortSettings::default();
             state.seen = None;
+            state.stopped.clear();
             state.auto_scope = None;
             if let Some(poll) = state.poll.take() {
                 poll.cancel();
@@ -428,6 +434,7 @@ impl PortForwarder {
                 if auto && !state.settings.auto {
                     // Only ports that start listening from now on.
                     state.seen = None;
+                    state.stopped.clear();
                     state.auto_scope = if self.inner.returns { None } else { scope };
                 }
                 state.settings.auto = auto;
@@ -502,6 +509,10 @@ impl PortForwarder {
     /// since auto-forward was turned on, outside [`AUTO_SKIPPED`], on the
     /// same local port when it is free.
     fn auto_forward(&self, listed: &Value) {
+        // A runtime that cannot tell what listens says nothing about what stopped.
+        if listed.get("detected").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
         let ports: HashSet<u16> = listed
             .get("ports")
             .and_then(Value::as_array)
@@ -522,8 +533,13 @@ impl PortForwarder {
                 state.seen = Some(ports);
                 return;
             };
-            let mut fresh: Vec<u16> = ports.iter().copied().filter(|port| !seen.contains(port) && !AUTO_SKIPPED.contains(port) && !state.forwards.contains_key(port)).collect();
-            seen.extend(ports);
+            let mut fresh: Vec<u16> = ports
+                .iter()
+                .copied()
+                .filter(|port| !seen.contains(port) && !state.stopped.contains(port) && !AUTO_SKIPPED.contains(port) && !state.forwards.contains_key(port))
+                .collect();
+            state.stopped.retain(|port| ports.contains(port));
+            *seen = ports;
             fresh.sort_unstable();
             // Past the cap the rest are left to the person, as already seen.
             let room = MAX_AUTO_FORWARDS.saturating_sub(state.forwards.values().filter(|listening| listening.forward.auto).count());
@@ -635,6 +651,10 @@ impl PortForwarder {
         let closed: Vec<String> = {
             let mut state = self.inner.state.lock().unwrap();
             let Some(listening) = state.forwards.remove(&port) else { return false };
+            // Stopped by the person: auto-forward leaves it while it keeps listening.
+            if state.settings.auto {
+                state.stopped.insert(port);
+            }
             if let Some(stop) = listening.stop {
                 stop.cancel();
             }
@@ -969,23 +989,31 @@ fn release(counter: &AtomicUsize, bytes: usize) {
     }
 }
 
-/// Listen on `127.0.0.1:port` (0: any free port) **without address reuse**.
-/// tokio's `TcpListener::bind` sets `SO_REUSEADDR`, and on macOS that lets a
-/// loopback bind succeed while another program listens on the wildcard
-/// address of the same port; the new socket then takes that program's
-/// loopback traffic.
+/// Listen on `127.0.0.1:port` (0: any free port), with `SO_REUSEADDR`.
+///
+/// Without it a forward that carried a connection could not come back on its
+/// own port: closing it from this side (Forwarding off, a machine's link
+/// dropping) leaves the port in TIME_WAIT, and a plain bind is refused until
+/// that ends. With it, on macOS, a loopback bind would also succeed while
+/// another program listens on the wildcard address of the same port, and take
+/// that program's loopback traffic; that is why [`bind`] asks
+/// [`taken_elsewhere`] first, whose probes (also with `SO_REUSEADDR`) still see
+/// every listener on the IPv4 wildcard, IPv6 loopback and IPv6 wildcard. A
+/// program on `127.0.0.1` itself is refused by this bind.
 fn listen_on(port: u16) -> std::io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
     socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
     socket.listen(128)
 }
 
 /// Whether another program already listens on `port` on an address that a
 /// browser's `localhost`, or loopback traffic, could reach: the IPv4
-/// wildcard, IPv6 loopback or the IPv6 wildcard.
+/// wildcard, IPv6 loopback or the IPv6 wildcard. A connection of ours in
+/// TIME_WAIT on the port does not count (`SO_REUSEADDR`); a listener does.
 fn taken_elsewhere(port: u16) -> bool {
     let in_use = |socket: std::io::Result<TcpSocket>, address: SocketAddr| {
-        socket.and_then(|socket| socket.bind(address)).is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
+        socket.and_then(|socket| socket.set_reuseaddr(true).map(|()| socket)).and_then(|socket| socket.bind(address)).is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
     };
     in_use(TcpSocket::new_v4(), SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         || in_use(TcpSocket::new_v6(), SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
@@ -1411,16 +1439,24 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_machines_forwards_wait_through_a_dropped_link_and_return_on_the_same_local_port() {
-        let (forwarder, _requests, mut changes) = watched(true);
+        let (forwarder, mut requests, mut changes) = watched(true);
         let forward = forwarder.forward(3000, None, false, None).await.unwrap();
         assert_eq!((forward.state, forward.auto), (ForwardState::Open, false));
         let local = forward.local_port;
         let waiting = Forward { state: ForwardState::Waiting, ..forward.clone() };
         let open = forward.clone();
         told(&mut changes);
+        // A preview is open when the link drops: closing its connection from
+        // this side leaves the local port in TIME_WAIT, which must not keep
+        // the forward off its own port when it returns.
+        let mut browser = connect(local).await;
+        let opened = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({ "id": opened["id"], "ok": true, "result": { "streamId": "port-1" } }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // The link drops: the listener closes, the forward is kept as waiting.
         forwarder.set_connected(None);
+        assert_eq!(read_all(&mut browser).await, "", "the preview's connection ended with the link");
         assert_eq!(forwarder.forwards(), vec![waiting.clone()]);
         assert!(closed(local).await, "nothing answers on this Mac while the machine is away");
         assert_eq!(told(&mut changes).last().map(|changed| changed.forwards.clone()), Some(vec![waiting.clone()]));
@@ -1551,6 +1587,33 @@ mod tests {
         forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(forwarder.forwards().is_empty());
+
+        // A list that cannot tell what listens forgets nothing.
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": false, "ports": [], "streams": [] } }));
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(forwarder.forwards().is_empty(), "nothing looks new after a list that saw nothing");
+
+        // Both servers stop, then start again: the one that listened before the
+        // switch and the one the person stopped are new now, and taken.
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": [{ "port": 40000 }], "streams": [] } }));
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
+        let mut taken = Vec::new();
+        for _ in 0..100 {
+            taken = forwarder.forwards().into_iter().map(|forward| forward.port).collect::<Vec<_>>();
+            if taken.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(taken, vec![3000, 5173], "a restarted server is auto-forwarded again; 40000 stays skipped");
+        for port in [3000, 5173] {
+            forwarder.unforward(port);
+        }
 
         // Off: the runtime is no longer asked.
         forwarder.set_settings(None, Some(false), None);

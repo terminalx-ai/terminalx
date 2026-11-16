@@ -1804,7 +1804,8 @@ asked for and two switches (`CloudPortSettings` in `src/lib/api.ts`):
   listening after the switch was turned on, skipping 32768–60999, on the same
   local port when free (a random one for a port below 1024), at most 16 at
   once per connection. Ports already listening when it was turned on, and a
-  port the person stopped, are left to the person. While Forwarding is off a
+  port the person stopped, are left to the person while they keep
+  listening; one that stops and starts again is new and is taken. While Forwarding is off a
   new forward is refused with `cloud_port_forwarding_off`.
 
 A machine's forwards **end with the connection and return with it**: when the

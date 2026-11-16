@@ -222,15 +222,22 @@ connection's forwards or switches is sent as the event
   turned on, outside 32768–60999, on the same local port when free (a random
   one for a port below 1024), at most 16 at once per connection; ports
   already listening when it was turned on are left to the person, and so is
-  a port the person unforwarded. Auto-forward sends only `ports.list` and so
+  a port the person unforwarded, for as long as they keep listening. A port
+  that a later list no longer has is forgotten, so a server that stops and
+  starts again is auto-forwarded; a list answered `detected: false` changes
+  nothing. Auto-forward sends only `ports.list` and so
   never wakes a stopped workspace.
 
-- It binds `127.0.0.1` only, **without address reuse**. With `SO_REUSEADDR`
-  (which a plain listener sets) macOS lets a loopback bind succeed while
-  another program listens on the wildcard address of the same port, and the
-  new socket takes that program's loopback traffic. Before using a named
-  port it also checks that nothing listens on it on the IPv4 wildcard, IPv6
-  loopback or the IPv6 wildcard.
+- It binds `127.0.0.1` only, with `SO_REUSEADDR`, so a forward whose
+  connections this side closed (Forwarding off, a machine's link dropping)
+  can return on its own port while that port sits in TIME_WAIT (PRO-355).
+  `SO_REUSEADDR` also lets a loopback bind succeed on macOS while another
+  program listens on the wildcard address of the same port, and the new
+  socket would take that program's loopback traffic; so before using a named
+  port it checks, with probes that set `SO_REUSEADDR` too, that nothing
+  listens on it on the IPv4 wildcard, IPv6 loopback or the IPv6 wildcard. A
+  listener of ours in TIME_WAIT does not count; a listening program does
+  (measured on macOS 26). A program on `127.0.0.1` itself refuses the bind.
 - The local port is a random free one. A caller may name one (`localPort`);
   when any program has it, a random one is used and the answer says
   `reassigned`, or with `exact` the forward is refused (`cloud_port_in_use`).
