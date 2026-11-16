@@ -16,17 +16,19 @@ const mocks = vi.hoisted(() => ({
   focus: [] as (() => void | (() => void))[],
 }));
 vi.mock("expo-router", () => ({
-  Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> },
+  // The header as the stack draws it: its title, or the screen's own title view, and what is on its right.
+  Stack: { Screen: ({ options }: { options: { title: string; headerTitle?: () => ReactNode; headerRight?: () => ReactNode } }) => <div data-testid="screen-header"><div data-testid="screen-title">{options.title}</div>{options.headerTitle ? <div data-testid="header-title">{options.headerTitle()}</div> : null}{options.headerRight ? <div data-testid="header-right">{options.headerRight()}</div> : null}</div> },
   useLocalSearchParams: () => mocks.params,
   useRouter: () => ({ push: mocks.push }),
   useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); },
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
+vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
-vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: (catalog: any) => catalog?.getSnapshot() ?? { organizations: [], loading: false, error: null, refreshedAt: null } }));
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: (catalog: any) => catalog?.getSnapshot() ?? { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} } }));
 vi.mock("react-native", () => {
-  const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "alert" ? "alert" : undefined}>{children}</div>;
+  const Box = ({ children, accessibilityRole, accessibilityLabel, testID }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : undefined} aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
   return {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null,
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
@@ -34,10 +36,10 @@ vi.mock("react-native", () => {
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, ...rest }: any) => (mocks.listProps = { data, ...rest }) && <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
-    SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key}>{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter({ section })}</div>) : ListEmptyComponent}</div>,
+    SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
@@ -93,7 +95,8 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   const listed = state === null ? null : item("ws-1", { name: "fix-login", state }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
-    getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1 }),
+    getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
+    start: vi.fn(async () => undefined),
     refresh: vi.fn(async () => undefined),
     watch: vi.fn(() => unwatch),
     workspace: () => listed,
@@ -112,6 +115,8 @@ const button = (label: string) => {
   if (!found) throw new Error(`Button not found: ${label}`);
   return found;
 };
+const stateLine = () => container.querySelector('[data-testid="workspace-state-line"]')!;
+const startBar = () => container.querySelector('[data-testid="start-bar"]')!;
 const click = async (label: string) => { await act(async () => { button(label).click(); }); };
 const type = async (value: string, placeholder?: string) => { await act(async () => { const field = (placeholder ? container.querySelector(`input[placeholder="${placeholder}"]`) : container.querySelector('input[type="text"]')) as HTMLInputElement; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value); field.dispatchEvent(new Event("input", { bubbles: true })); }); };
 const show = async (node: ReactNode) => { await act(async () => { root.render(node); }); };
@@ -131,19 +136,24 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe("the Cloud tab", () => {
-  it("lists each organization's workspaces with their state, role and what waits, and only reads", async () => {
+  const listing = (organizations: unknown[], fields: Record<string, unknown> = {}) => { mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, saved: false, titles: {}, organizations, ...fields }); };
+  const organization = (orgId: string, name: string, workspaces: unknown[], error: string | null = null) => ({ organization: { orgId, name, role: "member" }, error, loaded: true, workspaces });
+
+  it("lists each workspace as the Sessions list does: mark, title, status with its time, then repository and branch; and only reads", async () => {
     world();
-    mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, organizations: [
-      { organization: { orgId: "org-1", name: "Acme", role: "member" }, error: null, loaded: true, workspaces: [
-        item("fix-login", { runtimeActivity: { pendingApprovals: 2 }, repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
+    const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
+    listing([
+      organization("org-1", "Acme", [
+        item("fix-login", { runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
         item("old-work", { state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
-      ] },
-      { organization: { orgId: "org-2", name: "Beta", role: "admin" }, error: "cloud_provider_unavailable", loaded: true, workspaces: [] },
-    ] });
+      ]),
+      organization("org-2", "Beta", [], "cloud_provider_unavailable"),
+    ]);
     await show(<CloudScreen />);
     expect(text()).toContain("Acme");
-    expect(button("fix-login, Running, 2 waiting for an answer, Can send").textContent).toContain("acme/web · tx/fix-login");
-    expect(button("old-work, Stopped, View only, Shared with 3")).toBeTruthy();
+    const row = button("fix-login, Needs your answer, Can send");
+    expect(row.textContent).toBe("fix-loginNeeds your answer · 6macme/web · tx/fix-login");
+    expect(button("old-work, Stopped, View only, Shared with 3").textContent).toBe("old-workStopped");
     expect(text()).toContain("The cloud provider is not answering right now.");
     // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
     const leave = mocks.focus.at(-1)!();
@@ -151,18 +161,82 @@ describe("the Cloud tab", () => {
     expect(mocks.catalog.watch).toHaveBeenCalledTimes(1);
     expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(mocks.catalog.retain).not.toHaveBeenCalled();
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
     await click("old-work, Stopped, View only, Shared with 3");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "old-work", orgId: "org-1", title: "old-work" } });
+  });
+
+  it("puts organizations with workspaces first and folds the empty ones into one row that opens their names (#988)", async () => {
+    world();
+    listing([
+      organization("personal", "Personal", []),
+      organization("org-1", "Acme", [item("a1")]),
+      organization("e1", "E2E Box", []),
+      organization("org-2", "Northwind", [item("n1", { orgId: "org-2" })]),
+      organization("e2", "E2E Video", []),
+      organization("e3", "E2E Isolated", []),
+      organization("e4", "Sandbox", []),
+    ]);
+    await show(<CloudScreen />);
+    const sections = [...container.querySelectorAll('[data-testid="cloud-section"]')].map((section) => section.textContent!.split(/a1|n1/)[0]);
+    expect(sections).toEqual(["Acme", "Northwind"]);
+    expect(text()).not.toContain("No cloud workspaces you can see.");
+    expect(text()).not.toContain("E2E Box");
+    const folded = button("5 organizations with no workspaces");
+    expect(folded.getAttribute("aria-expanded")).toBe("false");
+    // One row in total for the five, at the end of the list (the top bar, #984, is drawn after it).
+    const list = container.querySelector('[data-testid="top-bar"]')!.previousElementSibling!;
+    expect(list.textContent!.endsWith("5 organizations with no workspaces")).toBe(true);
+    await click("5 organizations with no workspaces");
+    expect(button("5 organizations with no workspaces").getAttribute("aria-expanded")).toBe("true");
+    expect(text()).toContain("PersonalE2E BoxE2E VideoE2E IsolatedSandbox");
+  });
+
+  it("never shows a blank page: placeholder rows under the title on a first load, the kept list on a later one (#988)", async () => {
+    world();
+    // Nothing read yet and nothing kept on the phone.
+    listing([], { loading: true, refreshedAt: null });
+    await show(<CloudScreen />);
+    expect(text().startsWith("Cloud")).toBe(true);
+    const placeholders = container.querySelector('[data-testid="cloud-placeholders"]')!;
+    expect(placeholders.getAttribute("aria-label")).toBe("Loading cloud workspaces");
+    // A heading bar, then a card of three rows in the list's shape.
+    expect(placeholders.children).toHaveLength(2);
+    expect(placeholders.children[1].children).toHaveLength(3);
+    // The title is placed under the status bar by the list itself, not by a later inset adjustment.
+    expect(mocks.listProps.contentContainerStyle).toContainEqual(expect.objectContaining({ paddingTop: 47 + 6 }));
+
+    // Before the catalog exists (just signed in): the same placeholders, not a blank page.
+    mocks.catalog = null;
+    await show(<CloudScreen />);
+    expect(container.querySelector('[data-testid="cloud-placeholders"]')).not.toBeNull();
+
+    // A list kept from before is shown while it is read again, with the titles learned for it.
+    world();
+    listing([organization("org-1", "Acme", [item("ws-9", { state: "suspended" })])], { loading: true, refreshedAt: null, saved: true, titles: { "org-1/ws-9": "Checkout redesign" } });
+    await show(<CloudScreen />);
+    expect(container.querySelector('[data-testid="cloud-placeholders"]')).toBeNull();
+    expect(button("Checkout redesign, Stopped, Can send")).toBeTruthy();
+    expect(text()).not.toContain("ws-9");
+    await click("Checkout redesign, Stopped, Can send");
+    expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
   it("says when there is nothing to see, and asks a signed-out person to sign in", async () => {
     world({ state: null });
     await show(<CloudScreen />);
     expect(text()).toContain("No cloud workspaces you can see.");
+    expect(text()).toContain("1 organization with no workspaces");
     mocks.app = { session: null, signIn: vi.fn() };
     await show(<CloudScreen />);
     await click("Sign in");
     expect(mocks.app.signIn).toHaveBeenCalled();
+  });
+
+  it("says why sign-in failed, under the button", async () => {
+    mocks.app = { session: null, signIn: vi.fn(), error: "The sign-in page could not open: error 2." };
+    await show(<CloudScreen />);
+    expect(text()).toContain("The sign-in page could not open: error 2.");
   });
 });
 
@@ -220,7 +294,8 @@ describe("a cloud workspace screen", () => {
   it("shows a running workspace live and sends without asking", async () => {
     const { session, release } = world();
     await show(<CloudWorkspaceScreen />);
-    expect(text()).toContain("Live · end-to-end encrypted");
+    expect(stateLine().textContent).toBe("Live · You can send");
+    expect(stateLine().getAttribute("aria-label")).toBe("Live · end-to-end encrypted, You can send");
     expect(text()).toContain("run the tests");
     expect(container.querySelector('[data-testid="screen-title"]')!.textContent).toBe("fix-login");
     expect(session.view).toHaveBeenCalledWith("t1");
@@ -235,13 +310,87 @@ describe("a cloud workspace screen", () => {
     expect(release).toHaveBeenCalled();
   });
 
-  it("shows a stopped workspace's saved conversation and starts it only after the person confirms", async () => {
-    const { session } = world({ state: "suspended" });
+  it("shows a stopped workspace's saved conversation with Start in place of the composer, and starts it only after a manager confirms (#988)", async () => {
+    const { session } = world({ state: "suspended", role: "manager" });
     await show(<CloudWorkspaceScreen />);
-    expect(text()).toContain("Stopped. Showing the saved conversation; nothing is running.");
+    // The state and the role are one line of words under the title; nothing in it is a button.
+    expect(stateLine().textContent).toBe("Stopped · You are a manager");
+    expect(container.querySelector('[data-testid="header-title"] button')).toBeNull();
     expect(text()).toContain("run the tests");
-    expect(container.querySelector("input")!.placeholder).toBe("Message (starts the workspace)");
+    expect(text()).not.toMatch(/Nothing saved|Showing the saved conversation/);
+    // No composer: the bar says why, with Start.
+    expect(container.querySelector("input")).toBeNull();
+    expect(startBar().textContent).toBe("This workspace is stoppedStart it to send a message.Start");
+    await click("Start");
+    // Asked first; nothing started yet.
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
+    const [title, message, buttons] = mocks.alert.mock.calls[0];
+    expect(title).toBe("Start this workspace?");
+    expect(message).toContain("billed");
+    expect(buttons.map((entry: { text: string }) => entry.text)).toEqual(["Cancel", "Start"]);
+    buttons[0].onPress?.();
+    expect(mocks.catalog.start).not.toHaveBeenCalled();
+    await act(async () => buttons[1].onPress());
+    expect(mocks.catalog.start).toHaveBeenCalledWith("org-1", mocks.params.workspaceId);
+    // Nothing was sent to wake it: Start is its own request.
     expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it("says no conversation was had in a stopped workspace with nothing saved, with the same Start, and nothing that contradicts it (#988)", async () => {
+    world({ state: "suspended", role: "manager", tabs: 0 });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopped · You are a manager");
+    expect(text()).toContain("No conversation yet Nothing was said in this workspace before it stopped.");
+    expect(text()).not.toMatch(/saved conversation|Nothing saved/);
+    expect(startBar().textContent).toBe("This workspace is stoppedStart it to send a message.Start");
+    await click("Start");
+    await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+    expect(mocks.catalog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {
+    world({ role: "manager" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Live · You are a manager");
+    expect(text()).toContain("run the tests");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(container.querySelector("input")!.placeholder).toBe("Message the agent");
+
+    world({ role: "manager", events: [] });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("No conversation yet This tab has not published any turns.");
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(container.querySelector("input")).not.toBeNull();
+  });
+
+  it("tells a viewer of a stopped workspace who can start it, instead of the button (#988)", async () => {
+    const { snapshot } = world({ state: "suspended", role: "viewer" });
+    // Its creator is someone this phone knows by name.
+    const listed = mocks.catalog.workspace();
+    listed.createdBy = "u-alice";
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopped · You can view");
+    expect(startBar().textContent).toBe("This workspace is stoppedAlice, its creator, or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+    expect(() => button("Start")).toThrow();
+    expect(container.querySelector("input")).toBeNull();
+    // A workspace whose creator is not known by name.
+    listed.createdBy = null;
+    snapshot.role = "viewer";
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toBe("This workspace is stoppedIts creator or an organization owner or admin can start it. Anyone who can send to it starts it by sending a message.");
+  });
+
+  it("lets a driver start a stopped workspace by sending, only after they confirm, with no Start bar (contract §11.2)", async () => {
+    const { session } = world({ state: "suspended", role: "driver" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Stopped · You can send");
+    expect(text()).toContain("run the tests");
+    // /resume is for managers: no Start and no "who can start it" for someone who can start it by sending.
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    expect(() => button("Start")).toThrow();
+    expect(text()).not.toContain("can start it");
+    expect(container.querySelector("input")!.placeholder).toBe("Message (starts the workspace)");
+    expect(container.querySelector("input")!.getAttribute("aria-label")).toBe("Message for the agent. Sending starts the workspace.");
     await type("continue");
     await click("Send");
     // Asked first; nothing sent yet.
@@ -250,19 +399,45 @@ describe("a cloud workspace screen", () => {
     expect(title).toBe("Start this workspace?");
     expect(message).toContain("billed");
     expect(buttons.map((entry: { text: string }) => entry.text)).toEqual(["Cancel", "Start and send"]);
-    expect(container.querySelector("input")!.getAttribute("aria-label")).toBe("Message for the agent. Sending starts the workspace.");
-    // Cancel does nothing.
     buttons[0].onPress?.();
     expect(session.send).not.toHaveBeenCalled();
     await act(async () => buttons[1].onPress());
     expect(session.send).toHaveBeenCalledWith("t1", "continue", { allowWake: true });
   });
 
+  it("says a workspace is starting once Start was pressed, and the server's word when it would not start it (#988)", async () => {
+    world({ state: "suspended", role: "manager" });
+    mocks.catalog.start.mockRejectedValueOnce(Object.assign(new Error("forbidden"), { code: "cloud_workspace_manager_required" }));
+    await show(<CloudWorkspaceScreen />);
+    await click("Start");
+    await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe("Only this workspace's creator or an organization owner or admin can do that.");
+    expect(button("Start").disabled).toBe(false);
+
+    // The list says it is starting: the bar says so, and the composer is not back yet.
+    world({ state: "resuming", role: "manager", connection: "waitingForRuntime" });
+    await show(<CloudWorkspaceScreen />);
+    expect(stateLine().textContent).toBe("Starting… · You are a manager");
+    expect(startBar().textContent).toBe("Starting the workspace…The composer appears when it is running.Starting…");
+    expect(button("Starting…").disabled).toBe(true);
+    expect(container.querySelector("input")).toBeNull();
+  });
+
+  it("puts Sharing in the header as an icon button with a 44 pt target, and the role as plain text (#988)", async () => {
+    world({ role: "manager" });
+    await show(<CloudWorkspaceScreen />);
+    const sharing = container.querySelector('[data-testid="header-right"] button')!;
+    expect(sharing.getAttribute("aria-label")).toBe("Sharing");
+    expect(sharing.textContent).toBe("");
+    expect(JSON.parse(sharing.getAttribute("data-style")!)).toMatchObject({ width: 44, height: 44 });
+    expect([...container.querySelectorAll("button")].some((entry) => /manager/i.test(entry.textContent ?? ""))).toBe(false);
+  });
+
   it("gives a viewer the conversation and no way to send", async () => {
     world({ role: "viewer" });
     await show(<CloudWorkspaceScreen />);
     expect(text()).toContain("run the tests");
-    expect(text()).toContain("View only");
+    expect(stateLine().textContent).toBe("Live · You can view");
     expect(text()).toContain("You can view this workspace but not send to it.");
     expect(container.querySelector("input")).toBeNull();
     expect(() => button("Send")).toThrow();
@@ -329,7 +504,7 @@ describe("a cloud workspace screen", () => {
   });
 
   it("explains a phone that holds no key, a refusal, an archived workspace and one taken away", async () => {
-    world({ state: "suspended", hasKey: false, noKey: true, events: [] });
+    world({ hasKey: false, noKey: true, events: [], connection: "waitingForRuntime" });
     await show(<CloudWorkspaceScreen />);
     expect(text()).toContain("Not readable on this phone yet");
     expect(button("Send").disabled).toBe(true);

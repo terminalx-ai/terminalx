@@ -161,6 +161,10 @@ pub struct Pause {
     /// milliseconds since the epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_at: Option<i64>,
+    /// `resume_at` was set by the run itself, not asked for by the person
+    /// (#1004): its own points of a window are spent, and the window resets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_itself: bool,
 }
 
 /// Two observations this close name the same reset (`status::usage` allows
@@ -308,6 +312,7 @@ pub fn reached(run: &Run, now_ms: i64) -> Option<Pause> {
             message: format!("The {} window is at {:.0}%, past the {:.0}% this run stops at.{}", window_name(window), window.percent, ceiling, resets(window, now_ms)),
             window: Some(window.clone()),
             resume_at: None,
+            by_itself: false,
         });
     }
     if let Some((points, window)) = limits.points.at().and_then(|points| run.usage.windows.iter().filter(|window| window.start.is_some() && window.points >= points).max_by(|a, b| a.points.total_cmp(&b.points)).map(|window| (points, window))) {
@@ -322,6 +327,7 @@ pub fn reached(run: &Run, now_ms: i64) -> Option<Pause> {
             ),
             window: Some(window.clone()),
             resume_at: None,
+            by_itself: false,
         });
     }
     if let Some(dollars) = limits.dollars.at().filter(|dollars| run.usage.api_key && run.usage.dollars >= *dollars) {
@@ -330,6 +336,7 @@ pub fn reached(run: &Run, now_ms: i64) -> Option<Pause> {
             message: format!("Its workers on an API key have spent ${:.2}, past this run's budget of ${dollars:.2}.", run.usage.dollars),
             window: None,
             resume_at: None,
+            by_itself: false,
         });
     }
     None
@@ -428,6 +435,7 @@ mod tests {
                 windows: vec![WindowUse { agent: "claude".into(), key: "five_hour".into(), label: "5h".into(), percent, start: Some(percent - points), resets_at: None, points }],
             },
             pause: None,
+            events: Vec::new(),
             created: "2026-11-12T00:00:00Z".into(),
             modified: "2026-11-12T00:00:00Z".into(),
         }

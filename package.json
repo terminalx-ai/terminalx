@@ -41,6 +41,7 @@
     "test:webkit-usage-refresh": "node scripts/webkit/usage-refresh.mjs",
     "test:webkit-chat-controls": "node scripts/webkit/chat-controls.mjs",
     "test:webkit-chat-links": "node scripts/webkit/chat-links.mjs",
+    "test:webkit-chat-tables": "node scripts/webkit/chat-tables.mjs",
     "test:webkit-link-chat": "node scripts/webkit/link-chat.mjs",
     "test:webkit-dictation-edits": "node scripts/webkit/dictation-edits.mjs",
     "test:webkit-editor-toolbar": "node scripts/webkit/editor-toolbar.mjs",

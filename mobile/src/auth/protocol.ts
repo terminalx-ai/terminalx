@@ -23,6 +23,18 @@ export const AUTH_CONFIG: AuthConfig = {
   clientId: "terminalx-mobile",
 };
 
+/**
+ * Why the sign-in sheet failed, or null when it did not. iOS reports a sheet
+ * it could not present, and one the person closed, as the same "cancel"; only
+ * the error tells them apart. A person closing it (AuthenticationServices
+ * error 1, canceledLogin) is not a failure and is not reported.
+ */
+export function authSessionFailure(result: { type: string; error?: string | null }): string | null {
+  if (result.type === "success" || !result.error) return null;
+  if (/WebAuthenticationSession error 1\.\)?$/.test(result.error)) return null;
+  return `The sign-in page could not open: ${result.error}`;
+}
+
 export function buildAuthorizeUrl(config: AuthConfig, challenge: string, state: string, nonce: string): string {
   const url = new URL(config.authorizeEndpoint);
   url.searchParams.set("response_type", "code");

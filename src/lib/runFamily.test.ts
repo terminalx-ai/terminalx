@@ -172,6 +172,13 @@ describe("a run's numbers", () => {
 
 describe("familyNeeds", () => {
   const lead = session("lead");
+  it("does not ask the person about a blocked piece the run hands to the lead by itself (#1004)", () => {
+    const toLead = { for: "review" as const, stuck: "no verifier gave a verdict on it" };
+    const r = run([piece("1", "blocked", "w1", { toLead }), piece("2", "blocked", "w2")]);
+    const needs = familyNeeds({ lead, leadStatus: status("no_changes"), run: r, workers: [session("w1"), session("w2")], spend: null, statusOf: () => status("no_changes") });
+    expect(needs.map((need) => need.piece)).toEqual(["2"]);
+  });
+
   it("lists the lead's own wait, the plan, the budget, a worker's question and a blocked piece, once each", () => {
     const r = run([piece("1", "blocked", "w1", { note: "Reported blocked: no access" }), piece("2", "blocked", "w2"), piece("3", "running", "w3")], { budget: { dollars: 1 } });
     const needs = familyNeeds({
