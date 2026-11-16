@@ -1,4 +1,4 @@
-import type { ReviewEditorEntry } from "@/lib/editors";
+import type { TabEditorEntry } from "@/lib/editors";
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type ClosedTab, type TabLayout, type TabPane, type TabState } from "@/lib/api";
@@ -108,7 +108,8 @@ export interface ClosedHere {
   title?: string;
   /** A browser page's address; a page belongs to its workspace, not to a session. */
   page?: { url: string; cwd: string };
-  review?: ReviewEditorEntry;
+  /** A closed review or file tab, as it was: where it points, never unsaved text. */
+  review?: TabEditorEntry;
 }
 
 /** The saved state, and what this window closed in this run of the app. */
