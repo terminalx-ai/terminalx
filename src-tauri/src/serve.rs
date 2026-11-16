@@ -659,6 +659,10 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
     }
     manager.follow_pane_exits();
+    // Automatic account switching (#981) goes on with the desktop window closed.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        manager.start_account_switching();
+    }
     #[cfg(unix)]
     let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     // Terminals first, then the tabs whose CLIs run in them; the hooks those

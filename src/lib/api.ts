@@ -2197,6 +2197,8 @@ export const agent = {
    */
   switchAccount: (sessionId: string, tabId: string, harness: string, providerSessionId: string, account: string) =>
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId, account }),
+  /** The person is typing in the tab's composer: automatic account switching (#981) leaves the tab alone meanwhile. */
+  noteTyping: (sessionId: string, tabId: string) => invoke<void>("tab_note_typing", { sessionId, tabId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   /** `confirm`: the token from an overlap refusal, to go ahead with exactly the plan that was shown. */
