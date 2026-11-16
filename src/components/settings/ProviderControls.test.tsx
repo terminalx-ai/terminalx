@@ -66,6 +66,7 @@ beforeEach(() => {
           sourceSelection: "optional",
           pricing: "estimate",
         },
+        descriptor: null,
       },
     ],
   }));

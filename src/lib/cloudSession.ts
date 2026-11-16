@@ -55,18 +55,17 @@ import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
+import { cloudProviderLabel } from "@/lib/cloudProviders";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import type { MachineConnectionState, PairedMachine } from "@/types/machines";
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", hetzner: "Hetzner", "local-docker": "Local Docker" };
-
-/** A cloud provider's display name. */
+/** A cloud provider's display name, from its descriptor (PRO-415). */
 export function cloudProviderName(provider: string | null | undefined): string {
   if (!provider) return "Development runtime";
-  return PROVIDER_NAMES[provider] ?? provider;
+  return cloudProviderLabel(provider);
 }
 
 export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };

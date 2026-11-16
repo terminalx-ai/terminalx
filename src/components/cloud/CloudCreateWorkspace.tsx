@@ -36,6 +36,7 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderLabel } from "@/lib/cloudProviders";
 import { AllowNewMachines } from "./AllowNewMachines";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
@@ -248,7 +249,7 @@ export function CloudCreateWorkspace({
           >
             {usable.map((provider) => (
               <option key={provider.id} value={provider.id}>
-                {provider.displayName}
+                {cloudProviderLabel(provider)}
               </option>
             ))}
           </select>
@@ -377,7 +378,7 @@ export function CloudCreateWorkspace({
         </div>
       )}
       {quoted ? (
-        <QuotedCreate quote={quoted.quote} providerLabel={providers?.find((item) => item.id === form.provider)?.displayName ?? form.provider ?? ""} busy={busy} onConfirm={() => void submit(false)} onBack={() => setQuoted(null)} />
+        <QuotedCreate quote={quoted.quote} providerLabel={form.provider ? cloudProviderLabel(providers?.find((item) => item.id === form.provider) ?? form.provider) : ""} busy={busy} onConfirm={() => void submit(false)} onBack={() => setQuoted(null)} />
       ) : (
         <div className="flex items-center gap-2">
           <Button type="submit" size="sm" disabled={busy || Object.keys(errors).length > 0 || Boolean(pending)}>

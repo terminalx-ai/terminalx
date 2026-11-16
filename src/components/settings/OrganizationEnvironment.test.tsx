@@ -3,6 +3,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import { organizationEnvironment, type EnvironmentRecipe, type EnvironmentStatus, type EnvironmentVersion } from "@/lib/organizationEnvironment";
 import { OrganizationEnvironment } from "./OrganizationEnvironment";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// Provider names come from the descriptors the server publishes (PRO-415).
+learnDescriptors();
 
 vi.mock("@/lib/api", () => ({ api: { cloudProviders: vi.fn() } }));
 vi.mock("@/lib/organizationEnvironment", async (importOriginal) => ({
@@ -424,7 +428,7 @@ it("picks a connected provider and loads another when chosen", async () => {
   expect(environment.status).toHaveBeenCalledWith("local-docker");
   environment.status.mockResolvedValue(status({ provider: "hetzner", supported: false, template: null, activeVersion: null, versions: [] }));
   fireEvent.change(screen.getByLabelText("Environment provider"), { target: { value: "hetzner" } });
-  expect((await screen.findByRole("status")).textContent).toMatch(/Hetzner cannot build environment images yet/);
+  expect((await screen.findByRole("status")).textContent).toMatch(/Hetzner Cloud cannot build environment images yet/);
   expect(environment.status).toHaveBeenLastCalledWith("hetzner");
 });
 

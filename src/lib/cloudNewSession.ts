@@ -19,7 +19,8 @@ import {
   type CreateForm,
   type PendingCreate,
 } from "@/lib/cloudCreate";
-import { creatableProviders, machine0Offered, noProviderRefusal } from "@/lib/hiddenProviders";
+import { creatableProviders, noProviderRefusal } from "@/lib/hiddenProviders";
+import { cloudProviderLabel } from "@/lib/cloudProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -27,7 +28,6 @@ import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type Cl
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
-import { providerLabel } from "@/lib/organizationCompute";
 import { atLimit } from "@/lib/runningLimit";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
@@ -259,8 +259,20 @@ function cloneUrlOf(project: CloudProject): string | null {
   return `https://${project.identity}.git`;
 }
 
-/** Providers in the order the desktop prefers them when the organization's provider list cannot be read. */
-const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "hetzner", "local-docker"];
+const PROVIDER_FLAG = /^cloud\.workspaces\.provider\.(.+)\.v1$/;
+
+/**
+ * The providers an organization's capability flags offer (PRO-69), in the
+ * order the server lists them, which is its registry's presentation order
+ * (PRO-415). The app names none: each `cloud.workspaces.provider.<id>.v1`
+ * flag that is on is one.
+ */
+function offeredByFlags(flags: Record<string, boolean>): CloudWorkspaceProviderId[] {
+  return Object.entries(flags).flatMap(([flag, on]) => {
+    const id = on ? PROVIDER_FLAG.exec(flag)?.[1] : undefined;
+    return id ? [id] : [];
+  });
+}
 
 /**
  * The provider a new workspace in this organization uses. In the default
@@ -274,22 +286,21 @@ async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderI
   const status = getAccount().status;
   if (!isMultiOrg(status) || orgId === defaultOrgId(status)) {
     const { providers } = await api.cloudProviders();
-    const provider = creatableProviders(providers, orgId)[0];
-    if (!provider) throw noProviderRefusal(providers, orgId);
-    return { id: provider.id, label: provider.displayName || provider.id, setup: null };
+    const provider = creatableProviders(providers)[0];
+    if (!provider) throw noProviderRefusal(providers);
+    return { id: provider.id, label: cloudProviderLabel(provider), setup: null };
   }
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
-  const offered = (provider: CloudWorkspaceProviderId) => flags[`cloud.workspaces.provider.${provider}.v1`] === true && (provider !== "machine0" || machine0Offered(orgId));
   // Connected here with new machines paused (PRO-372): named if no other provider is usable.
   const paused: string[] = [];
-  for (const id of PROVIDER_ORDER.filter(offered)) {
+  for (const id of offeredByFlags(flags)) {
     try {
-      return { id, label: providerLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
+      return { id, label: cloudProviderLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
     } catch (error) {
       // Only "not connected here" or "paused here" moves on to the next provider;
       // anything else (not an admin, offline, rate-limited) is the real answer and is shown.
       const code = error && typeof error === "object" && "code" in error ? (error as { code: unknown }).code : null;
-      if (code === SERVER_CREATION_DISABLED) paused.push(providerLabel(id));
+      if (code === SERVER_CREATION_DISABLED) paused.push(cloudProviderLabel(id));
       else if (code !== "cloud_provider_connection_required") throw error;
     }
   }
