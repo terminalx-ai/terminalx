@@ -4,6 +4,7 @@ import type { ContinuationContext } from "@terminalx/portable/continuation";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
+import { recordStartedSessionOn } from "../notifications/store";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
@@ -434,6 +435,8 @@ export class HostApi {
     if (!result.ok) return { created: false, message: result.refusal.message };
     const value = result.value;
     if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    // A session started here is one of "Sessions I started or follow" for notifications (#990).
+    await recordStartedSessionOn(this.connection, value.sessionId).catch(() => undefined);
     const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
     return {
       created: true,

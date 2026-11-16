@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ChevronLeft, MessageSquare, Plus, SquareTerminal, X } from "lucide-react-native";
+import { Bell, BellOff, ChevronLeft, MessageSquare, Plus, SquareTerminal, X } from "lucide-react-native";
 import { providerName } from "@mobile/data/conversations";
 import type { NewTabSettings, SessionSummary } from "@mobile/data/host-api";
 import { branchChats } from "@mobile/data/session-list";
@@ -20,7 +20,7 @@ import { useTheme } from "./theme";
  * and on the right one glass button to the other view: Terminal from the
  * chat, Chat from the terminal.
  */
-export function SessionHeader({ title, subtitle, connection, onBack, view, onView }: {
+export function SessionHeader({ title, subtitle, connection, onBack, view, onView, muted, onNotifications }: {
   title: string;
   subtitle?: string;
   /** While not simply connected, the connection takes the subtitle's place, in the shared words (#983); connected says nothing. */
@@ -29,11 +29,17 @@ export function SessionHeader({ title, subtitle, connection, onBack, view, onVie
   /** Absent when the Mac offers no terminal view. */
   view?: "chat" | "terminal";
   onView(view: "chat" | "terminal"): void;
+  /** This session is muted on this phone (#990): its bell is struck through. */
+  muted?: boolean;
+  /** Opens "Notifications for this session"; absent, no bell. */
+  onNotifications?(): void;
 }) {
   const { palette } = useTheme();
+  // The session's bell (22.07 frame 5) beside the view switch.
+  const bell = onNotifications ? <GlassIconButton label="Notifications for this session" size={40} icon={muted ? <BellOff size={18} color={palette.ink} strokeWidth={1.9} /> : <Bell size={18} color={palette.ink} strokeWidth={1.9} />} onPress={onNotifications} /> : null;
   return <ScreenHeader title={title} onBack={onBack}
     subtitle={connection && connection !== "connected" && connection !== "none" ? <ConnectionLine state={connection} /> : subtitle}
-    trailing={view ? <GlassIconButton label={view === "chat" ? "Terminal" : "Chat"} size={40} icon={view === "chat" ? <SquareTerminal size={19} color={palette.ink} strokeWidth={1.9} /> : <MessageSquare size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => onView(view === "chat" ? "terminal" : "chat")} /> : null} />;
+    trailing={<>{bell}{view ? <GlassIconButton label={view === "chat" ? "Terminal" : "Chat"} size={40} icon={view === "chat" ? <SquareTerminal size={19} color={palette.ink} strokeWidth={1.9} /> : <MessageSquare size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => onView(view === "chat" ? "terminal" : "chat")} /> : null}</>} />;
 }
 
 /**

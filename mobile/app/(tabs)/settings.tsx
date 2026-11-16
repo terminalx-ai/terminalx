@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Alert, Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
+import { Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
 import { useRouter } from "expo-router";
-import { Check, ChevronRight, Info } from "lucide-react-native";
-import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
+import { Check, ChevronRight } from "lucide-react-native";
+import { settingsSummary } from "@mobile/notifications/model";
+import { useNotificationSettings } from "@mobile/notifications/store";
 import type { MacSettings } from "@mobile/data/host-api";
 import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
@@ -23,7 +24,7 @@ export default function SettingsScreen() {
   const scheme = useColorScheme();
   const { name, palette, setName } = useTheme();
   const machine = useMachines().paired.find((item) => item.active);
-  const [notifications, setNotifications] = useState(false);
+  const notificationSettings = useNotificationSettings();
   // The machine's own settings: undefined while asking, null from a machine that does not offer them.
   const [mac, setMac] = useState<MacSettings | null | undefined>(undefined);
   const [macError, setMacError] = useState<string | null>(null);
@@ -54,26 +55,6 @@ export default function SettingsScreen() {
     }
   };
 
-  useEffect(() => {
-    let current = true;
-    const enabled = app.activeHost ? localNotificationsEnabled(app.activeHost.id) : Promise.resolve(false);
-    void enabled.then((value) => { if (current) setNotifications(value); });
-    return () => { current = false; };
-  }, [app.activeHost]);
-
-  const toggleNotifications = async (enabled: boolean) => {
-    if (!enabled) {
-      if (app.activeHost) await disableLocalNotifications(app.activeHost.id);
-      setNotifications(false);
-      return;
-    }
-    if (!app.activeHost || app.connectionStage !== "connected") {
-      Alert.alert("Connect to a machine first", "Alerts come from the machine this phone is connected to.");
-      return;
-    }
-    setNotifications(await enableLocalNotifications(app.connection, app.activeHost.id));
-  };
-
   const user = app.session?.user;
   const who = user ? user.displayName ?? user.email : null;
   const machineName = machine?.name ?? (app.activeHost ? hostDisplayName(app.activeHost) : null);
@@ -88,10 +69,8 @@ export default function SettingsScreen() {
     </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</Card>}
 
     <SectionTitle>Notifications</SectionTitle>
-    <Card>
-      <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Tell me when an agent finishes</Text><Text style={[styles.detail, { color: palette.muted }]}>An alert when an agent on the machine in use finishes its work.</Text></View><Switch accessibilityLabel="Tell me when an agent finishes" value={notifications} onValueChange={(value) => void toggleNotifications(value)} trackColor={{ true: palette.accent }} /></View>
-      <View style={[styles.noteRow, { borderTopColor: palette.border }]}><Info size={16} color={palette.warning} /><Text style={[styles.detail, styles.flex, { color: palette.muted }]}>Works while the app is open or recently used. It can miss alerts when iOS closes the app.</Text></View>
-    </Card>
+    {/* Its own page (#990, design 22.07): the row says what is switched on. */}
+    <Card><Pressable accessibilityRole="button" accessibilityLabel={`Notifications, ${notificationSettings ? settingsSummary(notificationSettings) : ""}`} onPress={() => router.push("/notifications")} style={({ pressed }) => [styles.settingRow, pressed && { backgroundColor: palette.raised }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Notifications</Text>{notificationSettings ? <Text style={[styles.detail, { color: palette.muted }]}>{settingsSummary(notificationSettings)}</Text> : null}</View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>
 
     <SectionTitle>Appearance</SectionTitle>
     <View style={styles.themeGrid}>{THEMES.map((theme) => {
@@ -142,7 +121,6 @@ const styles = StyleSheet.create({
   swatchAccent: { width: 22, height: 6, borderRadius: 3 },
   themeName: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 2 },
   settingRow: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
-  noteRow: { minHeight: 44, flexDirection: "row", gap: 12, alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth },
   linkRow: { minHeight: 48, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 10 },
   macError: { paddingHorizontal: 15, paddingBottom: 12 },
 });

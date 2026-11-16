@@ -6,15 +6,16 @@ import SettingsScreen from "../app/(tabs)/settings";
 import PrivacyScreen from "../app/privacy";
 import ConnectionLogScreen from "../app/connection-log";
 import AccountScreen from "../app/account";
+import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
-const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn() }));
+const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
-vi.mock("@mobile/notifications/local", () => ({ localNotificationsEnabled: async () => false, enableLocalNotifications: vi.fn(async () => true), disableLocalNotifications: vi.fn() }));
+vi.mock("@mobile/notifications/store", () => ({ useNotificationSettings: () => mocks.notifications }));
 vi.mock("react-native", () => {
   const flat = (style: unknown): Record<string, unknown> => Array.isArray(style) ? Object.assign({}, ...style.map(flat)) : style && typeof style === "object" ? style as Record<string, unknown> : {};
   const View = ({ children, testID, style }: { children?: ReactNode; testID?: string; style?: unknown }) => <div data-testid={testID} data-bg={flat(style).backgroundColor as string | undefined}>{children}</div>;
@@ -44,6 +45,7 @@ beforeEach(() => {
   mocks.back.mockReset();
   mocks.setName.mockReset();
   mocks.alert.mockReset();
+  mocks.notifications = { ...defaultSettings(), allow: true };
   const studio = host("studio", { customName: "Studio MacBook" });
   mocks.app = {
     session: { user: { displayName: "Alex", email: "alex@example.com" } },
@@ -96,13 +98,22 @@ it("shows the app version and build, and links to the privacy page and the conne
   expect(mocks.push).toHaveBeenLastCalledWith("/connection-log");
 });
 
-it("says plainly what alerts do, and what to do when no machine is connected", async () => {
+// #990 (design 22.07 frame 1): notifications have their own page; the row says what is switched on.
+it("opens Notifications from a row that says what is switched on", async () => {
+  await show(<SettingsScreen />);
+  expect(container.textContent).not.toContain("Tell me when an agent finishes");
+  const row = container.querySelector("button[aria-label='Notifications, Questions, approvals, finished, failed']") as HTMLButtonElement;
+  expect(row.textContent).toBe("NotificationsQuestions, approvals, finished, failed");
+  await act(async () => row.click());
+  expect(mocks.push).toHaveBeenLastCalledWith("/notifications");
+});
+
+it("says Off on the Notifications row while notifications are off, connected or not", async () => {
+  mocks.notifications = { ...defaultSettings(), allow: false };
   mocks.app.connectionStage = "unreachable";
   await show(<SettingsScreen />);
-  expect(container.textContent).toContain("Tell me when an agent finishes");
-  expect(container.textContent).toContain("Works while the app is open or recently used. It can miss alerts when iOS closes the app.");
-  await act(async () => (container.querySelector("input[aria-label='Tell me when an agent finishes']") as HTMLInputElement).click());
-  expect(mocks.alert).toHaveBeenCalledWith("Connect to a machine first", "Alerts come from the machine this phone is connected to.");
+  expect(container.querySelector("button[aria-label='Notifications, Off']")).not.toBeNull();
+  expect(mocks.alert).not.toHaveBeenCalled();
 });
 
 // The words the recording found in Settings: none of them is in Settings or behind its links.

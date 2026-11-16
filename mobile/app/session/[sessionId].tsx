@@ -27,6 +27,7 @@ import { conversationKey, providerName } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { rowName } from "@mobile/data/session-list";
 import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome";
+import { SessionNotificationsSheet, useSessionOverride } from "@mobile/ui/notifications/SessionNotifications";
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
@@ -79,6 +80,8 @@ export default function SessionScreen() {
   // Whether this Mac takes an answer to an agent's question from a phone (#979): null until it has said.
   const answersQuestions = features ? features.questions === 1 : null;
   const [adding, setAdding] = useState(false);
+  const [notifying, setNotifying] = useState(false);
+  const override = useSessionOverride(app.activeHost?.id ?? "", sessionId);
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
@@ -104,7 +107,8 @@ export default function SessionScreen() {
   };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
-    <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} />
+    <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} muted={override === "mute"} onNotifications={() => setNotifying(true)} />
+    <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={named} onClose={() => setNotifying(false)} />
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} actionsDisabled={!linked} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}

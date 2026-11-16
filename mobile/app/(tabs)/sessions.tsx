@@ -113,7 +113,7 @@ export default function SessionsScreen() {
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={headerHeight} />}
     renderSectionHeader={({ section }) => section.title ? <Text accessibilityRole="header" numberOfLines={1} style={[styles.section, { color: palette.muted }]}>{section.title}</Text> : null}
     renderSectionFooter={() => <View style={styles.sectionGap} />}
-    renderItem={({ item, index, section }) => <SessionListRow row={item} first={index === 0} last={index === section.data.length - 1} onOpen={(tabId) => open(item, tabId)} />}
+    renderItem={({ item, index, section }) => <SessionListRow row={item} hostId={host.id} first={index === 0} last={index === section.data.length - 1} onOpen={(tabId) => open(item, tabId)} />}
     ListFooterComponent={waiting}
     ListEmptyComponent={empty}
   />{header}</View>;
