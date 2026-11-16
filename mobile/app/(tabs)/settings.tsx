@@ -85,7 +85,7 @@ export default function SettingsScreen() {
         <View style={styles.flex}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text numberOfLines={1} style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
         <ChevronRight size={18} color={palette.faint} />
       </Pressable>
-    </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></Card>}
+    </Card> : <Card style={styles.block}><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account.</Text><Button label="Sign in" onPress={() => void app.signIn()} />{app.error ? <Text accessibilityRole="alert" style={[styles.detail, { color: palette.danger }]}>{app.error}</Text> : null}</Card>}
 
     <SectionTitle>Notifications</SectionTitle>
     <Card>

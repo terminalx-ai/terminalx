@@ -12,9 +12,10 @@ import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
  * Nothing here resumes a stopped workspace on its own. The list and the
  * checkpoints only read. `open` is refused by the server for a stopped
  * workspace, and this client never asks it to reconcile the provider. A
- * workspace is woken only by a queued command (`enqueue`), which the server
- * reports back as `wake`; with `wake: false` the server starts nothing and
- * refuses a stopped workspace instead (`WORKSPACE_STOPPED`, §11.2.1).
+ * workspace is started only when the person asks: by a queued command
+ * (`enqueue`), which the server reports back as `wake`, or by `resume`, which
+ * only its managers may call (§10). With `wake: false` the server starts
+ * nothing and refuses a stopped workspace instead (`WORKSPACE_STOPPED`, §11.2.1).
  */
 
 /** The server's refusal of a `wake: false` command for a workspace that is not running. Nothing was stored. */
@@ -72,12 +73,14 @@ const workspaceSchema = z
   .passthrough();
 
 const operationSchema = z.object({ id: z.string(), state: z.string(), action: z.string().nullish(), errorCode: z.string().nullish() }).passthrough();
+const snapshotSchema = z.object({ workspace: workspaceSchema, operation: operationSchema }).passthrough();
 const listItemSchema = z.object({ workspace: workspaceSchema, latestOperation: operationSchema.nullish() }).passthrough();
 const tombstoneSchema = z.object({ id: z.string(), orgId: z.string(), deletedAt: z.number(), expiresAt: z.number() });
 const listSchema = z.object({ workspaces: z.array(listItemSchema), tombstones: z.array(tombstoneSchema).optional() }).passthrough();
 
 export type CloudWorkspace = z.infer<typeof workspaceSchema>;
 export type CloudWorkspaceItem = z.infer<typeof listItemSchema>;
+export type CloudWorkspaceSnapshot = z.infer<typeof snapshotSchema>;
 export type CloudTombstone = z.infer<typeof tombstoneSchema>;
 export type CloudRole = z.infer<typeof ROLE>;
 
@@ -154,7 +157,7 @@ export class CloudApi {
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
-    for (const name of ["organizations", "workspaces", "open", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare"] as const) {
+    for (const name of ["organizations", "workspaces", "open", "resume", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare"] as const) {
       const self = this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
       const original = self[name]!.bind(this);
       self[name] = (...args) =>
@@ -205,6 +208,19 @@ export class CloudApi {
   async open(orgId: string, workspaceId: string, clientInstallationId: string, options: { refreshPairing?: boolean } = {}): Promise<CloudAttachment> {
     const body = { clientInstallationId, ...(options.refreshPairing ? { refreshPairing: true } : {}) };
     return attachmentSchema.parse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/open?attachTicket=1`, body));
+  }
+
+  /**
+   * Start a stopped workspace, as the person asked. The server allows it to
+   * the workspace's managers (its creator, organization owners and admins)
+   * and refuses anyone else (`cloud_workspace_manager_required`). It answers
+   * with the workspace and the queued operation; the list says when it runs.
+   */
+  async resume(orgId: string, workspaceId: string): Promise<CloudWorkspaceSnapshot> {
+    const snapshot = snapshotSchema.parse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/resume`, {}));
+    // An answer about another workspace is not the answer to this request.
+    if (snapshot.workspace.id !== workspaceId || snapshot.workspace.orgId !== orgId) throw new CloudApiError("cloud_workspace_invalid_response", 200);
+    return snapshot;
   }
 
   /**
