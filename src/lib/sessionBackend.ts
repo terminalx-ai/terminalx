@@ -2,7 +2,8 @@ import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, Workspa
 import { agent, attachments, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { FileRef } from "@/types/events";
 import { showError } from "@/lib/errorToasts";
-import { loadTab, setTabStatus } from "@/lib/agentEvents";
+import { applyEvent, loadTab, setTabStatus } from "@/lib/agentEvents";
+import { failFirstMessage, holdFirstMessage, releaseFirstMessage } from "@/lib/firstMessage";
 import { patchTab } from "@/lib/sessions";
 import {
   attachCloudAgentTab,
@@ -290,6 +291,23 @@ export async function sendFirstMessage(sessionId: string, tabId: string, text: s
     throw error;
   });
   return agent.send(sessionId, tabId, text, images, false, undefined, stored);
+}
+
+/**
+ * Send a new session's first message, drawn as held in its chat meanwhile
+ * (PRO-397). Its events are applied and the held copy released in one go, so
+ * the chat never draws both; a send that fails leaves it there with the error.
+ */
+export async function sendHeldFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<void> {
+  holdFirstMessage(sessionId, tabId, text, images, files);
+  try {
+    const out = await sendFirstMessage(sessionId, tabId, text, images, files);
+    out.events.forEach(applyEvent);
+    releaseFirstMessage(sessionId, tabId);
+  } catch (error) {
+    failFirstMessage(sessionId, tabId, error);
+    throw error;
+  }
 }
 
 // ---- cloud
