@@ -5,6 +5,9 @@ import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
+import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
+import { useAccount } from "@/lib/account";
+import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
@@ -121,6 +124,7 @@ export function AppShell() {
   // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
   const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
+  const account = useAccount();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
   // The repository Settings opens on, for a request that names one; every other way in names none.
@@ -130,6 +134,14 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // A menu/palette selection navigates away from Settings just like the sidebar.
   useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
+  // The full-window cloud setup (PRO-370), opened from Settings → Organizations in Settings' place.
+  // Any other request for Settings, or any navigation, ends it: its progress is already saved.
+  const [cloudSetup, setCloudSetup] = useState<CloudSetupTarget | null>(null);
+  useEffect(() => setCloudSetup(null), [settingsRequest, store.navigationVersion]);
+  useEffect(() => onOpenCloudSetup((target) => {
+    setCloudSetup(target);
+    setSettingsOpen(true);
+  }), []);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
   useEffect(() => { void bootDataPrivacy().then(() => startUpdateChecks()); }, []);
@@ -326,7 +338,17 @@ export function AppShell() {
       <MachineApprovalHost />
       <ConnectedBar />
       <div className="flex min-h-0 flex-1">
-        {settingsOpen ? (
+        {settingsOpen && cloudSetup ? (
+          <CloudSetupFlow
+            key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
+            target={cloudSetup}
+            onExit={() => setCloudSetup(null)}
+            onDone={() => {
+              setCloudSetup(null);
+              setSettingsOpen(false);
+            }}
+          />
+        ) : settingsOpen ? (
           <Suspense fallback={viewFallback}>
             <SettingsPage
               initialTab={settingsTab}

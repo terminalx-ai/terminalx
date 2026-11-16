@@ -42,6 +42,18 @@ export interface OrganizationSetupRecord {
    */
   workspace: { pending: PendingCreate | null; id: string | null } | null;
   completedAt: number | null;
+  /**
+   * Where the person is in the full-window setup (PRO-370), when it was
+   * started from there. Read through `flowOf` (cloudSetupFlow.ts).
+   */
+  flow?: { step: string; passed: string[]; finishedAt: number | null };
+  /**
+   * The machine the setup check starts on, as chosen in the flow: the
+   * provider, region and size from the Compute step, the base image from the
+   * Environment step. Ids from that provider's `cloudWorkspaceSetup`; one
+   * that is no longer offered falls back to the provider's default.
+   */
+  machine?: { provider: string; locationId?: string; machineClassId?: string; sourceId?: string };
 }
 
 const KEY = "terminalx.organization-setup.v2";

@@ -1,0 +1,6 @@
+import type { StepProps } from "./stepProps";
+
+// PRO-370 placeholder: replaced by the real step before this branch is reported. Never shipped.
+export function InviteStep(_props: StepProps & { onDone: () => void }): null {
+  return null;
+}
