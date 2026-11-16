@@ -17,7 +17,7 @@ it("confirms the selected turn and leaves files alone by default", async () => {
   const { onClose } = show();
   expect((screen.getByRole("checkbox", { name: "Also reset files" }) as HTMLInputElement).checked).toBe(false);
   expect(mocks.reset).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   expect(mocks.reset).toHaveBeenCalledWith("s", "t", 9, false, null);
   expect(mocks.reload).toHaveBeenCalledWith("s", "t");
@@ -26,8 +26,8 @@ it("resets files when checked and remembers the choice for next time", async () 
   const { onClose } = show();
   fireEvent.click(screen.getByRole("checkbox", { name: "Also reset files" }));
   expect(getPrefs().resetFiles).toBe(true);
-  expect(screen.getByText(/go back to how they were when it ended/)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  expect(screen.getByText(/go back to how they were then/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   expect(mocks.reset).toHaveBeenCalledWith("s", "t", 9, true, null);
   cleanup();
@@ -38,7 +38,7 @@ it("warns about files other chats changed and resets anyway on confirmation", as
   setPrefs({ resetFiles: true });
   mocks.reset.mockRejectedValueOnce('Other changes to these files would be overwritten: ["src/a.ts","b [1].txt"]. Resetting files removes those changes too. Confirm: reset:e:i:n:x');
   const { onClose } = show();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain("2 files were changed by another chat or by hand");
   expect(alert.textContent).toContain("src/a.ts");
@@ -54,14 +54,14 @@ it("Cancel after the overlap warning changes nothing, and a later plain reset se
   setPrefs({ resetFiles: true });
   mocks.reset.mockRejectedValueOnce('Other changes to these files would be overwritten: ["a.txt"]. Resetting files removes those changes too. Confirm: reset:shown');
   const { onClose } = show();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   expect((await screen.findByRole("alert")).textContent).toContain("This file was changed");
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(onClose).toHaveBeenCalledOnce();
   expect(mocks.reset).toHaveBeenCalledOnce();
   cleanup();
   show();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   await waitFor(() => expect(mocks.reset).toHaveBeenCalledTimes(2));
   expect(mocks.reset).toHaveBeenLastCalledWith("s", "t", 9, true, null);
 });
@@ -69,11 +69,11 @@ it("a changed choice drops the shown confirmation", async () => {
   setPrefs({ resetFiles: true });
   mocks.reset.mockRejectedValueOnce('Other changes to these files would be overwritten: ["a.txt"]. Resetting files removes those changes too. Confirm: reset:shown');
   show();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   await screen.findByRole("alert");
   fireEvent.click(screen.getByRole("checkbox", { name: "Also reset files" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "Also reset files" }));
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   await waitFor(() => expect(mocks.reset).toHaveBeenCalledTimes(2));
   expect(mocks.reset).toHaveBeenLastCalledWith("s", "t", 9, true, null);
 });
@@ -110,7 +110,7 @@ it("reads the paths and token out of an overlap refusal only", () => {
 it("keeps format errors in the dialog without replacing history", async () => {
   mocks.reset.mockRejectedValue("Unknown transcript format");
   const { onClose } = show();
-  fireEvent.click(screen.getByRole("button", { name: "Reset chat" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Unknown transcript format");
   expect(mocks.reload).not.toHaveBeenCalled();
   expect(onClose).not.toHaveBeenCalled();
@@ -122,4 +122,12 @@ it("confirms undo and cannot repeat a committed reset after a refresh failure", 
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
   expect(mocks.reset).toHaveBeenCalledWith("s", "t", null, false, null);
   expect(onWarning).toHaveBeenCalledWith(expect.stringContaining("Chat reset"));
+});
+it("names the turn, the turns that go and the files that would be reset (PRO-378)", async () => {
+  render(<ResetChatDialog sessionId="s" tabId="t" endSeq={9} target={{ turn: 2, removed: [3, 4], files: 3 }} agent="Claude Code" onClose={vi.fn()} onWarning={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Reset the chat to turn 2?" })).toBeDefined();
+  expect(screen.getByText(/Turns 3 and 4 are removed from this chat and from what Claude Code remembers/)).toBeDefined();
+  expect(screen.getByText("3 files changed since turn 2 go back to how they were then")).toBeDefined();
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Enter", metaKey: true });
+  await waitFor(() => expect(mocks.reset).toHaveBeenCalledWith("s", "t", 9, false, null));
 });
