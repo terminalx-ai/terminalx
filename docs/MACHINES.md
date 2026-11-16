@@ -1087,6 +1087,58 @@ agent the runtime started, and when its input is not a terminal. PRO-357 tests
 this ("an agent running on the machine cannot approve a pairing or create a
 pairing code").
 
+#### As built (PRO-349): through the account, and Settings → Machines
+
+PRO-344 built the server side (terminalx-server
+`apps/api/docs/machine-relay-access.md`). PRO-349 builds the desktop side,
+because the "On your account" tab of Add a machine (screen 21.03) needs it.
+
+- **The capability.** The window's host binding advertises
+  `machine-operating.v1` beside `account-bound-host-pairing.v1` only while
+  "Let other computers operate this Mac" is on and data privacy mode is off.
+  Changing the switch sends a heartbeat at once
+  (`PairingManager::machine_operating_changed`), so the account directory lists
+  the Mac as not available without waiting for the next one.
+- **The machine answers runtime grants.** The window polls
+  `requestedScope=runtime` grants beside the phone's `mobile` ones (whose
+  handling is unchanged). For each, it asks its runtime for a fresh machine code
+  (`runtime.machineHost.createCode`, with the grant's id), seals the code's JSON
+  (exactly the bytes a `txm2.` code base64url-encodes) with the phone grant's
+  HPKE envelope and publishes it. Creating that code ends any code made before.
+  The computer still waits for Allow and the four-group fingerprint (decision
+  5); a granted account is never an approval. The approved computer's record
+  keeps the grant's id, so a runtime revocation from the poll revokes it, and
+  revoking it on the machine also revokes the grant on the server
+  (`reason: "host-removed"`).
+- **The operating computer** registers a client installation (a P-256 key in
+  the Keychain, service `<app identifier>.machines`) with
+  `account-bound-host-pairing.v1` and `machine-operating.v1`, lists
+  `GET /v1/account/hosts`, and requests a grant whose signed transcript ends in
+  `runtime`. It opens the envelope, refuses an offer whose key is not the
+  directory's key byte for byte or whose `machineId` is not that key's
+  (`key_mismatch`), and hands the dialog the offer as a `txm2.` code. From there
+  it pairs exactly as a pasted code, and consumes the grant once paired or
+  revokes it when not. Commands: `machines_account_list`,
+  `machines_account_request { hostId }`, `machines_account_cancel`,
+  `machines_account_finish { grantRequestId, paired }`; shapes in
+  `src/types/machines.ts`.
+- **A headless server** has no host binding until PRO-368, so it is not listed
+  on the account; it pairs from its terminal (PRO-353).
+- **Remove** (`machines_remove { machineId }`) stops the machine's connection
+  and deletes its record, its device token and its relay credential. Nothing on
+  the machine changes: its sessions keep running, and it lists this computer
+  until someone revokes it there.
+- **Key labels.** Cards show a short label for a key ("7F3A·91C2"): the first
+  four bytes of SHA-256 of the public key, read from `machineId` (or a paired
+  computer's `keyId`, `host_id` of its client key). It is a label only; Allow
+  compares the pairing fingerprint.
+- **The machine record** keeps `hasWindow` from `machine.describe`, so a card
+  says "headless". A paired computer's row says its `route` (`lan`,
+  `tailscale` or `relay`) while it is connected.
+- **Not built here.** The "Update" button for a machine that needs an update is
+  PRO-354; the machine's own page is PRO-350 (a card opens the machine's view in
+  the main slot until then).
+
 ### Connect
 
 1. The operating computer loads the machine's record and opens one connection
