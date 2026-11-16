@@ -99,7 +99,7 @@ try {
     // command palette (or a chat's Move to section menu).
     assert.equal(await page.getByRole("button", { name: "New section…", exact: true }).count(), 0, "no standing New section row");
     await page.getByRole("button", { name: /^Search/ }).click();
-    await page.getByLabel("Command palette search").fill("New local section");
+    await page.getByLabel("Command palette search").fill("New section");
     await page.locator('[role="option"][id="command:local-section:create"]').click();
     await page.getByLabel("Section name", { exact: true }).fill("Refactor");
     await page.getByRole("button", { name: "Create", exact: true }).click();

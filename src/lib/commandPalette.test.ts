@@ -3,6 +3,9 @@ import {
   buildCloudPaletteProjects,
   buildPaletteIndex,
   movePaletteSelection,
+  orderPaletteItems,
+  sectionChoices,
+  stepPaletteTab,
   PALETTE_TABS,
   paletteScopeShows,
   palettePlaceholder,
@@ -202,19 +205,74 @@ describe("palette tabs and scopes (design 07.05)", () => {
   });
 
   it("keeps each scope's groups, and every group in All", () => {
-    const groups = ["smart", "sessions", "workspaces", "projects", "files", "commands", "settings", "settings-pages", "settings-projects"];
+    const groups = ["smart", "sessions", "workspaces", "projects", "files", "session-actions", "commands", "settings", "settings-pages", "settings-projects"];
     expect(groups.filter((group) => paletteScopeShows("all", group))).toEqual(groups);
     expect(groups.filter((group) => paletteScopeShows("sessions", group))).toEqual(["sessions"]);
     expect(groups.filter((group) => paletteScopeShows("cloud", group))).toEqual(["sessions"]);
     expect(groups.filter((group) => paletteScopeShows("projects", group))).toEqual(["workspaces", "projects"]);
-    expect(groups.filter((group) => paletteScopeShows("actions", group))).toEqual(["commands"]);
+    expect(groups.filter((group) => paletteScopeShows("actions", group))).toEqual(["session-actions", "commands"]);
     expect(groups.filter((group) => paletteScopeShows("settings", group))).toEqual(["settings", "settings-pages", "settings-projects"]);
   });
 
   it("says what each scope searches", () => {
     expect(palettePlaceholder("settings")).toBe("Search settings…");
     expect(palettePlaceholder("cloud")).toBe("Search cloud sessions…");
+    expect(palettePlaceholder("actions")).toBe("Search actions…");
     expect(palettePlaceholder("all")).toBe("Search sessions, workspaces, projects, files, settings and commands…");
     expect(new Set(PALETTE_TABS.map((tab) => palettePlaceholder(tab.id))).size).toBe(PALETTE_TABS.length);
+  });
+});
+
+describe("Tab moves round the tab strip (design 07.04)", () => {
+  it("steps forward and back, wrapping at both ends", () => {
+    expect(stepPaletteTab("all", 1)).toBe("sessions");
+    expect(stepPaletteTab("settings", 1)).toBe("all");
+    expect(stepPaletteTab("all", -1)).toBe("settings");
+    expect(stepPaletteTab("actions", -1)).toBe("projects");
+  });
+});
+
+describe("the Actions order (design 07.04)", () => {
+  it("puts the named actions first in that order, then the rest as they were", () => {
+    const items = ["about", "updates", "new-session", "zoom", "add-project"].map((id, index) => ({ id, recentAt: index }));
+    const ordered = orderPaletteItems(items, ["new-session", "missing", "add-project"]);
+    expect(ordered.map((item) => item.id)).toEqual(["new-session", "add-project", "about", "updates", "zoom"]);
+    expect(ordered.map((item) => item.recentAt)).toEqual([5, 4, 3, 2, 1]);
+  });
+});
+
+describe("Move to section choices (design 07.13, 07.14)", () => {
+  const sections = [
+    { id: "release", name: "Release 0.9", emoji: "🚀", sessions: ["a"] },
+    { id: "bugs", name: "Bugs", emoji: "🐛", sessions: ["b", "gone"] },
+    { id: "later", name: "Later", sessions: [] },
+  ];
+  const listed = (id: string) => id !== "gone";
+
+  it("lists every section with its listed sessions and marks the one the session is in", () => {
+    const { choices, current, createName } = sectionChoices(sections, ["b"], "", listed);
+    expect(choices.map((choice) => [choice.section.name, choice.count, choice.current])).toEqual([["Release 0.9", 1, false], ["Bugs", 1, true], ["Later", 0, false]]);
+    expect(current?.id).toBe("bugs");
+    expect(createName).toBeNull();
+  });
+
+  it("marks no section when the sessions are in different ones, or in none", () => {
+    expect(sectionChoices(sections, ["a", "b"], "", listed).current).toBeNull();
+    expect(sectionChoices(sections, ["c"], "", listed).current).toBeNull();
+    expect(sectionChoices(sections, [], "", listed).current).toBeNull();
+  });
+
+  it("narrows by name whatever the case, and offers what is typed as a new section", () => {
+    const found = sectionChoices(sections, ["b"], "LAT", listed);
+    expect(found.choices.map((choice) => choice.section.name)).toEqual(["Later"]);
+    expect(found.choices[0].nameRanges).toEqual([{ start: 0, end: 3 }]);
+    expect(found.createName).toBe("LAT");
+    const none = sectionChoices(sections, ["b"], "  docs   site ", listed);
+    expect(none.choices).toEqual([]);
+    expect(none.createName).toBe("docs site");
+  });
+
+  it("does not offer a second section of a name that is taken", () => {
+    expect(sectionChoices(sections, ["a"], "bugs", listed).createName).toBeNull();
   });
 });
