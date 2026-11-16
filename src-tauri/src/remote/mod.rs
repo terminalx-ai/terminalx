@@ -13,6 +13,8 @@
 //!   machine (PRO-340).
 //! - [`machine_client`]: the operating computer's one connection per paired
 //!   machine, over its direct routes and the relay (PRO-345).
+//! - [`ports`] and [`port_listeners`]: `ports/1`, a workspace port carried
+//!   over the connection, and what listens on which port (PRO-28, PRO-355).
 //! - [`agent_commands`]: receipts of live agent commands on a runtime with
 //!   no cloud mailbox (`agent-commands/1`, PRO-343).
 
@@ -27,6 +29,7 @@ pub mod machine;
 pub mod machine_client;
 pub mod machine_update;
 pub mod mirror;
+pub mod port_listeners;
 pub mod ports;
 pub mod protocol;
 pub mod server;

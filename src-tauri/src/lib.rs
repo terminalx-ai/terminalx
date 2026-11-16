@@ -685,6 +685,8 @@ pub fn run() {
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,
+            cloud_remote::cloud_port_settings,
+            cloud_remote::cloud_port_set_settings,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
