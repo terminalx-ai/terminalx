@@ -86,7 +86,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <View style={[styles.backdrop, styles.centred]}>
         {backdrop}
-        <View accessibilityViewIsModal style={[styles.dialog, { backgroundColor: palette.card, borderColor: palette.border }]}>
+        <View accessibilityViewIsModal onAccessibilityEscape={close} style={[styles.dialog, { backgroundColor: palette.card, borderColor: palette.border }]}>
           <Text accessibilityRole="header" numberOfLines={2} style={[styles.title, { color: palette.ink }]}>{`Forget ${machine.name}?`}</Text>
           <Text style={[styles.dialogText, { color: palette.muted }]}>
             {"This phone will no longer connect to it. Sessions on that machine are not changed. To use it again, pair it again."}
@@ -106,7 +106,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.backdrop}>
         {backdrop}
-        <Sheet>
+        <Sheet onClose={close}>
           {mode === "menu" ? <>
             <Text numberOfLines={2} accessibilityRole="header" style={[styles.title, styles.sheetTitle, { color: palette.ink }]}>{machine.name}</Text>
             <Text style={[styles.detail, styles.sheetDetail, { color: palette.muted }]}>{machine.state}</Text>
@@ -140,12 +140,19 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
   );
 }
 
-/** A sheet on the bottom edge with a grabber, clear of the home indicator. */
-function Sheet({ children }: { children: ReactNode }) {
+/**
+ * A sheet on the bottom edge with a grabber, clear of the home indicator.
+ * VoiceOver keeps to the sheet (the backdrop's Close is outside it), so the
+ * sheet closes on the escape gesture, and the grabber is its Close button:
+ * drawn as the board draws it, with a full-size place to tap.
+ */
+function Sheet({ children, onClose }: { children: ReactNode; onClose?: () => void }) {
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
-  return <View accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: Math.max(26, insets.bottom + 8) }]}>
-    <View style={[styles.grab, { backgroundColor: palette.selected }]} />
+  return <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: Math.max(26, insets.bottom + 8) }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={!onClose} onPress={onClose} style={styles.grabTarget}>
+      <View style={[styles.grab, { backgroundColor: palette.selected }]} />
+    </Pressable>
     {children}
   </View>;
 }
@@ -199,7 +206,9 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" },
   centred: { justifyContent: "center", paddingHorizontal: 28 },
   sheet: { borderTopLeftRadius: 26, borderTopRightRadius: 26, borderCurve: "continuous", borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 10, paddingHorizontal: 16 },
-  grab: { alignSelf: "center", width: 38, height: 5, borderRadius: 3, marginBottom: 14 },
+  // The grabber where 22.05 draws it (10 pt down, 14 pt above the title), in a target that fills that band instead of adding to it.
+  grabTarget: { alignSelf: "center", width: 88, height: 29, marginTop: -10, paddingTop: 10, alignItems: "center" },
+  grab: { width: 38, height: 5, borderRadius: 3 },
   dialog: { borderRadius: 20, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, padding: 20 },
   dialogText: { fontSize: 14, lineHeight: 20, marginTop: 8, marginBottom: 16 },
   title: { fontSize: 17, fontWeight: "600" },
