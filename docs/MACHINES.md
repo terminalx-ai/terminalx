@@ -1837,3 +1837,74 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Left out.** Docker and Local VM targets are PRO-312. The cloud entry's
   second line shows the organization's project count, not a price: a price
   needs a create quote, which the cloud form asks for when it is chosen.
+
+### As built (PRO-355): forwarded ports and previews
+
+A machine session has the same Ports tab and header popover as a cloud
+session (14.10, 14.11, 21.08), with the machine's name where they say cloud.
+The tab and the header's forward chip appear where the machine grants
+`ports/1`; without it the "Runs on" strip's update line names "forward ports"
+(PRO-354) and neither appears. Hosted preview links (PRO-135) are never
+offered for a machine: a machine's ports reach this Mac only.
+
+**`ports.list` names the listener.** Each entry may carry
+`process: { name, pid, cwd? }`, additive within `ports/1` (an older desktop
+ignores it; an older runtime sends none, and the row shows the port alone).
+`name` is a short label for the command: the executable's file name, or for
+an interpreter (`node`, `bun`, `deno`, `python`, `python3`, `ruby`) running a
+script, the script's file name (`vite`, not `node`). `cwd` is the process's
+working directory on the machine; the UI shows its last component beside the
+name when it differs ("vite · console"). The runtime lists what it can see as
+its own user:
+
+- Linux: `/proc/net/tcp` and `tcp6` as before, each socket inode matched to a
+  process through `/proc/<pid>/fd`, its argv from `/proc/<pid>/cmdline`, its
+  directory from `/proc/<pid>/cwd`.
+- macOS: listening TCP sockets of the user's processes through libproc
+  (`proc_listallpids`, `PROC_PIDLISTFDS`, `PROC_PIDFDSOCKETINFO`), argv from
+  `KERN_PROCARGS2`, directory from `PROC_PIDVNODEPATHINFO`. Before PRO-355 a
+  Mac answered `detected: false` and listed nothing.
+
+The runtime's own listeners (its pid) are left out of the list. `ports.list`
+stays a driver's call (`Role::Driver`, as before): naming the processes adds
+nothing a terminal on the machine would not show the same person.
+
+**Forwards on this Mac.** Every listener binds `127.0.0.1` only, as for a
+cloud workspace (docs/CLOUD-PREVIEWS.md): nothing on the network can reach a
+forwarded port. The desktop keeps, per connection, the forwards the person
+asked for and two switches (`CloudPortSettings` in `src/lib/api.ts`):
+
+- **Forwarding** (`enabled`, on by default): off closes every listener and
+  keeps each forward as `waiting`; on opens them again.
+- **Forward new ports automatically** (`auto`, off by default): while on and
+  connected, the desktop reads `ports.list` every 2 s (request ids under
+  `ports-`, never shown to the web view) and forwards each port that starts
+  listening after the switch was turned on, skipping 32768–60999, on the same
+  local port when free (a random one for a port below 1024), at most 16 at
+  once per connection. Ports already listening when it was turned on, and a
+  port the person stopped, are left to the person while they keep
+  listening; one that stops and starts again is new and is taken. While Forwarding is off a
+  new forward is refused with `cloud_port_forwarding_off`.
+
+A machine's forwards **end with the connection and return with it**: when the
+link drops (`reconnecting`, `offline`) the listeners close and the forwards
+stay as `waiting`; on `connected` they open again, on the same local port when
+it is free, else on a new one (`reassigned`). A cloud workspace's forwards do
+not return (docs/CLOUD-PREVIEWS.md): they are dropped with the connection.
+Everything is forgotten when the last web view lets go of the connection
+(`cloud_remote_detach`), so a closed session view leaves nothing listening and
+nothing to come back.
+
+| Command | Params | Result |
+| --- | --- | --- |
+| `cloud_port_forwards` | `connectionId` | `CloudPortForward[]`, with `state` (`open`, `waiting`) and `auto` |
+| `cloud_port_settings` | `connectionId` | `CloudPortSettings` |
+| `cloud_port_set_settings` | `connectionId`, `enabled?`, `auto?` | `CloudPortSettings` as they now are |
+
+The event `cloud_port_forwards_changed` (`CloudPortForwardsChanged`) carries a
+connection's forwards and switches whenever either changes, with `opened`: the
+forwards that opened without a click (auto, or returned after a reconnect), for
+the "Port 5173 forwarded to 127.0.0.1:5173" toast.
+
+**Open** opens the address in this Mac's built-in browser (decision 7); the
+browser runs here, and only the stream crosses.

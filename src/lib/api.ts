@@ -583,6 +583,11 @@ export const api = {
     invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
   cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
   cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
+  /** The connection's forwarding switches (PRO-355). */
+  cloudPortSettings: (connectionId: string) => invoke<CloudPortSettings>("cloud_port_settings", { connectionId }),
+  /** Change either switch; answers the switches as they now are. */
+  cloudPortSetSettings: (connectionId: string, settings: Partial<CloudPortSettings>) =>
+    invoke<CloudPortSettings>("cloud_port_set_settings", { connectionId, enabled: settings.enabled ?? null, auto: settings.auto ?? null }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -1581,7 +1586,44 @@ export interface CloudPortForward {
   port: number;
   localPort: number;
   reassigned: boolean;
+  /**
+   * `open`: listening on this Mac now. `waiting`: kept while the connection is
+   * away or Forwarding is off, and opened again (same local port when free)
+   * once it is back: a paired machine's forwards return when it reconnects,
+   * a cloud workspace's do not (PRO-355). Absent from an older desktop: `open`.
+   */
+  state?: "open" | "waiting";
+  /** Opened by "Forward new ports automatically", not by the person. */
+  auto?: boolean;
 }
+
+/**
+ * A connection's forwarding switches (14.10, 14.11), kept by the desktop for
+ * as long as the connection is held. `enabled` is the master "Forwarding":
+ * off closes every listener and keeps them as `waiting`; on opens them again.
+ * `auto` forwards each port that starts listening after it was turned on,
+ * outside 32768–60999 (`AUTO_FORWARD_SKIPPED`).
+ */
+export interface CloudPortSettings {
+  enabled: boolean;
+  auto: boolean;
+}
+
+/** Ports auto-forwarding leaves alone: the ephemeral range, where clients bind, not servers. */
+export const AUTO_FORWARD_SKIPPED = { from: 32768, to: 60999 } as const;
+
+/**
+ * `cloud_port_forwards_changed`: a connection's forwards or switches changed,
+ * whoever changed them. `opened` lists forwards that opened without a click
+ * here (auto-forwarded, or returned after a reconnect), for the toast.
+ */
+export interface CloudPortForwardsChanged {
+  connectionId: string;
+  forwards: CloudPortForward[];
+  settings: CloudPortSettings;
+  opened: CloudPortForward[];
+}
+export const CLOUD_PORT_FORWARDS_CHANGED = "cloud_port_forwards_changed";
 
 export interface CloudWorkspacePreflight {
   ready: boolean;

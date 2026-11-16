@@ -300,6 +300,38 @@ export type PtyControl = "you" | "other" | "none";
 /** The most ports or streams `listPorts` returns, whatever the runtime sent. */
 export const MAX_LISTED_PORTS = 256;
 
+/**
+ * The program listening on a port, as `ports.list` names it (PRO-355). `name`
+ * is a short label for the command (`vite`, `redis-server`); `cwd` is its
+ * working directory on the runtime's computer, absent where it cannot be read.
+ */
+export interface ListedProcess {
+  name: string;
+  pid?: number;
+  cwd?: string;
+}
+
+/** A listening port; `process` is absent on a runtime that does not name it. */
+export interface ListedPort {
+  port: number;
+  process?: ListedProcess;
+}
+
+/** The longest process name or directory kept from `ports.list`. */
+const MAX_PROCESS_TEXT = 512;
+
+/** A `ports.list` entry's `process`, or nothing: the runtime is not trusted for the shape. */
+export function listedProcess(value: unknown): ListedProcess | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const text = (field: unknown) => (typeof field === "string" && field.trim() && field.length <= MAX_PROCESS_TEXT ? field : undefined);
+  const name = text(record.name);
+  if (!name) return undefined;
+  const pid = typeof record.pid === "number" && Number.isInteger(record.pid) && record.pid > 0 ? record.pid : undefined;
+  const cwd = text(record.cwd);
+  return { name, ...(pid !== undefined ? { pid } : {}), ...(cwd !== undefined ? { cwd } : {}) };
+}
+
 /** An agent process on the runtime. A tab whose process ended keeps its saved conversation. */
 export type AgentProcessState = "running" | "exited" | "not-started";
 export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
@@ -1014,19 +1046,29 @@ export class WorkspaceRpcClient {
    * cannot tell which ports listen. Refused unless the person may open a
    * port: a manager, or a driver who may approve.
    */
-  async listPorts(): Promise<{ detected: boolean; ports: { port: number }[]; streams: { streamId: string; port: number }[] }> {
+  async listPorts(): Promise<{ detected: boolean; ports: ListedPort[]; streams: { streamId: string; port: number }[] }> {
     const listed = await this.call<{ detected?: unknown; ports?: unknown; streams?: unknown }>("ports.list");
     // The runtime is not trusted for the shape: whole port numbers only, and a bounded list.
     const port = (value: unknown): number | null => (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null);
     const entries = (value: unknown): Record<string, unknown>[] => (Array.isArray(value) ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object") : []);
-    const ports = [...new Set(entries(listed.ports).map((entry) => port(entry.port)).filter((value): value is number => value !== null))].sort((a, b) => a - b).slice(0, MAX_LISTED_PORTS);
+    // One entry per port; the first entry that names a process for it stands.
+    const byPort = new Map<number, ListedPort>();
+    for (const entry of entries(listed.ports)) {
+      const value = port(entry.port);
+      if (value === null) continue;
+      const process = listedProcess(entry.process);
+      const known = byPort.get(value);
+      if (!known) byPort.set(value, process ? { port: value, process } : { port: value });
+      else if (!known.process && process) known.process = process;
+    }
+    const ports = [...byPort.values()].sort((a, b) => a.port - b.port).slice(0, MAX_LISTED_PORTS);
     const streams = entries(listed.streams)
       .flatMap((entry) => {
         const value = port(entry.port);
         return typeof entry.streamId === "string" && value !== null ? [{ streamId: entry.streamId, port: value }] : [];
       })
       .slice(0, MAX_LISTED_PORTS);
-    return { detected: listed.detected === true, ports: ports.map((value) => ({ port: value })), streams };
+    return { detected: listed.detected === true, ports, streams };
   }
 
   async listPtys(): Promise<{ epoch: string; terminals: PtyInfo[] }> {
