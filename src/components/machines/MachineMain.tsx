@@ -8,7 +8,7 @@ import { WorkspaceView } from "@/components/cloud/CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
 import { parseMachineKey } from "@/types/target";
-import { MachineChip, MachineLocation } from "./connectionStatus";
+import { MachineChip, MachineLocation, machineViewStatus } from "./connectionStatus";
 
 /**
  * A paired machine in the main slot (PRO-345, screen 21.08): the header chip
@@ -30,7 +30,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
 
   let body;
   if (connection && machine) {
-    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} />;
+    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null, machine: { record: machine, status: machineViewStatus(state, name) } }} state={clientState} />;
   } else {
     body = (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground" data-testid="machine-main-empty">

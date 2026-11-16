@@ -210,6 +210,27 @@ describe("the cloud workspace view", () => {
     await waitFor(() => expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Connecting…"));
   });
 
+  it("in a paired machine's view, names the machine and says what the machine's own state is (PRO-398)", async () => {
+    const record = {
+      machineId: "m1", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5",
+      directEndpoints: [], route: "relayAndNearby" as const, pairedAt: 1, lastSeenAt: 1,
+    };
+    const opened = { connection: fakeConnection("m1"), name: "Mac mini", provider: null, workspaceState: null, machine: { record, status: "Mac mini is offline. Sessions there keep running." } };
+    // Offline reaches the transport as a reconnect with attempt 0.
+    const { rerender } = render(<WorkspaceView opened={opened} state={{ state: "reconnecting", attempt: 0, reason: "offline", retryInMs: 10_000 } as never} />);
+    expect(screen.getByTestId("workspace-connection-status").textContent).toBe("Mac mini is offline. Sessions there keep running.");
+    expect(document.body.textContent).not.toContain("Reconnecting (attempt");
+    expect(document.body.textContent).toContain("Terminals appear once Mac mini is connected.");
+
+    listed = [];
+    rerender(<WorkspaceView opened={opened} state={connectedState() as never} />);
+    expect(screen.queryByTestId("workspace-connection-status")).toBeNull();
+    const tab = await screen.findByTestId("cloud-terminal-tab");
+    expect(tab.querySelector("button")!.getAttribute("title")).toBe("Terminal 1 runs on Mac mini");
+    expect(tab.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
+    expect(screen.getByRole("button", { name: "New terminal on Mac mini" })).toBeTruthy();
+  });
+
   it("labels the workspace, its provider and that commands run in the cloud", async () => {
     await openReady();
     const location = await screen.findByTestId("cloud-execution-location");

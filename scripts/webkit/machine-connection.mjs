@@ -8,11 +8,18 @@
 //
 // Every state is shown in turn (connecting, direct on this network, direct
 // over Tailscale, relay, reconnecting, offline, needs update, access removed),
-// at the window's smallest size (760×520, tauri.conf.json) and a roomy one, in
-// the light and the dark theme. In each: the label and the hover text are the
+// at the window's smallest size (760×520, tauri.conf.json) and at the screens'
+// width (1440×900), in the light and the dark theme. In each: the label and the hover text are the
 // ones the screens name, the section and the chip stay inside the sidebar and
 // the header, the sidebar does not scroll sideways, no text is under 12 px and
 // no UI text is mono. With Machines off, the section is not there at all.
+//
+// PRO-398: while the view is not connected it speaks from the machine's own
+// state (an offline machine is offline and its sessions keep running, never
+// the transport's "Reconnecting (attempt 0)…") and names the machine, not a
+// workspace; the last-seen time is on the 24-hour clock; Connecting and
+// Reconnecting turn an arc; the "Runs on" strip is 36 px tall; and a Mac has
+// one icon in the sidebar, the chip and the strip.
 //
 // Pictures of every case go to MACHINES_SHOTS, by default
 // scripts/webkit/output/machine-connection; that default folder ignores itself.
@@ -95,14 +102,16 @@ const fixture = (machines) => `(() => {
 })();`;
 
 const STATES = [
-  { id: "connecting", state: { state: "connecting", trying: ["lan", "tailscale", "relay"] }, label: "Connecting", hint: "Reaching the Mac mini" },
+  { id: "connecting", state: { state: "connecting", trying: ["lan", "tailscale", "relay"] }, label: "Connecting", hint: "Reaching the Mac mini", status: "Connecting to Mac mini…", spins: true },
   { id: "direct-lan", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 0, rttMs: 3 }, label: "Direct", hint: "On this network or Tailscale", path: "Direct on this network · 3 ms" },
   { id: "direct-tailscale", state: { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.2:6768/machine/1" }, since: 0, rttMs: 9 }, label: "Direct", hint: "On this network or Tailscale", path: "Direct over Tailscale · 9 ms" },
   { id: "relay", state: { state: "relay", route: { kind: "relay", endpoint: null }, since: 0, rttMs: 41 }, label: "Relay", hint: "Through TerminalX Relay", path: "Through TerminalX Relay · 41 ms" },
-  { id: "reconnecting", state: () => ({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 2, retryInMs: 500, trying: ["lan", "relay"] }), label: "Reconnecting", hint: /^Lost it 1[2-4] seconds ago$/ },
-  { id: "offline", state: { state: "offline", lastSeenAt: LAST_SEEN, retryInMs: 10_000 }, label: "Offline", sidebarLabel: /^Offline · seen \d{1,2}:02/, hint: "Sessions there keep running" },
-  { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27" }, label: "Needs update", hint: "Runs an older TerminalX" },
-  { id: "access-removed", state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac" },
+  { id: "reconnecting", state: () => ({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 2, retryInMs: 500, trying: ["lan", "relay"] }), label: "Reconnecting", hint: /^Lost it 1[2-4] seconds ago$/,
+    status: "Reconnecting to Mac mini. Trying this network, then Relay. Sessions there keep running.", spins: true },
+  { id: "offline", state: { state: "offline", lastSeenAt: LAST_SEEN, retryInMs: 10_000 }, label: "Offline", sidebarLabel: "Offline · seen 14:02", hint: "Sessions there keep running",
+    status: "Mac mini is offline. Sessions there keep running." },
+  { id: "needs-update", state: { state: "needsUpdate", version: "0.2.27" }, label: "Needs update", hint: "Runs an older TerminalX", status: "Mac mini runs an older TerminalX. Update TerminalX there to connect." },
+  { id: "access-removed", state: { state: "accessRemoved" }, label: "Access removed", hint: "Revoked on that Mac", status: "Mac mini no longer allows this Mac. Pair again to reconnect." },
 ];
 
 const matches = (expected, actual) => (expected instanceof RegExp ? expected.test(actual ?? "") : expected === actual);
@@ -137,6 +146,12 @@ const measure = (page) =>
       chipLabel: chip ? chip.textContent.replace("Mac mini", "") : null,
       chipHint: chip?.getAttribute("title") ?? null,
       strip: rect(strip),
+      status: document.querySelector('[data-testid="workspace-connection-status"]')?.textContent ?? null,
+      mainText: document.querySelector('[data-testid="machine-main"]')?.textContent ?? "",
+      noTerminals: document.querySelector('[data-testid="workspace-no-terminals"]')?.textContent ?? null,
+      mark: chip?.querySelector('[data-testid="machine-state-mark"]')?.getAttribute("data-icon") ?? null,
+      sidebarMark: section?.querySelector('[data-testid="machine-state-mark"]')?.getAttribute("data-icon") ?? null,
+      macIcons: [section, chip, strip].map((node) => node?.querySelector("[data-icon]:not([data-testid])")?.getAttribute("data-icon") ?? ""),
       path: document.querySelector('[data-testid="machine-path"]')?.textContent ?? null,
       icons: [...document.querySelectorAll('[data-testid="machine-section"]')].map((node) => node.querySelector("[data-icon]")?.getAttribute("data-icon") ?? ""),
       texts: [...texts(section), ...texts(header), ...texts(strip)],
@@ -147,7 +162,7 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 
-for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], ["roomy", { width: 1280, height: 800 }]]) {
+for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], ["roomy", { width: 1440, height: 900 }]]) {
   for (const colorScheme of ["light", "dark"]) {
     const name = `${viewportName}, ${colorScheme}`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture(true), colorScheme });
@@ -162,6 +177,8 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
       const state = typeof expected.state === "function" ? expected.state() : expected.state;
       await page.evaluate(([id, next]) => window.__PW_MACHINE__(id, next), ["m-mini", state]);
       await page.locator(`[data-testid="machine-chip"][data-state="${state.state}"]`).waitFor();
+      // The view's own channel follows the machine's state a moment later.
+      if (expected.status) await page.locator('[data-testid="workspace-connection-status"]', { hasText: expected.status }).waitFor({ timeout: 5_000 }).catch(() => {});
       await page.waitForTimeout(50);
       const m = await measure(page);
       const inside = (inner, outer) => !!inner && !!outer && inner.left >= outer.left - SLACK && inner.right <= outer.right + SLACK;
@@ -180,6 +197,15 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
           "the chip is inside the header": inside(m.chip, m.header) && m.chip.top >= m.header.top - SLACK && m.chip.bottom <= m.header.bottom + SLACK,
           "the strip is under the header": !!m.strip && m.strip.top >= m.header.bottom - SLACK,
           "a Mac has a monitor and Linux a server": m.icons[0] === "monitor" && m.icons[1] === "server",
+          "the Mac's icon is the same in the sidebar, the chip and the strip": m.macIcons.every((icon) => icon === "monitor"),
+          "the strip is 36 px tall": !!m.strip && Math.abs(m.strip.height - 36) <= SLACK,
+          ...(expected.status ? { [`the view says: ${expected.status}`]: m.status === expected.status } : {}),
+          "the view never shows the transport's attempt counter": !/\(attempt \d+\)/.test(m.mainText),
+          "the status and the empty terminal area name the machine, not a workspace":
+            !/workspace/i.test(`${m.status ?? ""} ${m.noTerminals ?? ""}`) && (m.noTerminals === null || m.noTerminals.includes("Mac mini")),
+          ...(expected.spins
+            ? { "Connecting and Reconnecting turn an arc, not a burst": m.mark === "loader-circle" && m.sidebarMark === "loader-circle" }
+            : { "a settled state has a dot": m.mark === null && m.sidebarMark === null }),
           "no text is under 12 px": small.length === 0,
           "no UI text is mono": mono.length === 0,
         },

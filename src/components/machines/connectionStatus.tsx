@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Loader2, Lock, Monitor, Server } from "@/icons";
+import { LoaderCircle, Lock } from "@/icons";
 import { cn } from "@/lib/cn";
-import type { MachineConnectionState, MachineRouteUsed, PairedMachine } from "@/types/machines";
+import type { MachineConnectionState, MachineRouteKind, MachineRouteUsed, PairedMachine } from "@/types/machines";
+import { PlatformIcon } from "./machineText";
 
 /**
  * How a machine's connection reads (screens 21.01, 21.08 and 21.09): a short
@@ -29,9 +30,9 @@ export function machineTone(state: MachineConnectionState): MachineTone {
   }
 }
 
-/** "14:02" in the reader's locale. */
+/** "14:02": the 24-hour clock the screens use (21.09), whatever the reader's locale. */
 export function clockTime(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 /** The machine's last contact: the offline state's, else the record's. */
@@ -94,6 +95,38 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
   }
 }
 
+/** The routes a reconnect is trying, as the view says them (21.09): "Trying this network, then Relay." */
+function tryingText(trying: MachineRouteKind[]): string | null {
+  const direct = trying.some((kind) => kind !== "relay");
+  const relay = trying.includes("relay");
+  if (direct && relay) return "Trying this network, then Relay.";
+  if (direct) return "Trying this network.";
+  return relay ? "Trying Relay." : null;
+}
+
+/**
+ * What a machine's view says under its tabs while it is not connected (21.09).
+ * It reads the machine's own state, so it agrees with the chip and the
+ * sidebar: an offline machine is offline, with no transport retry counter.
+ */
+export function machineViewStatus(state: MachineConnectionState, name: string): string {
+  switch (state.state) {
+    case "reconnecting":
+      return [`Reconnecting to ${name}.`, tryingText(state.trying), "Sessions there keep running."].filter(Boolean).join(" ");
+    case "offline":
+      return `${name} is offline. Sessions there keep running.`;
+    case "needsUpdate":
+      return `${name} runs an older TerminalX. Update TerminalX there to connect.`;
+    case "accessRemoved":
+      return `${name} no longer allows this Mac. Pair again to reconnect.`;
+    case "idle":
+      return `Not connected to ${name}.`;
+    default:
+      // Connecting, or the link is up and the view's own channel is opening.
+      return `Connecting to ${name}…`;
+  }
+}
+
 /** "Direct over Tailscale", "Direct on this network" or "Through TerminalX Relay". */
 export function routeText(route: MachineRouteUsed): string {
   if (route.kind === "relay") return "Through TerminalX Relay";
@@ -132,20 +165,18 @@ export function toneText(tone: MachineTone): string {
   return TONE_TEXT[tone];
 }
 
-/** A dot for a settled state, a spinner while it is reaching the machine (21.09). */
+/** A dot for a settled state, an arc spinner in the state's colour while it is reaching the machine (21.09). */
 export function MachineStateMark({ state, className }: { state: MachineConnectionState; className?: string }) {
   const tone = machineTone(state);
   if (tone === "connecting" || tone === "reconnecting") {
-    return <Loader2 className={cn("size-3 shrink-0 animate-spin", TONE_TEXT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
+    return <LoaderCircle className={cn("size-3 shrink-0 animate-spin", TONE_TEXT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
   }
   return <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
 }
 
-/** A monitor for a Mac, a server for Linux (21.01). */
+/** A monitor for a Mac, a server for Linux (21.01): the same icon Settings draws. */
 export function MachineIcon({ machine, className }: { machine: PairedMachine | null; className?: string }) {
-  const linux = machine?.os.family === "linux";
-  const Icon = linux ? Server : Monitor;
-  return <Icon className={className} aria-hidden data-icon={linux ? "server" : "monitor"} />;
+  return <PlatformIcon platform={machine?.os.family ?? null} className={className} />;
 }
 
 /** Re-render every second while `on`, so "Lost it N seconds ago" counts. */
@@ -189,7 +220,7 @@ export function MachineChip({ machine, name, state }: { machine: PairedMachine |
 export function MachineLocation({ machine, name, state }: { machine: PairedMachine | null; name: string; state: MachineConnectionState }) {
   const path = machinePathText(state);
   return (
-    <div className="flex h-8 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on this Mac.`}>
+    <div className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on this Mac.`}>
       <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="shrink-0 font-medium text-foreground">Runs on {name}</span>
       <span className="min-w-0 truncate text-faint">· its files, terminals and git; this Mac can sleep</span>

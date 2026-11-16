@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy, Loader2, Plus } from "@/icons";
+import { Check, Copy, LoaderCircle, Plus } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { RegisteredSetting } from "@/components/settings/settingsRegistry";
@@ -12,7 +12,7 @@ import type { MachinePairingCode, PairedComputer, PairedMachine } from "@/types/
 import { AddMachineDialog } from "./AddMachineDialog";
 import { PlatformIcon, machineSummary, osLabel, shortDate, soft } from "./machineText";
 
-const heading = "text-[13px] font-medium";
+const heading = "text-[14px] font-semibold";
 const list = "mt-3 overflow-hidden rounded-lg border border-hairline";
 const row = "flex min-h-14 items-center gap-3 border-b border-hairline px-4 py-2 last:border-b-0";
 
@@ -30,7 +30,7 @@ export function MachinesSettings() {
 
   return (
     <div className="flex flex-col gap-6" data-testid="machines-settings">
-      <p className="text-[13px] text-muted-foreground">Operate TerminalX on your other computers from this Mac, or let them operate this one. Sessions, terminals and files stay on the computer that runs them.</p>
+      <p className="text-[13px] text-muted-foreground">Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.</p>
       <div>
         <RegisteredSetting
           setting="machines.allowOperating"
@@ -47,13 +47,6 @@ export function MachinesSettings() {
         {host.ready && view && !view.status && <p className="text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
         {view?.status?.error && <p role="alert" className="text-[12.5px] text-destructive">{view.status.error}</p>}
       </div>
-      {allow && (
-        <RegisteredSetting setting="machines.pairingCode">
-          <section>
-            <PairingCode />
-          </section>
-        </RegisteredSetting>
-      )}
       <RegisteredSetting setting="machines.yours">
         <section>
           <YourMachines />
@@ -65,6 +58,14 @@ export function MachinesSettings() {
           <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">
             Each has its own credential. Revoking one ends that credential and closes its connection. It does not undo what was already done through its terminals.
           </p>
+          {/* A code is how a computer joins this list, so it is made here, under Your machines (21.02). */}
+          {allow && (
+            <RegisteredSetting setting="machines.pairingCode">
+              <div className="mt-3">
+                <PairingCode />
+              </div>
+            </RegisteredSetting>
+          )}
           <ComputerList computers={view?.status?.computers ?? []} busy={host.busy} />
         </section>
       </RegisteredSetting>
@@ -108,16 +109,20 @@ function PairingCode() {
 
   return (
     <div className="grid gap-2">
-      <div className={heading}>Pairing code</div>
-      <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-        On the other computer, open Add a machine and paste this code. Allow it here only if both screens show the same fingerprint.
-      </p>
+      <div className="flex items-center gap-4">
+        <p className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-muted-foreground">
+          To add a computer, create a pairing code and paste it in Add a machine there. Allow it here only if both screens show the same fingerprint.
+        </p>
+        <Button className="shrink-0" size="sm" variant="outline" disabled={busy || paused || !status} onClick={() => void create()}>
+          {busy ? <LoaderCircle className="animate-spin" /> : null} {live ? "Create a new code" : "Create pairing code"}
+        </Button>
+      </div>
       {live && left > 0 && (
         <div className="grid gap-1.5" data-testid="machine-pairing-code">
           <code className="block break-all rounded-lg border border-hairline-strong bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px]">{live.code}</code>
           <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
             <span aria-live="polite">Expires in {minutesSeconds(left)} · works once</span>
-            <Button variant="ghost" size="xs" className="ml-auto" onClick={() => void copy()}>
+            <Button variant="ghost" size="sm" className="ml-auto" onClick={() => void copy()}>
               {copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy code"}
             </Button>
           </div>
@@ -130,9 +135,6 @@ function PairingCode() {
         <p role="status" className="text-[12.5px] text-warning">Pairing is paused after too many wrong codes. Try again in {minutesSeconds(pausedLeft)}.</p>
       )}
       {error && <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}
-      <Button className="justify-self-start" size="sm" variant="secondary" disabled={busy || paused || !status} onClick={() => void create()}>
-        {busy ? <Loader2 className="animate-spin" /> : null} {live ? "Create a new code" : "Create pairing code"}
-      </Button>
     </div>
   );
 }
@@ -157,12 +159,12 @@ function YourMachines() {
 
   return (
     <>
-      <div className="flex items-start gap-3">
-        <div className="min-w-0">
+      <div className="flex items-end gap-3">
+        <div className="min-w-0 flex-1">
           <div className={heading}>Your machines</div>
-          <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">Computers this Mac can operate.</p>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-muted-foreground">Computers this Mac can operate. Each one appears as a section in the sidebar.</p>
         </div>
-        <Button className="ml-auto shrink-0" size="sm" variant="secondary" onClick={() => setAdding(true)}>
+        <Button className="shrink-0" onClick={() => setAdding(true)}>
           <Plus /> Add a machine
         </Button>
       </div>
@@ -227,13 +229,13 @@ function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boole
           <span className="mr-auto min-w-0 text-[12.5px] text-muted-foreground">
             Ends {computer.label}’s credential and closes its connection. It does not undo what it already did on this Mac.
           </span>
-          <Button size="xs" variant="outline" onClick={() => setConfirming(false)}>Keep</Button>
-          <Button size="xs" variant="destructive" disabled={busy} onClick={() => void revokeComputer(computer.id).then(() => setConfirming(false))}>
+          <Button size="sm" variant="outline" onClick={() => setConfirming(false)}>Keep</Button>
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => void revokeComputer(computer.id).then(() => setConfirming(false))}>
             Revoke
           </Button>
         </div>
       ) : (
-        <Button size="xs" variant="ghost" className="shrink-0 text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
+        <Button size="sm" variant="ghost" className="shrink-0 text-[13px] text-destructive hover:text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
           Revoke
         </Button>
       )}

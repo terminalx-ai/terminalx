@@ -56,6 +56,20 @@ describe("Settings → Machines", () => {
     const computers = screen.getByRole("list", { name: "Computers that can operate this Mac" });
     expect(computers.textContent).toContain("Paresh’s MacBook Air");
     expect(computers.textContent).toContain("Connected now");
+    // A Mac has the icon the sidebar and the machine's view give it (PRO-398).
+    expect(yours.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
+    expect(computers.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
+  });
+
+  it("puts Add a machine beside Your machines as the page's primary button, and the pairing code under it with the computers (PRO-398)", async () => {
+    view = hostView({}, { computers: [computer()] });
+    render(<MachinesSettings />);
+    const create = await screen.findByRole("button", { name: "Create pairing code" });
+    const add = screen.getByRole("button", { name: "Add a machine" });
+    expect(add.className).toContain("bg-primary");
+    const yours = await screen.findByRole("list", { name: "Your machines" });
+    expect(yours.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId("machines-settings").textContent).toContain("Computers this Mac can operate. Each one appears as a section in the sidebar.");
   });
 
   it("turns operating on, then makes a pairing code that shows with its expiry", async () => {
