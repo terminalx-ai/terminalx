@@ -642,13 +642,14 @@ async fn connect_once(
 ) -> Result<()> {
     // The relay keeps one registration per host id: while the runtime
     // registers this Mac (PRO-368) the window uses that one, and registers
-    // itself only when the runtime does not.
+    // itself when the runtime does not, or has not for `RUNTIME_WAIT`.
+    let waiting_since = Instant::now();
     loop {
         match manager.runtime_relay() {
             super::machine_route::RuntimeRelay::Registered(registration) => {
                 return through_runtime(manager, context, retry, registration).await;
             }
-            super::machine_route::RuntimeRelay::Connecting => {
+            super::machine_route::RuntimeRelay::Connecting if waiting_since.elapsed() < RUNTIME_WAIT => {
                 tokio::select! {
                     _ = tokio::time::sleep(CONTROL_TICK) => {}
                     _ = manager.relay_retry.notified() => {}
@@ -656,6 +657,10 @@ async fn connect_once(
                 if manager.is_stopped() || manager.account_context().as_ref().map(|next| &next.user_id) != Some(&context.user_id) {
                     return Ok(());
                 }
+            }
+            super::machine_route::RuntimeRelay::Connecting => {
+                log::info!("the runtime has not registered with Relay; this window registers for its phones meanwhile");
+                break;
             }
             super::machine_route::RuntimeRelay::Off => break,
         }
@@ -712,6 +717,11 @@ async fn register_window(
         .await
         .context(Stage::ControlSession)
 }
+
+/// How long the window waits for the runtime's first relay registration
+/// before registering itself. The runtime's registration retires the
+/// window's when it comes.
+const RUNTIME_WAIT: Duration = Duration::from_secs(30);
 
 /// Use the runtime's registration (PRO-368) as the window's own: phone
 /// invites, credential installs and revocations go over the runtime's control
@@ -770,29 +780,24 @@ async fn through_runtime(
 /// One control request through the runtime's registration, answered as on
 /// the window's own (`control_loop`).
 async fn forward_to_runtime(manager: Arc<PairingManager>, command: ControlCommand) {
+    let Some(frame) = runtime_frame(&command) else { return };
+    let reply = runtime_request(&manager, frame).await;
+    answer_from_runtime(command, reply);
+}
+
+/// The relay control frame for `command`, as `control_loop` sends it.
+fn runtime_frame(command: &ControlCommand) -> Option<serde_json::Value> {
     let new_req_id = || uuid::Uuid::new_v4().simple().to_string();
-    match command {
-        ControlCommand::CreateInvite { device_id, share_expires_at, respond } => {
+    Some(match command {
+        ControlCommand::CreateInvite { device_id, share_expires_at, .. } => {
             let mut frame = serde_json::json!({ "type": "invite-create", "reqId": new_req_id(), "relayDeviceId": device_id });
             if let Some(expires_at) = share_expires_at {
                 frame["sessionShare"] = serde_json::json!({ "expiresAt": expires_at });
             }
-            let invite = runtime_request(&manager, frame).await.and_then(|reply| {
-                let invite: InviteCreated = serde_json::from_value(reply)?;
-                if invite.kind != "invite-created" || !valid_opaque_id(&invite.req_id) || !valid_base64url_32(&invite.invite_token) || invite.expires_at <= now_ms() || invite.max_attempts == 0 || invite.max_attempts > 16 {
-                    bail!("invalid relay invite response");
-                }
-                Ok(invite)
-            });
-            let _ = respond.send(invite);
+            frame
         }
-        ControlCommand::Revoke { device_id } => {
-            let frame = serde_json::json!({ "type": "device-revoke", "reqId": new_req_id(), "relayDeviceId": device_id });
-            if let Err(error) = runtime_request(&manager, frame).await {
-                log::warn!("could not revoke a phone's relay credential through the runtime: {error:#}");
-            }
-        }
-        ControlCommand::InstallCredential { req_id, relay_device_id, new_resume_token_hash, expected_current_hash, authorization, respond } => {
+        ControlCommand::Revoke { device_id } => serde_json::json!({ "type": "device-revoke", "reqId": new_req_id(), "relayDeviceId": device_id }),
+        ControlCommand::InstallCredential { req_id, relay_device_id, new_resume_token_hash, expected_current_hash, authorization, .. } => {
             let mut frame = serde_json::json!({
                 "type": "device-credential-install",
                 "v": 1,
@@ -802,32 +807,64 @@ async fn forward_to_runtime(manager: Arc<PairingManager>, command: ControlComman
                 "authorization": authorization,
             });
             if let Some(expected) = expected_current_hash {
-                frame["expectedCurrentHash"] = serde_json::Value::String(expected);
+                frame["expectedCurrentHash"] = serde_json::Value::String(expected.clone());
             }
-            let installed = runtime_request(&manager, frame).await.and_then(|reply| {
+            frame
+        }
+        ControlCommand::CredentialInstallStatus { req_id, relay_device_id, .. } => {
+            serde_json::json!({ "type": "device-credential-install-status", "v": 1, "reqId": req_id, "relayDeviceId": relay_device_id })
+        }
+        ControlCommand::ConfirmResume { req_id, basis_conn_id, .. } => {
+            serde_json::json!({ "type": "device-resume-confirm", "v": 1, "reqId": req_id, "basisConnId": basis_conn_id })
+        }
+        ControlCommand::Shutdown => return None,
+    })
+}
+
+/// Answer `command` with the relay's `reply` through the runtime, checked as
+/// `control_loop` checks its own. `control-error` fails it.
+fn answer_from_runtime(command: ControlCommand, reply: Result<serde_json::Value>) {
+    let reply = reply.and_then(|reply| {
+        if reply["type"] == "control-error" {
+            bail!("Relay could not complete the request. Please retry.");
+        }
+        Ok(reply)
+    });
+    match command {
+        ControlCommand::CreateInvite { respond, .. } => {
+            let _ = respond.send(reply.and_then(|reply| {
+                let invite: InviteCreated = serde_json::from_value(reply)?;
+                if invite.kind != "invite-created" || !valid_opaque_id(&invite.req_id) || !valid_base64url_32(&invite.invite_token) || invite.expires_at <= now_ms() || invite.max_attempts == 0 || invite.max_attempts > 16 {
+                    bail!("invalid relay invite response");
+                }
+                Ok(invite)
+            }));
+        }
+        ControlCommand::Revoke { .. } => {
+            if let Err(error) = reply {
+                log::warn!("could not revoke a phone's relay credential through the runtime: {error:#}");
+            }
+        }
+        ControlCommand::InstallCredential { respond, .. } => {
+            let _ = respond.send(reply.and_then(|reply| {
                 let installed: CredentialInstalled = serde_json::from_value(reply)?;
                 validate_installed(&installed, true)?;
                 Ok(installed)
-            });
-            let _ = respond.send(installed);
+            }));
         }
-        ControlCommand::CredentialInstallStatus { req_id, relay_device_id, respond } => {
-            let frame = serde_json::json!({ "type": "device-credential-install-status", "v": 1, "reqId": req_id, "relayDeviceId": relay_device_id });
-            let status = runtime_request(&manager, frame).await.and_then(|reply| {
+        ControlCommand::CredentialInstallStatus { respond, .. } => {
+            let _ = respond.send(reply.and_then(|reply| {
                 let status: CredentialInstallStatus = serde_json::from_value(reply)?;
                 validate_install_status(&status)?;
                 Ok(status)
-            });
-            let _ = respond.send(status);
+            }));
         }
-        ControlCommand::ConfirmResume { req_id, basis_conn_id, respond } => {
-            let frame = serde_json::json!({ "type": "device-resume-confirm", "v": 1, "reqId": req_id, "basisConnId": basis_conn_id });
-            let confirmed = runtime_request(&manager, frame).await.and_then(|reply| {
+        ControlCommand::ConfirmResume { respond, .. } => {
+            let _ = respond.send(reply.and_then(|reply| {
                 let confirmed: ResumeConfirmed = serde_json::from_value(reply)?;
                 validate_resume_confirmed(&confirmed)?;
                 Ok(confirmed)
-            });
-            let _ = respond.send(confirmed);
+            }));
         }
         ControlCommand::Shutdown => {}
     }
@@ -836,11 +873,7 @@ async fn forward_to_runtime(manager: Arc<PairingManager>, command: ControlComman
 /// Send `frame` on the runtime's registration and wait for the relay's reply.
 async fn runtime_request(manager: &PairingManager, frame: serde_json::Value) -> Result<serde_json::Value> {
     let runtime = manager.runtime.lock().unwrap().clone().ok_or_else(|| anyhow!("relay control is offline"))?;
-    let reply = tauri::async_runtime::spawn_blocking(move || runtime.relay_control(frame)).await??;
-    if reply["type"] == "control-error" {
-        bail!("Relay could not complete the request. Please retry.");
-    }
-    Ok(reply)
+    tauri::async_runtime::spawn_blocking(move || runtime.relay_control(frame)).await?
 }
 
 type ControlSocket =

@@ -56,6 +56,9 @@ pub enum Ended {
     /// A newer runtime process for this machine was issued a generation.
     /// This process never serves through the relay again.
     Superseded,
+    /// Another account binds this machine (`409 host_binding_owner_conflict`):
+    /// asking again changes nothing until that account lets it go.
+    OwnerConflict,
 }
 
 /// Whether this build may register with the relay. A release build always
@@ -125,6 +128,7 @@ impl AccountLink {
         log::info!("machine relay: {}", match ended {
             Ended::SignedOut => "signed out; not registering with the relay",
             Ended::Superseded => "a newer runtime process serves this machine; this one stops serving through the relay",
+            Ended::OwnerConflict => "another account binds this machine; not registering with the relay",
         });
         Revoked.into()
     }
@@ -182,8 +186,11 @@ impl AccountLink {
         };
         match answer {
             Ok(grant) => Ok(grant),
-            Err(error) if error.downcast_ref::<RelaySessionRefused>() == Some(&RelaySessionRefused::Superseded) => Err(self.end(Ended::Superseded)),
-            Err(error) => Err(error),
+            Err(error) => match error.downcast_ref::<RelaySessionRefused>() {
+                Some(RelaySessionRefused::Superseded) => Err(self.end(Ended::Superseded)),
+                Some(RelaySessionRefused::OwnerConflict) => Err(self.end(Ended::OwnerConflict)),
+                _ => Err(error),
+            },
         }
     }
 }
@@ -194,7 +201,7 @@ impl RuntimeLink for AccountLink {
     }
 
     fn session(&self) -> Result<RelaySession> {
-        if self.ended() == Some(Ended::Superseded) {
+        if matches!(self.ended(), Some(Ended::Superseded | Ended::OwnerConflict)) {
             return Err(Revoked.into());
         }
         let session = self.fresh_session()?;
@@ -355,6 +362,19 @@ mod tests {
         let keypair = HostKeypair::from_secret([7; 32]);
         assert_eq!(seen[0].1["relayHostId"], keypair.host_id());
         assert_eq!(seen[0].1["hostPublicKeyB64"], keypair.public_key_b64());
+    }
+
+    #[test]
+    fn a_machine_another_account_binds_ends_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        machine_account::save(dir.path(), &session("u1", "one", now_ms() + 1_800_000)).unwrap();
+        let (base, _, handle) = service(vec![(409, json!({ "error": "host_binding_owner_conflict" }))]);
+        let link = AccountLink::with_api(dir.path().into(), [7; 32], None, Api::new(&base));
+        assert!(link.session().err().unwrap().is::<Revoked>());
+        assert_eq!(link.ended(), Some(Ended::OwnerConflict));
+        // It does not ask again: the service answers only once.
+        assert!(link.session().err().unwrap().is::<Revoked>());
+        handle.join().unwrap();
     }
 
     #[test]

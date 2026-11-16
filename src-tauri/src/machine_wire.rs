@@ -118,8 +118,13 @@ pub enum RelayState {
     Off,
     /// The switch is on and nobody is signed in on this machine.
     SignedOut,
-    /// Registering, or registering again after a lost connection.
+    /// Making its first registration. The window waits a while for it
+    /// rather than take the host id from it.
     Connecting,
+    /// Its registration was lost or refused, and it is trying again. The
+    /// window registers itself meanwhile; the runtime's next registration
+    /// retires the window's.
+    Retrying,
     /// Registered: [`Status::relay`] says where.
     Registered,
     /// A newer runtime process for this machine took the relay; this one

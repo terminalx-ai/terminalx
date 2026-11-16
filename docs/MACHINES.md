@@ -1335,8 +1335,14 @@ device to the window's phone route, as PRO-341 built. Its link is
   window register again at once.
 - A debug build registers only with `TERMINALX_DEV_RELAY_DIRECTOR_URL` set, and
   then with that director, never production's, as the window does.
+- `409 host_binding_owner_conflict` (another account binds this machine) ends
+  the link too; the runtime asks again for that account after 10 minutes, or
+  at once for another account. The window registers itself meanwhile.
+- Every other failure (the API or relay unreachable, a refresh the window
+  could not make) is retried with the host's backoff.
 - The registration is in the status (`machine_wire::Status`): `relayState`
-  (`off`, `signedOut`, `connecting`, `registered`, `superseded`) and, while
+  (`off`, `signedOut`, `connecting` for the first registration, `retrying`
+  after one was lost or refused, `registered`, `superseded`) and, while
   registered, `relay` (`relayHostId`, `directorUrl`, `cellUrl`,
   `assignmentEpoch`, `generation`, `runtimeGeneration`). An older runtime says
   neither, which reads as `off`.
@@ -1370,9 +1376,12 @@ presented again (`desktopTokens.ts`), so:
 
 **The window's phones.** The relay keeps one registration per host id: the
 generation-fenced runtime retires the window's (`4101`), and refuses the window
-while its own control socket is open. So while the runtime is `connecting` or
-`registered` the window does not register itself (`pairing/relay.rs`,
-`connect_once`). While it is `registered`, the window uses that registration as
+while its own control socket is open. So while the runtime is `registered` the
+window does not register itself, and while it is `connecting` the window waits
+up to 30 s for it (`pairing/relay.rs`, `connect_once`, `RUNTIME_WAIT`). When
+the runtime is `retrying`, or `connecting` for longer, the window registers
+for its phones as before; the runtime's registration retires the window's
+when it comes, and the window then uses it. While it is `registered`, the window uses that registration as
 its own: a `RelayLive` whose control requests (`invite-create`, with
 `sessionShare` for a shared session, `device-revoke`,
 `device-credential-install`, `device-credential-install-status`,
@@ -1893,8 +1902,15 @@ which runs in a child process because data privacy is one switch per process.
   would need someone to answer a prompt after a reboot; a file the window and
   the runtime share under one lock is also what keeps a rotating refresh
   token from being presented twice. Any process of the same user can read it,
-  as it can use the user's other credentials on disk. It exists only while
-  the switch is on and someone is signed in.
+  as it can use the user's other credentials on disk; that includes the
+  agents TerminalX starts, which run as the user and could mint access
+  tokens for the account from it. The Keychain item is guarded by its access
+  list, which makes macOS ask before another program reads it; the file has
+  no such guard. That is the cost of a runtime that serves with the window
+  closed: it cannot answer a Keychain prompt, and a second Keychain item it
+  could read would need one after every reboot. The file exists only while
+  the switch is on and someone is signed in, and signing out ends the
+  session it holds on the server, so a copy taken earlier stops working.
 - **An expired computer's account grant** ends when the operating computer
   removes the machine, as it is asked to on "Access removed"; the machine ends
   its connections and relay credential itself.

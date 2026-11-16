@@ -17,11 +17,13 @@ pub mod registry;
 mod pairing_tests;
 #[cfg(all(test, feature = "desktop"))]
 mod security_tests;
+#[cfg(test)]
+mod relay_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -164,6 +166,79 @@ struct State {
     /// for (`409 machine_runtime_superseded`). It does not register for it
     /// again; another account it would.
     relay_superseded: Option<String>,
+    /// The account the relay session was refused for because another
+    /// account binds this machine (`409 host_binding_owner_conflict`), and
+    /// when. Asked again after [`RELAY_REFUSED_RETRY`].
+    relay_refused: Option<(String, Instant)>,
+}
+
+/// How long a machine another account binds waits before asking again.
+const RELAY_REFUSED_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// Why a running relay registration stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayStop {
+    Superseded,
+    OwnerConflict,
+    SignedOut,
+    HostKeyChanged,
+    AnotherAccount,
+}
+
+impl RelayStop {
+    fn why(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::OwnerConflict => "another account binds this machine",
+            Self::SignedOut => "signed out",
+            Self::HostKeyChanged => "host key changed",
+            Self::AnotherAccount => "another account signed in",
+        }
+    }
+}
+
+/// Whether a running registration stops on this pass. `registered_host`:
+/// the host id it registered as; `key_host`: the host key's now. `user`: the
+/// account it registered for; `saved`: on a read pass, the account in the
+/// session file (`Some(None)` when there is none), else `None`.
+fn running_relay_stop(ended: Option<crate::remote::account_link::Ended>, registered_host: &str, key_host: &str, user: Option<&str>, saved: Option<Option<&str>>) -> Option<RelayStop> {
+    use crate::remote::account_link::Ended;
+    match ended {
+        Some(Ended::Superseded) => Some(RelayStop::Superseded),
+        Some(Ended::OwnerConflict) => Some(RelayStop::OwnerConflict),
+        Some(Ended::SignedOut) => Some(RelayStop::SignedOut),
+        // A key adopted from the window replaced the one it registered with.
+        None if registered_host != key_host => Some(RelayStop::HostKeyChanged),
+        // The link reads the session only when it renews its token, up to an
+        // hour apart: signing out, or another account signing in, ends the
+        // registration at the next read pass.
+        None => match saved {
+            Some(None) => Some(RelayStop::SignedOut),
+            Some(Some(saved)) if user.is_some_and(|user| user != saved) => Some(RelayStop::AnotherAccount),
+            _ => None,
+        },
+    }
+}
+
+/// Whether to register for `user`: not after a newer process superseded
+/// this one for it, nor soon after another account's binding refused it.
+fn may_register(user: &str, superseded: Option<&str>, refused: Option<(&str, Instant)>, now: Instant) -> bool {
+    superseded != Some(user) && !refused.is_some_and(|(refused, at)| refused == user && now.duration_since(at) < RELAY_REFUSED_RETRY)
+}
+
+/// A running registration that is not registered, as the status says it.
+/// `retrying`: it registered or tried before, and lost or was refused it.
+fn unregistered_relay_state(ended: Option<crate::remote::account_link::Ended>, host: &crate::remote::host::HostStatus) -> wire::RelayState {
+    use crate::remote::account_link::Ended;
+    use crate::remote::host::HostStatus;
+    match (ended, host) {
+        (Some(Ended::Superseded), _) => wire::RelayState::Superseded,
+        (Some(Ended::SignedOut), _) | (None, HostStatus::Revoked) => wire::RelayState::SignedOut,
+        // Stopping at the next pass; the window need not wait for it.
+        (Some(Ended::OwnerConflict), _) => wire::RelayState::Off,
+        (None, HostStatus::Connecting) => wire::RelayState::Connecting,
+        (None, HostStatus::Retrying { .. } | HostStatus::Fenced { .. } | HostStatus::Registered { .. }) => wire::RelayState::Retrying,
+    }
 }
 
 /// The machine's own relay registration from the signed-in account (PRO-368).
@@ -442,7 +517,6 @@ impl MachineHost {
     /// The relay registration as the status says it. Takes the
     /// `account_relay` lock under the state lock: never the other way round.
     fn relay_view(&self, state: &State) -> (wire::RelayState, Option<wire::RelayRegistration>) {
-        use crate::remote::host::HostStatus;
         let registration = |host: &crate::remote::host::RelayHost| {
             host.registration().map(|registration| wire::RelayRegistration {
                 relay_host_id: registration.relay_host_id,
@@ -457,11 +531,7 @@ impl MachineHost {
             if let Some(registration) = registration(&relay.host) {
                 return (wire::RelayState::Registered, Some(registration));
             }
-            return match (relay.link.ended(), &*relay.host.status().borrow()) {
-                (Some(crate::remote::account_link::Ended::Superseded), _) => (wire::RelayState::Superseded, None),
-                (Some(crate::remote::account_link::Ended::SignedOut), _) | (None, HostStatus::Revoked) => (wire::RelayState::SignedOut, None),
-                _ => (wire::RelayState::Connecting, None),
-            };
+            return (unregistered_relay_state(relay.link.ended(), &relay.host.status().borrow()), None);
         }
         if !state.enabled || !self.account_relay_allowed {
             return (wire::RelayState::Off, None);
@@ -581,35 +651,27 @@ impl MachineHost {
         };
         let running = self.account_relay.lock().unwrap().as_ref().map(|relay| (relay.link.ended(), relay.link.user_id(), relay.host.relay_host_id()));
         if let Some((ended, user, host_id)) = running {
-            match ended {
-                Some(crate::remote::account_link::Ended::Superseded) => {
-                    self.state.lock().unwrap().relay_superseded = user;
-                    self.stop_relay("superseded");
+            let saved = if read && ended.is_none() {
+                let data_dir = self.data_dir.clone();
+                match tokio::task::spawn_blocking(move || crate::machine_account::load(&data_dir)).await {
+                    Ok(Ok(session)) => Some(session.map(|session| session.cloud.user_id)),
+                    _ => None,
                 }
-                Some(crate::remote::account_link::Ended::SignedOut) => {
-                    self.state.lock().unwrap().relay_signed_out = true;
-                    self.stop_relay("signed out");
-                }
-                // A key adopted from the window replaced the one it registered with.
-                None if host_id != HostKeypair::from_secret(secret).host_id() => self.stop_relay("host key changed"),
-                // The link reads the session only when it renews its token,
-                // up to an hour apart: signing out, or another account
-                // signing in, ends the registration at the next read pass.
-                None if read => {
-                    let data_dir = self.data_dir.clone();
-                    let saved = tokio::task::spawn_blocking(move || crate::machine_account::load(&data_dir)).await;
-                    match saved {
-                        Ok(Ok(None)) => {
-                            self.state.lock().unwrap().relay_signed_out = true;
-                            self.stop_relay("signed out");
-                        }
-                        Ok(Ok(Some(session))) if user.as_deref().is_some_and(|user| user != session.cloud.user_id) => {
-                            self.stop_relay("another account signed in");
-                        }
-                        _ => {}
+            } else {
+                None
+            };
+            let stop = running_relay_stop(ended, &host_id, &HostKeypair::from_secret(secret).host_id(), user.as_deref(), saved.as_ref().map(Option::as_deref));
+            if let Some(stop) = stop {
+                {
+                    let mut state = self.state.lock().unwrap();
+                    match stop {
+                        RelayStop::Superseded => state.relay_superseded = user,
+                        RelayStop::OwnerConflict => state.relay_refused = user.map(|user| (user, Instant::now())),
+                        RelayStop::SignedOut => state.relay_signed_out = true,
+                        RelayStop::HostKeyChanged | RelayStop::AnotherAccount => {}
                     }
                 }
-                None => {}
+                self.stop_relay(stop.why());
             }
             return;
         }
@@ -633,10 +695,12 @@ impl MachineHost {
         {
             let mut state = self.state.lock().unwrap();
             state.relay_signed_out = false;
-            if state.relay_superseded.as_deref() == Some(user.as_str()) {
+            let refused = state.relay_refused.as_ref().map(|(user, at)| (user.as_str(), *at));
+            if !may_register(&user, state.relay_superseded.as_deref(), refused, Instant::now()) {
                 return;
             }
             state.relay_superseded = None;
+            state.relay_refused = None;
         }
         self.start_relay(secret, rpc);
     }

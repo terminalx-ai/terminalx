@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -389,6 +389,19 @@ pub struct RelayHost {
 const FORWARDED_REQUESTS: &[&str] = &["invite-create", "device-revoke", "device-credential-install", "device-credential-install-status", "device-resume-confirm"];
 
 /// The relay's replies to them, each naming the request's `reqId`.
+/// How long a forwarded request waits for the relay's reply. The window's
+/// caller gives up after 15 s (`RELAY_CONTROL_WAIT` in machine_host.rs); a
+/// later reply has nobody to go to.
+const FORWARDED_TTL: Duration = Duration::from_secs(20);
+
+/// Requests the window made through this registration, by `reqId`.
+type Forwarded = HashMap<String, (std::sync::mpsc::Sender<Result<Value>>, Instant)>;
+
+/// Forget forwarded requests the relay has not answered in [`FORWARDED_TTL`].
+fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
+    forwarded.retain(|_, (_, sent)| now.saturating_duration_since(*sent) < FORWARDED_TTL);
+}
+
 const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
 
 /// A live registration, as the window needs it to use it (PRO-368).
@@ -824,8 +837,9 @@ impl RelayHost {
     ) -> Result<()> {
         let mut invites = HashMap::<String, oneshot::Sender<Result<(String, i64)>>>::new();
         let mut installs = HashMap::<String, oneshot::Sender<Result<Value>>>::new();
-        let mut forwarded = HashMap::<String, std::sync::mpsc::Sender<Result<Value>>>::new();
+        let mut forwarded = Forwarded::new();
         loop {
+            forget_unanswered(&mut forwarded, Instant::now());
             tokio::select! {
                 command = commands.recv() => {
                     let Some(command) = command else { return Ok(()) };
@@ -853,7 +867,7 @@ impl RelayHost {
                                 continue;
                             }
                             socket.send(Message::Text(frame.to_string().into())).await?;
-                            forwarded.insert(req_id, respond);
+                            forwarded.insert(req_id, (respond, Instant::now()));
                         }
                         ControlCommand::InstallCredential { payload, req_id, respond } => {
                             if installs.contains_key(&req_id) || forwarded.contains_key(&req_id) {
@@ -885,7 +899,7 @@ impl RelayHost {
                     let message: Value = serde_json::from_str(&text)?;
                     // A reply to a request the window made through this registration.
                     if FORWARDED_REPLIES.contains(&message["type"].as_str().unwrap_or_default()) {
-                        if let Some(respond) = message["reqId"].as_str().and_then(|req_id| forwarded.remove(req_id)) {
+                        if let Some((respond, _)) = message["reqId"].as_str().and_then(|req_id| forwarded.remove(req_id)) {
                             let _ = respond.send(Ok(message));
                             continue;
                         }
@@ -1670,6 +1684,86 @@ mod tests {
         assert!(host.admit("relay-desk", "desk-token", "another-key", refused).await.is_err(), "its token from another key");
         host.close_all_connections();
         assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
+    }
+
+    /// A link for tests that never asks the API.
+    struct NoLink;
+    impl RuntimeLink for NoLink {
+        fn host_secret(&self) -> [u8; 32] {
+            [3; 32]
+        }
+        fn session(&self) -> Result<RelaySession> {
+            bail!("not in this test")
+        }
+        fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn complete_revocation(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// PRO-368: the window's relay requests go out on the runtime's control
+    /// connection, and each reply goes back to the request with its `reqId`,
+    /// `control-error` included; other requests' replies do not.
+    #[tokio::test]
+    async fn a_forwarded_request_gets_the_relays_reply_to_its_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/host/control", listener.local_addr().unwrap());
+        let (sent, mut relay_saw) = mpsc::unbounded_channel::<Value>();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let frame: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            sent.send(frame.clone()).unwrap();
+            // Another request's reply first: it is not this one's answer.
+            socket.send(Message::Text(json!({ "type": "control-error", "reqId": "req-other", "code": "invalid" }).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({ "type": "invite-created", "reqId": frame["reqId"], "inviteToken": "t", "expiresAt": 1, "maxAttempts": 3 }).to_string().into())).await.unwrap();
+            let revoke: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            sent.send(revoke.clone()).unwrap();
+            socket.send(Message::Text(json!({ "type": "control-error", "reqId": revoke["reqId"], "code": "not_found" }).to_string().into())).await.unwrap();
+            // Held open until the test ends.
+            let _ = socket.next().await;
+        });
+        let (mut socket, _) = crate::data_privacy::connect(url.as_str(), None, true).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(NoLink), rpc, None);
+        assert!(host.forward_control(json!({ "type": "invite-create", "reqId": "req-1" })).is_err(), "offline before it registers");
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let live = Live { commands, cell_url: "ws://cell".into(), assignment_epoch: 1, relay_generation: 1 };
+        *host.registered.lock().unwrap() = Some((live.clone(), "http://director".into()));
+        // Only the window's control requests, each with its own id.
+        assert!(host.forward_control(json!({ "type": "conn-accept", "reqId": "req-1" })).is_err());
+        assert!(host.forward_control(json!({ "type": "invite-create" })).is_err());
+        let invite = host.forward_control(json!({ "type": "invite-create", "reqId": "req-1", "relayDeviceId": "phone-1" })).unwrap();
+        let duplicate = host.forward_control(json!({ "type": "invite-create", "reqId": "req-1", "relayDeviceId": "phone-2" })).unwrap();
+        let control = host.clone();
+        let running = tokio::spawn(async move { control.control_loop(&mut socket, &mut command_rx, &live).await });
+        let wait = |receive: std::sync::mpsc::Receiver<Result<Value>>| tokio::task::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(10)).unwrap());
+        assert!(wait(duplicate).await.unwrap().is_err(), "a second request with a pending id is refused");
+        let frame = relay_saw.recv().await.unwrap();
+        assert_eq!(frame["relayDeviceId"], "phone-1");
+        let reply = wait(invite).await.unwrap().unwrap();
+        assert_eq!((reply["type"].as_str(), reply["reqId"].as_str()), (Some("invite-created"), Some("req-1")));
+        let revoke = host.forward_control(json!({ "type": "device-revoke", "reqId": "req-2", "relayDeviceId": "phone-1" })).unwrap();
+        assert_eq!(relay_saw.recv().await.unwrap()["type"], "device-revoke");
+        let reply = wait(revoke).await.unwrap().unwrap();
+        assert_eq!((reply["type"].as_str(), reply["code"].as_str()), (Some("control-error"), Some("not_found")));
+        running.abort();
+        relay.abort();
+    }
+
+    #[test]
+    fn unanswered_forwarded_requests_are_forgotten() {
+        let sent = Instant::now();
+        let mut forwarded = Forwarded::new();
+        let (respond, _receive) = std::sync::mpsc::channel();
+        forwarded.insert("req-1".into(), (respond, sent));
+        forget_unanswered(&mut forwarded, sent + Duration::from_secs(5));
+        assert!(forwarded.contains_key("req-1"), "still waiting for the relay");
+        forget_unanswered(&mut forwarded, sent + FORWARDED_TTL);
+        assert!(forwarded.is_empty(), "nobody waits for it after the window gave up");
     }
 
     #[test]

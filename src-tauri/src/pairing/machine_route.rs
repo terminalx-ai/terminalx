@@ -56,11 +56,25 @@ pub(super) struct MachineSide {
 pub(super) enum RuntimeRelay {
     /// The runtime does not register this Mac: the window registers itself.
     Off,
-    /// The runtime is registering: the window waits rather than take the
-    /// host id from it, which the relay would only close again.
+    /// The runtime is making its first registration: the window waits a
+    /// while ([`super::relay`]'s `RUNTIME_WAIT`) rather than take the host id
+    /// from it, which the relay would only close again.
     Connecting,
     /// The window uses this registration for its phones.
     Registered(wire::RelayRegistration),
+}
+
+/// What the window does about the runtime's relay registration in `status`.
+/// A runtime that lost or was refused its registration (`retrying`) is not
+/// waited for: the window registers itself until the runtime's registration
+/// retires it.
+fn runtime_relay(status: Option<&Status>) -> RuntimeRelay {
+    let Some(status) = status.filter(|status| status.enabled) else { return RuntimeRelay::Off };
+    match (status.relay_state, &status.relay) {
+        (wire::RelayState::Registered, Some(registration)) => RuntimeRelay::Registered(registration.clone()),
+        (wire::RelayState::Registered | wire::RelayState::Connecting, _) => RuntimeRelay::Connecting,
+        (wire::RelayState::Off | wire::RelayState::SignedOut | wire::RelayState::Retrying | wire::RelayState::Superseded, _) => RuntimeRelay::Off,
+    }
 }
 
 impl MachineSide {
@@ -69,12 +83,7 @@ impl MachineSide {
     }
 
     fn runtime_relay(&self) -> RuntimeRelay {
-        let Some(status) = self.status.as_ref().filter(|status| status.enabled) else { return RuntimeRelay::Off };
-        match (status.relay_state, &status.relay) {
-            (wire::RelayState::Registered, Some(registration)) => RuntimeRelay::Registered(registration.clone()),
-            (wire::RelayState::Registered | wire::RelayState::Connecting, _) => RuntimeRelay::Connecting,
-            _ => RuntimeRelay::Off,
-        }
+        runtime_relay(self.status.as_ref())
     }
 
     /// Take no more phones from the runtime.
@@ -375,5 +384,47 @@ mod tests {
         assert!(side.runtime_owns_direct(), "on, even before its listener is bound");
         side.status = Some(Status { takes_port: false, host_key: HostKeyState::Error, ..status(true) });
         assert!(!side.runtime_owns_direct(), "on, but it cannot listen: the window keeps the port");
+    }
+
+    /// PRO-368: the window uses the runtime's relay registration while it is
+    /// registered, waits for a first one, and registers itself otherwise.
+    #[test]
+    fn the_window_follows_the_runtimes_relay_registration() {
+        let registration = wire::RelayRegistration {
+            relay_host_id: "host".into(),
+            director_url: "https://director".into(),
+            cell_url: "wss://cell".into(),
+            assignment_epoch: 3,
+            generation: 2,
+            runtime_generation: 7,
+        };
+        let status = |enabled, relay_state, relay: Option<wire::RelayRegistration>| Status {
+            enabled,
+            host_key: HostKeyState::Ready,
+            machine_id: None,
+            listening: None,
+            takes_port: enabled,
+            phone_route: false,
+            computers: vec![],
+            error: None,
+            pending: None,
+            code: None,
+            paused_until: None,
+            relay_state,
+            relay,
+        };
+        assert_eq!(runtime_relay(None), RuntimeRelay::Off, "no runtime said anything");
+        assert_eq!(
+            runtime_relay(Some(&status(true, wire::RelayState::Registered, Some(registration.clone())))),
+            RuntimeRelay::Registered(registration.clone())
+        );
+        assert_eq!(runtime_relay(Some(&status(true, wire::RelayState::Connecting, None))), RuntimeRelay::Connecting);
+        // Registered, but its registration is not in the status yet.
+        assert_eq!(runtime_relay(Some(&status(true, wire::RelayState::Registered, None))), RuntimeRelay::Connecting);
+        for state in [wire::RelayState::Off, wire::RelayState::SignedOut, wire::RelayState::Retrying, wire::RelayState::Superseded] {
+            assert_eq!(runtime_relay(Some(&status(true, state, None))), RuntimeRelay::Off, "{state:?}: the window registers itself");
+        }
+        // Switched off: whatever it last said about the relay.
+        assert_eq!(runtime_relay(Some(&status(false, wire::RelayState::Registered, Some(registration)))), RuntimeRelay::Off);
     }
 }
