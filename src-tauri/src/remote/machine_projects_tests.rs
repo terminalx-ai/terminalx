@@ -85,6 +85,8 @@ fn browse_never_leaves_home() {
     assert_eq!(code(browse(&home.path(), &json!({ "path": s(outside.path()) }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": format!("{}/..", s(&home.path())) }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "/" }))), "path_forbidden");
+    // Outside home, a missing path is refused as one that exists: the answer never says which.
+    assert_eq!(code(browse(&home.path(), &json!({ "path": s(&outside.path().join("missing")) }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "work" }))), "invalid_params", "relative");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "" }))), "invalid_params");
     assert_eq!(code(browse(&home.path(), &json!({ "path": 7 }))), "invalid_params");

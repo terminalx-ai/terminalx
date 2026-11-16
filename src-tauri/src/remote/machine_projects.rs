@@ -43,9 +43,13 @@ pub fn resolve_folder(home: &Path, path: Option<&str>) -> Result<PathBuf, RpcErr
     if path.is_empty() || !Path::new(path).is_absolute() {
         return Err(RpcError::invalid("path must be absolute"));
     }
-    let resolved = std::fs::canonicalize(path).map_err(|_| RpcError::not_found(format!("{path} does not exist")))?;
+    let forbidden = || RpcError::new("path_forbidden", format!("{path} is outside {}", home.display()));
+    // A path that does not exist is `not_found` only under home: outside it,
+    // the answer must not say whether something is there.
+    let under_home = Path::new(path).starts_with(home) || dirs::home_dir().is_some_and(|raw| Path::new(path).starts_with(raw));
+    let resolved = std::fs::canonicalize(path).map_err(|_| if under_home { RpcError::not_found(format!("{path} does not exist")) } else { forbidden() })?;
     if !resolved.starts_with(home) {
-        return Err(RpcError::new("path_forbidden", format!("{path} is outside {}", home.display())));
+        return Err(forbidden());
     }
     if !resolved.is_dir() {
         return Err(RpcError::not_found(format!("{path} is not a folder")));
