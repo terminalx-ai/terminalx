@@ -30,6 +30,8 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   api: { statsUsageSnapshot: vi.fn(), statsUsageRefresh: vi.fn() },
 }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+const { status } = vi.hoisted(() => ({ status: { usage: { windows: [] } as Record<string, unknown> } }));
+vi.mock("@/lib/status", () => ({ useStatus: () => ({ usage: status.usage }) }));
 
 const { StatsUsageView } = await import("./StatsUsageView");
 
@@ -47,7 +49,7 @@ beforeEach(() => {
   vi.mocked(api.statsUsageSnapshot).mockReset().mockResolvedValue(saved());
   vi.mocked(api.statsUsageRefresh).mockReset().mockResolvedValue(saved());
 });
-afterEach(() => { cleanup(); statsUsageStore.dispose(); });
+afterEach(() => { cleanup(); statsUsageStore.dispose(); status.usage = { windows: [] }; });
 
 describe("StatsUsageView", () => {
   it("shows partial pricing and incomplete discovery next to retained usage", async () => {
@@ -239,4 +241,23 @@ describe("StatsUsageView", () => {
     expect(screen.queryByText(/Saved activity — could not refresh/)).toBeNull();
   });
 
+
+  it("shows each account's limits under its label only when an agent has several", async () => {
+    const window = (agent: string, usedPercent: number) => ({ agent, key: "five_hour", label: "5h", usedPercent, resetsAt: Date.now() + 3_600_000, updatedAt: Date.now(), stale: false });
+    const view = render(<StatsUsageView />);
+    await screen.findByText("12.7B");
+    expect(screen.queryByText("Usage limits by account")).toBeNull();
+    view.unmount();
+    status.usage = { windows: [window("claude", 42)], accounts: [
+      { agent: "claude", accountId: "local", label: "This Mac's login", windows: [window("claude", 42)], error: null, unavailable: false },
+      { agent: "claude", accountId: "aaaa1111bbbb2222", label: "Work · Max", windows: [window("claude", 12)], error: null, unavailable: false },
+      { agent: "claude", accountId: "cccc3333dddd4444", label: "Home · Pro", windows: [], error: "Claude OAuth usage request failed with HTTP 401", unavailable: true },
+    ] };
+    render(<StatsUsageView />);
+    const section = screen.getByRole("region", { name: "Usage limits by account" });
+    expect(screen.getByLabelText("This Mac's login").textContent).toContain("42% used");
+    expect(screen.getByLabelText("Work · Max").textContent).toContain("12% used");
+    expect(screen.getByLabelText("Home · Pro").textContent).toContain("Usage unavailable");
+    expect(section.textContent).not.toContain("HTTP 401");
+  });
 });

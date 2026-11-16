@@ -78,7 +78,6 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
     { ...launchSettingsOf(source), ...(reviewPrompt ? { permissionMode: "plan" } : {}) },
     initialHarness ? providers.filter((provider) => provider.id === initialHarness) : providers, models, prefs,
   ));
-  const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
   const store = useSessionStore();
   const [projectChoice, setProjectChoice] = useState<string | null | undefined>(undefined);
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
@@ -119,8 +118,11 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const held = sameSession ? pipelineForSession(pipelines, session.id) : null;
   const carried = held?.role === "author" && held.pipeline.state !== "merged" ? { autoMerge: held.pipeline.autoMerge, resolveConflicts: held.pipeline.resolveConflicts ?? false } : "session";
   const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (!sameSession && (matchingWorkspace ? matchingWorkspace.isMain : !worktree)) ? "Choose a worktree branch to automate this session." : undefined, undefined, carried);
+  // The destination's own default account applies (#980) unless the source conversation ran on one, which carries over.
+  const accountProject = sameSession ? (session.kind === "quick" ? null : session.projectPath ?? null) : project?.path ?? null;
+  const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined, undefined, accountProject);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!reviewPrompt && (sameSession || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(selection.accountId ? { account: selection.accountId } : {}), ...(!reviewPrompt && (sameSession || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {

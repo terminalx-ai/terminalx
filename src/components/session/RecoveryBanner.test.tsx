@@ -336,3 +336,39 @@ describe("session recovery UI smoke", () => {
     expect(askDetail({ input: null })).toBeNull();
   });
 });
+
+// #980: at a usage limit, continue on another of the agent's accounts.
+describe("continuing on another account", () => {
+  const account = (id: string, label: string) => ({ id, agent: "claude" as const, kind: "subscription" as const, label, email: null, plan: null, organization: null, local: id === "local", isDefault: false, missing: false, addedAt: null });
+  const spare = account("fedcba9876543210", "Spare · Pro");
+
+  it("offers Continue with each account with room at a usage limit, and switches to the one clicked", () => {
+    const onSwitch = vi.fn();
+    const p = { ...props(), onPressed: vi.fn() };
+    render(<RecoveryBanner {...p} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }}
+      accounts={{ choices: [spare, account("local", "This Mac's login")], switching: null, onSwitch }} />);
+    const offered = screen.getAllByTestId("continue-with-account").map((button) => button.textContent);
+    expect(offered).toEqual(["Continue with Spare · Pro", "Continue with This Mac's login"]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Spare · Pro" }));
+    expect(onSwitch).toHaveBeenCalledWith(spare);
+    expect(p.onPressed).toHaveBeenCalledOnce();
+  });
+
+  it("looks exactly as before with none to offer, and offers none for other stops", () => {
+    const { rerender } = render(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }} />);
+    const before = screen.getAllByRole("button").map((button) => button.textContent);
+    rerender(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }} accounts={{ choices: [], switching: null, onSwitch: vi.fn() }} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(before);
+    rerender(<RecoveryBanner {...props()} kind="failed" accounts={{ choices: [spare], switching: null, onSwitch: vi.fn() }} />);
+    expect(screen.queryByTestId("continue-with-account")).toBeNull();
+  });
+
+  it("holds every choice while one switch runs, and says why one failed", () => {
+    render(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }}
+      accounts={{ choices: [spare], switching: spare.id, error: "Wait for the turn to end, or stop it, before switching accounts.", onSwitch: vi.fn() }} />);
+    const button = screen.getByTestId("continue-with-account") as HTMLButtonElement;
+    expect(button.textContent).toBe("Switching to Spare · Pro…");
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId("account-switch-error").textContent).toContain("Wait for the turn to end");
+  });
+});

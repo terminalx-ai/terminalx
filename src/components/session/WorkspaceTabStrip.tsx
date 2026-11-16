@@ -21,6 +21,7 @@ import { useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { TabMenuItems } from "./TabMenu";
+import { TabAccountMark } from "./TabStrip";
 
 /** The id of a tab in the strip: what its panel is labelled by while the strip is shown. */
 export function stripTabId(tab: SelectedSessionTab): string {
@@ -92,8 +93,11 @@ export function WorkspaceTabStrip({
   className,
   paneRow,
   paneDrag,
+  accounts = true,
 }: {
   session: SessionEntry;
+  /** Whether its agent tabs show which of this computer's accounts they run on (#980): not for a cloud session's. */
+  accounts?: boolean;
   /** The tab on screen in `session`. */
   selected: SelectedSessionTab | null;
   /** Why this person may not change the tabs (a viewer of a shared session); the tabs still show. */
@@ -328,6 +332,7 @@ export function WorkspaceTabStrip({
                         {status ? <StatusStripe status={status} size="tab" /> : null}
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
+                        {accounts && !tab.pinned && tab.kind === "agent" && !isShellPeer(tab) ? <TabAccountMark tab={tab.tab} /> : null}
                         {!tab.pinned && tab.kind === "agent" && mobileDriven.has(tab.id) ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
                         {!tab.pinned && tab.kind === "agent" && !isShellPeer(tab) && tabViewIn(tabViews.views, tab.tab) === "terminal" ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
                         {!tab.pinned && tab.kind === "browser" && tab.page.active ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}

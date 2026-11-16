@@ -235,12 +235,125 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     }
 }
 
+// ------------------------------------------------------- agent accounts (#980)
+
+/// The account a tab was asked to start on (`docs/AGENT-ACCOUNTS.md`): kept
+/// on the tab entry, so every start and restart of its agent uses it until
+/// it is restarted on another. A tab without one starts on its project's
+/// default, then its agent's, then This Mac's login, as before accounts.
+/// Kept among the entry's unknown fields, which a build that knows nothing
+/// of accounts carries along unchanged.
+pub const TAB_ACCOUNT: &str = "account";
+/// The account the tab's agent last started on, as its launch resolved it.
+/// Written only once it is something other than This Mac's login, so with
+/// one login nothing about a tab entry changes.
+pub const TAB_LAUNCHED_ACCOUNT: &str = "launchedAccount";
+/// In a desktop's reply only, never saved: the tab asked for an account and
+/// the runtime it runs in is too old to know accounts, so it starts on This
+/// Mac's login. The value says why (`olderRuntime`).
+pub const TAB_ACCOUNT_FALLBACK: &str = "accountFallback";
+
+/// A launch request with the account it asks for: `account` beside the
+/// request's own fields, which an older runtime reads as the request alone.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OnAccount<T> {
+    #[serde(flatten)]
+    pub req: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// An account id a request may carry: one `agent_accounts` could have made.
+/// Blank is none. Whether the agent lists it is the launch's to decide.
+pub(crate) fn requested_account(account: Option<&str>) -> std::result::Result<Option<String>, String> {
+    match account.map(str::trim).filter(|id| !id.is_empty()) {
+        None => Ok(None),
+        Some(id) if crate::agent_accounts::valid_id(id) => Ok(Some(id.to_string())),
+        Some(_) => Err("That is not an agent account id.".into()),
+    }
+}
+
+/// The account `tab` asks for, if it asks for one.
+pub fn tab_account(tab: &TabEntry) -> Option<&str> {
+    tab.unknown.get(TAB_ACCOUNT).and_then(|value| value.as_str()).filter(|id| crate::agent_accounts::valid_id(id))
+}
+
+/// The account `tab`'s agent runs on, or last ran on: what it asks for, what
+/// its last launch resolved, or `None` when neither says (This Mac's login,
+/// or whatever the defaults give it next).
+pub fn tab_running_account(tab: &TabEntry) -> Option<&str> {
+    tab.unknown.get(TAB_LAUNCHED_ACCOUNT).and_then(|value| value.as_str()).filter(|id| crate::agent_accounts::valid_id(id)).or_else(|| tab_account(tab))
+}
+
+pub(crate) fn set_tab_account(tab: &mut TabEntry, account: Option<&str>) {
+    match account {
+        Some(id) => { tab.unknown.insert(TAB_ACCOUNT.into(), serde_json::Value::String(id.into())); }
+        None => { tab.unknown.remove(TAB_ACCOUNT); }
+    }
+}
+
+/// Record that `tab`'s agent started on `account`. This Mac's login is left
+/// unwritten on a tab that never ran on anything else.
+pub(crate) fn set_launched_account(tab: &mut TabEntry, account: &str) -> bool {
+    let current = tab.unknown.get(TAB_LAUNCHED_ACCOUNT).and_then(|value| value.as_str());
+    if current == Some(account) || (current.is_none() && account == crate::agent_accounts::LOCAL) {
+        return false;
+    }
+    tab.unknown.insert(TAB_LAUNCHED_ACCOUNT.into(), serde_json::Value::String(account.into()));
+    true
+}
+
+/// The key a session's project default is stored under in
+/// `agent-logins.json`: the project's path, which is what names a project
+/// in this app. A quick chat has no project.
+pub fn project_key(entry: &SessionEntry) -> Option<&str> {
+    (!entry.is_quick() && !entry.project_path.is_empty()).then_some(entry.project_path.as_str())
+}
+
+/// What a new tab of `harness` in `session` starts on when it is not asked:
+/// the account another tab of the same agent there asked for, so a session
+/// stays on the account it was started on.
+fn inherited_account<'s>(session: &'s SessionEntry, harness: &str) -> Option<&'s str> {
+    session.tabs.iter().filter(|tab| tab.harness == harness).find_map(tab_account)
+}
+
+/// The variables a terminal tab of `entry` carries (#980), so `claude` or
+/// `codex` typed there uses the session's account: `CLAUDE_CONFIG_DIR` and
+/// `CODEX_HOME` of the added subscription accounts its agents run on, or
+/// would start on now. Nothing for This Mac's login or a key: with one
+/// login a terminal is what it always was. A key is never put in a shell.
+pub fn session_account_env(entry: &SessionEntry) -> Vec<(String, String)> {
+    let Ok(store) = crate::agent_keys::store() else { return Vec::new() };
+    let mut env = Vec::new();
+    for agent in crate::agent_keys::Agent::ALL {
+        let Ok(accounts) = store.entry(agent) else { continue };
+        let asked = entry.tabs.iter().filter(|tab| tab.harness == agent.id()).find_map(tab_running_account);
+        let id = crate::agent_accounts::choose(&accounts, asked, project_key(entry));
+        if !matches!(crate::agent_accounts::login_of(&accounts, &id), crate::agent_accounts::Login::Subscription { .. }) {
+            continue;
+        }
+        // The same home the agent's own launch builds, so a hand-typed CLI
+        // finds the shared settings and history there too.
+        match crate::agent_keys::launch_grant_on(agent.id(), Path::new(&entry.cwd), crate::agent_keys::Choice { account: Some(&id), project: None }) {
+            Ok(grant) => env.extend(grant.after_profile),
+            Err(error) => log::warn!("a terminal of session {} starts without its {} account: {error:#}", entry.id, agent.label()),
+        }
+    }
+    env
+}
+
 /// Create a session: an index entry around an existing checkout, or a new
 /// worktree and its first tab. The index entry lands before anything else can
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 pub(crate) fn create_session_blocking(sink: &dyn EventSink, req: NewSession) -> Result<SessionEntry> {
-    let (entry, workspace_created) = create_session_workspace(req, None).map_err(err)?;
+    create_session_blocking_on(sink, req, None)
+}
+
+/// [`create_session_blocking`], its first tab on `account` (#980).
+pub(crate) fn create_session_blocking_on(sink: &dyn EventSink, req: NewSession, account: Option<&str>) -> Result<SessionEntry> {
+    let account = requested_account(account)?;
+    let (entry, workspace_created) = create_session_workspace(req, None, account.as_deref()).map_err(err)?;
     emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
@@ -253,7 +366,13 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
 /// CLI creation keeps an explicit `--name` distinct from the automatically
 /// uniquified worktree-name hints used by the issue view and automations.
 pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    let (entry, workspace_created) = create_session_workspace(req, name)?;
+    create_named_session_blocking_on(sink, req, name, None)
+}
+
+/// [`create_named_session_blocking`], its first tab on `account` (#980).
+pub(crate) fn create_named_session_blocking_on(sink: &dyn EventSink, req: NewSession, name: Option<&str>, account: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    let account = requested_account(account).map_err(WorkspaceError::InvalidArguments)?;
+    let (entry, workspace_created) = create_session_workspace(req, name, account.as_deref())?;
     emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
@@ -265,10 +384,10 @@ fn emit_created(sink: &dyn EventSink, entry: &SessionEntry, workspace_created: b
 
 #[cfg(test)]
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    create_session_workspace(req, name).map(|(entry, _)| entry)
+    create_session_workspace(req, name, None).map(|(entry, _)| entry)
 }
 
-fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
+fn create_session_workspace(req: NewSession, name: Option<&str>, account: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
     let _request = crate::github_process::scope();
     if crate::git::is_repo(Path::new(&req.project_path)) {
         crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
@@ -287,7 +406,10 @@ fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result:
     let now = index::now();
     let requested_title = req.title.clone().filter(|t| !t.trim().is_empty())
         .or_else(|| req.issue.as_ref().map(|issue| format!("{} {}", issue.identifier, issue.title)));
-    let first_tab = req.tab.as_ref().map(new_tab_entry);
+    let first_tab = req.tab.as_ref().map(new_tab_entry).map(|mut tab| {
+        set_tab_account(&mut tab, account);
+        tab
+    });
     let has_agent = first_tab.is_some();
     let explicit_name = name.map(|name| {
         if !has_agent || !req.use_worktree || req.on_main || req.cwd.is_some() || !git::is_repo(project_path) {
@@ -451,18 +573,34 @@ fn quick_chat_folder(path: &str) -> Result<String> {
 /// Create a quick chat and tell listeners. Like any session, its index entry
 /// is written before an agent is started in it.
 pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
-    let entry = create_quick_chat_entry(req)?;
+    create_quick_chat_blocking_on(sink, req, None)
+}
+
+/// Create a quick chat, its first tab on `account` (#980; none: the agent's
+/// default), and tell listeners. Like any session, its index entry is
+/// written before an agent is started in it.
+pub(crate) fn create_quick_chat_blocking_on(sink: &dyn EventSink, req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
+    let account = requested_account(account)?;
+    let entry = create_quick_chat_entry_on(req, account.as_deref())?;
     sink.emit("session_created", &entry);
     Ok(entry)
 }
 
+#[cfg(test)]
 pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry> {
+    create_quick_chat_entry_on(req, None)
+}
+
+fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
     let created = (|| {
         let chosen = req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).map(quick_chat_folder).transpose()?;
-        let first_tab = req.tab.as_ref().map(new_tab_entry);
+        let first_tab = req.tab.as_ref().map(new_tab_entry).map(|mut tab| {
+            set_tab_account(&mut tab, account);
+            tab
+        });
         let now = index::now();
         let entry = SessionEntry {
             id: id.clone(),
@@ -1186,7 +1324,8 @@ pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>
     }
     let transcript = session.tabs.iter()
         .filter(|tab| tab.harness == "claude")
-        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
+        // Where the account the tab runs on wrote it (#980).
+        .filter_map(|tab| crate::agent_data::locate_claude(tab, &session.cwd, tab.provider_session_id.as_deref()?))
         .find(|path| path.is_file());
     // The app's own log holds the prompt as it was typed, for every agent.
     let first = store::conversation_titles::first_request(&session)
@@ -1286,16 +1425,24 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
 
 /// Add an agent tab to a session and make it the active one.
 pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> {
+    add_tab_entry_on(session_id, tab, None)
+}
+
+/// [`add_tab_entry`] on `account` (#980). Not asked, the tab starts on the
+/// account another tab of its agent in the session asked for.
+pub(crate) fn add_tab_entry_on(session_id: &str, tab: &NewTab, account: Option<&str>) -> Result<TabEntry> {
     validate_transport(tab)?;
-    let t = new_tab_entry(tab);
-    let out = t.clone();
+    let account = requested_account(account)?;
+    let mut t = new_tab_entry(tab);
     index::update_session(session_id, |s| {
-        s.tabs.push(t);
-        s.active_tab = Some(out.id.clone());
+        let harness = t.harness.clone();
+        set_tab_account(&mut t, account.as_deref().or_else(|| inherited_account(s, &harness)));
+        s.tabs.push(t.clone());
+        s.active_tab = Some(t.id.clone());
         Ok(())
     })
     .map_err(err)?;
-    Ok(out)
+    Ok(t)
 }
 
 /// Close an agent tab: it leaves its session, and nothing of a conversation

@@ -29,7 +29,8 @@ const { bootBrowser, refreshBrowserPages } = await import("@/lib/browser");
 const { dropSessionTerminals, openTerminal, setSelectedAgent } = await import("@/lib/terminal");
 const { resetTabLayouts } = await import("@/lib/tabLayouts");
 const { setPrefs } = await import("@/lib/prefs");
-const { newTabBlockedReason, NewTabHint } = await import("@/components/session/TabStrip");
+const { newTabBlockedReason, NewTabHint, TabAccountMark, TabAccountLabel } = await import("@/components/session/TabStrip");
+const { forgetAgentAccounts, takeAgentAccounts } = await import("@/lib/useSessionAgent");
 const { SHORTCUT_ACTIONS, SHORTCUT_GROUPS, bindingProblem, defaultBindings, saveShortcut } = await import("@/lib/shortcuts");
 
 const LONG = "Refactor the authentication middleware to use the new token service";
@@ -390,5 +391,60 @@ describe("review tabs in the workspace row", () => {
     act(() => selectSessionTab("a", restoreSessionTabSelection(saved).a));
     expect(getTerminalState().selected.a).toEqual(selected);
     expect(review() !== null).toBe(kind === "review");
+  });
+});
+
+// #980: a tab shows its account only when its agent has several.
+describe("the tab's agent account", () => {
+  const WORK = "0123456789abcdef";
+  const account = (agent: "claude" | "codex", id: string, label: string, email: string | null = null) =>
+    ({ id, agent, kind: "subscription" as const, label, email, plan: null, organization: null, local: id === "local", isDefault: id === "local", missing: false, addedAt: null });
+  const tab = (harness: string, fields: Record<string, unknown> = {}) => ({ id: `t-${harness}`, harness, title: "Fix it", status: "idle", model: "m", permissionMode: "manual", created: "", ...fields }) as unknown as import("@/types/session").TabEntry;
+  const marks = (tabs: import("@/types/session").TabEntry[]) => {
+    render(<>{tabs.map((t) => <div key={t.id} data-tab={t.id}><TabAccountMark tab={t} /><TabAccountLabel tab={t} /></div>)}</>);
+  };
+  beforeEach(() => forgetAgentAccounts());
+
+  it("draws nothing with one account", async () => {
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));
+    marks([tab("claude"), tab("claude", { id: "t-2", account: "local" })]);
+    await flush();
+    expect(screen.queryByTestId("tab-account-mark")).toBeNull();
+    expect(screen.queryByTestId("tab-account-label")).toBeNull();
+  });
+
+  it("marks each tab with its account when the agent has several, and names it in the header", async () => {
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max", "work@example.com")], defaultAccount: "local", projectDefaults: {} }));
+    act(() => takeAgentAccounts({ agent: "codex", accounts: [account("codex", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));
+    marks([tab("claude", { launchedAccount: WORK }), tab("claude", { id: "t-local" }), tab("codex")]);
+    await flush();
+    const [work, local] = screen.getAllByTestId("tab-account-mark");
+    expect(screen.getAllByTestId("tab-account-mark")).toHaveLength(2);
+    expect(work.getAttribute("aria-label")).toBe("On Work · Max");
+    expect(work.textContent).toBe("W");
+    // A tab that names no account runs on This Mac's login: any other is recorded at launch.
+    expect(local.getAttribute("aria-label")).toBe("On This Mac's login");
+    expect(screen.getAllByTestId("tab-account-label").map((label) => label.textContent)).toEqual(["Work · Max", "This Mac's login"]);
+    // Codex has one account: its tab is drawn as before accounts.
+    expect(document.querySelector('[data-tab="t-codex"]')!.textContent).toBe("");
+  });
+
+  it("marks the agent tabs in the workspace's row of tabs, and not a cloud session's", async () => {
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
+    act(() => takeAgentAccounts({ agent: "codex", accounts: [account("codex", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));
+    const { unmount } = render(<TabsHarness />);
+    await flush();
+    const markOf = (name: string) => within(within(strip()).getAllByRole("tab").find((item) => item.getAttribute("aria-label") === name)!).queryByTestId("tab-account-mark");
+    // Session a: two Claude tabs (on This Mac's login) and a Codex tab, whose agent has one account.
+    expect(markOf(LONG)?.getAttribute("aria-label")).toBe("On This Mac's login");
+    expect(markOf("Review")?.getAttribute("aria-label")).toBe("On This Mac's login");
+    expect(markOf("Fix flaky test")).toBeNull();
+    unmount();
+    // A cloud session's tabs run on its machine's logins, not this computer's accounts.
+    const { WorkspaceTabStrip } = await import("@/components/session/WorkspaceTabStrip");
+    const { TooltipProvider } = await import("@/components/ui/tooltip");
+    render(<TooltipProvider><WorkspaceTabStrip session={getSessionStore().sessions.find((item) => item.id === "a")!} selected={null} accounts={false} /></TooltipProvider>);
+    await flush();
+    expect(screen.queryByTestId("tab-account-mark")).toBeNull();
   });
 });

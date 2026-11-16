@@ -55,6 +55,7 @@
                 "HOME",
                 "LD_PRELOAD",
                 "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR",
                 "CLAUDECODE",
                 "CLAUDE_CODE_SESSION_ID",
                 "CLAUDE_CODE_CHILD_SESSION",

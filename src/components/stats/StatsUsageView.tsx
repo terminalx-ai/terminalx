@@ -13,7 +13,7 @@ import {
   RefreshCw,
   Sparkles,
 } from "@/icons";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -21,6 +21,9 @@ import type { AppStats, ProviderUsage, StatsUsageSnapshot } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatAgentTime, formatCost, formatTokens, heatmapDays } from "@/lib/stats";
 import { statsUsageStore } from "@/lib/statsUsageStore";
+import { useStatus } from "@/lib/status";
+import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
+import { accountUsageNotice, usageByAgent, windowIsStale, type AccountUsage } from "@/lib/accountUsage";
 
 const LEVELS = ["bg-veil-raised", "bg-muted-foreground/25", "bg-muted-foreground/45", "bg-muted-foreground/70", "bg-foreground/85"];
 
@@ -81,8 +84,58 @@ export function StatsUsageView() {
           </section>
         )}
         {!snapshot && initialized && loading ? <LoadingState /> : null}
+        <AccountsUsage />
       </div>
     </div>
+  );
+}
+
+/** Each subscription account's windows under its label (#980); nothing with one account per agent. */
+function AccountsUsage() {
+  const { usage } = useStatus();
+  const groups = usageByAgent(usage);
+  const now = useCountdownNow(groups.flatMap((group) => group.accounts.flatMap((account) => account.windows.flatMap((window) => [window.resetsAt, window.updatedAt + 30 * 60_000]))));
+  if (!groups.length) return null;
+  return (
+    <section className="mt-5 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5" aria-labelledby="account-usage-heading">
+      <h2 id="account-usage-heading" className="text-sm font-semibold">Usage limits by account</h2>
+      <p className="mt-0.5 text-xs text-muted-foreground">Each signed-in account&apos;s current windows, read with that account&apos;s own login.</p>
+      {groups.map((group) => (
+        <div key={group.agent} className="mt-4">
+          <h3 className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <AgentMark id={group.agent} className="size-3.5" decorative /> {agentName(group.agent)}
+          </h3>
+          <div className="mt-2 grid gap-3 @min-[760px]:grid-cols-2">
+            {group.accounts.map((account) => <AccountCard key={account.accountId} account={account} now={now} />)}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function AccountCard({ account, now }: { account: AccountUsage; now: number }) {
+  const notice = accountUsageNotice(account);
+  return (
+    <article className="min-w-0 rounded-xl bg-background/30 p-4 hairline" aria-label={account.label}>
+      <h4 className="truncate text-sm font-semibold" title={account.label}>{account.label}</h4>
+      {notice && <p className="mt-2 text-xs text-muted-foreground">{notice}</p>}
+      {account.windows.map((window) => {
+        const stale = windowIsStale(window, now);
+        return (
+          <div key={window.key} className="mt-3 text-xs">
+            <div className="flex justify-between gap-3">
+              <span>{window.label}</span>
+              <span className="tabular-nums">{Math.round(window.usedPercent)}% used{stale ? " · Last known" : ""}</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-veil-raised">
+              <div className="h-full rounded-full bg-foreground/75" style={{ width: `${Math.min(100, Math.max(0, window.usedPercent))}%` }} />
+            </div>
+            {window.resetsAt != null && <p className="mt-0.5 text-[11px] text-faint">{window.resetsAt <= now ? "Window expired; awaiting update" : `Resets ${formatResetCountdown(window.resetsAt, now, "")}`}</p>}
+          </div>
+        );
+      })}
+    </article>
   );
 }
 

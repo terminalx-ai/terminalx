@@ -64,15 +64,15 @@ Usage:
   terminalx sessions archive|unarchive SESSION... [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
-      [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--account ACCOUNT] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge]
       [--resolve-conflicts|--no-resolve-conflicts] [--no-pipeline]
       [--title TEXT] [--name NAME] [--on-main] [--parent SESSION|--no-parent]
-      [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--account ACCOUNT] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
       [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
-      [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--account ACCOUNT] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
   terminalx sessions report SESSION_OR_TAB [--json]
@@ -741,6 +741,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let account = tokens.option("--account")?;
             let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             for refused in ["--project", "--name"] {
                 if tokens.option(refused)?.is_some() {
@@ -762,6 +763,8 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "effort": effort,
                     "mode": mode,
                 });
+            // Only a request that names one carries it.
+            if let Some(account) = account { params["account"] = json!(account); }
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
             if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
@@ -790,6 +793,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let account = tokens.option("--account")?;
             let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             let worktree = tokens.flag("--worktree")?;
             let on_main = tokens.flag("--on-main")?;
@@ -811,6 +815,8 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "effort": effort,
                 "mode": mode,
             });
+            // Only a request that names one carries it.
+            if let Some(account) = account { params["account"] = json!(account); }
             if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
             if tokens.flag("--report")? { params["report"] = json!(true); }
             started_by(&mut params, tokens)?;
@@ -1729,6 +1735,21 @@ mod tests {
             Action::Rpc { command, params, timeout } => (command, params, timeout),
             other => panic!("expected rpc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sessions_create_carries_an_account_only_when_one_is_named() {
+        // #980: by id or label; the app resolves it against the agent's accounts.
+        for base in [
+            &["sessions", "create", "--project", "/p", "--agent", "claude", "--prompt", "go"][..],
+            &["sessions", "create", "--project", "/p", "--agent", "codex", "--issue", "12"],
+            &["sessions", "create", "--quick", "--agent", "claude", "--prompt", "go"],
+        ] {
+            let (command, params, _) = rpc_of(&[base, &["--account", "Work"]].concat());
+            assert_eq!((command.as_str(), &params["account"]), ("sessions.create", &json!("Work")), "{base:?}");
+            assert!(rpc_of(base).1.get("account").is_none(), "a request without it is what it always was: {base:?}");
+        }
+        assert!(help_text().contains("--account ACCOUNT"));
     }
 
     #[test]

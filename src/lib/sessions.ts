@@ -801,6 +801,8 @@ export async function createChat(req: NewQuickChat) {
     title: req.title,
     useWorktree: false,
     tab: req.tab ?? undefined,
+    // The account the person chose for it (#980); none starts on the agent's default, as before accounts.
+    ...(req.account ? { account: req.account } : {}),
   });
   upsertSession(session);
   return session;

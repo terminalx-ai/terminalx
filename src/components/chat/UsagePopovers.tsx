@@ -4,6 +4,9 @@ import { agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { useStatus } from "@/lib/status";
 import { checkAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
+import { agentAccounts } from "@/lib/agentAccounts";
+import { accountUsageNotice, agentAccountUsage, LOCAL_ACCOUNT, tabAccountFirst, windowIsStale } from "@/lib/accountUsage";
+import { tabAccount, type UsageWindow } from "@/lib/api";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import type { Turn } from "@/lib/transcript";
 import type { TabEntry } from "@/types/session";
@@ -23,33 +26,52 @@ export function sessionEstimate(turns: readonly Turn[]): { cost: number | null; 
   return { cost: finished.length && !priced.length ? null : priced.reduce((sum, turn) => sum + turn.usage!.costUsd!, 0), partial: priced.length < finished.length };
 }
 
-function AccountDetails({ agent, local }: { agent: string; local: boolean }) {
+function UsageWindows({ windows, now }: { windows: readonly UsageWindow[]; now: number }) {
+  return <>{windows.map((window) => {
+    const stale = windowIsStale(window, now);
+    return <div key={window.key} className="py-1">
+      <div className="flex justify-between gap-3"><span>{window.label}</span><span className="tabular-nums">{Math.round(window.usedPercent)}% used{stale ? " · Last known" : ""}</span></div>
+      {window.resetsAt != null && <p className="mt-0.5 text-muted-foreground">{window.resetsAt <= now ? "Window expired; awaiting update" : `Resets ${formatResetCountdown(window.resetsAt, now, "")}`}</p>}
+    </div>;
+  })}</>;
+}
+
+function AccountDetails({ agent, local, accountId }: { agent: string; local: boolean; accountId: string | null }) {
   const { usage } = useStatus();
   const [account, setAccount] = useState<AgentReadiness | null>(null);
+  // With several accounts (#980): the tab's own first, under its label, then the others.
+  const accounts = local ? tabAccountFirst(agentAccountUsage(usage, agent), accountId) : [];
+  const own = accounts[0];
+  const readOwn = own && own.accountId !== LOCAL_ACCOUNT ? own.accountId : null;
   useEffect(() => {
     if (!local) return;
     let current = true;
-    void checkAgentReadiness(agent).then((answer) => { if (current) setAccount(answer); });
+    const read = readOwn ? agentAccounts.readiness(agent, readOwn) : checkAgentReadiness(agent);
+    void read.then((answer) => { if (current) setAccount(answer); }, () => { if (current) setAccount(null); });
     return () => { current = false; };
-  }, [agent, local]);
-  const windows = local ? usage.windows.filter((window) => window.agent === agent) : [];
-  const now = useCountdownNow(windows.flatMap((window) => [window.resetsAt, window.updatedAt + 30 * 60_000]));
+  }, [agent, local, readOwn]);
+  const windows = own ? own.windows : local ? usage.windows.filter((window) => window.agent === agent) : [];
+  const now = useCountdownNow([...windows, ...accounts.slice(1).flatMap((other) => other.windows)].flatMap((window) => [window.resetsAt, window.updatedAt + 30 * 60_000]));
+  const ownNotice = own ? accountUsageNotice(own) : null;
   return <>
     <dl className="text-xs">
+      {own && <Detail label="Account">{own.label}</Detail>}
       <Detail label="Login method">{local ? account?.loginMethod ?? (account?.state === "signed_out" ? "Signed out" : "Unavailable") : "Unavailable in this workspace"}</Detail>
       <Detail label="Plan">{local ? account?.plan ?? "Unavailable" : "Unavailable"}</Detail>
     </dl>
     <div className="mt-3 border-t border-hairline pt-3 text-xs">
-      <p className="mb-1 font-medium">{agentName(agent)} account usage</p>
-      {!windows.length && <p className="text-muted-foreground">{local ? "Usage windows unavailable" : "Usage windows unavailable in this workspace"}</p>}
-      {windows.map((window) => {
-        const stale = window.stale || now - window.updatedAt >= 30 * 60_000 || (window.resetsAt != null && window.resetsAt <= now);
-        return <div key={window.key} className="py-1">
-          <div className="flex justify-between gap-3"><span>{window.label}</span><span className="tabular-nums">{Math.round(window.usedPercent)}% used{stale ? " · Last known" : ""}</span></div>
-          {window.resetsAt != null && <p className="mt-0.5 text-muted-foreground">{window.resetsAt <= now ? "Window expired; awaiting update" : `Resets ${formatResetCountdown(window.resetsAt, now, "")}`}</p>}
-        </div>;
-      })}
+      <p className="mb-1 font-medium">{own ? `${agentName(agent)} usage · ${own.label}` : `${agentName(agent)} account usage`}</p>
+      {!windows.length && <p className="text-muted-foreground">{own ? ownNotice ?? "Usage windows unavailable" : local ? "Usage windows unavailable" : "Usage windows unavailable in this workspace"}</p>}
+      <UsageWindows windows={windows} now={now} />
     </div>
+    {accounts.length > 1 && <div className="mt-3 border-t border-hairline pt-3 text-xs" aria-label={`Other ${agentName(agent)} accounts`}>
+      <p className="mb-1 font-medium">Other {agentName(agent)} accounts</p>
+      {accounts.slice(1).map((other) => <section key={other.accountId} className="py-1" aria-label={other.label}>
+        <p className="truncate text-muted-foreground" title={other.label}>{other.label}</p>
+        {accountUsageNotice(other) && <p className="text-muted-foreground">{accountUsageNotice(other)}</p>}
+        <UsageWindows windows={other.windows} now={now} />
+      </section>)}
+    </div>}
   </>;
 }
 
@@ -98,7 +120,7 @@ export function ContextPopover({ tab, used, max, reportedModel, local, turns, co
         <Detail label="Session cost (estimate)">{estimate.cost == null ? "Unavailable" : `${money(estimate.cost)}${estimate.partial ? " · Partial" : ""}`}</Detail>
       </dl>
       <p className="mt-1 text-[11px] text-muted-foreground">Recorded finished turns for the main agent only, at API prices. Subscription charges may differ.{estimate.partial ? " Some turns have no price or usage data." : ""}</p>
-      <AccountDetails key={`${local}:${tab.harness}`} agent={tab.harness} local={local} />
+      <AccountDetails key={`${local}:${tab.harness}`} agent={tab.harness} local={local} accountId={tabAccount(tab)} />
       {(tab.harness === "claude" || tab.harness === "codex") && <Button size="sm" variant="outline" className="mt-4 w-full" disabled={compactDisabled || compacting || sending} onClick={() => void compact()}>{compacting ? "Compacting…" : sending ? "Sending…" : "Compact now"}</Button>}
       {error && <p role="alert" className="mt-2 text-xs text-destructive">Could not send /compact. Try again.</p>}
     </Popover.Content></Popover.Portal>

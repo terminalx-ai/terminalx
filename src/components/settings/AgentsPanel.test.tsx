@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, SessionEntry } from "@/types/session";
 import type { AgentReadiness } from "@/lib/agentReadiness";
@@ -16,6 +16,7 @@ vi.mock("@/lib/tabViews", () => ({ startTabAgent }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal-view" data-pane={id} /> }));
 import { AgentsPanel } from "./AgentsPanel";
 import { AgentLoginToasts } from "./AgentLoginToasts";
+import { useAgentAccountsView } from "./AgentAccounts";
 import { resetAgentSetupFlows } from "@/lib/agentSetupFlow";
 import { forgetAgentLoginNotices } from "@/lib/agentLogins";
 
@@ -80,6 +81,14 @@ function backend(command: string, args: Record<string, unknown> = {}) {
       logins[harness] = { ...logins[harness], baseUrl: (args.baseUrl as string | null)?.replace(/\/$/, "") ?? undefined };
       return logins[harness];
     case "agent_login_tabs": return running[harness];
+    // #980, as the core answers before any account is added: This Mac's login, and the saved key while there is one.
+    case "agent_accounts_list": {
+      const login = logins[harness];
+      const usingKey = login.mode === "api_key" && !!login.saved;
+      const local = { id: "local", agent: harness, kind: "subscription", label: "This Mac's login", email: null, plan: null, organization: null, local: true, isDefault: !usingKey, missing: false, addedAt: null };
+      const key = login.saved ? [{ id: "api-key", agent: harness, kind: "apiKey", label: "API key", email: null, plan: null, organization: null, local: false, isDefault: usingKey, missing: false, addedAt: login.saved.savedAt }] : [];
+      return { agent: harness, accounts: [local, ...key], defaultAccount: usingKey ? "api-key" : "local", projectDefaults: {} };
+    }
     case "stop_tab": return null;
     default: throw new Error(`unexpected command ${command}`);
   }
@@ -342,6 +351,48 @@ describe("Agents · API key (PRO-306)", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Could not save the key to the Keychain. Nothing changed.");
     expect(screen.queryByRole("status", { name: "API key saved to the Keychain" })).toBeNull();
     expect(calls("agent_login_tabs")).toHaveLength(0);
+  });
+});
+
+describe("Agents · accounts (#980)", () => {
+  it("with This Mac's login only, shows today's panel and nothing but Add account", async () => {
+    show();
+    await waitFor(() => expect(statusLine().textContent).toBe("Signed in"));
+    await waitFor(() => expect(calls("agent_accounts_list")).toContainEqual({ harness: "claude" }));
+    const panel = within(screen.getByRole("tabpanel"));
+    expect(panel.getByRole("radio", { name: /Claude subscription/, checked: true })).toBeTruthy();
+    expect(row("Login")).toBe("Claude Max · ada@example.com");
+    expect(panel.queryByRole("region", { name: /Accounts/ })).toBeNull();
+    expect(panel.queryByRole("list", { name: "Claude Code accounts" })).toBeNull();
+    expect(panel.queryByText("Default")).toBeNull();
+    expect(panel.getByRole("button", { name: "Add account" })).toBeTruthy();
+  });
+
+  it("asks for accounts only for the agents that have them", async () => {
+    show([claude, opencode]);
+    await waitFor(() => expect(statusLine().textContent).toBe("Signed in"));
+    fireEvent.click(screen.getByRole("tab", { name: /OpenCode/ }));
+    await waitFor(() => expect(statusLine().textContent).toBe("Not installed"));
+    expect(screen.queryByRole("button", { name: "Add account" })).toBeNull();
+    const asked = calls("agent_accounts_list").map((args) => (args as { harness: string }).harness);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((harness) => harness === "claude")).toBe(true);
+  });
+
+  it("lists nothing for an agent without accounts: no command, no view", async () => {
+    const { result } = renderHook(() => useAgentAccountsView(null, 1));
+    await act(async () => { await result.current.reload(); });
+    expect(result.current.view).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(calls("agent_accounts_list")).toHaveLength(0);
+  });
+
+  it("keeps the PRO-306 key choice as it was while the saved key is the only other account", async () => {
+    logins.claude = { ...logins.claude, mode: "api_key", saved: { masked: MASKED, savedAt: "2026-11-11T09:00:00Z" }, verified: { ok: true, checkedAt: new Date().toISOString() } };
+    show();
+    await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
+    expect(screen.getByRole("radio", { name: /API key/, checked: true })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Claude Code accounts" })).toBeNull();
   });
 });
 
