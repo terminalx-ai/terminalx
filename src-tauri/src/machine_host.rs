@@ -489,12 +489,30 @@ impl MachineHost {
         match self.registry.remove_expired(now, &connected) {
             Ok(expired) => {
                 for computer in expired {
-                    log::info!("machine host: computer {}'s credential went unused for 90 days and expired", computer.id);
-                    self.activity.record(activity::Entry::new(activity::Kind::Expired, Some((&computer.id, &computer.label)), None));
+                    self.ended_unused(&computer);
                 }
             }
             Err(error) => log::warn!("machine host: expire unused credentials: {error:#}"),
         }
+    }
+
+    /// A computer whose credential went unused for 90 days was removed: end
+    /// the rest as Revoke does (its connections, its relay credential) and
+    /// note it. Its account grant, if any, ends when the operating computer
+    /// removes this machine, as it is asked to on "Access removed".
+    fn ended_unused(&self, computer: &registry::PairedComputer) {
+        log::info!("machine host: computer {}'s credential went unused for 90 days and expired", computer.id);
+        self.close_connections(&computer.id);
+        if let (Some(device), Some(relay)) = (computer.relay_device_id.as_deref(), self.relay()) {
+            relay.revoke_device(device);
+        }
+        self.activity.record(activity::Entry::new(activity::Kind::Expired, Some((&computer.id, &computer.label)), None));
+        self.wake.notify_one();
+    }
+
+    /// Whether `computer_id` has a connection open now.
+    fn is_connected(&self, computer_id: &str) -> bool {
+        self.state.lock().unwrap().connections.get(computer_id).is_some_and(|connections| !connections.is_empty())
     }
 
     /// While a computer is connected, note a project added or removed on
@@ -653,8 +671,9 @@ impl MachineHost {
     /// Let a computer in with `token` by `route`:
     /// `Ok(Err(reason))` refuses it with that `pairing_refused` reason.
     ///
-    /// A credential unused for 90 days expires here, and one the person
-    /// disconnected is held off (PRO-357). Otherwise its connection is
+    /// A credential unused for 90 days expires here unless it is connected
+    /// now, and one the person disconnected is held off (PRO-357).
+    /// Otherwise its connection is
     /// tracked, then the computer checked to be still paired: a revocation
     /// removes the record before it closes the tracked connections, so one
     /// racing this admission is either seen here or finds the connection and
@@ -662,10 +681,12 @@ impl MachineHost {
     /// Blocking: reads and writes the registry.
     pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
         let now = now_ms();
-        if computer.expired(now) {
+        // One connected now is in use, however long ago it was let in: a
+        // second connection (the direct probe beside the relay, a reconnect
+        // while the old socket is half open) must not expire it.
+        if computer.expired(now) && !self.is_connected(&computer.id) {
             if self.registry.remove(&computer.id)? {
-                log::info!("machine host: computer {}'s credential went unused for 90 days and expired", computer.id);
-                self.activity.record(activity::Entry::new(activity::Kind::Expired, Some((&computer.id, &computer.label)), None));
+                self.ended_unused(computer);
             }
             return Ok(Err(wire::REFUSED_CODE_INACTIVE));
         }

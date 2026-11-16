@@ -118,54 +118,51 @@ async fn an_operating_computer_reads_only_inside_the_machines_projects() {
     assert_eq!(error_code(&unknown), "not_found", "{unknown}");
 }
 
-/// An agent on the machine has a shell and the `terminalx` CLI. Without the
-/// window's attachment, nothing it sends to the runtime pairs, approves,
-/// revokes, disconnects or lets back; and making a code, Allow and letting a
-/// computer back need a person's witness besides (`serve_cli::consent`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back() {
-    let rig = rig(TTL);
-    paired(&rig, "desk", [3; 32], "desk-token-0000000000000000");
-    rig.host.disconnect("desk").unwrap();
-    let guess = |extra: Value| {
-        let mut params = json!({ "epoch": "guessed", "lease": "guessed" });
-        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        params
-    };
-    let commands = [
-        (wire::CREATE_CODE, guess(json!({}))),
-        (wire::APPROVE, guess(json!({ "requestId": "any" }))),
-        (wire::DECLINE, guess(json!({ "requestId": "any" }))),
-        (wire::REVOKE, guess(json!({ "id": "desk" }))),
-        (wire::DISCONNECT, guess(json!({ "id": "desk" }))),
-        (wire::LET_BACK, guess(json!({ "id": "desk" }))),
-        (wire::ADOPT_KEY, guess(json!({ "secretB64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }))),
-    ];
-    for (command, params) in commands {
-        let refused = rig.host.execute(command, params).unwrap_err();
-        // `unsupported` here (no window ever attached); a desktop runtime says `attachment_expired`.
-        assert!(matches!(refused.code.as_str(), "unsupported" | "attachment_expired"), "{command}: {}", refused.code);
+/// An agent on the machine has a shell and the `terminalx` CLI, and can
+/// attach to the runtime as any process of the user can, so the window's
+/// attachment is no boundary against it. The boundary is the person's
+/// witness (`serve_cli::consent`, which `control.rs` checks before the host
+/// sees a guarded command): making a code, Allow and letting a computer back
+/// are refused unless the request's witness is a process outside the
+/// runtime's tree and terminals. Revoke and Disconnect are not guarded: they
+/// only take access away (docs/MACHINES.md, "Accepted risks").
+#[cfg(unix)]
+#[test]
+fn an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back() {
+    use crate::serve_cli::consent;
+    for command in [wire::CREATE_CODE, wire::APPROVE, wire::LET_BACK] {
+        assert!(consent::guards(command), "{command} needs a person");
     }
-    let computers = rig.host.registry().list().unwrap();
-    assert_eq!(computers.len(), 1, "not revoked");
-    assert!(computers[0].disconnected_at.is_some(), "still held off");
-    assert!(rig.host.status().code.is_none(), "no code was made");
-
-    // Read-only commands need nothing.
-    assert!(rig.host.execute(wire::STATUS, json!({})).is_ok());
-    assert!(rig.host.execute(wire::ACTIVITY, json!({})).is_ok());
-
-    #[cfg(unix)]
+    for command in [wire::REVOKE, wire::DISCONNECT, wire::STATUS, wire::ACTIVITY] {
+        assert!(!consent::guards(command), "{command} takes nothing away from the person");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    std::fs::create_dir(&run).unwrap();
     {
-        use crate::serve_cli::consent;
-        for command in [wire::CREATE_CODE, wire::APPROVE, wire::LET_BACK] {
-            assert!(consent::guards(command), "{command} needs a person");
-        }
-        let run = tempfile::tempdir().unwrap();
-        let unsigned = consent::verify(run.path(), &mut json!({ "requestId": "any" })).unwrap_err();
-        assert_eq!(unsigned.code, "person_required", "a request that does not say who sent it");
-        let nobody = consent::verify(run.path(), &mut json!({ "consent": { "socket": run.path().join("nobody.sock"), "nonce": "n" } })).unwrap_err();
-        assert_eq!(nobody.code, "person_required", "a witness that is not there");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (command, params) in [
+        (wire::CREATE_CODE, json!({ "epoch": "e", "lease": "l" })),
+        (wire::APPROVE, json!({ "epoch": "e", "lease": "l", "requestId": "any" })),
+        (wire::LET_BACK, json!({ "epoch": "e", "lease": "l", "id": "desk" })),
+    ] {
+        // Asked with no witness, or one that is not there.
+        let unsigned = consent::verify(&run, &mut params.clone()).unwrap_err();
+        assert_eq!(unsigned.code, "person_required", "{command}: a request that does not say who sent it");
+        let mut nobody = params.clone();
+        nobody[consent::PARAM] = json!({ "socket": run.join("nobody.sock"), "nonce": "n" });
+        assert_eq!(consent::verify(&run, &mut nobody).unwrap_err().code, "person_required", "{command}: a witness that is not there");
+        // Asked with a real witness that the runtime's own process holds, as
+        // a process it started (an agent, a terminal) would: the kernel says
+        // who listens, and it is refused.
+        let mut asked = params.clone();
+        let witness = consent::witness_for(command, &run, &mut asked).unwrap().expect("guarded");
+        let refused = consent::verify(&run, &mut asked).unwrap_err();
+        assert_eq!(refused.code, "person_required", "{command}: {}", refused.message);
+        assert!(asked.get(consent::PARAM).is_none(), "the witness is never passed on to the host");
+        drop(witness);
     }
 }
 
@@ -248,6 +245,28 @@ async fn a_credential_unused_for_ninety_days_expires() {
     assert!(rig.host.registry().list().unwrap().is_empty(), "the record is gone");
     let entries = logged(&rig, &[Kind::Expired]).await;
     assert_eq!(entries[0].computer.as_deref(), Some("Old MacBook"));
+}
+
+/// A computer whose link has stayed up past 90 days is in use: a second
+/// connection (the direct probe beside the relay, a reconnect while the old
+/// socket is half open) is let in, not expired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_computer_connected_for_ninety_days_is_not_expired_by_its_next_connection() {
+    let rig = rig(TTL);
+    let token = "desk-token-0000000000000000";
+    let mut first = connected(&rig, "desk", [10; 32], token, &["machine/1"]).await;
+    eventually("connected", || rig.host.status().computers.first().is_some_and(|computer| computer.connected).then_some(())).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut aged = rig.host.registry().list().unwrap().remove(0);
+    aged.approved_at = now - UNUSED_EXPIRY_MS - 120_000;
+    aged.last_seen_at = Some(now - UNUSED_EXPIRY_MS - 60_000);
+    rig.host.registry().put(aged).unwrap();
+
+    let mut second = ask(&rig, [10; 32], token).await;
+    assert_eq!(second.answer(Duration::from_secs(5)).await, Answer::In, "a connected computer is not expired");
+    assert_eq!(rig.host.registry().list().unwrap().len(), 1, "its record is kept");
+    assert!(!rig.host.activity().recent().unwrap().iter().any(|entry| entry.kind == Kind::Expired));
+    assert!(!first.closed_within(Duration::from_millis(300)).await, "the first link stays up");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
