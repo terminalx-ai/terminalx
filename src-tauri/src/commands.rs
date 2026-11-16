@@ -4025,6 +4025,12 @@ pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
     tauri::async_runtime::spawn_blocking(move || crate::files::write_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
 }
 
+/// Exclusive create: refused when the path already exists.
+#[tauri::command]
+pub async fn create_text_file(path: String, content: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::create_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 pub async fn read_whole_text_file(path: String) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || crate::files::read_whole_text(Path::new(&path))).await.map_err(err)?.map_err(err)
@@ -6079,9 +6085,9 @@ pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> Cm
 }
 
 #[tauri::command]
-pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>, detached: Option<bool>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch, "detached": detached.unwrap_or(false) })).map_err(err)
     }).await.map_err(err)?
 }
 

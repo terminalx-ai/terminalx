@@ -10,7 +10,8 @@ import { GripVertical } from "@/icons";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { editLocalSection, useLocalSections } from "@/lib/localSections";
-import { reportError } from "@/lib/errorToasts";
+import { reportError, showError } from "@/lib/errorToasts";
+import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 export interface SidebarSortItem { id: string; name: string; members?: string[] }
@@ -187,10 +188,16 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
   const movedTo = useRef<string | null>(null);
   const moveTo = (data: RowData, target: string | null, order: string[] | null) => {
     movedTo.current = target;
-    void (async () => {
+    // Where it was, said when the move fails: the row is back there (02.20).
+    const from = latestSections.current.find((section) => data.members.some((id) => section.sessions.includes(id)))?.id ?? null;
+    const attempt = async () => {
       await editLocalSection({ kind: "move", sessionIds: data.members, sectionId: target });
       if (order) await saveSidebarOrder({ sessions: order });
-    })().catch(reportError(`Couldn't move “${data.name}” to ${sectionName(target)}`));
+    };
+    const failed = (cause: unknown) => {
+      showMoveFailed(data.name, sectionName(target), sectionName(from), cause, () => attempt().then(() => true, (again: unknown) => { failed(again); return false; }));
+    };
+    void attempt().catch(failed);
   };
   const dropSession = (data: RowData, activeId: string | number, over: Over) => {
     const target = moveTarget(data, over);
@@ -408,4 +415,25 @@ export function SidebarSortGroup({ id, children }: { id: string; children: React
 export function SidebarOrderError() {
   const { error } = useSidebarOrder();
   return error ? <div role="alert" className="px-2 py-1 text-xs text-destructive">{error}</div> : null;
+}
+
+/**
+ * A drag into a section that did not save (02.20): titled with what was not done, a plain sentence on why and where
+ * the row is now, and Try again. The raw error goes to the console, not the card.
+ */
+export function showMoveFailed(name: string, to: string, from: string, cause: unknown, retry: () => Promise<boolean>) {
+  console.error("sidebar move failed", cause);
+  const text = errorMessage(cause);
+  const why = /revision|conflict|changed|stale/i.test(text)
+    ? "The sidebar changed on another device while you were dragging"
+    : /locked|busy/i.test(text)
+      ? "The sidebar was busy saving something else"
+      : "The move wasn't saved";
+  showError(`${why}. It's back in ${from}`, undefined, {
+    title: `Couldn't move ${name} to ${to}`,
+    key: `sidebar-move:${name}`,
+    tone: "error",
+    copy: false,
+    actions: [{ label: "Try again", icon: "retry", primary: true, run: retry }],
+  });
 }

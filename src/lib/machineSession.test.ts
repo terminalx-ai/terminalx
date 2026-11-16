@@ -3,7 +3,7 @@ import type { MachineProject, RuntimeSession } from "@terminalx/portable/workspa
 
 vi.mock("@/components/terminal/TerminalView", () => ({ createTerminal: vi.fn() }));
 
-const { machineSendBlocked, sessionRepository, worktreeInProject } = await import("./machineSession");
+const { machinePortsOffered, machineSendBlocked, resetMachinePortsGrants, sessionRepository, worktreeInProject } = await import("./machineSession");
 
 const project = { projectId: "p1", name: "terminalx", path: "/Users/me/code/terminalx", kind: "git", defaultBranch: "main", archived: false } as MachineProject;
 const session = (cwd: string) => ({ id: "s1", projectId: "p1", cwd }) as RuntimeSession;
@@ -51,5 +51,29 @@ describe("sending while the machine is away", () => {
     expect(
       machineSendBlocked("Mac mini", { state: "connected", runtimeGeneration: 1, runtimeVersion: "0.2.33", capabilities: [], authority: "manage" }),
     ).toBeNull();
+  });
+});
+
+describe("the Ports tab and forward chip of a machine session (PRO-355)", () => {
+  const connected = (capabilities: string[]) => ({ state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.3.0", capabilities, authority: "manage" }) as const;
+  const reconnecting = { state: "reconnecting", attempt: 1, reason: "closed", retryInMs: 1000 } as const;
+
+  it("is offered while the machine grants ports/1, and stays through a reconnect: its forwards wait for it", () => {
+    resetMachinePortsGrants();
+    expect(machinePortsOffered("m1", { state: "idle" })).toBe(false);
+    expect(machinePortsOffered("m1", connected(["pty/1", "ports/1"]))).toBe(true);
+    expect(machinePortsOffered("m1", reconnecting)).toBe(true);
+    expect(machinePortsOffered("m1", { state: "idle" })).toBe(true);
+    // Another machine's grant is its own.
+    expect(machinePortsOffered("m2", reconnecting)).toBe(false);
+  });
+
+  it("is not offered for a machine without ports/1 (an older TerminalX), connected or away", () => {
+    resetMachinePortsGrants();
+    expect(machinePortsOffered("old", connected(["pty/1", "fs/1"]))).toBe(false);
+    expect(machinePortsOffered("old", reconnecting)).toBe(false);
+    // Updated, it grants ports/1 on its next connection; an update that drops it again hides them again.
+    expect(machinePortsOffered("old", connected(["pty/1", "ports/1"]))).toBe(true);
+    expect(machinePortsOffered("old", connected(["pty/1"]))).toBe(false);
   });
 });

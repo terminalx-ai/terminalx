@@ -266,7 +266,7 @@ impl Dialer for Script {
                         }
                         let _ = events.send((link, LinkEvent::Closed(Closed { code: None, reason: "stopped".into() })));
                     });
-                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None })
+                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None, rotated_token: None })
                 }
             }
         })

@@ -1,32 +1,54 @@
 import type { ReactNode } from "react";
-import { ChevronDown, Ellipsis, FolderPlus, Layers, Plus } from "@/icons";
+import { Check, ChevronDown, Ellipsis, Folder, FolderInput, FolderMinus, FolderPlus, Layers, Plus } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { ContextMenuItem, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/menu";
+import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, MenuItemText } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { useFold } from "./useFold";
 import { cn } from "@/lib/cn";
 import { holdMenuFocus, keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { openSectionDialog, runSectionEdit, useLocalSections, type LocalSection } from "@/lib/localSections";
-import { conversationTitle, startSessionInSection } from "@/lib/sessions";
+import { conversationTitle, startSessionInSection, useSessionStore } from "@/lib/sessions";
 import { customSessionOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { SortableStatusGroups, SidebarDragScope, SidebarSection, SidebarSectionOrder, SidebarSortList, useInSidebarDragScope, useSidebarSectionDrag } from "./SidebarSort";
 import type { SessionEntry } from "@/types/session";
 
 function openDialog(dialog: Parameters<typeof openSectionDialog>[0]) { holdMenuFocus(); openSectionDialog(dialog); }
 
-/** Same menu for single sessions and rows representing several sessions on a branch. */
-export function MoveToLocalSectionItems({ sessionIds, contextMenu = false }: { sessionIds: string[]; contextMenu?: boolean }) {
+/**
+ * Same menu for single sessions and rows representing several sessions on a branch (02.19): a heading, each section
+ * with its mark and how many sessions it holds, a check on the one they are in, New section…, and, while they are in
+ * one, Remove from section, which says where they go back to (`home`, their project).
+ */
+export function MoveToLocalSectionItems({ sessionIds, home, contextMenu = false }: { sessionIds: string[]; home?: string | null; contextMenu?: boolean }) {
   const { sections } = useLocalSections();
+  const known = useSessionStore().sessions;
   const Sub = contextMenu ? ContextMenuSub : DropdownMenuSub;
   const Trigger = contextMenu ? ContextMenuSubTrigger : DropdownMenuSubTrigger;
   const Content = contextMenu ? ContextMenuSubContent : DropdownMenuSubContent;
   const Item = contextMenu ? ContextMenuItem : DropdownMenuItem;
+  const Separator = contextMenu ? ContextMenuSeparator : DropdownMenuSeparator;
+  const Label = contextMenu ? ContextMenuLabel : DropdownMenuLabel;
+  const inSome = sections.some((section) => section.sessions.some((id) => sessionIds.includes(id)));
+  // Only sessions that are still here count: a section keeps the ids of ones deleted since.
+  const live = new Set(known.filter((session) => !session.archived).map((session) => session.id));
   return <Sub>
-    <Trigger><FolderPlus /> Move to section</Trigger>
-    <Content className="max-h-72 w-56 overflow-y-auto">
-      <Item disabled={!sections.some((section) => section.sessions.some((id) => sessionIds.includes(id)))} onSelect={() => runSectionEdit({ kind: "move", sessionIds, sectionId: null })}>Main list</Item>
-      {sections.map((section) => <Item key={section.id} disabled={sessionIds.every((id) => section.sessions.includes(id))} onSelect={() => runSectionEdit({ kind: "move", sessionIds, sectionId: section.id })}><span className="truncate">{section.emoji} {section.name}</span></Item>)}
-      <Item onSelect={() => openDialog({ kind: "create", sessionIds })}><Plus /> New section…</Item>
+    <Trigger><FolderInput /> Move to section</Trigger>
+    <Content className="max-h-80 w-[236px] overflow-y-auto">
+      {sections.length > 0 && <Label className="px-2 pt-1.5 pb-1 font-normal tracking-[.08em]">Move to section</Label>}
+      {sections.map((section) => {
+        const current = sessionIds.every((id) => section.sessions.includes(id));
+        return <Item key={section.id} role="menuitemradio" aria-checked={current} onSelect={() => { if (!current) runSectionEdit({ kind: "move", sessionIds, sectionId: section.id }); }}>
+          {section.emoji ? <span aria-hidden className="grid size-4 shrink-0 place-items-center text-[13px] leading-none">{section.emoji}</span> : <Folder />}
+          <span className="min-w-0 flex-1 truncate">{section.name}</span>
+          <span aria-hidden className="font-mono text-[11px] text-faint tabular-nums">{section.sessions.filter((id) => live.has(id)).length}</span>
+          <span className="grid w-4 shrink-0 place-items-center">{current && <Check className="text-foreground!" />}</span>
+        </Item>;
+      })}
+      {sections.length > 0 && <Separator />}
+      <Item onSelect={() => openDialog({ kind: "create", sessionIds })}><FolderPlus /> New section…</Item>
+      {inSome && <Item className="items-start" onSelect={() => runSectionEdit({ kind: "move", sessionIds, sectionId: null })}>
+        <FolderMinus className="mt-0.5" /> <MenuItemText label="Remove from section" hint={home ? `Back under ${home}` : "Back to the main list"} />
+      </Item>}
     </Content>
   </Sub>;
 }
