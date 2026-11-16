@@ -4,7 +4,8 @@ import type { Terminal } from "@xterm/xterm";
 import { ChevronDown, ChevronUp, MessageSquarePlus, Search, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/theme";
-import { hasEscapeOverlay, isMac, useHotkey, useShortcut } from "@/lib/hotkeys";
+import { hasEscapeOverlay, useHotkey, useShortcut } from "@/lib/hotkeys";
+import { isMac } from "@/lib/shortcuts";
 import { peekInstance } from "@/lib/terminal";
 import { TerminalChatContext } from "./TerminalChat";
 

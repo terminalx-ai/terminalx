@@ -10,7 +10,7 @@ import { getDraft, setDraft } from "@/lib/drafts";
 import { openDiff, openFile, useEditors } from "@/lib/editors";
 import { showError } from "@/lib/errorToasts";
 import { localGitSource } from "@/lib/gitSource";
-import { isMac, runShortcut } from "@/lib/hotkeys";
+import { runShortcut } from "@/lib/hotkeys";
 import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
@@ -22,7 +22,7 @@ import type { ChangeStatus } from "@/types/session";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { copyText } from "@/lib/clipboard";
 import { openProjectSearch } from "@/lib/projectSearch";
-import { keycaps, useKeymap } from "@/lib/shortcuts";
+import { isMac, keycaps, useKeymap } from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { KbdGroup } from "@/components/ui/tooltip";
 
