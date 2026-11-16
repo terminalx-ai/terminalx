@@ -368,7 +368,7 @@ pub fn controlling_terminal(pid: libc::pid_t) -> Option<Device> {
     {
         // The kernel's own encoding, not the C library's.
         let tty: u64 = stat_field(pid, 4)?.parse().ok()?;
-        (tty != 0).then(|| (((tty >> 8) & 0xfff) as u32, ((tty & 0xff) | ((tty >> 12) & 0xfff00)) as u32))
+        (tty != 0).then_some((((tty >> 8) & 0xfff) as u32, ((tty & 0xff) | ((tty >> 12) & 0xfff00)) as u32))
     }
 }
 
