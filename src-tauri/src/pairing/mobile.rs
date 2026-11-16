@@ -689,9 +689,7 @@ impl MobileConnection {
             return Ok(result["removed"].as_bool().unwrap_or(false));
         }
         let listener = self.subscriptions.lock().unwrap().remove(subscription_id);
-        let mut filter = self.notification_filter.lock().unwrap();
-        if filter.as_ref().is_some_and(|(id, _)| id == subscription_id) { *filter = None; }
-        drop(filter);
+        forget_filter(&self.notification_filter, subscription_id);
         if let (Some(sink), Some(listener)) = (self.runtime.sink.get(), listener) {
             sink.unlisten(listener);
             Ok(true)
@@ -2124,20 +2122,35 @@ fn subscribe_notifications(
     let subscription_id = Uuid::new_v4().to_string();
     let stream = Arc::downgrade(connection);
     let response_id = request_id.to_string();
-    let filter = params.filter;
-    *connection.notification_filter.lock().unwrap() = filter.clone().map(|filter| (subscription_id.clone(), filter));
-    let listener = sink.listen(
-        "mobile_notification",
-        Box::new(move |payload| {
-            let Ok(event) = serde_json::from_str::<MobileNotification>(payload) else { return };
-            if !admitted(filter.as_ref(), &event) { return; }
-            if let Some(stream) = stream.upgrade() {
-                stream.stream(&response_id, json!({ "event": event }));
-            }
-        }),
-    );
+    let listener = listen_notifications(sink, &connection.notification_filter, &subscription_id, params.filter, move |result| {
+        if let Some(stream) = stream.upgrade() { stream.stream(&response_id, result); }
+    });
     connection.insert_subscription(subscription_id.clone(), listener);
     Ok(json!({ "subscriptionId": subscription_id }))
+}
+
+/// A subscription's stream: each notice its filter admits, to `deliver`, and
+/// the filter kept as the connection's (`slot`), which `notifications.event`
+/// is held to as well.
+fn listen_notifications(
+    sink: &dyn EventSink,
+    slot: &ConnectionFilter,
+    subscription_id: &str,
+    filter: Option<NotificationFilter>,
+    deliver: impl Fn(Value) + Send + Sync + 'static,
+) -> ListenerId {
+    *slot.lock().unwrap() = filter.clone().map(|filter| (subscription_id.to_string(), filter));
+    sink.listen("mobile_notification", Box::new(move |payload| {
+        let Ok(event) = serde_json::from_str::<MobileNotification>(payload) else { return };
+        if admitted(filter.as_ref(), &event) { deliver(json!({ "event": event })); }
+    }))
+}
+
+/// The connection's filter, cleared when the subscription that named it ends;
+/// a later subscription's is kept.
+fn forget_filter(slot: &ConnectionFilter, subscription_id: &str) {
+    let mut filter = slot.lock().unwrap();
+    if filter.as_ref().is_some_and(|(id, _)| id == subscription_id) { *filter = None; }
 }
 
 fn validate_session_tab(session_id: &str, tab_id: &str) -> Result<(SessionEntry, TabEntry)> {
@@ -3542,6 +3555,71 @@ mod tests {
         let missed = runtime.missed_notifications(Some(&runtime.notification_epoch), 0, Some(&chosen));
         assert_eq!(missed.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::Finished]);
         assert!(runtime.missed_notifications(Some(&runtime.notification_epoch), missed[0].seq, Some(&chosen)).is_empty());
+    }
+
+    #[test]
+    fn a_subscription_streams_only_what_its_filter_admits_until_it_ends() {
+        let sink = crate::sink::BroadcastSink::new(16);
+        let runtime = MobileRuntime::new();
+        let slot = ConnectionFilter::default();
+        let (tx, mut client) = mpsc::channel(16);
+        runtime.register_client("phone", tx, Default::default(), slot.clone());
+        let streamed = Arc::new(Mutex::new(Vec::new()));
+        let heard = streamed.clone();
+        let listener = listen_notifications(&sink, &slot, "first", Some(filter(json!({ "kinds": ["question"] }))), move |result| {
+            heard.lock().unwrap().push(result["event"]["kind"].as_str().unwrap().to_string());
+        });
+        let publish = |payload: Payload| {
+            let notification = runtime.agent_notification(&event(1, payload), titled).unwrap();
+            runtime.publish(Some(&sink), notification);
+        };
+        let pushed = |client: &mut mpsc::Receiver<Value>| std::iter::from_fn(|| client.try_recv().ok())
+            .map(|message| message["params"]["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        publish(asked("q", vec![question("Which?", &["A"], false)]));
+        publish(ended(TurnStatus::Ok, None, false));
+        assert_eq!(*streamed.lock().unwrap(), ["question"], "the stream is held to the subscription's filter");
+        assert_eq!(pushed(&mut client), ["question"], "and so is notifications.event to its connection");
+
+        // A later subscription's filter is not undone by the first one ending.
+        let _second = listen_notifications(&sink, &slot, "second", Some(filter(json!({ "kinds": ["finished"] }))), |_| {});
+        forget_filter(&slot, "first");
+        assert_eq!(slot.lock().unwrap().as_ref().map(|(id, _)| id.as_str()), Some("second"));
+        forget_filter(&slot, "second");
+        assert!(slot.lock().unwrap().is_none(), "its own subscription ended: the connection's filter is cleared");
+        sink.unlisten(listener);
+        publish(asked("q2", vec![question("Which?", &["A"], false)]));
+        publish(ended(TurnStatus::Ok, None, false));
+        assert_eq!(*streamed.lock().unwrap(), ["question"], "nothing more on an ended stream");
+        assert_eq!(pushed(&mut client), ["question", "finished"], "no filter: everything, as before filters");
+    }
+
+    #[test]
+    fn a_pipeline_written_merged_reaches_the_phone_once() {
+        let _home = crate::store::temp_home();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
+        let runtime = Arc::new(MobileRuntime::new());
+        runtime.configure(sink.clone()).unwrap();
+        let (tx, mut client) = mpsc::channel(16);
+        runtime.register_client("phone", tx, Default::default(), ConnectionFilter::default());
+        let now = Utc::now().to_rfc3339();
+        let pipeline = |state: &str, events: Value| json!({
+            "id": "p1", "created": now, "modified": now, "projectPath": "/workspace", "branch": "raccoon/7", "author": { "sessionId": "session", "tabId": "tab" },
+            "stage": "merge", "state": state, "maxRounds": 3,
+            "pr": { "number": 7, "url": "https://github.com/acme/api/pull/7", "base": "main" },
+            "issue": { "provider": "github", "id": "7", "identifier": "#7", "title": "Fix login", "url": "https://github.com/acme/api/issues/7" },
+            "events": events,
+        });
+        let merged = json!([{ "at": now, "stage": "merge", "kind": "merged", "message": "TerminalX merged pull request #7." }]);
+        let write = |pipeline: Value| sink.emit(crate::issue_pipeline::host::CHANGED, &pipeline);
+        write(pipeline("readyToMerge", json!([])));
+        write(pipeline("merged", merged.clone()));
+        write(pipeline("merged", merged));
+        let sent: Vec<Value> = std::iter::from_fn(|| client.try_recv().ok()).filter(|message| message["method"] == "notifications.event").collect();
+        assert_eq!(sent.len(), 1, "one notice for one merge, written twice: {sent:?}");
+        let notice = &sent[0]["params"];
+        assert_eq!((notice["kind"].as_str(), notice["title"].as_str(), notice["body"].as_str()), (Some("pr_merged"), Some("Fix login merged"), Some("TerminalX merged pull request #7.")));
+        assert_eq!((notice["sessionId"].as_str(), notice["tabId"].as_str()), (Some("session"), Some("tab")));
+        assert_eq!(runtime.missed_notifications(None, 0, None).len(), 1, "kept for a phone that missed it");
     }
 
     #[test]
