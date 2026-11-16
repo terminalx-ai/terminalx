@@ -555,6 +555,49 @@ fn prepare_native_in(native: &Path, user: Option<PathBuf>, cwd: &str, cloud_auth
     Ok(())
 }
 
+/// The native home of added Codex account `id` (#980): what [`prepare_native`]
+/// gives This Mac's login — the reader's settings and content, no hooks and
+/// none trusted, since a native tab answers its tools itself — with
+/// `auth.json` linked to the account's own login (kept in that file, as every
+/// account's is) and `sessions` shared with the native home, so a thread goes
+/// on after a switch between accounts. `root` is `$TERMINALX_HOME`.
+pub fn prepare_native_account(cwd: &str, root: &Path, id: &str) -> Result<PathBuf> {
+    anyhow::ensure!(crate::agent_accounts::valid_id(id) && id != crate::agent_accounts::LOCAL, "not an added Codex account");
+    let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let (account, _) = account_paths(root, id);
+    anyhow::ensure!(account.is_dir(), "This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents.");
+    let home = account.join("native");
+    let shared = crate::store::ensure_dir(root.join(NATIVE_HOME))?;
+    prepare_native_account_in(&home, &account, user_root(), &shared, cwd)?;
+    Ok(home)
+}
+
+fn prepare_native_account_in(home: &Path, account: &Path, user: Option<PathBuf>, shared: &Path, cwd: &str) -> Result<()> {
+    crate::agent_accounts::create_private(home)?;
+    let user = user.filter(|u| u.is_dir());
+    if let Some(user) = &user {
+        for name in LINKED.iter().filter(|name| **name != "auth.json") {
+            if let Err(e) = link(home, user, name) {
+                log::warn!("native codex account home: {e:#}");
+            }
+        }
+    }
+    force_link(&account.join("auth.json"), &home.join("auth.json")).context("link the account's auth.json into its native Codex home")?;
+    let sessions = crate::store::ensure_dir(shared.join("sessions"))?;
+    force_link(&sessions, &home.join("sessions")).context("share the native Codex sessions with the account's native home")?;
+    let hooks_path = home.join("hooks.json");
+    let hooks = serde_json::to_vec_pretty(&no_hooks())?;
+    if std::fs::read(&hooks_path).ok().as_deref() != Some(hooks.as_slice()) {
+        crate::store::write_atomic(&hooks_path, &hooks)?;
+    }
+    let config_path = home.join("config.toml");
+    let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    write_config(&config_path, &user_toml, &previous, cwd, &BTreeMap::new(), true)?;
+    dismiss_update_prompt(home);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +634,33 @@ mod tests {
         // A workspace with no Codex credential has none here either.
         prepare_native_in(&native, Some(user), "/work/repo", Some(None)).unwrap();
         assert!(native.join("auth.json").symlink_metadata().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_accounts_native_home_has_its_login_and_the_native_threads_but_no_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, account, shared) = (dir.path().join("user"), dir.path().join("account"), dir.path().join("codex-native"));
+        let home = account.join("native");
+        for d in [&user, &account, &shared] { std::fs::create_dir_all(d).unwrap(); }
+        std::fs::write(user.join("auth.json"), "{\"reader\":true}").unwrap();
+        std::fs::write(user.join("AGENTS.md"), "be brief").unwrap();
+        std::fs::write(user.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
+        std::fs::write(account.join("auth.json"), "{\"account\":true}").unwrap();
+        // The account's terminal home has Raccoon's hooks; none follow here.
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hooks.json"), "{\"hooks\":{\"PreToolUse\":[]}}").unwrap();
+
+        prepare_native_account_in(&home, &account, Some(user.clone()), &shared, "/work/repo").unwrap();
+        assert_eq!(std::fs::read_link(home.join("auth.json")).unwrap(), account.join("auth.json"), "the account's login, never the reader's");
+        assert_eq!(std::fs::read_link(home.join("sessions")).unwrap(), shared.join("sessions"), "the native threads, whatever account runs them");
+        assert_eq!(std::fs::read_link(home.join("AGENTS.md")).unwrap(), user.join("AGENTS.md"));
+        let hooks: Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks, no_hooks());
+        let config: toml::Table = toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"), "the account's login is its auth.json");
+        assert!(config["hooks"]["state"].as_table().is_some_and(|state| state.is_empty()), "no hook is trusted");
     }
 
     #[test]

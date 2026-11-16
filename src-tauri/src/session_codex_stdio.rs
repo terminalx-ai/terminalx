@@ -130,6 +130,19 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
     NativeLaunch { args, env, unset, model: route.and_then(|route| route.model.clone()), notice: route.and_then(|route| route.notice.clone()) }
 }
 
+/// Point `env`'s `CODEX_HOME` at the native home of the added Codex account
+/// `grant` runs on (#980), in place of the terminal home the grant names. This
+/// Mac's login, a saved key and a cloud workspace name no account home, and
+/// `env` is left as it is.
+fn native_account_home(env: &mut Vec<(String, String)>, grant: &crate::cloud_grants::LaunchGrant, cwd: &str) -> Result<()> {
+    let names_home = grant.env.iter().any(|(name, value)| name == "CODEX_HOME" && value.is_some());
+    let Some(id) = grant.account.as_deref().filter(|_| names_home && grant.codex_auth.is_none()) else { return Ok(()) };
+    let home = codex::home::prepare_native_account(cwd, &crate::store::root()?, id).context("prepare the account's native Codex home")?;
+    env.retain(|(key, _)| key != "CODEX_HOME");
+    env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+    Ok(())
+}
+
 /// Whether native Codex runs in a cloud workspace's home of its own: where
 /// `cloud_grants` gives Codex launches the workspace's credential.
 fn in_workspace() -> bool {
@@ -526,6 +539,10 @@ impl SessionManager {
             env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
         }
         env.extend(native.env);
+        // An added account's grant names its terminal home, whose hooks a
+        // native tab cannot answer: native Codex runs in the account's
+        // hook-free native home instead (#980).
+        native_account_home(&mut env, &grant, cwd)?;
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(cwd)?);
         native.unset.extend(["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()]);

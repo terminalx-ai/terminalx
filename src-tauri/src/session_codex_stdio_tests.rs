@@ -2176,3 +2176,33 @@ fn native3_resolved_fixture(manager: &SessionManager, bin: &Path) {
     assert!(rt.lock().unwrap().pending.is_empty());
     assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).count(), 2);
 }
+
+/// #980: native Codex on an added account runs in the account's hook-free
+/// native home, never the terminal tabs' home, whose hooks it cannot answer.
+#[cfg(unix)]
+#[test]
+fn native_codex_on_an_added_account_runs_in_its_hook_free_native_home() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let id = "0123456789abcdef";
+    let (account, terminal_home) = codex::home::account_paths(&root, id);
+    std::fs::create_dir_all(&terminal_home).unwrap();
+    std::fs::write(account.join("auth.json"), "{}").unwrap();
+    std::fs::write(terminal_home.join("hooks.json"), serde_json::to_vec(&json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"raccoon hook"}]}]}})).unwrap()).unwrap();
+    let grant = crate::cloud_grants::LaunchGrant::local(vec![("CODEX_HOME".into(), Some(terminal_home.to_string_lossy().into_owned())), ("OPENAI_API_KEY".into(), None)], None).on_account(id, Vec::new());
+    let native = native_launch(&grant, &Default::default(), &Default::default(), None);
+    let mut env = native.env;
+    native_account_home(&mut env, &grant, "/work/repo").unwrap();
+    let homes: Vec<_> = env.iter().filter(|(key, _)| key == "CODEX_HOME").map(|(_, value)| PathBuf::from(value)).collect();
+    assert_eq!(homes, vec![account.join("native")]);
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(account.join("native/hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks, json!({"hooks":{}}), "no hook a native tab would have to answer");
+    assert_eq!(std::fs::read_link(account.join("native/auth.json")).unwrap(), account.join("auth.json"));
+    assert!(native.unset.contains(&"OPENAI_API_KEY".to_string()), "what the grant unsets stays unset");
+
+    // This Mac's login names no account home: the native home is the reader's, as before.
+    let local = crate::cloud_grants::LaunchGrant::local(Vec::new(), None).on_account("local", Vec::new());
+    let mut env = vec![("A".to_string(), "1".to_string())];
+    native_account_home(&mut env, &local, "/work/repo").unwrap();
+    assert_eq!(env, vec![("A".to_string(), "1".to_string())]);
+}
