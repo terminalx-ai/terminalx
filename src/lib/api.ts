@@ -551,6 +551,12 @@ export const api = {
    */
   cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
     invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
+  /** The workspace's idle window and its choices (PRO-410), for whoever may manage it. */
+  cloudWorkspaceIdleSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceIdleSuspend>("cloud_workspace_idle_suspend", { workspaceId, orgId: orgId ?? null }),
+  /** Change how long the workspace may sit idle before it is stopped; 0 is never (PRO-410). */
+  cloudWorkspaceSetIdleSuspend: (workspaceId: string, idleSuspendMinutes: number, orgId?: string | null) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_idle_suspend", { workspaceId, idleSuspendMinutes, orgId: orgId ?? null }),
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
@@ -1217,8 +1223,20 @@ export interface CloudWorkspaceSetup {
     activeHourlyMicros: number | null;
   }[];
   defaults: CloudWorkspaceProviderSelection;
+  /** Already limited to the organization's idle cap; 0 is never. */
   allowedIdleSuspendMinutes: number[];
   allowedRetentionDays: number[];
+  /** The organization's idle cap (PRO-410); null or absent with none, or from an older server. */
+  maxIdleSuspendMinutes?: number | null;
+}
+
+/** A workspace's idle window and what it may be changed to (PRO-410). */
+export interface CloudWorkspaceIdleSuspend {
+  workspaceId: string;
+  /** Minutes without activity before it is stopped, 0 for never. */
+  idleSuspendMinutes: number | null;
+  allowedIdleSuspendMinutes: number[];
+  maxIdleSuspendMinutes: number | null;
 }
 
 export interface CloudWorkspaceQuoteInput extends CloudWorkspaceProviderSelection {
@@ -1271,6 +1289,8 @@ export interface CloudWorkspace {
   repositories?: CloudWorkspaceRepository[] | null;
   createdBy?: string | null;
   lastActivityAt?: number | null;
+  /** Minutes without activity before TerminalX stops it, 0 for never (PRO-410); absent from older servers. */
+  idleSuspendMinutes?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
   runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
   /** Monotonic per workspace (S1). */

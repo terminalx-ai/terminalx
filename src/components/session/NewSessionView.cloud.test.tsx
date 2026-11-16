@@ -22,6 +22,7 @@ const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.
     startInWorkspace: vi.fn(),
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
+    cloudIdleOptions: vi.fn(),
   },
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
@@ -122,6 +123,8 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
+  // The organization's "Stop when idle" windows for a new workspace (PRO-410): the provider's default is 30 minutes.
+  flow.cloudIdleOptions.mockResolvedValue({ choices: [15, 30, 60, 0], defaultMinutes: 30, cap: null });
   modelConnection.client = null;
   modelConnection.targets.mockClear();
   mayStart.value = true;
@@ -205,9 +208,13 @@ describe("new session in a cloud project", () => {
     flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
     const view = render(form());
     type("Start the API");
+    // "Stop when idle" is offered once the organization's windows are read.
+    await screen.findByTestId("cloud-idle-line");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
     expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1);
+    // The new workspace stops itself after the provider's default idle window unless another is chosen (PRO-410).
+    expect(flow.prepareCloudCreate.mock.calls[0][1]).toMatchObject({ idleSuspendMinutes: 30 });
     expect(screen.queryByTestId("cloud-create-confirm")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create workspace and start" })).toBeNull();
     await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("Starting the workspace"));
@@ -241,13 +248,14 @@ describe("new session in a cloud project", () => {
   it("resends the same create after an unknown outcome, so Create again cannot make a second workspace", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "create" });
     // The prepared create carries the request it was made from, as the real one does.
-    flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string }) => ({
+    flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string; idleSuspendMinutes?: number }) => ({
       ...prepared,
-      form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode },
+      form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode, idleSuspendMinutes: request.idleSuspendMinutes },
     }));
     flow.confirmCloudCreate.mockRejectedValueOnce({ code: "cloud_workspace_request_timeout", status: 0, retryWithSameIdempotencyKey: true }).mockResolvedValue({ workspace: { id: "ws-new" } });
     render(form());
     type("Start the API");
+    await screen.findByTestId("cloud-idle-line");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
