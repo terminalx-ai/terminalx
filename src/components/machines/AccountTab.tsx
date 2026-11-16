@@ -108,14 +108,25 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
     }
   };
 
+  /** Stop asking, or drop a grant that was not used: an unused grant is revoked, never left to expire. */
+  const letGo = () => {
+    if (!asking) return;
+    const grant = asking.grantRequestId;
+    if (!grant) void machinesApi.accountCancel().catch(() => undefined);
+    else if (finished.current !== grant && pairing.step.kind !== "paired") {
+      finished.current = grant;
+      void machinesApi.accountFinish(grant, false).catch(() => undefined);
+    }
+  };
+
   const cancelAsking = () => {
-    if (asking && !asking.grantRequestId) void machinesApi.accountCancel().catch(() => undefined);
+    letGo();
     pairing.cancel();
     setAsking(null);
   };
 
   const close = () => {
-    if (asking && !asking.grantRequestId) void machinesApi.accountCancel().catch(() => undefined);
+    letGo();
     onClose();
   };
 

@@ -144,6 +144,19 @@ describe("Add a machine → On your account (screen 21.03)", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-2", paired: false }));
   });
 
+  it("revokes an unused grant when the person goes back before the machine answers", async () => {
+    const { dialog } = open();
+    const list = await within(dialog).findByRole("list", { name: "Computers on your account" });
+    fireEvent.click(within(within(list).getAllByTestId("account-machine")[0]).getByRole("button", { name: "Connect" }));
+    await act(async () => request.resolve({ code: CODE, grantRequestId: "grant-3" }));
+    await within(dialog).findByText("Waiting for approval on Mac mini…");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-3", paired: false }));
+    expect(mocks.invoke).toHaveBeenCalledWith("machines_cancel_pairing");
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "machines_account_finish")).toHaveLength(1);
+    expect(await within(dialog).findByRole("list", { name: "Computers on your account" })).toBeTruthy();
+  });
+
   it("says why a grant was not given, on the machine's row", async () => {
     const { dialog } = open();
     const list = await within(dialog).findByRole("list", { name: "Computers on your account" });

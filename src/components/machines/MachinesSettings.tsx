@@ -154,7 +154,7 @@ function ThisMac({ machineId }: { machineId: string | null }) {
           onKeyDown={(event) => {
             if (event.key === "Escape") setDraft(null);
           }}
-          className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-[12.5px] outline-none focus:border-border"
+          className="h-7 w-64 min-w-0 rounded-md border border-hairline bg-background px-2 text-[12.5px] outline-none focus:border-border"
         />
         <Button type="submit" size="sm" variant="secondary" disabled={saving || !typed || typed === name?.name}>
           {saving ? <Loader2 className="animate-spin" /> : null} Save
