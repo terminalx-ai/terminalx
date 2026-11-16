@@ -104,6 +104,11 @@ pub(super) fn installed_identity() -> Result<(PathBuf, Identity)> {
 fn installation_present_at(base: &Path) -> Result<bool> {
     match fs::symlink_metadata(base) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        // The installation is the guest account's own, which can always
+        // reach it: an account the path is closed to is not that guest. A
+        // cloud workspace's runtime runs with `ProtectHome=true`, where every
+        // path under /home is closed, and refusing here stopped it starting.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
         Err(error) => return Err(error.into()),
         Ok(metadata) if !metadata.is_dir() => bail!("Guest installation cannot be a symlink or file"),
         Ok(_) => (),
@@ -5085,6 +5090,27 @@ mod tests {
         let link = root.path().join("substitute");
         std::os::unix::fs::symlink(&base, &link).unwrap();
         assert!(installation_present_at(&link).is_err());
+    }
+
+    /// A cloud workspace's runtime runs with `ProtectHome=true`, so the guest
+    /// installation's path under /home is closed to it: that is no guest, and
+    /// the runtime starts as before rather than exit with "Permission denied".
+    #[test]
+    fn an_installation_path_closed_to_this_account_is_no_guest() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root reads through any mode; the closed home cannot be shown there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let base = home.join("cua/.terminalx-local");
+        private_directory(&base).unwrap();
+        atomic_private_write(&base.join("identity.json"), b"{}").unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let present = installation_present_at(&base);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!present.unwrap());
     }
 
     #[test]

@@ -185,6 +185,27 @@ impl Sessions {
         crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
+    /// The account a new session of `harness` in `project` starts on when
+    /// automatic switching moves it off `account` (#981). `None` with the
+    /// setting off, the account not full, or a runtime from before it.
+    pub fn launch_account_choice(&self, harness: &str, project: Option<&str>, account: Option<&str>) -> Result<Option<crate::session::account_switch::LaunchChoice>> {
+        match self.quick::<Value>("runtime.session.accountChoice", json!({"harness": harness, "project": project, "account": account})) {
+            Ok(Value::Null) => Ok(None),
+            Ok(value) => Ok(Some(serde_json::from_value(value)?)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The person is typing in a tab's composer (#981). Older runtimes have no use for it.
+    pub fn note_typing(&self, session: &str, tab: &str) -> Result<()> {
+        match self.quick_tab::<Value>("noteTyping", session, tab, json!({})) {
+            Ok(_) => Ok(()),
+            Err(error) if unsupported(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
         crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }

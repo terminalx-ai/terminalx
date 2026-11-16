@@ -7,6 +7,8 @@
 //! - `machines_connections` and the `machines_connection_changed` event give
 //!   each machine's [`MachineConnectionState`].
 //! - `machines_reconnect` is "Try again".
+//! - `machines_remove` forgets a machine: its owner stops, its record and
+//!   its credentials go. Its sessions stay on the machine.
 //! - A wake (the wall clock jumping past the monotonic one) and a change of
 //!   this computer's interface addresses nudge every owner; a change of the
 //!   signed-in account tells each one, so a relay link closes on sign-out.
@@ -221,6 +223,11 @@ impl MachineEnv for StoreEnv {
             log::warn!("machines: forget the relay credential of machine {}: {error:#}", self.machine_id);
         }
     }
+
+    fn recorded_version(&self) -> Option<String> {
+        let record = self.machines.store().and_then(|store| store.get(&self.machine_id)).ok().flatten()?;
+        Some(record.version).filter(|version| !version.trim().is_empty())
+    }
 }
 
 /// A successful `machine.describe` on `route`: the name, os, version and
@@ -243,6 +250,11 @@ pub(crate) fn apply_described(machine: &mut super::store::PairedMachine, describ
         .unwrap_or_default();
     if !endpoints.is_empty() {
         machine.direct_endpoints = endpoints;
+    }
+    // A desktop app, or headless (`hasWindow` in `PairedMachine`): kept with
+    // the record's other fields, so Settings → Machines says "headless".
+    if let Some(has_window) = described["hasWindow"].as_bool() {
+        machine.other.insert("hasWindow".into(), Value::Bool(has_window));
     }
     machine.last_seen_at = Some(now);
     machine.last_route = Some(route.clone());
@@ -281,6 +293,30 @@ pub fn machines_reconnect(machine_id: String, connections: tauri::State<'_, Arc<
     }
 }
 
+impl MachineConnections {
+    /// Forget a machine: stop its connection, then delete its record, its
+    /// device token and its relay credential. Nothing on the machine
+    /// changes: its sessions keep running there, and it lists this computer
+    /// until someone revokes it there. `false` when it was not paired.
+    fn remove(&self, machine_id: &str) -> Result<bool> {
+        self.owners.remove(machine_id);
+        let removed = self.machines.store()?.remove(machine_id)?;
+        self.machines.secrets.delete_token(machine_id)?;
+        self.machines.secrets.delete_relay_token(machine_id)?;
+        if removed.is_some() {
+            self.emit(&MachineConnectionView { machine_id: machine_id.to_string(), state: MachineConnectionState::Idle });
+        }
+        Ok(removed.is_some())
+    }
+}
+
+/// Settings → Machines → Remove. Answers whether the machine was paired.
+#[tauri::command]
+pub async fn machines_remove(machine_id: String, connections: tauri::State<'_, Arc<MachineConnections>>) -> Result<bool, String> {
+    let connections = connections.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || connections.remove(&machine_id)).await.map_err(super::err)?.map_err(super::err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +327,7 @@ mod tests {
     fn a_describe_brings_the_record_up_to_date_and_an_empty_address_list_keeps_the_last() {
         let mut machine = crate::machines::store::tests_support::machine("cs1uhCLEB_ttCYaQ");
         let route = RouteUsed { kind: RouteKind::Lan, endpoint: Some("ws://192.168.1.21:6768/machine/1".into()) };
-        let described = json!({ "machineId": "cs1uhCLEB_ttCYaQ", "name": "Studio", "os": { "family": "macos", "version": "26.2" }, "version": "0.2.40",
+        let described = json!({ "machineId": "cs1uhCLEB_ttCYaQ", "name": "Studio", "os": { "family": "macos", "version": "26.2" }, "version": "0.2.40", "hasWindow": false,
             "directEndpoints": ["ws://192.168.1.21:6768/machine/1", "http://not-a-machine", "ws://mac-mini.local:6768/machine/1"] });
         apply_described(&mut machine, &described, &route, 77);
         assert_eq!(machine.name, "Studio");
@@ -299,6 +335,7 @@ mod tests {
         assert_eq!(machine.version, "0.2.40");
         assert_eq!(machine.direct_endpoints, vec!["ws://192.168.1.21:6768/machine/1".to_string(), "ws://mac-mini.local:6768/machine/1".to_string()]);
         assert_eq!(machine.last_seen_at, Some(77));
+        assert_eq!(serde_json::to_value(&machine).unwrap()["hasWindow"], json!(false), "headless, as the UI reads it");
         assert_eq!(machine.last_route, Some(route.clone()));
         apply_described(&mut machine, &json!({ "machineId": "cs1uhCLEB_ttCYaQ", "directEndpoints": [] }), &route, 78);
         assert_eq!(machine.direct_endpoints.len(), 2, "kept");

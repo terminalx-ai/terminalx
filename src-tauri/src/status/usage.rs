@@ -1022,6 +1022,37 @@ impl UsageStore {
         apply_claude_live(&mut self.inner.lock().unwrap(), payload, now)
     }
 
+    /// Poll `agent`'s accounts `ids` every minute (#981): automatic switching
+    /// watches them, near their threshold. `local` is This Mac's login.
+    pub fn set_hot(&self, agent: &'static str, ids: HashSet<String>) {
+        self.inner.lock().unwrap().accounts.set_hot(agent, ids);
+    }
+
+    /// The cadence `agent`'s own login (`local`) is polled at: every minute
+    /// while automatic switching watches it.
+    fn local_cadence(&self, agent: &str, cadence: Option<i64>) -> Option<i64> {
+        let hot = self.inner.lock().unwrap().accounts.is_hot(agent, crate::agent_accounts::LOCAL);
+        if hot { Some(cadence.unwrap_or(i64::MAX).min(accounts::HOT_REFRESH_MS + REFRESH_SLACK_MS)) } else { cadence }
+    }
+
+    /// Each account's usage as a snapshot would give it, without counting a
+    /// snapshot or dropping a window (#981): what automatic switching reads.
+    /// Empty for an agent with only This Mac's login.
+    pub fn accounts_now(&self) -> Vec<AccountUsage> {
+        self.sync_listed();
+        let now = now_ms();
+        let inner = self.inner.lock().unwrap();
+        let windows: Vec<UsageWindow> = inner.windows.values().map(|window| {
+            let mut window = window.clone();
+            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS || expired(&window, now);
+            window
+        }).collect();
+        inner.accounts.usage(|agent| {
+            let error = if agent == "claude" { inner.claude.error.clone() } else { inner.codex.error.clone() };
+            (windows.iter().filter(|window| window.agent == agent).cloned().collect(), error)
+        }, now)
+    }
+
     pub fn snapshot(&self, running_agents: &HashSet<String>) -> UsageSnapshot {
         // A label changed or an account removed in Settings shows at once.
         self.sync_listed();
@@ -1136,7 +1167,7 @@ impl UsageStore {
     /// while failures and Retry-After still gate every request. `cadence` is
     /// the automatic refresh interval, `None` when that timer is off.
     pub fn refresh_claude(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
-        let local = self.refresh_local_claude(manual, cadence);
+        let local = self.refresh_local_claude(manual, self.local_cadence("claude", cadence));
         // Added accounts after `local`, whose answer and failure stay its own.
         self.refresh_accounts("claude", manual, cadence);
         local
@@ -1168,7 +1199,8 @@ impl UsageStore {
     /// snapshot intact.
     pub fn refresh_codex(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
         let now = now_ms();
-        let local = if begin_codex_refresh(&mut self.inner.lock().unwrap(), now, manual, cadence) {
+        let local_cadence = self.local_cadence("codex", cadence);
+        let local = if begin_codex_refresh(&mut self.inner.lock().unwrap(), now, manual, local_cadence) {
             let answer = read_codex();
             finish_codex_refresh(&mut self.inner.lock().unwrap(), answer, now)
         } else {
