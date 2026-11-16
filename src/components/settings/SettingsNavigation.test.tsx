@@ -80,7 +80,7 @@ describe("registry navigation", () => {
     expect(screen.queryByLabelText("Archive script")).toBeNull();
     fireEvent.click(within(screen.getByRole("navigation", { name: "Project settings" })).getByRole("button", { name: "Scripts" }));
     fireEvent.change(await screen.findByLabelText("Archive script"), { target: { value: "docker compose down" } });
-    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
+    fireEvent.blur(screen.getByLabelText("Archive script"));
     await screen.findByText("Archive script saved.");
     expect(mocks.updateProject).toHaveBeenCalledWith("/repos/two", { scripts: { setup: "", archive: "docker compose down" } });
   });
