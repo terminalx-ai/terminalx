@@ -311,7 +311,7 @@ resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) 
   `terminalx-serve update` accept only signed releases, with the same key
   (`RUNTIME_SIGNING_KEY` in `src/serve_cli/mod.rs`).
 - **Commands** (`src/serve_cli/`): `service install|status|uninstall` (a systemd user unit
-  with lingering, or a LaunchAgent), `pair`, `devices`, `login`/`logout` and `update`. Each
+  with lingering, or a LaunchAgent), `pair`, `devices`, `projects`, `login`/`logout` and `update`. Each
   finds the data directory as the runtime does: `--data-dir`, `TERMINALX_HOME`, then
   `~/.terminalx/data`. Installing the service does not turn hosting on; `pair` does, with
   consent in that terminal ([MACHINES.md](MACHINES.md), decision 9).
