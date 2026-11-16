@@ -44,6 +44,8 @@ const fixture = (machines) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
   answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  // This desktop's version, which the machine's view compares with the machine's (PRO-354).
+  answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5", directEndpoints: ["ws://192.168.1.20:6768/machine/1"],
     route: "relayAndNearby", pairedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: ${LAST_SEEN}, lastRoute: null, relay: null, ...patch });
   answers.machines_list = [
@@ -58,6 +60,8 @@ const fixture = (machines) => `(() => {
   // The transport state the native side sends on cloud_remote_event for each
   // machine state (docs/MACHINES.md "As built (PRO-345)"): connected carries
   // the link, offline is reconnecting, needs update and access removed end it.
+  // Every feature this desktop uses, so a connected machine is not shown as needing an update (PRO-354).
+  const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3"];
   const links = {};
   const transport = (machineId, view) => {
     switch (view.state) {
@@ -65,7 +69,7 @@ const fixture = (machines) => `(() => {
       case "relay":
         links[machineId] = (links[machineId] ?? 0) + 1;
         return { state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.2.33", authority: "manage", link: links[machineId],
-          capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "machine/1", "machine/2"] };
+          capabilities: CAPABILITIES };
       case "reconnecting":
         return { state: "reconnecting", attempt: view.attempt, reason: "link lost", retryInMs: view.retryInMs };
       case "offline":
