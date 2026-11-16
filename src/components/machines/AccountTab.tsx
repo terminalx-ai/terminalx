@@ -83,25 +83,51 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
   }, [load, signedIn]);
 
   const { step } = pairing;
-  // The grant is consumed once paired and revoked when the pairing ended any other way.
+  // Read by the unmount cleanup and by a request that answers late.
+  const askingNow = useRef(asking);
+  askingNow.current = asking;
+  const stepNow = useRef(step);
+  stepNow.current = step;
+  const mounted = useRef(true);
+  // Each Connect outdates the ones before: a late answer to an old one is dropped.
+  const attempt = useRef(0);
+
+  // The grant is consumed once paired, and revoked when the pairing ended for good. A failure
+  // that offers Try again keeps it: the retry pairs with the same code, and a revocation could
+  // remove the computer the retry paired. Back, close and leaving the tab revoke it then.
   useEffect(() => {
     const grant = asking?.grantRequestId;
     if (!grant || finished.current === grant) return;
     const paired = step.kind === "paired";
-    if (paired || step.kind === "failed" || step.kind === "fault") {
+    const ended = step.kind === "fault" || (step.kind === "failed" && !failureCopy(step.reason, asking.name).retry);
+    if (paired || ended) {
       finished.current = grant;
       void machinesApi.accountFinish(grant, paired).catch(() => undefined);
       if (paired) void load();
     }
-  }, [asking?.grantRequestId, step, load]);
+  }, [asking?.grantRequestId, asking?.name, step, load]);
+
+  /** Revoke a grant that was not used. */
+  const dropGrant = (grant: string) => {
+    if (finished.current === grant) return;
+    finished.current = grant;
+    void machinesApi.accountFinish(grant, false).catch(() => undefined);
+  };
 
   const connect = async (machine: AccountMachine) => {
+    const mine = ++attempt.current;
     setAsking({ hostId: machine.hostId, name: machine.name, grantRequestId: null, error: null });
     try {
       const offer = await machinesApi.accountRequest(machine.hostId);
+      // The person left the tab, closed the dialog or went back meanwhile: never pair with it.
+      if (!mounted.current || attempt.current !== mine || askingNow.current?.hostId !== machine.hostId) {
+        dropGrant(offer.grantRequestId);
+        return;
+      }
       setAsking({ hostId: machine.hostId, name: machine.name, grantRequestId: offer.grantRequestId, error: null });
       await pairing.changeCode(offer.code);
     } catch (e) {
+      if (!mounted.current || attempt.current !== mine) return;
       const message = errorMessage(e);
       if (message.startsWith("cancelled")) setAsking(null);
       else setAsking({ hostId: machine.hostId, name: machine.name, grantRequestId: null, error: requestFailure(message, machine.name) });
@@ -110,18 +136,29 @@ export function AccountTab({ pairing, onClose, onDone, onUseCode }: { pairing: M
 
   /** Stop asking, or drop a grant that was not used: an unused grant is revoked, never left to expire. */
   const letGo = () => {
-    if (!asking) return;
-    const grant = asking.grantRequestId;
+    const current = askingNow.current;
+    if (!current || current.error) return;
+    attempt.current++;
+    const grant = current.grantRequestId;
     if (!grant) void machinesApi.accountCancel().catch(() => undefined);
-    else if (finished.current !== grant && pairing.step.kind !== "paired") {
-      finished.current = grant;
-      void machinesApi.accountFinish(grant, false).catch(() => undefined);
-    }
+    else if (stepNow.current.kind !== "paired") dropGrant(grant);
   };
+  const letGoNow = useRef(letGo);
+  letGoNow.current = letGo;
+
+  // Escape, the close button and switching tabs unmount this tab: stop the request and drop the grant.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      letGoNow.current();
+    };
+  }, []);
 
   const cancelAsking = () => {
     letGo();
     pairing.cancel();
+    askingNow.current = null;
     setAsking(null);
   };
 

@@ -157,6 +157,47 @@ describe("Add a machine → On your account (screen 21.03)", () => {
     expect(await within(dialog).findByRole("list", { name: "Computers on your account" })).toBeTruthy();
   });
 
+  it("leaving the tab while it asks cancels the request, and an offer that arrives later never pairs and is revoked", async () => {
+    const { dialog } = open();
+    const list = await within(dialog).findByRole("list", { name: "Computers on your account" });
+    fireEvent.click(within(within(list).getAllByTestId("account-machine")[0]).getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(dialog).getByRole("tab", { name: "Pairing code" }));
+    expect(mocks.invoke).toHaveBeenCalledWith("machines_account_cancel");
+    await act(async () => request.resolve({ code: CODE, grantRequestId: "grant-late" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-late", paired: false }));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("machines_inspect_code", expect.anything());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("machines_pair", expect.anything());
+  });
+
+  it("closing the dialog while it waits for Allow revokes the grant", async () => {
+    // As Settings → Machines does: closing sets `open` false, which unmounts the dialog.
+    const view = render(<AddMachineDialog open onOpenChange={(next) => view.rerender(<AddMachineDialog open={next} onOpenChange={vi.fn()} />)} />);
+    const dialog = screen.getByRole("dialog", { name: "Add a machine" });
+    const list = await within(dialog).findByRole("list", { name: "Computers on your account" });
+    fireEvent.click(within(within(list).getAllByTestId("account-machine")[0]).getByRole("button", { name: "Connect" }));
+    await act(async () => request.resolve({ code: CODE, grantRequestId: "grant-4" }));
+    await within(dialog).findByText("Waiting for approval on Mac mini…");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-4", paired: false }));
+    expect(mocks.invoke).toHaveBeenCalledWith("machines_cancel_pairing");
+  });
+
+  it("keeps the grant through a failure that offers Try again, and consumes it when the retry pairs", async () => {
+    const { dialog } = open();
+    const list = await within(dialog).findByRole("list", { name: "Computers on your account" });
+    fireEvent.click(within(within(list).getAllByTestId("account-machine")[0]).getByRole("button", { name: "Connect" }));
+    await act(async () => request.resolve({ code: CODE, grantRequestId: "grant-5" }));
+    await within(dialog).findByText("Waiting for approval on Mac mini…");
+    const first = pairAnswer;
+    pairAnswer = deferred<MachinePairResult>();
+    await act(async () => first.resolve({ paired: false, reason: "unreachable", message: "unreachable" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Try again" }));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("machines_account_finish", expect.anything());
+    await act(async () => pairAnswer.resolve({ paired: true, machine: pairedMachine() }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_account_finish", { grantRequestId: "grant-5", paired: true }));
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "machines_account_finish")).toHaveLength(1);
+  });
+
   it("says why a grant was not given, on the machine's row", async () => {
     const { dialog } = open();
     const list = await within(dialog).findByRole("list", { name: "Computers on your account" });
