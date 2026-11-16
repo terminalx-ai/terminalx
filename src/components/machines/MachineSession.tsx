@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, Loader2, Plus, RotateCw, ShieldX, Unplug, X } from "@/icons";
+import { ChevronDown, ChevronUp, LoaderCircle, Plus, RotateCw, ShieldX, Unplug, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { Button } from "@/components/ui/button";
@@ -150,7 +150,7 @@ export function MachineConnectionNotice({ machineId, name, state }: { machineId:
     const detail = state.state === "updating" ? "Back in under a minute. The agent keeps working there." : "Trying this network, then Relay. The agent keeps working there.";
     return (
       <div className="flex shrink-0 items-start gap-2.5 border-b border-hairline px-4 py-2.5 text-[12.5px]" role="status" data-testid="machine-session-reconnecting">
-        <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" aria-hidden />
+        <LoaderCircle className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" aria-hidden />
         <div className="min-w-0">
           <div className="text-foreground">{title}</div>
           <div className="text-muted-foreground">{detail}</div>
