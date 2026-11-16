@@ -248,7 +248,7 @@ function toolbarChecks(measured) {
   measured.overlapping = overlapping;
   const names = controls.map((control) => control.name);
   return {
-    "the toolbar has its controls: attach, model, dictate, more options, and Stop or Send": ["Attach", "Dictate", "More options"].every((name) => names.some((found) => found.startsWith(name))) && names.some((found) => found === "Stop" || found === "Send") && controls.length >= 5,
+    "the toolbar has its controls: model, permission mode, attach, dictate, and Stop or Send": ["Attach", "Dictate", "Permission mode"].every((name) => names.some((found) => found.startsWith(name))) && names.some((found) => found === "Stop" || found === "Send") && controls.length >= 5,
     "no two controls of the composer toolbar overlap": overlapping.length === 0,
     "every control is inside the toolbar, and the toolbar inside the composer and the window": controls.every((control) => control.left >= toolbar.left - SLACK && control.right <= toolbar.right + SLACK) && !!box && toolbar.left >= box.left - SLACK && toolbar.right <= box.right + SLACK && box.right <= viewport.width + SLACK && toolbar.bottom <= viewport.height + SLACK,
     "every control keeps its icons inside its own box, and is wide enough to press": controls.every((control) => control.iconsInside && control.width >= 20),
@@ -266,7 +266,7 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
     await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
     await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
     await page.locator("main [data-composer-toolbar]").waitFor();
-    await page.getByRole("button", { name: "More options" }).waitFor();
+    await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]').waitFor();
     await page.waitForTimeout(300);
     let measured = await toolbarLayout(page);
     const wide = toolbarChecks(measured);
@@ -286,8 +286,7 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
 
     // The bypass confirmation is modal: its overlay covers the whole window, the Notes drawer included.
     if (session.permissionMode !== "bypassPermissions") {
-      await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "More options" }).click();
-      await page.getByTestId("permission-mode").click();
+      await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]').click();
       await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).click();
       const dialog = page.getByRole("dialog");
       const opened = await dialog.waitFor({ timeout: 5_000 }).then(() => true, () => false);
@@ -532,115 +531,80 @@ for (const { viewport, collapsed, terminalSwitch = false } of [
   await page.close();
 }
 
-// The permission mode in a narrow composer. It used to be a picker in the
-// toolbar whose label was cut to "B" at 960 px with the side panel open; since
-// #584 it is a submenu of More options, so what must hold at every width is
-// that the button stays in the toolbar and pressable, and that its menu names
-// the mode in full. Since #838 the button carries no dot: its tooltip names the
-// mode, and the menu's Permissions row wears the mode's shield.
+// The permission mode in a narrow composer. It was a picker in the toolbar
+// whose label was cut to "B" at 960 px with the side panel open, then (#584) a
+// submenu of More options. Since PRO-397 it is a chip beside the model again,
+// with a short word for the long modes: what must hold at every width is that
+// the chip stays in the toolbar and pressable, with its shield and its word
+// whole, and that its menu names the mode in full.
 const permissionButton = (page) =>
   page.evaluate(() => {
-    const button = document.querySelector('main [data-composer-toolbar] [data-testid="composer-options"]');
+    const button = document.querySelector('main [data-composer-toolbar] [data-testid="permission-mode"]');
     if (!button) return null;
     const rect = button.getBoundingClientRect();
     const toolbar = button.closest("[data-composer-toolbar]").getBoundingClientRect();
-    const dot = button.querySelector('[data-testid="permission-mode-dot"]')?.getBoundingClientRect();
-    const icon = button.querySelector("svg")?.getBoundingClientRect();
+    const icon = button.querySelector('[data-testid="permission-mode-icon"]');
+    const shield = icon?.getBoundingClientRect();
+    const label = button.querySelector('[data-testid="permission-mode-label"]');
     const inside = (part) => !!part && part.width > 0 && part.left >= rect.left - 0.5 && part.right <= rect.right + 0.5 && part.top >= rect.top - 0.5 && part.bottom <= rect.bottom + 0.5;
     return {
       viewport: innerWidth,
       panel: !!document.querySelector("main aside"),
       width: Math.round(rect.width * 10) / 10,
-      icon: inside(icon),
-      dot: dot ? inside(dot) : null,
+      icon: inside(shield),
+      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
+      name: button.getAttribute("aria-label"),
+      label: label?.textContent ?? null,
+      whole: !!label && label.scrollWidth <= label.clientWidth + 1 && inside(label.getBoundingClientRect()),
       inToolbar: rect.left >= toolbar.left - 1 && rect.right <= toolbar.right + 1 && rect.top >= toolbar.top - 1 && rect.bottom <= toolbar.bottom + 1,
     };
   });
 
-const permissionMenuItem = (page) =>
-  page.evaluate(() => {
-    const item = document.querySelector('[role="menu"] [data-testid="permission-mode"]');
-    const label = item?.querySelector('[data-testid="permission-mode-label"]');
-    if (!item || !label) return null;
-    const icon = item.querySelector('[data-testid="permission-mode-icon"]');
-    const rect = item.getBoundingClientRect();
-    const shield = icon?.getBoundingClientRect();
-    const iconInside = !!shield && shield.width > 0 && shield.height > 0 && shield.left >= rect.left && shield.right <= rect.right && shield.top >= rect.top && shield.bottom <= rect.bottom;
-    const tint = !icon ? null : icon.classList.contains("text-destructive") ? "danger" : icon.classList.contains("text-info") ? "plan" : "plain";
-    return {
-      tint, name: item.getAttribute("aria-label"), label: label.textContent, whole: label.scrollWidth <= label.clientWidth + 1,
-      iconInside,
-      tone: icon?.classList.contains("text-destructive") ? "danger" : icon?.classList.contains("text-info") ? "plan" : "guarded",
-    };
-  });
-
 function permissionChecks(measured) {
-  if (!measured) return { "the More options button is there": false };
+  if (!measured) return { "the permission chip is there": false };
   return {
-    "the More options button is inside the composer toolbar": measured.inToolbar,
-    "it keeps its icon and is wide enough to press": measured.icon && measured.width >= 20,
-    "it carries no dot: the mode is named in its tooltip": measured.dot === null,
+    "the permission chip is inside the composer toolbar": measured.inToolbar,
+    "it keeps its shield and is wide enough to press": measured.icon && measured.width >= 20,
+    "its word is whole, not cut": measured.whole,
   };
 }
 
 const MODE_TONE = { bypassPermissions: "danger", manual: "guarded", plan: "plan" };
 const MODE_LABEL = { bypassPermissions: "Bypass permissions", manual: "Ask every time", plan: "Plan" };
-const MODE_TINT = { bypassPermissions: "danger", manual: "plain", plan: "plan" };
+const MODE_SHORT = { bypassPermissions: "Bypass", manual: "Ask", plan: "Plan" };
 for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "manager", lines: 4, permissionMode } }, { width: 960, height: 700 });
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.locator("main aside").first().waitFor();
-  await page.locator('main [data-composer-toolbar] [data-testid="composer-options"]').waitFor();
+  const chip = page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]');
+  await chip.waitFor();
   await page.locator('main [data-testid="panel-presence"][data-side="right"][data-state="open"]').waitFor();
   let measured = await permissionButton(page);
-  const options = page.locator('main [data-composer-toolbar] [data-testid="composer-options"]');
-  // Pin the scheduling case where opening the panel leaves Refresh's tooltip
-  // open under the pointer. Start from a fresh pointer entry, not a second
-  // hover over a trigger whose tooltip was already dismissed.
-  await page.mouse.move(0, 0);
-  await page.keyboard.press("Escape");
-  await page.getByRole("tooltip").waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "Refresh", exact: true }).hover();
-  await page.getByRole("tooltip", { name: "Refresh", exact: true }).waitFor();
-  // A synthetic jump from any open tooltip can leave Radix in pointer transit.
-  // Dismiss and observe its closure before entering the next trigger.
-  await page.keyboard.press("Escape");
-  await page.getByRole("tooltip").waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "Toggle panel" }).hover();
-  await page.getByRole("tooltip", { name: /^Hide panel/ }).waitFor();
-  await page.keyboard.press("Escape");
-  await page.getByRole("tooltip").waitFor({ state: "hidden" });
-  await options.hover();
-  // Wait for this trigger's tooltip, independently of the text we assert below.
-  const tooltip = page.locator('xpath=//*[@role="tooltip"][@id=//main//*[@data-testid="composer-options"]/@aria-describedby]');
-  await tooltip.waitFor();
-  const tooltipText = await tooltip.textContent();
-  const tooltipState = await tooltip.evaluate((node) => {
-    const trigger = document.querySelector('main [data-testid="composer-options"]');
-    return { id: node.id, describedBy: trigger?.getAttribute("aria-describedby"), hovered: trigger?.matches(":hover"), focused: document.activeElement === trigger };
+  await chip.click();
+  const picked = page.getByRole("menuitemradio", { checked: true });
+  await picked.waitFor();
+  const item = await picked.evaluate((node) => {
+    const label = node.querySelector("span");
+    return { label: label?.textContent ?? null, whole: !!label && label.scrollWidth <= label.clientWidth + 1 };
   });
-  await options.click();
-  await page.locator('[role="menu"] [data-testid="permission-mode"]').waitFor();
-  const item = await permissionMenuItem(page);
   await page.keyboard.press("Escape");
   failed += report(
     `permission mode (960x700, side panel open, ${permissionMode})`,
     {
       "the side panel is open": !!measured?.panel,
       ...permissionChecks(measured),
-      "the permission shield is visible inside the menu with the mode's tone": !!item && item.iconInside && item.tone === MODE_TONE[permissionMode],
-      "the options tooltip names the mode in force": tooltipText === `More options · ${MODE_LABEL[permissionMode]}`,
-      "the More options menu names the mode, whole": !!item && item.label === MODE_LABEL[permissionMode] && item.whole,
-      "the menu item's accessible name says which mode is in force": !!item && item.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
-      [`the menu item wears the mode's shield (${MODE_TINT[permissionMode]})`]: !!item && item.iconInside && item.tint === MODE_TINT[permissionMode],
+      "the chip wears the mode's shield": !!measured && measured.icon && measured.tone === MODE_TONE[permissionMode],
+      "the chip says the mode in a short word": !!measured && measured.label === MODE_SHORT[permissionMode],
+      "the chip's accessible name says which mode is in force": !!measured && measured.name === `Permission mode: ${MODE_LABEL[permissionMode]}`,
+      "its menu names the mode in force, whole": item.label === MODE_LABEL[permissionMode] && item.whole,
     },
-    { button: measured, item, tooltip: { expected: `More options · ${MODE_LABEL[permissionMode]}`, actual: tooltipText, ...tooltipState } },
+    { button: measured, item },
   );
   if (process.env.WEBKIT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.WEBKIT_LAYOUT_SCREENSHOTS}/permission-mode-960-${permissionMode}.png` });
 
-  // Every width on the way: the button never leaves the toolbar, loses its icon, or gets too narrow to press.
+  // Every width on the way: the chip never leaves the toolbar, loses its shield, cuts its word, or gets too narrow to press.
   const failures = [];
   for (let width = 960; width <= 1400; width += 10) {
     await page.setViewportSize({ width, height: 700 });
@@ -655,7 +619,7 @@ for (const permissionMode of ["bypassPermissions", "manual", "plan"]) {
   failed += report(
     `permission mode (960 to 1400 px, side panel open, ${permissionMode})`,
     {
-      "at every width the button stays in the toolbar, pressable, with its icon": failures.length === 0,
+      "at every width the chip stays in the toolbar, pressable, with its shield and its word whole": failures.length === 0,
       "with room (1680 px) the same holds": Object.values(permissionChecks(measured)).every(Boolean),
     },
     { failures, wide: measured },

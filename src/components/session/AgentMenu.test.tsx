@@ -72,19 +72,15 @@ describe("the picker's rows (PRO-397)", () => {
     const rows = within(menu).getAllByRole("menuitem").filter((row) => row.getAttribute("aria-haspopup") === "menu");
     expect(rows.map((row) => row.textContent)).toEqual(["AgentClaude Code", "ModelOpus", "EffortHigh", "PermissionsAsk every time"]);
     // The agents and the efforts are behind their rows, not listed in the menu itself.
-    const agents = within(menu).getByRole("group", { name: /^Agent/ });
-    const efforts = within(menu).getByRole("group", { name: /^Effort/ });
-    expect(agents.getAttribute("data-state")).toBe("closed");
-    expect(efforts.getAttribute("data-state")).toBe("closed");
-    expect(agents.className).toContain("data-[state=closed]:hidden");
+    expect(within(menu).queryAllByRole("menuitemradio")).toEqual([]);
+    expect(within(menu).queryByRole("menuitem", { name: /^Codex/ })).toBeNull();
 
     fireEvent.keyDown(screen.getByTestId("agent-menu-effort"), { key: "ArrowRight" });
-    await waitFor(() => expect(efforts.getAttribute("data-state")).toBe("open"));
-    expect(within(efforts).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Low", "High"]);
-    // Opened from the keyboard, the list takes the focus.
-    await waitFor(() => expect(efforts.contains(document.activeElement)).toBe(true));
+    await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true }).length).toBe(2));
+    const efforts = screen.getAllByRole("menu", { hidden: true }).at(-1)!;
+    expect(within(efforts).getAllByRole("menuitemradio", { hidden: true }).map((item) => item.textContent)).toEqual(["Low", "High"]);
 
-    fireEvent.click(within(efforts).getByRole("menuitemradio", { name: "Low" }));
+    fireEvent.click(within(efforts).getByRole("menuitemradio", { name: "Low", hidden: true }));
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     expect(screen.getByTestId("agent-effort").textContent).toBe("Low");
   });

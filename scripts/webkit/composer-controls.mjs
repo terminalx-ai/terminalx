@@ -253,7 +253,7 @@ try {
       // Nothing of a closed row's choices is drawn.
       assert.equal(await menu.getByRole("menuitemradio").evaluateAll((items) => items.filter((i) => i.checkVisibility()).length), 0, `${scheme}: efforts are not listed until their row opens`);
       const beside = async (name, expected) => {
-        const list = menu.getByRole("group", { name });
+        const list = page.getByRole("menu", { name });
         await list.waitFor({ state: "visible" });
         await settled();
         const box = await list.boundingBox();
@@ -267,10 +267,10 @@ try {
         return list;
       };
       await page.getByRole("menuitem", { name: /^Agent/ }).hover();
-      await beside("Agent", ["Claude Codecurrent", "Codex"]);
+      await beside(/^Agent/, ["Claude Codecurrent", "Codex"]);
       await page.getByRole("menuitem", { name: /^Effort/ }).hover();
-      const efforts = await beside("Effort", ["Low", "Medium", "High", "Extra high", "Max"]);
-      assert.ok(!(await menu.getByRole("group", { name: "Agent" }).isVisible()), `${scheme}: one list at a time`);
+      const efforts = await beside(/^Effort/, ["Low", "Medium", "High", "Extra high", "Max"]);
+      assert.equal(await page.getByRole("menu", { name: /^Agent/ }).count(), 0, `${scheme}: one list at a time`);
       await shot(page, "new-session");
       await efforts.getByRole("menuitemradio", { name: "Max" }).click();
       await menu.waitFor({ state: "detached" });
@@ -282,10 +282,10 @@ try {
       for (let i = 0; i < 4 && !(await page.evaluate(() => document.activeElement?.textContent?.startsWith("Effort"))); i++) await page.keyboard.press("ArrowDown");
       assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: the arrows reach the Effort row`);
       await page.keyboard.press("ArrowRight");
-      await menu.getByRole("group", { name: "Effort" }).waitFor({ state: "visible" });
+      await page.getByRole("menu", { name: /^Effort/ }).waitFor({ state: "visible" });
       assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("role")), "menuitemradio", `${scheme}: the arrow key moves into the efforts`);
       await page.keyboard.press("ArrowLeft");
-      await menu.getByRole("group", { name: "Effort" }).waitFor({ state: "hidden" });
+      await page.getByRole("menu", { name: /^Effort/ }).waitFor({ state: "hidden" });
       assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: and back to the Effort row`);
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "detached" });

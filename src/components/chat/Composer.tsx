@@ -888,13 +888,13 @@ function PermissionChip({ permissions: p, onOpen }: { permissions: PermissionCho
         <Button
           variant="ghost"
           size="sm"
-          className={cn("min-w-0 shrink gap-1.5 overflow-hidden px-2", p.tone === "danger" ? "text-destructive" : p.tone === "plan" ? "text-info" : "text-muted-foreground")}
+          className={cn("shrink-0 gap-1.5 px-2", p.tone === "danger" ? "text-destructive" : p.tone === "plan" ? "text-info" : "text-muted-foreground")}
           title={p.lock ?? `Permission mode: ${p.label}`}
           aria-label={`Permission mode: ${p.lock ?? p.label}`}
           data-testid="permission-mode"
         >
           <PermissionIcon tone={p.tone} />
-          <span className="min-w-0 max-w-40 truncate" data-testid="permission-mode-label">{short}</span>
+          <span className="max-w-40 truncate" data-testid="permission-mode-label">{short}</span>
           <ChevronDown className="size-3 text-faint" />
         </Button>
       </DropdownMenuTrigger>

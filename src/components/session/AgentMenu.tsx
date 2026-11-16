@@ -1,5 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { DropdownMenu as Prim } from "radix-ui";
+import { Fragment } from "react";
 import { ChevronDown, TriangleAlert } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import {
@@ -65,8 +64,7 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           <ChevronDown className="size-3.5 shrink-0 text-faint" />
         </button>
       </DropdownMenuTrigger>
-      {/* `overflow-visible`: the Agent and Effort choices are drawn from inside this menu (ChoiceRow). */}
-      <DropdownMenuContent align="start" className="min-w-[15rem] overflow-visible">
+      <DropdownMenuContent align="start" className="min-w-[15rem]">
         <ChoiceRow label="Agent" value={harness?.name ?? "None"} testId="agent-menu-agent" className="min-w-[14rem]">
           {harnesses.map((h) => {
             const state = readiness?.[h.id]?.state;
@@ -159,46 +157,15 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
   );
 }
 
-/**
- * The Agent and Effort rows: what is chosen, and its choices beside the row.
- * They open like any submenu, but stay mounted inside the menu's own element
- * (hidden until their row opens them) instead of in a layer of their own: the
- * agents and efforts remain part of the one menu, which is how IssuesView's
- * tests pick them. Two things a submenu mounted on opening gets for free are
- * done here. Mounted with the menu, the list is a layer below it, which a
- * modal menu takes the pointer from: `pointerEvents` gives it back. And a
- * list opened from the keyboard takes the focus once it is shown.
- */
+/** The Agent and Effort rows: what is chosen, and its choices in a submenu beside the row. */
 function ChoiceRow({ label, value, testId, className, children }: { label: string; value: string; testId: string; className?: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const list = useRef<HTMLDivElement>(null);
-  const byKey = useRef(false);
-  useEffect(() => {
-    if (open && byKey.current) list.current?.focus();
-    byKey.current = false;
-  }, [open]);
   return (
-    <DropdownMenuSub open={open} onOpenChange={setOpen}>
-      <DropdownMenuSubTrigger
-        data-testid={testId}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowRight" || e.key === "Enter" || e.key === " ") byKey.current = true;
-        }}
-      >
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger data-testid={testId}>
         <span className="flex-1">{label}</span>
         <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{value}</span>
       </DropdownMenuSubTrigger>
-      <Prim.SubContent
-        ref={list}
-        forceMount
-        role="group"
-        collisionPadding={8}
-        avoidCollisions
-        style={{ pointerEvents: "auto" }}
-        className={cn("z-(--z-menu) overflow-hidden rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline data-[state=closed]:hidden data-[state=open]:animate-fade-in", className)}
-      >
-        {children}
-      </Prim.SubContent>
+      <DropdownMenuSubContent className={className}>{children}</DropdownMenuSubContent>
     </DropdownMenuSub>
   );
 }
