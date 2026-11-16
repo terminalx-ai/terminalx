@@ -85,8 +85,8 @@ function ScriptsPage({ project }: { project: Project }) {
   return <section aria-label={`${project.name} scripts`} className="flex flex-col gap-6">
     <header className="flex items-start justify-between gap-4">
       <div className="min-w-0">
-        <h3 className="text-xl font-semibold tracking-tight">Scripts</h3>
-        <p className="mt-1 text-[13px] text-muted-foreground">Commands that run when a workspace is set up or removed. The run command lives in Actions.</p>
+        <h3 className="text-sm font-medium">Scripts</h3>
+        <p className="mt-0.5 text-[12.5px] text-muted-foreground">Commands that run when a workspace is set up or removed. The run command lives in Actions.</p>
       </div>
       {trust && <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" onClick={() => void openPath(sharedFile).catch((cause) => setActionError(errorMessage(cause)))}>
         <FileText /> Open <span className="font-mono">{SHARED_FILE}</span>

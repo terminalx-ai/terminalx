@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { configuration, type SettingsEditor } from "@/lib/configuration";
-import { AlertCircle, Check, ChevronDown, Code, Copy, Ellipsis, FileText, FolderGit2, FolderOpen, Lock, RotateCcw, UserRound, X } from "@/icons";
+import { AlertCircle, Check, ChevronDown, Code, Copy, Ellipsis, FileJson, FileText, Folder, FolderGit2, Lock, MousePointer2, RotateCcw, UserRound, UserRoundPen, X, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -16,7 +16,7 @@ import { createSettingsFile, dismissSaveFailure, resetUserSetting, useSettingsFi
 import {
   cantSaveCopy, cantSaveEffect, cantSaveTitle, effectSentence, setUserKeys, SOURCE_BADGES, type SourceBadgeKind,
 } from "@/lib/settingSources";
-import type { SettingsFileProblem } from "@/types/settingsSources";
+import type { SettingsFileLayer, SettingsFileProblem } from "@/types/settingsSources";
 
 const TONES = {
   managed: "bg-warning/10 text-warning",
@@ -105,41 +105,108 @@ export function UserFileRowAccessory({ keys, title }: { keys: readonly string[];
   </>;
 }
 
-/** Open settings.json, top right of every Settings page, with its Open / Open in / Copy path menu. */
-export function OpenSettingsFileButton() {
+/** Where each app in Open in comes from: its colour on a small tile, as the design draws them (11.10). */
+const OPEN_IN: readonly { label: string; icon: typeof Code; tone: string; editor?: (typeof EDITORS)[number] }[] = [
+  { label: "Finder", icon: Folder, tone: "text-info" },
+  { label: "Cursor", icon: MousePointer2, tone: "text-foreground", editor: EDITORS[0] },
+  { label: "VS Code", icon: Code, tone: "text-info", editor: EDITORS[1] },
+  { label: "Zed", icon: Zap, tone: "text-accent", editor: EDITORS[2] },
+];
+
+const GIT_WORDS = { committed: "committed", ignored: "ignored by git", untracked: "not committed" } as const;
+
+/** A file the split button can open: the user file, or one of the project's two. */
+interface OpenTarget { key: string; title: string; detail: string; path: string; displayPath: string; exists: boolean; icon: typeof Code; problemLine: number | null; broken: boolean }
+
+/**
+ * Open settings.json, top right of every Settings page, with its Open / Open in / Copy path menu. On a project's pages
+ * (design 11.10) it opens the project's shared file and lists the project's two files beside Your settings.
+ */
+export function OpenSettingsFileButton({ projectPath }: { projectPath?: string | null }) {
   const { file } = useSettingsFile();
+  const projectFiles = useProjectFiles(projectPath ?? null);
+  const [menu, setMenu] = useState(false);
   if (!file) return null;
-  const displayPath = shownPath(file);
-  const name = shortFileName(displayPath);
-  const line = file.problem?.line;
-  const broken = !!file.problem;
-  const open = (app?: (typeof EDITORS)[number]) => void ensureUserFile(file).then(() => openSettingsPath(file.path, displayPath, app), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
-  const reveal = () => void ensureUserFile(file).then(() => revealSettingsPath(file.path, displayPath), (error: unknown) => showError(`Couldn’t create ${displayPath}`, error));
+  const userPath = shownPath(file);
+  const user: OpenTarget = { key: "user", title: "Your settings", detail: userPath, path: file.path, displayPath: userPath, exists: true, icon: UserRound, problemLine: file.problem?.line ?? null, broken: !!file.problem };
+  const project = (projectFiles ?? []).filter((layer) => (layer.layer === "repositoryShared" || layer.layer === "repositoryLocal") && layer.path).map((layer): OpenTarget => {
+    const displayPath = layer.displayPath ?? layer.path!;
+    const name = shortFileName(displayPath);
+    const state = !layer.exists ? "none yet" : layer.git ? GIT_WORDS[layer.git] : null;
+    return { key: layer.layer, title: LAYER_TITLE[layer.layer], detail: state ? `${name} · ${state}` : name, path: layer.path!, displayPath, exists: layer.exists, icon: layer.layer === "repositoryShared" ? FolderGit2 : UserRoundPen, problemLine: layer.problem?.line ?? null, broken: !!layer.problem };
+  });
+  // Shared first, as the design opens it; a project without one opens its local file, else Your settings.
+  const ordered = [...project].sort((a, b) => Number(b.key === "repositoryShared") - Number(a.key === "repositoryShared"));
+  const current = ordered.find((target) => target.exists) ?? user;
+  const name = shortFileName(current.displayPath);
+  const line = current.problemLine;
+  const broken = current.broken;
+  const prepare = () => current === user ? ensureUserFile(file) : Promise.resolve();
+  const open = (target: OpenTarget, app?: (typeof EDITORS)[number]) => void (target === user ? ensureUserFile(file) : Promise.resolve())
+    .then(() => openSettingsPath(target.path, target.displayPath, app), (error: unknown) => showError(`Couldn’t create ${target.displayPath}`, error));
+  const reveal = () => void prepare().then(() => revealSettingsPath(current.path, current.displayPath), (error: unknown) => showError(`Couldn’t create ${current.displayPath}`, error));
+  const copy = () => void copyText(current.path).catch((error: unknown) => showError("Couldn’t copy the path", error));
+  const openIn = (index: number) => { const app = OPEN_IN[index]; if (!app) return; if (app.editor) open(current, app.editor); else reveal(); };
   const part = "inline-flex h-7 shrink-0 items-center whitespace-nowrap text-xs outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40";
-  return <div data-open-settings-file="" className={cn("flex shrink-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground")}>
-    <button type="button" onClick={() => open()} className={cn(part, "gap-1.5 px-2.5 [&_svg]:size-3.5")}>
-      <FileText aria-hidden className={broken ? "text-destructive" : "text-muted-foreground"} />
+  const targets = [user, ...ordered];
+  return <div data-open-settings-file="" className={cn("flex shrink-0 items-stretch overflow-hidden rounded-md hairline", broken ? "text-destructive" : "text-foreground", menu && "bg-veil-raised")}>
+    <button type="button" onClick={() => open(current)} className={cn(part, "gap-1.5 px-2.5 [&_svg]:size-3.5")}>
+      <FileJson aria-hidden className={broken ? "text-destructive" : "text-muted-foreground"} />
       <span>Open <span className="font-mono">{name}</span>{line != null && <> · line {line}</>}</span>
     </button>
-    <DropdownMenu>
+    <DropdownMenu open={menu} onOpenChange={setMenu}>
       <DropdownMenuTrigger asChild>
         <button type="button" aria-label={`More ways to open ${name}`} className={cn(part, "border-l border-hairline px-1.5 [&_svg]:size-3.5")}><ChevronDown aria-hidden /></button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[16rem]">
+      <DropdownMenuContent align="end" className="w-[18rem]" onKeyDown={(event) => {
+        const digit = /^[1-4]$/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey;
+        const copyKeys = event.metaKey && event.shiftKey && event.key.toLowerCase() === "c";
+        if (!digit && !copyKeys) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu(false);
+        if (digit) openIn(Number(event.key) - 1); else copy();
+      }}>
         <DropdownMenuLabel>Open</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => open()} className="items-start">
-          <UserRound className="mt-0.5" />
-          <span className="flex min-w-0 flex-col"><span>Your settings</span><span className="truncate font-mono text-xs text-muted-foreground">{displayPath}</span></span>
-        </DropdownMenuItem>
+        {targets.map((target) => {
+          const Icon = target.icon;
+          return <DropdownMenuItem key={target.key} disabled={!target.exists} data-current={target === current ? "" : undefined} onSelect={() => open(target)} className="items-start data-current:bg-selected">
+            <Icon className="mt-0.5" />
+            <span className="flex min-w-0 flex-col"><span>{target.title}</span><span className="truncate text-[11.5px] text-faint">{target.detail}</span></span>
+          </DropdownMenuItem>;
+        })}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Open in</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={reveal}><FolderOpen />Finder</DropdownMenuItem>
-        {EDITORS.map((editor) => <DropdownMenuItem key={editor.id} onSelect={() => open(editor)}><Code />{editor.label}</DropdownMenuItem>)}
+        {OPEN_IN.map((app, index) => {
+          const Icon = app.icon;
+          return <DropdownMenuItem key={app.label} onSelect={() => openIn(index)}>
+            <span aria-hidden className="grid size-[18px] shrink-0 place-items-center rounded-[4px] bg-veil-strong"><Icon className={cn("size-[11px]!", app.tone)} /></span>
+            {app.label}
+            <span aria-hidden className="ml-auto pl-4 text-[11px] text-faint">{index + 1}</span>
+          </DropdownMenuItem>;
+        })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void copyText(file.path).catch((error: unknown) => showError("Couldn’t copy the path", error))}><Copy />Copy path</DropdownMenuItem>
+        <DropdownMenuItem onSelect={copy}><Copy />Copy path<kbd aria-hidden className="ml-auto rounded border border-hairline px-1 font-sans text-[10px] text-faint">⌘⇧C</kbd></DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>;
+}
+
+const LAYER_TITLE = { repositoryShared: "Project · shared", repositoryLocal: "Project · local" } as Record<string, string>;
+
+/** A project's settings files for the split button; none without a project. */
+function useProjectFiles(projectPath: string | null): SettingsFileLayer[] | null {
+  const [files, setFiles] = useState<{ path: string; files: SettingsFileLayer[] } | null>(null);
+  useEffect(() => {
+    if (!projectPath) return;
+    let live = true;
+    const read = () => configuration.files(projectPath).then((next) => { if (live) setFiles({ path: projectPath, files: next }); }, () => {});
+    let stop: (() => void) | undefined;
+    void read();
+    void Promise.resolve().then(() => configuration.watch(projectPath, () => void read())).then((unwatch) => { if (live) stop = unwatch; else unwatch(); }, () => {});
+    return () => { live = false; stop?.(); };
+  }, [projectPath]);
+  return projectPath && files?.path === projectPath ? files.files : null;
 }
 
 /**
