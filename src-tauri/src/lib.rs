@@ -180,6 +180,7 @@ mod native_menu;
 mod chat_windows;
 pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_account;
 pub mod machine_host;
 pub mod machine_wire;
 mod session;
