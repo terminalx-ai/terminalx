@@ -367,7 +367,9 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn open_reviewer(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+    fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        // As the app's: the reviewer runs on the author tab's agent.
+        if author.tab(&pipeline.author.tab_id).is_none() { bail!("the author's conversation is gone"); }
         let mut world = self.world();
         world.reviewers += 1;
         let id = format!("reviewer-{}", world.reviewers);
@@ -439,7 +441,8 @@ impl Host for FakeHost {
         world.workspace.head = head.into();
         Ok(())
     }
-    fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+    fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        if author.tab(&pipeline.author.tab_id).is_none() { bail!("the author's conversation is gone"); }
         let mut world = self.world();
         world.resolvers += 1;
         let id = if world.resolvers == 1 { "resolver".into() } else { format!("resolver-{}", world.resolvers) };
@@ -2483,6 +2486,133 @@ fn a_missing_reviewer_can_be_replaced_when_the_head_moves() {
     assert_ne!(again.reviewer.as_ref(), Some(&old));
     assert_eq!(again.reviewer.unwrap().session_id, "author");
     assert_eq!(run.host.world().sessions.len(), 1);
+}
+
+// ---- #1014: the pipeline follows its session, not one tab ----------------------
+
+/// TerminalX restarted: the author's tab is gone and the lead carries on in
+/// `tab`, which the session now shows.
+fn restart_into(host: &FakeHost, tab: &str) {
+    let mut world = host.world();
+    let session = world.sessions.get_mut("author").unwrap();
+    session.tabs.retain(|entry| entry.id != "t1");
+    let mut entry = session_tab(tab);
+    entry.title = Some("Work".into());
+    session.tabs.push(entry);
+    session.active_tab = Some(tab.into());
+}
+
+fn session_tab(id: &str) -> crate::store::index::TabEntry {
+    let mut tab = session("unused", None).tabs.remove(0);
+    tab.id = id.into();
+    tab
+}
+
+#[test]
+fn a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    restart_into(&run.host, "t2");
+
+    // The lead reports from its new tab: that tab is the author from here on.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.stage, reviewing.state), (Stage::Review, State::Working), "{:?}", reviewing.note);
+    assert_eq!(reviewing.author, SessionRef { session_id: "author".into(), tab_id: "t2".into() });
+    let moved = reviewing.events.iter().find(|event| event.kind == "authorMoved").expect("an event says the author moved");
+    assert!(moved.message.contains("Tab t2 became the author") && moved.message.contains("t1 is no longer in this session"), "{}", moved.message);
+    assert_eq!(moved.session_id.as_deref(), Some("author"));
+    let reviewer = reviewing.reviewer.clone().unwrap();
+    assert_ne!(reviewer.tab_id, "t2");
+
+    // Findings go to the new author tab, which fixes them; the fix is reviewed and merged.
+    let addressing = run.reviewer(&reviewed(C1, "fix", HIGH));
+    assert_eq!(addressing.stage, Stage::Address);
+    assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
+    run.host.commit(C2);
+    turn_completed(&run.host, "author", "t2", Some(&done("Fixed.")));
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    assert_eq!(run.pipeline().reviewer, Some(reviewer), "the same reviewer reads the fix");
+    let merged = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!(merged.state, State::Merged, "{:?}", merged.note);
+    assert_eq!(run.merges().len(), 1);
+    assert_eq!(merged.events.iter().filter(|event| event.kind == "authorMoved").count(), 1);
+}
+
+#[test]
+fn the_successor_is_never_a_reviewer_tab_and_a_report_from_another_tab_is_ignored() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    restart_into(&run.host, "t2");
+    {
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        let mut reviewer = session_tab("t3");
+        reviewer.title = Some(super::REVIEWER_TAB.into());
+        session.tabs.push(reviewer);
+        session.active_tab = Some("t3".into());
+    }
+    // A tab that is not the successor reports: nothing moves.
+    turn_completed(&run.host, "author", "t3", Some(&done("Not mine.")));
+    assert_eq!(run.pipeline().stage, Stage::Work);
+    // The most recent agent tab is: it carries on as the author.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.author.tab_id.as_str(), reviewing.stage), ("t2", Stage::Review));
+    assert!(reviewing.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("most recent agent tab")));
+}
+
+#[test]
+fn a_pipeline_stuck_on_a_gone_author_moves_on_when_asked_again() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    // The author's tab went with nothing in its place: the review cannot start.
+    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
+    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
+    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    assert!(matches!(&stuck.reason, Some(StopReason::Failed { message, .. }) if message.contains("the author's conversation is gone")), "{:?}", stuck.reason);
+    // The lead's new tab appears; asking for the review again starts it.
+    restart_into(&run.host, "t2");
+    let reviewing = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((reviewing.stage, reviewing.state, reviewing.author.tab_id.as_str()), (Stage::Review, State::Working, "t2"), "{:?}", reviewing.note);
+}
+
+#[test]
+fn start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
+    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
+    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    let pr = stuck.pr.clone().expect("the pull request was opened");
+    let events = stuck.events.len();
+    {
+        // Two tabs after the restart; the session shows the other one.
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        session.tabs.push(session_tab("t2"));
+        session.tabs.push(session_tab("t3"));
+        session.active_tab = Some("t3".into());
+    }
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor.clone()).unwrap();
+    assert_eq!(taken.id, run.id, "the old pipeline is kept, not replaced");
+    assert_eq!(taken.author.tab_id, "t2");
+    assert_eq!(taken.pr.as_ref().map(|link| link.number), Some(pr.number));
+    assert!(taken.auto_merge);
+    assert!(taken.events.len() > events && taken.events[..events] == stuck.events[..], "its record is kept");
+    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("Tab t2 took this pipeline over")));
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    // Asked again, it is the same pipeline; the review carries it to a merge.
+    assert_eq!(engine::start_existing(&run.host, "author", "t2", None, None, true, actor.clone()).unwrap().author.tab_id, "t2");
+    let refused = engine::start_existing(&run.host, "author", "t3", None, None, true, actor).unwrap_err();
+    assert!(refused.to_string().contains("Use its author tab, t2"), "{refused:#}");
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
 #[test]

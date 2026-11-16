@@ -499,6 +499,7 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         Err(error) => (IssuePipelineSettings::default(), Some(format!("{error:#}"))),
     };
     let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background, ended: None };
+    step.follow_session();
     if let Err(error) = action(&mut step) {
         match on_error {
             OnError::Report | OnError::Background => return Err(error),
@@ -588,6 +589,28 @@ impl Step<'_> {
             self.settle(State::Stopped, None, "Stopped. Nothing further happens until it is resumed.");
         }
         stopped
+    }
+
+    /// The pipeline follows its session, not one tab (#1014): when the
+    /// author's tab is gone, as after a restart that left the lead working in
+    /// a new tab, the session's current agent tab is the author from here on,
+    /// for findings, conflict resolution and merge alike.
+    fn follow_session(&mut self) {
+        let Some((tab_id, why)) = self.author.as_ref().and_then(|session| self.p.successor(session)) else {
+            return;
+        };
+        let why = match why {
+            super::Succession::Active => "the tab the session is on",
+            super::Succession::Latest => "the session's most recent agent tab",
+        };
+        let message = format!("Tab {tab_id} became the author: the author's tab {} is no longer in this session, and {tab_id} is {why}.", self.p.author.tab_id);
+        self.move_author(tab_id, message);
+    }
+
+    fn move_author(&mut self, tab_id: String, message: String) {
+        self.p.author.tab_id = tab_id;
+        let session_id = self.p.author.session_id.clone();
+        self.record("authorMoved", message).session_id = Some(session_id);
     }
 
     fn author_session(&mut self) -> Option<SessionEntry> {
@@ -2415,10 +2438,20 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
 pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, adopt_pr: bool, actor: super::SwitchActor) -> Result<Pipeline> {
     let lock = step_lock(&format!("start:{session_id}"));
     let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
-    let existing = store::for_session(session_id)?;
+    let mut existing = store::for_session(session_id)?;
+    if let Some(found) = existing.as_ref().filter(|found| found.author.session_id == session_id && found.author.tab_id != tab_id) {
+        // Its author tab is gone: this tab takes the pipeline over, with its
+        // pull request, record and switches (#1014).
+        if host.session(session_id)?.tab(&found.author.tab_id).is_none() {
+            existing = Some(take_over(host, found, tab_id, &actor)?);
+        }
+    }
     if let Some(existing) = &existing {
-        if existing.author.session_id != session_id || existing.author.tab_id != tab_id {
-            bail!("This session already participates in a pipeline. Use its original author tab.");
+        if existing.author.session_id != session_id {
+            bail!("This session already participates in a pipeline. Use its author tab.");
+        }
+        if existing.author.tab_id != tab_id {
+            bail!("This session already participates in a pipeline. Use its author tab, {}.", existing.author.tab_id);
         }
         if !adopt_pr || existing.pr.is_some() { return Ok(existing.clone()); }
         if existing.stopped || existing.stage != Stage::Work {
@@ -2472,6 +2505,42 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
     })
 }
 
+/// Make `tab_id` the author of a pipeline whose author tab is gone (#1014).
+/// A pipeline that stopped because that tab could not be reached, while
+/// opening the pull request or starting its review, takes that step again.
+fn take_over(host: &dyn Host, pipeline: &Pipeline, tab_id: &str, actor: &super::SwitchActor) -> Result<Pipeline> {
+    let (session_id, old) = (pipeline.author.session_id.clone(), pipeline.author.tab_id.clone());
+    run(host, &pipeline.id, true, OnError::Report, |step| {
+        let session = step.author.clone().context("The author session is gone")?;
+        let tab = session.tab(tab_id).with_context(|| format!("tab {tab_id} not found in session {session_id}"))?;
+        if session.tab(&old).is_some() {
+            bail!("This session already participates in a pipeline. Use its author tab, {old}.");
+        }
+        if !step.p.may_author(&session, tab) {
+            bail!("Tab {tab_id} cannot be this pipeline's author: it is a terminal, a conversation the pipeline opened to review or resolve, or not a PTY conversation.");
+        }
+        // Loading the step may have moved the pipeline to this tab already;
+        // otherwise the tab asked for is the author, whichever the session shows.
+        if step.p.author.tab_id != tab_id {
+            let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+            step.move_author(tab_id.to_string(), format!("Tab {tab_id} took this pipeline over, asked by {by}: the author's tab {old} is no longer in this session."));
+        }
+        if step.p.state != State::NeedsYou || step.p.stopped || !matches!(step.p.reason, Some(StopReason::Failed { .. })) {
+            return Ok(());
+        }
+        let retried = match step.p.stage {
+            Stage::PullRequest => step.open_pull_request(),
+            Stage::Review => step.request_review(false),
+            _ => Ok(()),
+        };
+        if let Err(error) = retried {
+            let reason = StopReason::Failed { step: step.doing.to_string(), message: format!("{error:#}") };
+            step.needs_you(reason);
+        }
+        Ok(())
+    })
+}
+
 fn record_attachment(pipeline: &mut Pipeline, now: &str, actor: &super::SwitchActor) {
     let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
     pipeline.record(now, "attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
@@ -2497,7 +2566,7 @@ fn initialize_adoption(pipeline: &mut Pipeline, now: &str, pr: &PrSnapshot, acto
 /// author, the reviewer or the conflict resolver of a pipeline. Once the
 /// pipeline has ended, what the turn says is not pipeline work.
 pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_message: Option<&str>) {
-    let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
+    let Some((pipeline, role)) = taking_part_now(host, session_id, tab_id) else {
         return;
     };
     let message = final_message.unwrap_or_default();
@@ -2588,7 +2657,7 @@ pub(crate) fn retry_interrupted_resolver<T>(host: &dyn Host, session_id: &str, t
 /// turn it started decides again (#725). Anyone else's answer, and an answer
 /// to any other stop (a required review, a closed pull request), changes nothing.
 pub fn answered(host: &dyn Host, session_id: &str, tab_id: &str) {
-    if let Some((pipeline, Role::Author)) = taking_part(session_id, tab_id) {
+    if let Some((pipeline, Role::Author)) = taking_part_now(host, session_id, tab_id) {
         answer_if_stopped(host, &pipeline);
     }
 }
@@ -2618,7 +2687,7 @@ pub fn turn_failure(interrupted: bool) -> &'static str {
 
 /// A turn ended without finishing: interrupted, or the agent's process went.
 pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str) {
-    let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
+    let Some((pipeline, role)) = taking_part_now(host, session_id, tab_id) else {
         return;
     };
     // A resolver a person interrupted leaves its merge to them; one whose
@@ -2662,6 +2731,25 @@ fn taking_part(session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
     let pipeline = store::for_session(session_id).ok().flatten()?;
     let role = pipeline.role_of(session_id, tab_id)?;
     Some((pipeline, role))
+}
+
+/// As [`taking_part`], for a tab that is the author's successor before any
+/// step has said so: the pipeline is moved to it first (#1014), so a report
+/// from the tab the lead carried on in after a restart is the author's.
+fn taking_part_now(host: &dyn Host, session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
+    if let Some(found) = taking_part(session_id, tab_id) {
+        return Some(found);
+    }
+    let pipeline = store::for_session(session_id).ok().flatten()?;
+    let session = host.session(session_id).ok()?;
+    if pipeline.successor(&session).is_none_or(|(successor, _)| successor != tab_id) {
+        return None;
+    }
+    if let Err(error) = run(host, &pipeline.id, true, OnError::Report, |_| Ok(())) {
+        log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+        return None;
+    }
+    taking_part(session_id, tab_id)
 }
 
 pub fn run_local_checks(host: &dyn Host, id: &str) {
