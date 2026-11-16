@@ -1355,6 +1355,43 @@ pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>
     .map_err(err)
 }
 
+/// Give each tab the name made for it, as the phone is sent it
+/// (`summaries::generated_tab_titles`): a lone tab its session's title, a
+/// tab beside others the name of the conversation it holds. A tab the reader
+/// named keeps its own; every other title is one the app made (the first
+/// words of its request, or an earlier name), so it may be replaced. The
+/// tab strip, the sidebar and the phone then all read the same title.
+pub(crate) fn adopt_tab_titles(session_id: &str) -> Result<Option<SessionEntry>> {
+    let Some(session) = index::load().map_err(err)?.into_iter().find(|s| s.id == session_id) else { return Ok(None) };
+    let titles = crate::summaries::generated_tab_titles(&session);
+    // Each name is for the conversation its tab held when it was made.
+    let made: Vec<(String, Option<String>, String)> = session
+        .tabs
+        .iter()
+        .filter(|tab| !tab.follow.title_pinned)
+        .filter_map(|tab| {
+            let title = titles.get(&tab.id)?;
+            (tab.title.as_deref() != Some(title.as_str())).then(|| (tab.id.clone(), tab.follow.conversation.clone(), title.clone()))
+        })
+        .collect();
+    if made.is_empty() {
+        return Ok(None);
+    }
+    index::update_session(session_id, |s| {
+        let mut changed = false;
+        for (tab_id, conversation, title) in &made {
+            // The reader may have named it, or it moved to another conversation, since it was read.
+            let Some(tab) = s.tab_mut(tab_id).filter(|tab| !tab.follow.title_pinned && tab.follow.conversation == *conversation) else { continue };
+            if tab.title.as_deref() != Some(title.as_str()) {
+                tab.title = Some(title.clone());
+                changed = true;
+            }
+        }
+        Ok(changed.then(|| s.clone()))
+    })
+    .map_err(err)
+}
+
 /// Whether `title` is one the app made up: the untitled default, the opening
 /// prompt's first line (cut short), or the name generated from that prompt.
 fn automatic_title(title: &str, first_prompt: &str) -> bool {
@@ -1738,6 +1775,39 @@ mod tests {
         update_session_meta("n", &SessionPatch { title: Some("Inbox".into()), ..Default::default() }).unwrap();
         assert!(adopt_agent_title("n").unwrap().is_none());
         assert_eq!(index::get("n").unwrap().title, "Inbox");
+    }
+
+    #[test]
+    fn tabs_take_the_name_made_for_them_as_the_phone_is_sent_it() {
+        let _home = crate::store::temp_home();
+        // A lone tab in a session given its name when it was started.
+        one_tab_session("Tabs show the generated title", "claude");
+        said("n", "only", LONG_PROMPT);
+        store::conversation_titles::name_tab("n", "only").unwrap();
+        assert_eq!(index::get("n").unwrap().tabs[0].title.as_deref(), Some("You are the owner's chief of staff for"));
+        let named = adopt_tab_titles("n").unwrap().expect("renamed");
+        assert_eq!(named.tabs[0].title.as_deref(), Some("Tabs show the generated title"));
+        let phone = crate::summaries::generated_tab_titles(&named);
+        assert_eq!(phone.get("only").map(String::as_str), named.tabs[0].title.as_deref(), "the Mac and the phone say the same");
+        assert!(adopt_tab_titles("n").unwrap().is_none(), "computed once");
+        // A name the reader gave the tab is never replaced.
+        rename_tab_entry("n", "only", Some("Mine".into())).unwrap();
+        assert!(adopt_tab_titles("n").unwrap().is_none());
+        assert_eq!(index::get("n").unwrap().tabs[0].title.as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn a_tab_beside_others_is_named_for_the_conversation_it_holds() {
+        let _home = crate::store::temp_home();
+        two_tab_session();
+        said("s", "talked", LONG_PROMPT);
+        store::conversation_titles::name_tab("s", "talked").unwrap();
+        rename_tab_entry("s", "empty", Some("Verifier".into())).unwrap();
+        let named = adopt_tab_titles("s").unwrap().expect("renamed");
+        let talked = named.tab("talked").unwrap().title.as_deref();
+        assert_eq!(talked, Some("Triage the support inbox every morning"));
+        assert_eq!(crate::summaries::generated_tab_titles(&named).get("talked").map(String::as_str), talked);
+        assert_eq!(named.tab("empty").unwrap().title.as_deref(), Some("Verifier"));
     }
 
     #[test]

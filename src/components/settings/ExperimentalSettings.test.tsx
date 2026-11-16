@@ -7,11 +7,12 @@ const mocks = vi.hoisted(() => ({
   setNativeCodex: vi.fn(),
   setSessionCost: vi.fn(),
   setOrchestratorRuns: vi.fn(),
+  setMachines: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setMachines: mocks.setMachines },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -29,6 +30,7 @@ beforeEach(() => {
   mocks.setNativeCodex.mockReset();
   mocks.setSessionCost.mockReset();
   mocks.setOrchestratorRuns.mockReset();
+  mocks.setMachines.mockReset();
 });
 afterEach(cleanup);
 
@@ -47,6 +49,23 @@ describe("Settings → Experimental: session cost (PRO-273)", () => {
     await waitFor(() => expect(mocks.setSessionCost).toHaveBeenCalledWith(true));
     await waitFor(() => expect(cost().getAttribute("aria-checked")).toBe("true"));
     expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+  });
+});
+
+describe("Settings → Experimental: Machines (PRO-342)", () => {
+  const machines = () => screen.getByRole("switch", { name: "Machines" });
+
+  it("is off by default, says what it shows, and saves only its own switch", async () => {
+    mocks.setMachines.mockResolvedValue({ nativeCodex: false, machines: true });
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(machines().hasAttribute("disabled")).toBe(false));
+    expect(machines().getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId("experimental-settings").textContent).toContain("Settings → Machines");
+    fireEvent.click(machines());
+    await waitFor(() => expect(mocks.setMachines).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(machines().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    expect(mocks.setOrchestratorRuns).not.toHaveBeenCalled();
   });
 });
 

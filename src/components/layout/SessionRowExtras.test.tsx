@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry, Workspace } from "@/types/session";
 import { clearDrafts, setDraft } from "@/lib/drafts";
@@ -54,7 +54,15 @@ describe("sidebar row extras", () => {
     render(<Draft />);
     expect(screen.queryByTestId("row-draft")).toBeNull();
     act(() => setDraft("t", "  Please\n  finish the tests  "));
-    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Please finish the tests");
+    const line = screen.getByTestId("row-draft");
+    // A pencil named "Draft" leads the text, in the line's faint colour; there is no "Draft:" word.
+    expect(line.textContent).toBe("Please finish the tests");
+    const pencil = within(line).getByRole("img", { name: "Draft" });
+    expect(pencil.getAttribute("title")).toBe("Draft");
+    expect(pencil.querySelector("svg")).toBeTruthy();
+    expect(line.firstElementChild).toBe(pencil);
+    expect(line.className).toContain("text-faint");
+    expect(line.innerHTML).not.toContain("text-warning");
     act(() => clearDrafts((id) => id === "t"));
     expect(screen.queryByTestId("row-draft")).toBeNull();
   });

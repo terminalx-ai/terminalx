@@ -1,0 +1,415 @@
+diff --git a/mobile/app/(tabs)/sessions.tsx b/mobile/app/(tabs)/sessions.tsx
+index 3db8c74f..134ef92a 100644
+--- a/mobile/app/(tabs)/sessions.tsx
++++ b/mobile/app/(tabs)/sessions.tsx
+@@ -1,5 +1,7 @@
++import { mark } from "@mobile/measure/marks";
++let listMarked = false;
+ import { manualStatusLabel } from "@terminalx/portable/manualStatus";
+-import { useCallback, useMemo, useState } from "react";
++import { useCallback, useEffect, useMemo, useState } from "react";
+ import { AppState, Platform, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+ import { useFocusEffect, useRouter } from "expo-router";
+ import { ChevronDown, ChevronRight, Laptop } from "lucide-react-native";
+@@ -25,6 +27,7 @@ export default function SessionsScreen() {
+   const app = useApp();
+   const { palette } = useTheme();
+   const router = useRouter();
++  useEffect(() => { if (!listMarked && app.sessions.length > 0) { listMarked = true; mark("18.list-rendered", { count: app.sessions.length }); } }, [app.sessions.length]);
+   const [view, setViewState] = useState<ListView>(lastView);
+   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+   const setView = (next: ListView) => { lastView = next; setViewState(next); };
+diff --git a/mobile/app/_layout.tsx b/mobile/app/_layout.tsx
+index d1d5edb8..9887415b 100644
+--- a/mobile/app/_layout.tsx
++++ b/mobile/app/_layout.tsx
+@@ -1,4 +1,5 @@
+ import "react-native-gesture-handler";
++import { mark } from "@mobile/measure/marks";
+ import { useEffect } from "react";
+ import { Stack, useRouter } from "expo-router";
+ import * as Notifications from "expo-notifications";
+@@ -9,7 +10,9 @@ import { CloudProvider } from "@mobile/cloud/CloudProvider";
+ import { AppProvider } from "@mobile/state/AppProvider";
+ import { ThemeProvider, useTheme } from "@mobile/ui/theme";
+ 
++let rootRendered = false;
+ export default function RootLayout() {
++  if (!rootRendered) { rootRendered = true; mark("01.root-render"); }
+   return <SafeAreaProvider><ThemeProvider><AppProvider><CloudProvider><Navigation /></CloudProvider></AppProvider></ThemeProvider></SafeAreaProvider>;
+ }
+ 
+diff --git a/mobile/src/data/host-api.ts b/mobile/src/data/host-api.ts
+index 0f04b84d..2e748289 100644
+--- a/mobile/src/data/host-api.ts
++++ b/mobile/src/data/host-api.ts
+@@ -1,3 +1,4 @@
++import { mark } from "@mobile/measure/marks";
+ import * as Crypto from "expo-crypto";
+ import type { ModelInfo } from "@terminalx/portable/agentSettings";
+ import type { ContinuationContext } from "@terminalx/portable/continuation";
+@@ -145,8 +146,9 @@ export class HostApi {
+ 
+   features(): Promise<HostFeatures> {
+     if (this.capabilities) return this.capabilities;
++    mark("18.capabilities.sent");
+     const pending = this.connection.request<HostFeatures>("sync.capabilities")
+-      .then((result) => result.ok ? result.value : {})
++      .then((result) => { mark("18.capabilities.ok"); return result.ok ? result.value : {}; })
+       .catch((cause) => { if (this.capabilities === pending) this.capabilities = undefined; throw cause; });
+     this.capabilities = pending;
+     return pending;
+@@ -197,7 +199,9 @@ export class HostApi {
+   }
+ 
+   async summaries(): Promise<SessionSummary[] | null> {
++    mark("18.summaries.sent");
+     const value = await this.list("sessions.summaries") as { sessions?: unknown } | null;
++    mark("18.summaries.ok", { count: Array.isArray(value?.sessions) ? value.sessions.length : null });
+     return Array.isArray(value?.sessions) ? value.sessions.filter(isSessionSummary) : null;
+   }
+ 
+diff --git a/mobile/src/data/transcript-sync.ts b/mobile/src/data/transcript-sync.ts
+index 102151c2..0cb07e8e 100644
+--- a/mobile/src/data/transcript-sync.ts
++++ b/mobile/src/data/transcript-sync.ts
+@@ -1,3 +1,4 @@
++import { mark } from "@mobile/measure/marks";
+ import type { AgentEvent } from "@terminalx/portable/events";
+ import { connectionProblem } from "../transport/connection-errors";
+ import { RelayOuterError } from "../transport/relay-client";
+@@ -149,7 +150,9 @@ export function watchTranscript(
+           continue;
+         }
+         const cursor = state.cursor;
++        mark("19.sync.sent");
+         const page = await read(`sync:${JSON.stringify(cursor ?? null)}`, () => api.syncTranscript(session, tab, cursor));
++        mark("19.sync.ok", { events: "events" in page ? page.events.length : null });
+         if (!current()) return;
+         if (page.deleted) {
+           state = emptyTranscript();
+@@ -169,7 +172,7 @@ export function watchTranscript(
+       }
+       // Read to the end of the Mac's history, with the subscription confirmed before that read: caught up. Not
+       // confirmed yet, the confirmation asks for another drain, which then is.
+-      if (current() && heardSince) caughtUp(true);
++      if (current() && heardSince) { mark("19.caught-up"); caughtUp(true); }
+     } catch (cause) {
+       // Halted: the poll and live notifications stop asking until Retry starts a new watcher.
+       if (cause instanceof TranscriptHaltedError) halted = true;
+@@ -188,6 +191,7 @@ export function watchTranscript(
+   void (async () => {
+     state = await readCache(host, session, tab);
+     if (!current()) return;
++    mark("19.cache-shown", { events: state.events.length, connected });
+     update(state, false, "cache");
+     if (!connected) return;
+     initialized = true;
+diff --git a/mobile/src/measure/marks.ts b/mobile/src/measure/marks.ts
+new file mode 100644
+index 00000000..35b09168
+--- /dev/null
++++ b/mobile/src/measure/marks.ts
+@@ -0,0 +1,52 @@
++// Throwaway measurement instrumentation for issue #989. Not for shipping.
++// Each mark goes to a JSONL file in the app's Documents folder, pulled with
++// `xcrun devicectl device copy from --domain-type appDataContainer`.
++import { File, Directory, Paths } from "expo-file-system";
++import { Settings } from "react-native";
++
++const launchedAt = Date.now();
++const runId = String(Settings.get("TXRunId") ?? `run-${launchedAt}`);
++const rawInterval = Settings.get("TXKeepAliveMs");
++/** Keep-alive interval for this launch, from the launch argument `-TXKeepAliveMs <ms>`. 0 turns it off. Default is today's 30 s. */
++export const KEEP_ALIVE_MS = rawInterval === undefined || rawInterval === null || rawInterval === "" ? 30_000 : Number(rawInterval);
++
++/** Launch argument `-TXNoDirect 1`: skip the LAN paths so the relay path is measured on the home Wi-Fi. */
++export const NO_DIRECT = String(Settings.get("TXNoDirect") ?? "") === "1";
++
++const lines: string[] = [];
++let dirty = false;
++const directory = new Directory(Paths.document, "measure");
++const file = new File(directory, `${runId}.jsonl`);
++
++export function mark(name: string, data?: Record<string, unknown>): void {
++  lines.push(JSON.stringify({ name, wall: Date.now(), mono: performance.now(), ...data }));
++  dirty = true;
++}
++
++function flush(): void {
++  if (!dirty) return;
++  dirty = false;
++  try {
++    if (!directory.exists) directory.create({ intermediates: true, idempotent: true });
++    file.writeSync(lines.join("\n") + "\n");
++  } catch {
++    dirty = true;
++  }
++}
++setInterval(flush, 2_000);
++
++// Native start points, written into NSUserDefaults by the patched AppDelegate before React Native starts.
++let startup: Record<string, unknown> = {};
++try {
++  const t = (performance as unknown as { rnStartupTiming: { startTime: number; initializeRuntimeStart: number; executeJavaScriptBundleEntryPointStart: number; endTime: number } }).rnStartupTiming;
++  startup = { rnStartTime: t.startTime, rnInitializeRuntimeStart: t.initializeRuntimeStart, rnExecuteBundleStart: t.executeJavaScriptBundleEntryPointStart, rnEndTime: t.endTime };
++} catch { /* not available */ }
++mark("js.module-eval", {
++  runId,
++  keepAliveMs: KEEP_ALIVE_MS,
++  noDirect: NO_DIRECT,
++  processStartWall: Settings.get("TXProcessStartMs") ?? null,
++  didFinishLaunchingWall: Settings.get("TXDidFinishLaunchingMs") ?? null,
++  timeOrigin: performance.timeOrigin,
++  ...startup,
++});
+diff --git a/mobile/src/state/AppProvider.tsx b/mobile/src/state/AppProvider.tsx
+index bd6d782c..43f79a91 100644
+--- a/mobile/src/state/AppProvider.tsx
++++ b/mobile/src/state/AppProvider.tsx
+@@ -1,3 +1,4 @@
++import { mark } from "@mobile/measure/marks";
+ import { forgetConversationState } from "./conversation-state";
+ import { clearTranscriptCaches } from "../data/transcript-cache";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+@@ -195,7 +196,9 @@ export function AppProvider({ children }: PropsWithChildren) {
+       return true;
+     }
+     try {
++      mark("06.credential-read.start");
+       const credential = await readHostCredential(host.id);
++      mark("06.credential-read.end");
+       if (signal?.aborted || generation !== selectionGeneration.current) return false;
+       if (!credential) {
+         setError("The device credential is unavailable. Pair this computer again.");
+@@ -205,6 +208,7 @@ export function AppProvider({ children }: PropsWithChildren) {
+       activeHostRef.current = host;
+       setActiveHost(host);
+       setSessions([]);
++      mark("06.connection-start");
+       connection.start(host, credential);
+       return true;
+     } catch (cause) {
+@@ -215,10 +219,14 @@ export function AppProvider({ children }: PropsWithChildren) {
+ 
+   useEffect(() => {
+     const startup = new AbortController();
++    mark("02.storage-read.start");
+     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
++      mark("02.storage-read.end", { hosts: storedHosts.length, signedIn: !!storedSession });
+       let effectiveSession = storedSession;
+       if (storedSession) {
++        mark("03.account-refresh.start");
+         const outcome = await refreshStoredSession(storedSession);
++        mark("03.account-refresh.end", { status: outcome.status });
+         if (outcome.status === "rejected") {
+           forgetConversationState("");
+           await clearTranscriptCaches();
+@@ -240,6 +248,7 @@ export function AppProvider({ children }: PropsWithChildren) {
+         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
+       }
+       const initialUrl = await Linking.getInitialURL();
++      mark("05.initial-url");
+       if (startup.signal.aborted) return;
+       if (!effectiveSession && initialUrl && isAuthCallbackUrl(initialUrl)) {
+         try { setSession(await finishSignIn(initialUrl)); } catch (cause) { setError(readableError(cause)); }
+@@ -252,6 +261,7 @@ export function AppProvider({ children }: PropsWithChildren) {
+         !recent || host.lastConnectedAt > recent.lastConnectedAt ? host : recent, null);
+       if (recentHost && !recentHost.disconnectedOnMacAt) await connectHost(recentHost, startup.signal);
+       if (startup.signal.aborted) return;
++      mark("07.ready");
+       setReady(true);
+     }).catch((cause: unknown) => {
+       if (startup.signal.aborted) return;
+@@ -269,6 +279,7 @@ export function AppProvider({ children }: PropsWithChildren) {
+       connectionStageRef.current = next;
+       setConnectionStage(next);
+       setConnectionAttempt(attempt);
++      mark("17.stage", { stage: next, attempt });
+       if (next === "connected") {
+         api.resetConnection();
+         void refreshHostName();
+diff --git a/mobile/src/transport/connection.ts b/mobile/src/transport/connection.ts
+index 9744f66c..b01e8175 100644
+--- a/mobile/src/transport/connection.ts
++++ b/mobile/src/transport/connection.ts
+@@ -1,3 +1,4 @@
++import { mark, KEEP_ALIVE_MS, NO_DIRECT } from "@mobile/measure/marks";
+ import { directEndpoints } from "./direct-endpoints";
+ import { z } from "zod";
+ import type { RpcCallResult } from "@terminalx/portable/rpc";
+@@ -174,21 +175,26 @@ export class HostConnection {
+     const client = this.client;
+     const lost = this.lostWhileAway || !client;
+     this.lostWhileAway = false;
++    mark("13.foreground", { lost });
+     if (lost) {
+       this.reconnectNow("the connection was lost in the background");
+       return true;
+     }
+     const generation = this.generation;
++    const probeAt = performance.now();
++    mark("13.resume-probe.sent", { generation });
+     void client.request("pairing.getEndpoints", {}, RESUME_PROBE_MS).then(
+       () => {
++        mark("13.resume-probe.ok", { generation, rttMs: performance.now() - probeAt });
+         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
+         // Still there: carry on as if nothing happened, and let what is on screen catch up on what it missed.
+         this.endQuiet(false);
+         clearInterval(this.refreshTimer);
+-        this.refreshTimer = setInterval(() => void this.refreshEndpoints(client, generation), 30_000);
++        if (KEEP_ALIVE_MS > 0) this.refreshTimer = setInterval(() => void this.refreshEndpoints(client, generation), KEEP_ALIVE_MS);
+         for (const listener of this.connectedListeners) listener();
+       },
+       () => {
++        mark("13.resume-probe.failed", { generation, waitedMs: performance.now() - probeAt });
+         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
+         this.reconnectNow("the connection from before the background did not answer");
+       },
+@@ -371,7 +377,9 @@ export class HostConnection {
+     const cancelled = () => new Error("Connection attempt cancelled");
+     if (!this.active) throw cancelled();
+     const { host: storedHost, credential } = this.active;
++    mark("08.e2ee-key.start", { generation });
+     const clientSecretKey = await loadOrCreateE2EESecretKey();
++    mark("08.e2ee-key.end", { generation });
+     if (generation !== this.generation || !this.active) throw cancelled();
+     const clients = new Set<RelayClient>();
+     let raceFinished = false;
+@@ -409,14 +417,17 @@ export class HostConnection {
+       ...directEndpoints(storedHost).map(redactEndpoint),
+       ...(resumable.length ? [redactEndpoint(storedHost.relay!.cellUrl)] : []),
+     ].join(" · "));
+-    const attempts: Promise<ConnectionCandidate>[] = directEndpoints(storedHost).map(openDirect);
++    mark("09.race-start", { generation, direct: directEndpoints(storedHost).length, relay: resumable.length });
++    const attempts: Promise<ConnectionCandidate>[] = (NO_DIRECT ? [] : directEndpoints(storedHost)).map(openDirect);
+     for (const resume of resumable) {
+       attempts.push((async (): Promise<ConnectionCandidate> => {
+         try {
++          mark("09r1.resolve.start", { generation });
+           const host = await resolveRelay({ ...storedHost, relay: storedHost.relay! }, resume.token).catch((error: unknown) => {
+             if (racing()) this.log("warning", "Relay director unavailable", `${safeError(error)} · trying the saved relay cell`);
+             return storedHost;
+           });
++          mark("09r1.resolve.end", { generation });
+           if (!racing()) throw cancelled();
+           if (!host.relay) throw new Error("Relay endpoint unavailable");
+           const client = new RelayClient({ relay: host.relay, credential: resume.token, credentialKind: "resume", credentialVersion: resume.version, deviceToken: credential.deviceToken, desktopPublicKeyB64: host.publicKeyB64, clientSecretKey });
+@@ -448,6 +459,7 @@ export class HostConnection {
+       winner.client.close();
+       throw cancelled();
+     }
++    mark("09.winner", { generation, path: winner.path });
+     const { client, host } = winner;
+     this.client = client;
+     client.subscribe((event) => {
+@@ -464,6 +476,7 @@ export class HostConnection {
+         this.emitStage("connected", 0);
+         this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
+       } else if (state === "disconnected" && wasConnected) {
++        mark("conn.lost", { generation, path: winner.path, connectedForMs: Date.now() - connectedAt, backgrounded: this.backgrounded, cause: cause ? safeError(cause) : null });
+         clearInterval(this.refreshTimer);
+         this.client = null;
+         if (this.heldByMac) {
+@@ -494,6 +507,7 @@ export class HostConnection {
+     const { disconnectedOnMacAt: _held, ...reachedHost } = host;
+     const connectedHost = { ...reachedHost, lastConnectedAt: Date.now() };
+     await updateStoredHost(connectedHost).catch(() => undefined);
++    mark("15.stored", { generation });
+     if (generation !== this.generation || !this.active || this.client !== client) return;
+     this.active.host = connectedHost;
+     this.active.credential = confirmedCredential;
+@@ -506,7 +520,8 @@ export class HostConnection {
+     const refresh = () => this.refreshEndpoints(client, generation);
+     void refresh();
+     clearInterval(this.refreshTimer);
+-    if (!this.backgrounded) this.refreshTimer = setInterval(() => void refresh(), 30_000);
++    if (!this.backgrounded && KEEP_ALIVE_MS > 0) this.refreshTimer = setInterval(() => void refresh(), KEEP_ALIVE_MS);
++    mark("16.listeners", { generation, keepAliveMs: KEEP_ALIVE_MS });
+     for (const listener of this.connectedListeners) listener();
+     if (winner.path === "relay" && connectedHost.relay && confirmedCredential.current) {
+       void rotateCredentialIfNeeded({ client, host: connectedHost, credential: confirmedCredential }).then((rotated) => {
+@@ -539,13 +554,17 @@ export class HostConnection {
+   }
+ 
+   private async refreshEndpoints(client: RelayClient, generation: number): Promise<void> {
++    const sentAt = performance.now();
++    mark("14.keepalive.sent", { generation });
+     try {
+       const response = await client.request("pairing.getEndpoints", {}, 5_000).catch((error: unknown) => {
++        mark("14.keepalive.failed", { generation, waitedMs: performance.now() - sentAt, error: safeError(error) });
+         // A network change can leave TCP apparently open. Probe the encrypted
+         // channel so a silent dead path also starts a fresh candidate race.
+         if (generation === this.generation && this.client === client) client.close();
+         throw error;
+       });
++      mark("14.keepalive.ok", { generation, rttMs: performance.now() - sentAt });
+       if (!response.ok) return; // Older hosts can keep using their saved endpoint.
+       const endpoints = PairingGetEndpointsResultSchema.parse(response.value);
+       if (generation !== this.generation || this.client !== client || !this.active || !endpoints.directEndpoints) return;
+diff --git a/mobile/src/transport/relay-client.ts b/mobile/src/transport/relay-client.ts
+index fd82efc6..1b4760b0 100644
+--- a/mobile/src/transport/relay-client.ts
++++ b/mobile/src/transport/relay-client.ts
+@@ -1,3 +1,4 @@
++import { mark } from "@mobile/measure/marks";
+ import type { RpcCallResult, RpcErrorData } from "@terminalx/portable/rpc";
+ import { plainRefusal } from "./refusal";
+ import { PairingGetEndpointsResultSchema, RelayPhoneHelloSchema, type DeviceResumeConfirmed, type PairingRelay } from "../pairing/contracts";
+@@ -143,11 +144,14 @@ export class RelayClient {
+       this.resolveConnect = resolve;
+       this.rejectConnect = reject;
+     });
++    const tag = { transport: direct ? "direct" : "relay" };
++    mark("09s.socket-create", tag);
+     const socket = (this.options.createSocket ?? ((url) => new WebSocket(url)))(direct ? this.options.endpoint : relaySocketUrl(this.options.relay));
+     socket.binaryType = "arraybuffer";
+     this.socket = socket;
+     this.handshakeTimer = setTimeout(() => this.fail(new Error(`${direct ? "Direct" : "Relay"} handshake timed out after 15 seconds`)), 15_000);
+     socket.onopen = () => {
++      mark("09s.socket-open", tag);
+       if (direct) {
+         this.outerReady = true;
+         this.setState("handshaking");
+@@ -226,6 +230,7 @@ export class RelayClient {
+       if (!parsed.data.ok) throw new RelayOuterError(parsed.data.code);
+       if (parsed.data.credentialKind !== this.options.credentialKind) throw new Error("Unexpected relay credential kind");
+       if (parsed.data.credentialKind === "resume" && this.options.credentialVersion !== undefined && parsed.data.acceptedCredentialVersion !== this.options.credentialVersion) throw new Error("Relay resume credential version mismatch");
++      mark("09r5.relay-hello");
+       this.outerReady = true;
+       this.setState("handshaking");
+       this.socket.send(JSON.stringify(this.session.hello));
+@@ -233,6 +238,7 @@ export class RelayClient {
+     }
+     if (!this.handshakeReady) {
+       if (typeof raw !== "string" || !this.session.acceptReady(parseJson(raw))) throw new Error("Invalid E2EE ready");
++      mark("10.e2ee-ready", { transport: this.options.transport ?? "relay" });
+       this.handshakeReady = true;
+       this.socket.send(this.session.sealText(JSON.stringify({ type: "e2ee_auth", v: 2, transcriptHashB64: this.session.transcriptHashB64, deviceToken: this.options.deviceToken })));
+       const approval = this.options.awaitApproval;
+@@ -269,11 +275,13 @@ export class RelayClient {
+         throw new PairingNotApprovedError(refused);
+       }
+       if (!isAuthenticated(value, this.session.transcriptHashB64)) throw new Error("E2EE device authentication rejected");
++      mark("11.e2ee-authenticated", { transport: this.options.transport ?? "relay" });
+       this.authenticated = true;
+       // Asked first and not waited for: only a request too large for one frame waits for the answer.
+       this.fragments = this.request<{ fragments?: unknown } | null>("transport.negotiate", { fragments: FRAGMENTS_VERSION }, 10_000)
+         .then((result) => result.ok && result.value?.fragments === FRAGMENTS_VERSION, () => false);
+       if (this.options.transport !== "direct" && this.options.credentialKind === "resume") {
++        mark("14c.resume-confirm.sent");
+         const reqId = `confirm-${encodeBase64Url(secureRandom.bytes(16))}`;
+         const result = await this.request<unknown>("pairing.getEndpoints", { resumeConfirmReqId: reqId });
+         if (!result.ok) throw new Error(`${result.refusal.code}: ${result.refusal.message}`);
+@@ -281,9 +289,11 @@ export class RelayClient {
+         const confirmation = endpoints.resumeConfirmation;
+         if (!confirmation || confirmation.reqId !== reqId || endpoints.relay?.relayHostId !== this.options.relay.relayHostId) throw new Error("Relay resume confirmation missing");
+         this.resumeConfirmation = confirmation;
++        mark("14c.resume-confirm.ok");
+       }
+       if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+       this.handshakeTimer = null;
++      mark("14.connected", { transport: this.options.transport ?? "relay" });
+       this.setState("connected");
+       this.resolveConnect?.();
+       this.connectPromise = null;

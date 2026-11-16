@@ -169,14 +169,27 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    // Before anything reads stdin, a socket or the host key (#978 review).
+    #[cfg(target_os = "linux")]
+    crate::local_vm::guest::seal_key_holder();
     #[cfg(target_os = "linux")]
     if let Some(code) = crate::run_pty_supervisor() { return code; }
     if crate::startup::probe_cli() { return 0; }
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::attachment::run_stdio_cli() { return code; }
+    #[cfg(unix)]
+    if let Some(code) = crate::container_vm::run_stdio_cli() { return code; }
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::desktop::run_cli() { return code; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {
         return 0;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("local-vm-rpc") {
+        return crate::local_vm::guest::run_rpc_cli(&args[1..]);
+    }
     // So is Git's credential helper and the `gh` shim (`cloud_github`).
     if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
         return crate::cloud_github::run_cli(&args[1..]);
@@ -214,7 +227,8 @@ pub fn main() -> i32 {
     logger.init();
     #[cfg(all(target_os = "macos", feature = "local-ui"))]
     let outcome = if options.runtime_kind == RuntimeKind::Local && !options.self_test
-        && std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1") {
+        && std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1")
+        && !crate::local_vm::guest::Guest::installation_present().unwrap_or(true) {
         crate::local_runtime::platform::run(move || run(options))
     } else { run(options) };
     #[cfg(not(all(target_os = "macos", feature = "local-ui")))]
@@ -253,6 +267,10 @@ struct Runtime {
     /// What moves an issue's pipeline when a turn ends (#433); idle until
     /// the agent tabs are served.
     pipelines: Arc<RuntimeObserver>,
+    #[cfg(unix)]
+    guest: Option<Arc<crate::local_vm::guest::Guest>>,
+    #[cfg(unix)]
+    vm_supervisor: Option<crate::local_vm::supervisor::Supervisor>,
 }
 
 fn run(options: Options) -> Result<()> {
@@ -268,6 +286,17 @@ fn run(options: Options) -> Result<()> {
         bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
     }
     let data_dir = crate::store::root().context("open the state directory")?;
+    #[cfg(unix)]
+    let guest_mode = crate::local_vm::guest::Guest::installed_for_root(&data_dir)?;
+    #[cfg(not(unix))]
+    let guest_mode = false;
+    if guest_mode && (options.runtime_kind != RuntimeKind::Local || options.relay_link.is_some() || options.project_root.is_some()) {
+        bail!("Pinned guest cannot expose cloud, relay or generic project routing");
+    }
+    // A pinned guest is replaced only by its host, never handed over in place.
+    if guest_mode && options.adopt.is_some() {
+        bail!("A pinned guest runtime is never handed over; it is replaced by its host");
+    }
     crate::data_privacy::initialize();
     // A runtime taking over from the one this process was (#765) holds the
     // home already: its lock, its sockets and its terminals came with it.
@@ -315,7 +344,7 @@ fn run(options: Options) -> Result<()> {
             log::error!("start the environment checkout watcher: {error}");
         }
     }
-    let runtime = start(&options, adopted, _owner.as_ref())?;
+    let mut runtime = start(&options, guest_mode, adopted, _owner.as_ref())?;
     if let (Some((cloud, origin)), false) = (&cloud, options.self_test) {
         report_activity(&runtime, cloud.clone(), origin);
     }
@@ -342,11 +371,22 @@ fn run(options: Options) -> Result<()> {
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
     // link file in development and tests.
-    let link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
+    let mut link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
         (Some(path), _) => Some(Arc::new(crate::remote::host::FileLink::open(path).context("open the relay link")?)),
         (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
         (None, None) => None,
     };
+    // A local runtime hosts operating computers while the switch is on
+    // (PRO-341): it opens nothing until then.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        let parts = crate::machine_host::Parts { sink: runtime.sink.clone(), terminals: runtime.terminals.clone(), sessions: runtime.manager.clone() };
+        let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
+        let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
+        // One key answers on every route of a machine.
+        if let (Some(relay), true) = (link.take(), options.serves_machine()) {
+            link = Some(crate::machine_host::KeyedLink::wrap(&machine, relay));
+        }
+    }
     // The self-test checks the local runtime only.
     let mut agents = None;
     // A root serves one workspace; none, on a local runtime, its machine.
@@ -387,7 +427,11 @@ fn run(options: Options) -> Result<()> {
                             // An explicitly configured relay server is a
                             // standing service, not a detached desktop owner.
                             options.relay_link.is_some()
+                                // Hosting operating computers is a standing
+                                // service, and a connected computer is a client.
+                                || crate::machine_host::installed().is_some_and(|host| host.keeps_runtime())
                                 || runtime.manager.has_background_work()
+                                || local_vm_busy()
                                 || runtime.manager.idle_process_roots().is_none()
                                 || crate::issue_pipeline::engine::holding() != 0
                                 // An enabled schedule/issue watcher is an
@@ -411,7 +455,7 @@ fn run(options: Options) -> Result<()> {
         });
         Ok(())
     };
-    shutdown(&runtime);
+    shutdown(&mut runtime);
     println!("{}", json!({ "type": "stopped", "ok": outcome.is_ok() }));
     outcome
 }
@@ -499,6 +543,14 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
     });
 }
 
+/// Whether the Local VM supervisor has work a stop or idle exit must not cut off.
+fn local_vm_busy() -> bool {
+    #[cfg(unix)]
+    { crate::local_vm::supervisor::has_work() }
+    #[cfg(not(unix))]
+    { false }
+}
+
 #[cfg(unix)]
 type Inherited = Option<crate::local_runtime::handover::Adopted>;
 #[cfg(not(unix))]
@@ -512,7 +564,7 @@ fn adopted_any(adopted: &Inherited) -> bool {
 /// The desktop's `setup`, less everything that needs a window. `adopted` is
 /// what the runtime this process was handed over (#765): its terminals,
 /// agent tabs and sockets are taken over before anything is served.
-fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runtime::Owner>) -> Result<Runtime> {
+fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<&crate::local_runtime::Owner>) -> Result<Runtime> {
     #[cfg(not(unix))]
     let _ = owner;
     #[cfg(unix)]
@@ -532,7 +584,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     #[cfg(not(unix))]
     let going_on: std::collections::HashSet<String> = std::collections::HashSet::new();
     let handed_over = adopted_any(&adopted);
-    let lifetime = (options.runtime_kind == RuntimeKind::Local)
+    let lifetime = (options.runtime_kind == RuntimeKind::Local && !guest_mode)
         .then(|| crate::local_runtime::Lifetime::starting(Duration::from_secs(options.idle_grace_seconds)));
     let project_root = match &options.project_root {
         Some(root) => {
@@ -590,6 +642,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
     }
     manager.follow_pane_exits();
+    #[cfg(unix)]
+    let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     // Terminals first, then the tabs whose CLIs run in them; the hooks those
     // CLIs fire are answered only once their tabs are there to hear them.
     #[cfg(unix)]
@@ -605,11 +659,19 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
         control_endpoint.clone(),
         options.runtime_kind.as_str().into(),
     );
+    #[cfg(unix)]
+    { service = service.with_guest(guest.clone()); }
     if let Some(lifetime) = &lifetime {
         service = service.with_local_lifetime(lifetime.clone());
         #[cfg(unix)]
         lifetime.set_stream_socket(crate::local_runtime::stream::start(&control_endpoint, sink.clone(), terminals.clone(), lifetime.clone())?);
     }
+    #[cfg(unix)]
+    let vm_supervisor = if !options.self_test {
+        lifetime.as_ref().map(|life| crate::local_vm::supervisor::Supervisor::start(life.clone())).transpose()?
+    } else { None };
+    #[cfg(unix)]
+    if vm_supervisor.is_some() { service=service.with_vm_controller(); }
     let hook_lifetime = lifetime.clone();
     let served_endpoint = control_endpoint.clone();
     let on_hook = move |frame| {
@@ -643,7 +705,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
             log::warn!("{} handed-over hook(s) waited on a card no tab holds; they are answered as refused", parked.len());
         }
     }
-    if options.runs_local_work() {
+    // A guest runtime runs only its guest work (PRO-114).
+    if options.runs_local_work() && !guest_mode {
         manager.follow_terminals();
         let pipeline_host = Arc::new(crate::issue_pipeline::host::LocalHost::new(sink.clone(), manager.clone()));
         pipelines.attach(pipeline_host.clone());
@@ -691,7 +754,7 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     }
     // From here on it can be handed over in its turn (#765).
     #[cfg(unix)]
-    if let (Some(owner), true) = (owner, options.runtime_kind == RuntimeKind::Local && options.relay_link.is_none() && !options.self_test) {
+    if let (Some(owner), true) = (owner, options.runtime_kind == RuntimeKind::Local && !guest_mode && options.relay_link.is_none() && !options.self_test) {
         crate::local_runtime::handover::install(crate::local_runtime::handover::Runtime {
             manager: manager.clone(), terminals: terminals.clone(), bridge: bridge.clone(), control: served_endpoint,
             home: crate::store::root()?, owner: owner.descriptor(),
@@ -704,7 +767,8 @@ fn start(options: &Options, adopted: Inherited, owner: Option<&crate::local_runt
     if adopted.is_some() {
         bridge.thaw();
     }
-    Ok(Runtime { _settings_watcher: settings_watcher, lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines })
+    Ok(Runtime { _settings_watcher: settings_watcher, lifetime, sink, host, terminals, manager, socket, bridge, project_root, interrupted, pipelines,
+        #[cfg(unix)] guest, #[cfg(unix)] vm_supervisor })
 }
 
 /// The hook sockets a handover brought, the cards its hooks wait on, and
@@ -962,12 +1026,18 @@ fn start_relay_host(
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
+    let serves_machine = root.is_none();
     let root = root.map(PathBuf::from);
     let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
         let served = match root {
             Some(root) => crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
-            None => crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
+            None => {
+                // The relay admits the machine's paired computers and passes
+                // on its phones (PRO-341).
+                let routes = crate::machine_host::installed().map(|machine| machine.clone() as Arc<dyn crate::remote::host::MachineRoutes>);
+                crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone(), routes).await
+            }
         };
         let host = match served {
             Ok(host) => host,
@@ -976,6 +1046,10 @@ fn start_relay_host(
                 return;
             }
         };
+        // The machine's direct listener serves this same RPC.
+        if let (true, Some(machine)) = (serves_machine, crate::machine_host::installed()) {
+            machine.use_rpc(host.rpc());
+        }
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();
@@ -995,8 +1069,13 @@ fn start_relay_host(
     });
 }
 
-fn shutdown(runtime: &Runtime) {
+fn shutdown(runtime: &mut Runtime) {
+    if let Some(lifetime)=&runtime.lifetime { lifetime.begin_shutdown(); }
+    #[cfg(unix)]
+    if let Some(guest)=&runtime.guest {guest.shutdown();}
     runtime.manager.begin_shutdown();
+    #[cfg(unix)]
+    if let Some(supervisor)=&mut runtime.vm_supervisor {supervisor.shutdown();}
     let panes: Vec<_> = runtime.terminals.panes().into_iter().map(|pane| pane.id).collect();
     runtime.terminals.kill_all_and_wait(&panes, Duration::from_secs(5));
     runtime.host.kill_all_and_wait(Duration::from_secs(5));

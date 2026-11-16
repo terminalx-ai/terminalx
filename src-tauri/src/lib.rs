@@ -145,14 +145,21 @@ mod secret_clipboard;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
-mod local_vm;
+mod container_vm;
+mod computer_targets;
+#[cfg(unix)]
+pub mod local_vm;
 mod machine_name;
+mod direct_endpoints;
+mod pairing_fingerprint;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+#[cfg(feature = "desktop")]
+mod machines;
 pub mod power;
 mod project_start;
 mod project_templates;
@@ -172,8 +179,10 @@ mod quit;
 mod native_menu;
 #[cfg(feature = "desktop")]
 mod chat_windows;
-mod relay_e2ee;
+pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_host;
+pub mod machine_wire;
 mod session;
 mod sidebar_activity;
 mod session_archive;
@@ -322,6 +331,7 @@ pub fn run() {
     data_privacy::initialize();
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    let machines = Arc::new(machines::Machines::default());
     pairing.attach_models(codex_models.clone());
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let paired = pairing.clone();
@@ -395,6 +405,7 @@ pub fn run() {
         .manage(desktop_links::PendingSettingsLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
+        .manage(machines.clone())
         .setup(move |app| {
             #[cfg(unix)]
             match app.path().app_log_dir() {
@@ -424,6 +435,7 @@ pub fn run() {
             account.configure(&app.config().identifier)?;
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
+            machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -545,6 +557,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::local_vm_request,
             data_privacy::data_privacy_status,
             data_privacy::data_privacy_set,
             updater::app_update_check,
@@ -678,6 +691,17 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            machines::machines_host_status,
+            machines::machines_set_allow_operating,
+            machines::machines_create_code,
+            machines::machines_approve,
+            machines::machines_decline,
+            machines::machines_revoke,
+            machines::machines_inspect_code,
+            machines::machines_pair,
+            machines::machines_cancel_pairing,
+            machines::machines_list,
+            machines::machines_set_route,
             commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,

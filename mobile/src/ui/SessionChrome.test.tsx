@@ -3,7 +3,6 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatTabs, NewChatSheet, SessionHeader } from "./SessionChrome";
-import { shortProject } from "./ChatListRow";
 
 const mocks = vi.hoisted(() => ({ app: {} as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -56,6 +55,15 @@ describe("the branch's chats as tabs", () => {
     expect(button("New chat in this branch")).toBeUndefined();
   });
 
+  it("shows a tab's generated title, and its prompt's first words only until there is one", async () => {
+    const prompt = { id: "w", harness: "claude", title: "You are a worker in a run led", status: "idle" as const };
+    await render(<ChatTabs session={{ ...session, tabs: [prompt] }} selectedTabId="w" onSelect={vi.fn()} />);
+    expect(container.textContent).toContain("You are a worker in a run led");
+    await render(<ChatTabs session={{ ...session, tabs: [{ ...prompt, generatedTitle: "Tabs show the generated title" }] }} selectedTabId="w" onSelect={vi.fn()} />);
+    expect(button("Tabs show the generated title, open")).toBeDefined();
+    expect(container.textContent).not.toContain("You are a worker");
+  });
+
   it("offers + for another chat in the branch", async () => {
     const onAdd = vi.fn();
     await render(<ChatTabs session={session} selectedTabId="a" onSelect={vi.fn()} onAdd={onAdd} />);
@@ -89,12 +97,6 @@ describe("the session's bar", () => {
     // No terminal on this Mac: no switch.
     await render(<SessionHeader title="develop-widget" onBack={vi.fn()} onView={onView} />);
     expect(button("Chat") ?? button("Terminal")).toBeUndefined();
-  });
-
-  it("shortens a project to lead a row's title without crowding its branch", () => {
-    expect(shortProject("terminalx")).toBe("terminalx");
-    expect(shortProject("opengateway-web")).toBe("opengatew…");
-    expect(shortProject("Latent-mac-app")).toBe("Latent-ma…");
   });
 });
 

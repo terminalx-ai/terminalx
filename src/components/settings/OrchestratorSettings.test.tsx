@@ -46,7 +46,7 @@ function routed(rows: RoutingRows | undefined, patch: OrchestratorPatch): Routin
 
 let stored: OrchestratorSettings;
 beforeEach(() => {
-  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, projects: {} };
+  stored = { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, reaskVerifier: true, acceptBaseFailures: true, leadWhenLadderEnds: true, resumeAfterReset: true, leadTakesOver: true, projects: {} };
   mocks.projects = [{ path: "/repo", name: "terminalx" }, { path: "/notes", name: "notes", kind: "folder" }];
   mocks.settings.mockReset().mockImplementation(async () => stored);
   mocks.tierModels.mockReset().mockImplementation(async () => installed());
@@ -83,6 +83,18 @@ describe("Settings → Orchestrator (PRO-274)", () => {
     for (const said of ["Show the plan and wait for Approve.", "A larger plan is refused, and the lead is told the limit.", "Push, merge and deploy stay blocked by deny rules in every mode."]) {
       expect(text).toContain(said);
     }
+  });
+
+  it("lets the lead take blocked pieces over unless turned off, for the whole app", async () => {
+    render(<OrchestratorTab />);
+    const lead = screen.getByRole("switch", { name: "Let the lead take over blocked pieces" });
+    await waitFor(() => expect(lead.hasAttribute("disabled")).toBe(false));
+    expect(lead.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("orchestrator-settings").textContent).toContain("Leaving a piece out and widening its files stay yours. Off, it asks you.");
+    fireEvent.click(lead);
+    await waitFor(() => expect(lead.getAttribute("aria-checked")).toBe("false"));
+    expect(mocks.setSettings.mock.calls.map(([patch]) => patch)).toEqual([{ leadTakesOver: false }]);
+    expect(stored.leadTakesOver).toBe(false);
   });
 
   it("saves each setting by itself, and shows what the Mac saved", async () => {
@@ -131,6 +143,22 @@ describe("Settings → Orchestrator (PRO-274)", () => {
     fireEvent.blur(own());
     await waitFor(() => expect(stored.projects["/repo"]).toBeUndefined());
     expect(mocks.setSettings.mock.calls.slice(1).map(([patch]) => patch)).toEqual([{ project: "/repo", reviewDiffLines: 250 }, { project: "/repo", reviewDiffLines: null }]);
+  });
+
+  it("has four switches for what a run decides on its own, all on, each saved for the whole app (#1004)", async () => {
+    render(<OrchestratorTab />);
+    const names = ["Ask the reviewer again when it gives no verdict", "Accept a piece whose only failing check also fails on the base", "Hand a piece to the lead when no higher model is left", "Go on when the usage window resets"];
+    const card = within(screen.getByRole("group", { name: "Deciding on its own" }));
+    const switches = names.map((name) => card.getByRole("switch", { name }));
+    await waitFor(() => expect(switches[0].hasAttribute("disabled")).toBe(false));
+    expect(switches.map((control) => control.getAttribute("aria-checked"))).toEqual(["true", "true", "true", "true"]);
+    const text = screen.getByTestId("orchestrator-settings").textContent ?? "";
+    for (const said of ["a run takes it without waiting for you", "Up to 2 more times, in its own conversation.", "no try is used", "Pause when a window passes still stops every run."]) expect(text).toContain(said);
+    // Off, each is saved by itself: the run asks the person again, as before.
+    for (const control of switches) fireEvent.click(control);
+    await waitFor(() => expect(switches.map((control) => control.getAttribute("aria-checked"))).toEqual(["false", "false", "false", "false"]));
+    expect(mocks.setSettings.mock.calls.map(([patch]) => patch)).toEqual([{ reaskVerifier: false }, { acceptBaseFailures: false }, { leadWhenLadderEnds: false }, { resumeAfterReset: false }]);
+    expect(stored).toMatchObject({ reaskVerifier: false, acceptBaseFailures: false, leadWhenLadderEnds: false, resumeAfterReset: false });
   });
 
   it("does not save a limit that is not a number of pieces from 1 to 50", async () => {
@@ -263,7 +291,7 @@ describe("Settings → Orchestrator in two cards, with tries and the effort ceil
   it("puts the rows in a Runs card and a Budget and stalls card, as design 18.05 has them", async () => {
     render(<OrchestratorTab />);
     await waitFor(() => expect(limit("Tries per piece").disabled).toBe(false));
-    expect(rows("Runs")).toEqual(["orchestrator.requireApproval", "orchestrator.workersPerRun", "orchestrator.workersAtOnce", "orchestrator.pieceLimit", "orchestrator.workerMode", "orchestrator.triesPerPiece"]);
+    expect(rows("Runs")).toEqual(["orchestrator.requireApproval", "orchestrator.workersPerRun", "orchestrator.workersAtOnce", "orchestrator.pieceLimit", "orchestrator.workerMode", "orchestrator.triesPerPiece", "orchestrator.leadTakesOver"]);
     expect(rows("Budget and stalls")).toEqual(["orchestrator.budgetDollars", "orchestrator.budgetPoints", "orchestrator.windowCeiling", "orchestrator.stallMinutes", "orchestrator.effortCeiling"]);
     expect(group("Runs").getByRole("spinbutton", { name: "Tries per piece" })).toBeTruthy();
     expect(group("Budget and stalls").getByRole("combobox", { name: "Raise effort no higher than" })).toBeTruthy();

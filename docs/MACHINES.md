@@ -261,6 +261,87 @@ have to keep TerminalX open and logged in, and a server could never be a host.
 - The runtime stays alive while a computer is connected, as for an attached
   window (`docs/LOCAL-RUNTIME.md`, "Lifetime and honest recovery").
 
+#### How PRO-341 builds it
+
+PRO-341 settled these points while building decision 4.
+
+- **The runtime keeps its own copy of the key on macOS.** The app's item
+  `host-e2ee-key` was added by the app with the default access, which trusts
+  only the app that created it. The runtime is another executable, installed
+  at `~/.raccoon/runtime/<hash>/terminalx-serve` (`local_runtime/launch.rs`), so
+  reading the app's item would ask the person to allow it, and nobody answers
+  that prompt on a Mac mini after a reboot. So, as this decision allows, the
+  window hands the runtime the item's bytes once (`runtime.machineHost.adoptKey`)
+  and the runtime keeps them in an item it creates itself: service
+  `<app identifier>.machine-host`, account `host-e2ee-key`. The bytes never
+  change, so the fingerprint, the phones' pinned key and `machineId` stay the
+  same. A desktop-launched runtime never makes a key of its own; until it has
+  one it reports `hostKey: "needed"`. A runtime the app did not launch (a
+  headless server on Linux or macOS, and the serve tests) keeps the key in
+  `<data dir>/machine-host/host-key.json`, mode 0600, written as
+  `cloud-workspace/host-key.json` is, and makes it the first time the switch is on.
+- **Paired computers** are in `<data dir>/machine-host/paired-computers.json`,
+  mode 0600, holding token hashes only (decision 4 keeps them out of
+  `devices.json`). PRO-342 adds pairing; PRO-341 admits what is there.
+- **The direct listener routes by WebSocket path, before the handshake.** An
+  operating computer connects to `ws://<address>:6768/machine/1`; a phone
+  connects to `/`, as its offers already say. The runtime serves `/machine/1`
+  itself. Any other path is a phone: it passes the TCP stream, from its first
+  byte, to the window over a private Unix socket the window registered
+  (`runtime.machineHost.phoneRoute`), and the window runs the phone's E2EE
+  handshake and pairing unchanged. Routing after `e2ee_authenticated`, as this
+  decision first said, would mean moving a live E2EE session's keys and
+  counters from one process to another until PRO-359. Routing by path gives
+  the same result: each side checks the token against its own registry, so a
+  phone's token is refused on `/machine/1` and a computer's on `/`. PRO-342
+  and PRO-345 put `/machine/1` in a machine offer's direct endpoints. With no
+  window registered, a phone is refused as unreachable, as today.
+- **The relay route goes through PRO-340's `serve_machine`**, so a machine has
+  one relay registration. PRO-341 adds two hooks to its `RelayHost`: paired
+  computers are admitted from the registry by their relay device id and
+  token, and a `conn-open` for any other device goes to the window's phone
+  route, which opens the data leg itself. Until PRO-344 gives a personal
+  machine a relay session from the account, a runtime registers with the
+  relay only with `--relay-link`, which the desktop never passes. So a
+  desktop's phones keep the window's own relay registration, and the window
+  must stay off the relay whenever the runtime is registered. Minting a new
+  phone's relay invite through the runtime's registration is left to the
+  ticket that first registers a desktop runtime in production (PRO-344) or to
+  PRO-359.
+- **The switch is `machines.allowOperating`** in `settings.json`, off by
+  default. The runtime watches the file. On, it is a standing service: it does
+  not exit when idle, so a computer can connect with the window closed. It
+  keeps this Mac awake while a computer is connected and
+  `pairing.keepAwake` is on, as for a phone.
+- **The port changes hands by closing connections.** Both sides bind 6768
+  exclusively, as the phone listener always has, and on macOS and Linux an open
+  connection on the port keeps it from being bound again. So when the switch
+  turns on, the window closes its listener and the phones connected to it
+  (they reconnect through the runtime, which passes them back), and when it
+  turns off the runtime closes its listener, its computers and the phones it
+  passed on, and the window binds the port again. On macOS, connections closed
+  this way hold the port in TIME_WAIT for up to 30 seconds; both sides retry
+  once a second until it is free, as the window already did after an app
+  restart. On Linux, where only the runtime listens, it sets SO_REUSEADDR:
+  Linux still refuses a second listener with it, and TIME_WAIT is 60 s there.
+- **The window gives the port up only to a runtime that can take it.** The
+  status says `takesPort` while the runtime is on, its host key is not in
+  error, and nothing but the port being in use keeps it from listening. With
+  a key it cannot read, or a port it cannot bind for another reason, the
+  window keeps serving phones on 6768; the runtime retries every second and
+  says `takesPort` again once it can.
+- The relay host is given the machine's routes before it registers, so no
+  connection is answered without them. A paired computer's relay connection
+  is closed with every other one when the runtime loses its credential, is
+  fenced by a newer generation or loses the control connection. The relay
+  host reads the registry off its async tasks.
+- **Paired computers' file is rewritten under a cross-process lock**
+  (`paired-computers.lock`, the store's transaction lock), so one process
+  never undoes another's removal.
+- `TERMINALX_MACHINE_HOST_PORT` moves the listener off 6768 for tests.
+- The contract between the runtime and the window is
+  `src-tauri/src/machine_wire.rs`.
+
 ### 5. A paired computer has full operating rights on the machine's projects
 
 **Why.** A narrower role means a method-by-method threat review and a second set
@@ -797,6 +878,118 @@ merges as it does today. A person can still merge the pull request with
    `rpc.hello`, `machine.describe` and `machine.projects`.
 
 Five wrong or expired attempts in a minute pause pairing for a minute (PRO-342).
+
+#### As built (PRO-342)
+
+The owner settled four points against the screens on 2026-11-15: both dialogs
+show the four-group pairing fingerprint; 21.05's "won't" list says what
+TerminalX offers, with a line saying a shell runs as the machine's user; the
+controls live in a small Settings → Machines section behind Experimental →
+Machines until PRO-349 builds the page; and 21.04 shows only the pairing code,
+with no tab bar until PRO-344 and PRO-353 add their tabs.
+
+**The code.** `txm2.` followed by base64url (no padding) of this JSON:
+
+```json
+{
+  "v": 2, "kind": "machine", "scope": "runtime", "identityMode": "authenticate",
+  "deviceToken": "<random_token, 32 bytes, base64url>",
+  "publicKeyB64": "<host key, standard base64>",
+  "machine": { "machineId": "cs1uhCLEB_ttCYaQ", "name": "Mac mini",
+               "os": { "family": "macos", "version": "26.1" }, "version": "0.2.33" },
+  "directEndpoints": ["ws://192.168.1.20:6768/machine/1", "ws://mac-mini.local:6768/machine/1"],
+  "expiresAt": 1763200000000
+}
+```
+
+- `machine` carries what `machine.describe` would, so the operating computer
+  names the machine before it connects. `machineId` must equal
+  `host_id(publicKeyB64)`, or the code is refused.
+- `directEndpoints` are `advertised_endpoints` (moved to a module both builds
+  compile) with the path `/machine/1`, LAN and `.local` and Tailscale alike.
+- `relay` is absent. A desktop runtime has no relay registration of its own
+  until PRO-344, and minting a relay invite for a new device needs the account.
+  The decoder accepts an optional `relay` in the `RelayOffer` shape so PRO-344
+  adds it without a new version. "Relay and nearby" is kept with the machine and
+  uses the relay once there is one.
+- The code works once and lasts five minutes (`OFFER_TTL_MS`). Creating a new
+  code ends the one before. The token is kept only as its SHA-256, in memory:
+  a restarted runtime has no code.
+
+**The operating computer's key.** One long-lived X25519 key per installation,
+in the login Keychain (service `<app identifier>.machines`, account
+`client-e2ee-key`), used as the E2EE client key on every connection to every
+machine. The fingerprint binds it, and the machine pins it.
+
+**`e2ee_auth` from an operating computer** adds `label` (This Mac's name, 1–64
+characters, control characters stripped) and `platform` (`macos` or `linux`)
+beside `deviceToken`. The machine host reads them; the phone host never sees them.
+
+**The machine host answers `e2ee_auth`** in this order:
+
+1. While pairing is paused, a token that is not a paired computer's gets
+   `pairing_refused` `pairing-paused`.
+2. A paired computer's token is admitted only with the client key it paired
+   with (`clientPublicKeyB64`). Another key is a wrong attempt, refused with
+   close `4401`. A code that was used therefore cannot be replayed from
+   another computer. The relay route checks the same. A record with no
+   client key (only PRO-341's tests and hand-written records have none) is
+   admitted by its token alone, as before; every record pairing writes has one.
+3. The live code's token starts an approval: the host computes the fingerprint
+   from the connection's client key, publishes `pending` in its status, and
+   waits up to two minutes (`APPROVAL_TTL_MS`). More connections with the same
+   client key share the request; one with another key gets
+   `pairing_refused` `another-computer`.
+4. An expired, used or ended code's token, or one that matches nothing, is a
+   wrong attempt: `pairing_refused` `code-inactive`, then close `4401`. The
+   machine cannot tell a revoked computer's token from a spent code's, so a
+   computer that was connecting sees "Access removed" (Connect, step 2) and
+   one that was pairing has read the reason first.
+
+`pairing_refused` is `{"type":"pairing_refused","v":1,"reason":…}`, sealed,
+then the socket closes. **Allow** writes the paired computer (token hash,
+client key, label, platform, fingerprint, `approvedAt`), spends the code and
+sends `e2ee_authenticated`; the connection then serves workspace RPC with
+`Authority::Manage`. **Don't allow**, two minutes with no answer, or the
+asking connection closing, ends the code and sends `not-approved`.
+
+**Attempt limit.** Five wrong attempts (rules 2 and 4) within 60 s pause
+pairing until 60 s after the fifth. While paused, `createCode` is refused
+(`pairing_paused`, with `pausedUntil`) and the status says `pausedUntil`. Paired
+computers with the right key still connect.
+
+**Runtime IPC** (`machine_wire`), each with the window's `epoch` and `lease`:
+
+| Command | Params | Result |
+| --- | --- | --- |
+| `runtime.machineHost.createCode` | none | `{ code, expiresAt }`, or `pairing_paused` / `not_enabled` |
+| `runtime.machineHost.approve` | `requestId` | `{ approved: true }`, or `not_found` |
+| `runtime.machineHost.decline` | `requestId` | `{ declined: true }` |
+
+The runtime fills `machine` as `machine.describe` does and computes the
+endpoints itself, so a headless runtime (PRO-353) makes the same code. `Status` gains
+`pending` (`{ requestId, label, platform, fingerprint, transport, requestedAt,
+expiresAt }` or null), `code` (`{ expiresAt }` or null; never the code) and
+`pausedUntil` (or null).
+
+**Tauri commands.** On the machine: `machines_host_status`,
+`machines_set_allow_operating { enabled }`, `machines_create_code`,
+`machines_approve { requestId }`, `machines_decline { requestId }`,
+`machines_revoke { id }`; the window re-emits the runtime's status as
+`machines_host_changed`. On the operating computer: `machines_inspect_code
+{ code }`, `machines_pair { code, route }`, `machines_cancel_pairing`,
+`machines_list`, `machines_set_route { machineId, route }`. The shapes are in
+`src/types/machines.ts`; `machines_pair` answers `{ paired: false, reason }`
+for a refusal, with the reasons of `pairing_refused` plus `unreachable`,
+`invalid-code` and `cancelled`.
+
+**The operating computer's store.** `~/.raccoon/machines.json` (the store's
+root), one record per `machineId` (name, os, version, pinned
+`publicKeyB64`, `directEndpoints`, `route` of `relayAndNearby` or
+`thisNetwork`, `pairedAt`, `lastSeenAt`), and the device token in the Keychain
+(service `<app identifier>.machines`, account `machine:<machineId>`).
+`machines_pair` tries each endpoint in order, five seconds each to connect,
+and waits up to 150 s for Allow. PRO-345 connects with what it stores.
 
 ### Pairing through the account
 

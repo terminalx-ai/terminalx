@@ -13,7 +13,10 @@ import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
+import { RegisteredSetting } from "./settingsRegistry";
+import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
+import { MachinesSettings } from "@/components/machines/MachinesSettings";
 
 interface SectionContext {
   onOpenSkills?: () => void;
@@ -27,12 +30,14 @@ interface SectionContext {
 export const settingsSectionRenderers: Record<SettingsSection, (context: SectionContext) => ReactNode> = {
   account: () => <AccountTab />,
   devices: () => <DevicesTab />,
+  machines: () => <MachinesSettings />,
   general: () => <GeneralTab />,
   appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
+  localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   projects: () => <ProjectTemplatesSettings />,

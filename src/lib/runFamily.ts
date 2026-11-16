@@ -256,7 +256,8 @@ export function familyNeeds({ lead, leadStatus, run, workers, statusOf, spend }:
     needs.push({ kind: kind(status), sessionId: worker.id, text: `${workerTitle(worker, tryOf(run, worker.id))}: ${status.detail}` });
   }
   for (const piece of run?.pieces ?? []) {
-    if (piece.state !== "blocked" || (piece.worker && asked.has(piece.worker.sessionId))) continue;
+    // One the run hands to the lead by itself (#1004) waits on nobody.
+    if (piece.state !== "blocked" || piece.toLead || (piece.worker && asked.has(piece.worker.sessionId))) continue;
     // Answered in the lead's Run view (PRO-361): take it over, widen it, send its worker a note, or skip it.
     needs.push({ kind: "attention", sessionId: lead.id, text: `${piece.title}: ${piece.note ?? "blocked"}`, piece: piece.id });
   }

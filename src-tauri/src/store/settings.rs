@@ -77,6 +77,18 @@ pub struct Settings {
     /// Paired phones (PRO-314). The Rust side holds the power assertion, so
     /// it reads these for itself.
     pub pairing: PairingSettings,
+    /// Operating this computer from another one (PRO-338). The runtime opens
+    /// its listener and relay registration only while this says so.
+    pub machines: MachinesSettings,
+}
+
+/// Other computers that operate this one (docs/MACHINES.md decisions 4 and 9).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MachinesSettings {
+    /// "Let other computers operate this Mac": off until the person turns it
+    /// on. Off, the runtime opens no listener and registers nothing.
+    pub allow_operating: bool,
 }
 
 /// Paired phones and this Mac (docs/PAIRING-APPROVAL.md).
@@ -143,6 +155,30 @@ pub struct OrchestratorSettings {
     /// `orchestration::routing::EFFORTS`. A run keeps the value it was made with.
     #[serde(deserialize_with = "effort_ceiling")]
     pub effort_ceiling: String,
+    /// What a run decides on its own when a stop needs no person's judgment
+    /// (#1004), each on unless a person turned it off. App-wide: read when the
+    /// stop comes, so turning one off holds for runs already under way.
+    /// A verifier that gives no verdict is asked again, twice, and then the
+    /// lead reviews the diff itself.
+    #[serde(deserialize_with = "switch_on")]
+    pub reask_verifier: bool,
+    /// A done-check that fails is run on the base: a failure that is already
+    /// there is not the piece's, and the piece is accepted.
+    #[serde(deserialize_with = "switch_on")]
+    pub accept_base_failures: bool,
+    /// A piece whose ladder has no model left above it goes to the lead.
+    #[serde(deserialize_with = "switch_on")]
+    pub lead_when_ladder_ends: bool,
+    /// A run paused on its points of a usage window goes on when it resets.
+    #[serde(deserialize_with = "switch_on")]
+    pub resume_after_reset: bool,
+    /// The run's own lead may take a blocked piece over with `terminalx runs
+    /// take-over`, also in a run a person approved: it changes where the piece
+    /// is finished, not its goal or what else the plan holds. On unless a
+    /// person turned it off; app-wide, read when the lead asks. Leaving a
+    /// piece out and widening its files stay the person's.
+    #[serde(deserialize_with = "switch_on")]
+    pub lead_takes_over: bool,
     /// The rows of the routing table a person changed (PRO-275): which tier
     /// and effort a kind of piece starts on, per agent. A row that is not
     /// here is the built-in one (`orchestration::routing::default_route`).
@@ -201,8 +237,36 @@ pub struct OrchestratorLimits {
     pub review_diff_lines: u32,
     pub tries_per_piece: u32,
     pub effort_ceiling: String,
+    /// What a run decides on its own (#1004): the app's switches.
+    pub auto: AutoDecide,
+    /// The app's `lead_takes_over` switch.
+    pub lead_takes_over: bool,
     /// The routing table in force: every kind, every agent.
     pub routing: RoutingTable,
+}
+
+/// The stops a run gets past by itself, because each has one clear and safe
+/// next step (#1004). Off, the run waits for the person there, as it did
+/// before. Scope changes, the app-wide window level, and a check that fails
+/// only with the piece's change are never among them.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoDecide {
+    pub reask_verifier: bool,
+    pub accept_base_failures: bool,
+    pub lead_when_ladder_ends: bool,
+    pub resume_after_reset: bool,
+}
+
+impl Default for AutoDecide {
+    fn default() -> Self {
+        Self { reask_verifier: true, accept_base_failures: true, lead_when_ladder_ends: true, resume_after_reset: true }
+    }
+}
+
+/// A switch a file holds as anything but `false` is on: only a person's Off turns one off.
+fn switch_on<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool().unwrap_or(true))
 }
 
 /// Eight: a lead can still read eight reports and hold eight briefs apart;
@@ -401,6 +465,11 @@ impl Default for OrchestratorSettings {
             review_diff_lines: DEFAULT_REVIEW_DIFF_LINES,
             tries_per_piece: DEFAULT_TRIES_PER_PIECE,
             effort_ceiling: DEFAULT_EFFORT_CEILING.into(),
+            reask_verifier: true,
+            accept_base_failures: true,
+            lead_when_ladder_ends: true,
+            resume_after_reset: true,
+            lead_takes_over: true,
             routing: Default::default(),
             projects: Default::default(),
         }
@@ -424,6 +493,8 @@ impl OrchestratorSettings {
             review_diff_lines: project.and_then(|p| p.review_diff_lines).unwrap_or(self.review_diff_lines),
             tries_per_piece: project.and_then(|p| p.tries_per_piece).unwrap_or(self.tries_per_piece),
             effort_ceiling: project.and_then(|p| p.effort_ceiling.clone()).unwrap_or_else(|| self.effort_ceiling.clone()),
+            auto: AutoDecide { reask_verifier: self.reask_verifier, accept_base_failures: self.accept_base_failures, lead_when_ladder_ends: self.lead_when_ladder_ends, resume_after_reset: self.resume_after_reset },
+            lead_takes_over: self.lead_takes_over,
             routing: RoutingTable::resolved(&self.routing, project.map(|p| &p.routing)),
         }
     }
@@ -537,6 +608,15 @@ pub struct ExperimentalSettings {
     /// with the plan to approve, and Settings → Orchestrator. The `terminalx
     /// runs` commands work either way.
     pub orchestrator_runs: bool,
+    /// Local VM tasks and chosen computers (PRO-114): Settings → Local VMs,
+    /// a tab's computer choice and its Local VM task cards. Off, every agent
+    /// gets the Local VM's tools while it runs, as before, and a choice kept
+    /// from while it was on is not read. `terminalx vm` works either way.
+    pub local_vm_tasks: bool,
+    /// Machines (PRO-338): Settings → Machines, to let other computers
+    /// operate this one and to pair with one by code (PRO-342), until
+    /// PRO-349 builds the Machines page.
+    pub machines: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -718,6 +798,7 @@ impl Default for Settings {
             diagnostics: DiagnosticsSettings::default(),
             orchestrator: OrchestratorSettings::default(),
             pairing: PairingSettings::default(),
+            machines: MachinesSettings::default(),
         }
     }
 }
@@ -758,12 +839,27 @@ mod tests {
     }
 
     #[test]
+    fn the_lead_may_take_blocked_pieces_over_unless_a_person_turned_it_off() {
+        // A file from before the switch lets the lead.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert!(legacy.orchestrator.lead_takes_over && legacy.orchestrator.for_project("/repo").lead_takes_over);
+        // Off is a person's `false`, for the whole app; anything else in the file is on.
+        let off: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {"leadTakesOver": false}})).unwrap();
+        assert!(!off.orchestrator.for_project("/repo").lead_takes_over);
+        assert_eq!(serde_json::to_value(&off.orchestrator).unwrap()["leadTakesOver"], serde_json::json!(false));
+        for odd in [serde_json::json!(null), serde_json::json!("no"), serde_json::json!(0)] {
+            let read: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {"leadTakesOver": odd}})).unwrap();
+            assert!(read.orchestrator.lead_takes_over, "{odd}");
+        }
+    }
+
+    #[test]
     fn experimental_features_stay_off_until_turned_on() {
         let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"machines":false}));
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
@@ -773,6 +869,26 @@ mod tests {
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex && !cost.experimental.orchestrator_runs);
+        assert!(!legacy.experimental.local_vm_tasks);
+        let vms: Settings = serde_json::from_value(serde_json::json!({"experimental":{"localVmTasks":true}})).unwrap();
+        assert!(vms.experimental.local_vm_tasks && !vms.experimental.orchestrator_runs);
+        assert!(!legacy.experimental.machines, "Machines are off until turned on");
+        let machines: Settings = serde_json::from_value(serde_json::json!({"experimental":{"machines":true}})).unwrap();
+        assert!(machines.experimental.machines && !machines.experimental.local_vm_tasks);
+    }
+
+    #[test]
+    fn a_run_decides_its_routine_stops_by_itself_unless_a_person_turned_a_switch_off() {
+        // A file from before #1004 has every switch on.
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert_eq!(legacy.orchestrator.for_project("/repo").auto, AutoDecide::default());
+        assert!(AutoDecide::default().reask_verifier && AutoDecide::default().accept_base_failures && AutoDecide::default().lead_when_ladder_ends && AutoDecide::default().resume_after_reset);
+        // Off is a person's `false`, for the whole app; anything else in the file is on.
+        let set: Settings = serde_json::from_value(serde_json::json!({"orchestrator": {"reaskVerifier": false, "acceptBaseFailures": "no", "leadWhenLadderEnds": null, "resumeAfterReset": false}})).unwrap();
+        let auto = set.orchestrator.for_project("/repo").auto;
+        assert_eq!(auto, AutoDecide { reask_verifier: false, accept_base_failures: true, lead_when_ladder_ends: true, resume_after_reset: false });
+        let written = serde_json::to_value(&set.orchestrator).unwrap();
+        assert_eq!((written["reaskVerifier"].clone(), written["resumeAfterReset"].clone(), written["acceptBaseFailures"].clone()), (serde_json::json!(false), serde_json::json!(false), serde_json::json!(true)));
     }
 
     #[test]

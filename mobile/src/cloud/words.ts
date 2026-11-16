@@ -25,6 +25,40 @@ export function roleLabel(role: CloudRole | null | undefined): string | null {
   return null;
 }
 
+/** The person's role in a workspace as a phrase, for the line under its title ("Stopped · You are a manager"). */
+export function rolePhrase(role: CloudRole | null | undefined): string | null {
+  if (role === "manager") return "You are a manager";
+  if (role === "driver") return "You can send";
+  if (role === "viewer") return "You can view";
+  return null;
+}
+
+/**
+ * Who may start a stopped workspace, for someone who may not: its managers,
+ * which the server takes to be its creator and the organization's owners and
+ * admins (`cloud_workspace_manager_required`), and anyone who may send to
+ * it, whose queued message wakes it (contract §11.2).
+ */
+export function whoCanStart(creator: string | null): string {
+  const starters = creator ? `${creator}, its creator, or an organization owner or admin can start it.` : "Its creator or an organization owner or admin can start it.";
+  return `${starters} Anyone who can send to it starts it by sending a message.`;
+}
+
+/**
+ * A workspace in the Cloud list, as the Sessions list says a session: what
+ * it is doing in words, and its mark (working bars, a dot that needs you,
+ * else the state's colour).
+ */
+export function listStatus(workspace: { state: string; runtimeActivity?: { activeTurns?: number; pendingApprovals?: number } | null }): { words: string; mark: "needs" | "working" | "attention" | "running" | "changing" | "idle" } {
+  const waiting = workspace.runtimeActivity?.pendingApprovals ?? 0;
+  const running = workspace.state === "ready";
+  if (workspace.state === "attention-required") return { words: "Needs attention", mark: "attention" };
+  if (running && waiting > 0) return { words: waiting === 1 ? "Needs your answer" : `${waiting} waiting for an answer`, mark: "needs" };
+  if (running && (workspace.runtimeActivity?.activeTurns ?? 0) > 0) return { words: "Working", mark: "working" };
+  const words = stateLabel(workspace.state);
+  return { words, mark: running ? "running" : words === "Starting" || words === "Stopping" ? "changing" : "idle" };
+}
+
 const CODES: Record<string, string> = {
   account_signed_out: "Sign in to see your cloud workspaces.",
   cloud_workspace_unavailable: "The service could not be reached. What is shown may be out of date.",
@@ -75,28 +109,34 @@ export function codeText(code: string | null | undefined): string | null {
 }
 
 /**
- * One line for the banner above a workspace's conversation. A connection is
+ * One line for the state of a workspace, said under its title with the
+ * person's role. `short` is what fits there; `text` says more, and a warning
+ * is also shown in full under the header. Neither ever says what the
+ * conversation below holds: that is the body's to say (#988). A connection is
  * live only for someone with a role there: with none (access taken away, or
  * never given) or before the runtime knows (#475), nothing of it is shown, and
  * the banner says so instead of "Live".
  */
-export function connectionLine(connection: WorkspaceConnectionState, listedState: string | null, problem: CloudLinkProblem, starting = false, access: { role: CloudRole | null; checking: boolean } = { role: null, checking: false }): { tone: "live" | "idle" | "warn"; text: string } {
+export function connectionLine(connection: WorkspaceConnectionState, listedState: string | null, problem: CloudLinkProblem, starting = false, access: { role: CloudRole | null; checking: boolean } = { role: null, checking: false }): { tone: "live" | "idle" | "warn"; text: string; short: string } {
   if (connection.state === "connected") {
-    if (access.checking) return { tone: "idle", text: "Checking your access…" };
-    if (access.role === "none") return { tone: "warn", text: "No access: this workspace is not shared with you." };
-    return { tone: "live", text: "Live · end-to-end encrypted" };
+    if (access.checking) return { tone: "idle", text: "Checking your access…", short: "Checking access…" };
+    if (access.role === "none") return { tone: "warn", text: "No access: this workspace is not shared with you.", short: "No access" };
+    return { tone: "live", text: "Live · end-to-end encrypted", short: "Live" };
   }
-  if (connection.state === "updateRequired") return { tone: "warn", text: "Update the app to connect to this workspace." };
-  if (listedState === "archived") return { tone: "idle", text: "Archived. Showing the saved conversation." };
+  if (connection.state === "updateRequired") return { tone: "warn", text: "Update the app to connect to this workspace.", short: "Update needed" };
+  if (listedState === "archived") return { tone: "idle", text: "Archived", short: "Archived" };
   // Asked to start by a message, or already starting: said as long as it lasts, so a workspace that bills is never shown as stopped.
-  if (starting || listedState === "provisioning" || listedState === "resuming") return { tone: "idle", text: "Starting the workspace…" };
-  if (listedState === "suspending") return { tone: "idle", text: "Stopping…" };
-  if (listedState === "suspended" || connection.state === "suspended") return { tone: "idle", text: "Stopped. Showing the saved conversation; nothing is running." };
-  if (listedState === null) return { tone: "warn", text: "This workspace is no longer available to you." };
-  if (connection.state === "waitingForRuntime") return { tone: "idle", text: "Starting…" };
-  if (connection.state === "reconnecting") return { tone: "warn", text: problem?.kind === "api" && problem.unreachable ? "Offline. Reconnecting…" : "Reconnecting…" };
-  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : ((problem?.kind === "api" ? codeText(problem.code) : null) ?? "Not connected.") };
-  return { tone: "idle", text: "Connecting…" };
+  if (starting || listedState === "provisioning" || listedState === "resuming") return { tone: "idle", text: "Starting the workspace…", short: "Starting…" };
+  if (listedState === "suspending") return { tone: "idle", text: "Stopping…", short: "Stopping…" };
+  if (listedState === "suspended" || connection.state === "suspended") return { tone: "idle", text: "Stopped", short: "Stopped" };
+  if (listedState === null) return { tone: "warn", text: "This workspace is no longer available to you.", short: "Unavailable" };
+  if (connection.state === "waitingForRuntime") return { tone: "idle", text: "Starting…", short: "Starting…" };
+  if (connection.state === "reconnecting") {
+    const offline = problem?.kind === "api" && problem.unreachable;
+    return { tone: "warn", text: offline ? "Offline. Reconnecting…" : "Reconnecting…", short: offline ? "Offline" : "Reconnecting…" };
+  }
+  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : ((problem?.kind === "api" ? codeText(problem.code) : null) ?? "Not connected."), short: "Not connected" };
+  return { tone: "idle", text: "Connecting…", short: "Connecting…" };
 }
 
 /** Why a workspace that was asked for cannot be shown, by what the list says of this person's access. */

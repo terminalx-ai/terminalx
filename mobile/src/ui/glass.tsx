@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
 import { useTheme } from "./theme";
 
@@ -30,9 +30,9 @@ export function GlassIconButton({ icon, label, onPress, disabled, prominent, siz
 }
 
 /** A tab's title, large and in the page as iOS draws it, with its actions on the right. */
-export function LargeTitle({ title, children }: { title: string; children?: ReactNode }) {
+export function LargeTitle({ title, children, onLayout }: { title: string; children?: ReactNode; onLayout?(event: LayoutChangeEvent): void }) {
   const { palette } = useTheme();
-  return <View style={styles.titleRow}>
+  return <View onLayout={onLayout} style={styles.titleRow}>
     <Text accessibilityRole="header" numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
     {children ? <View style={styles.actions}>{children}</View> : null}
   </View>;

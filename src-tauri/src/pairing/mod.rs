@@ -7,9 +7,10 @@ mod cloud;
 mod crypto;
 mod diagnostics;
 mod direct;
-mod fingerprint;
+use crate::pairing_fingerprint as fingerprint;
 mod guest;
 mod host_poll;
+mod machine_route;
 mod mobile;
 use crate::local_runtime::mobile::model;
 use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
@@ -53,6 +54,7 @@ use self::model::{
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
+use crate::direct_endpoints::advertised_endpoints;
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
@@ -68,8 +70,16 @@ struct Inner {
     /// The pending device's phone waits for the person to approve it here.
     /// Dropping it declines every connection that waits on it.
     pending_approval: Option<PendingApproval>,
+    /// Phones can reach this window directly: on its own listener, or
+    /// through the runtime's (`direct_via_runtime`, PRO-341).
     direct_listener_started: bool,
     direct_listener_retrying: bool,
+    /// Something asked for direct connections (saved phones, a pairing code),
+    /// so they come back when the runtime gives the port up again.
+    direct_wanted: bool,
+    direct_via_runtime: bool,
+    /// The window's own listener on the port.
+    direct_accept: Option<tauri::async_runtime::JoinHandle<()>>,
     last_error: Option<String>,
 }
 
@@ -115,6 +125,8 @@ pub struct PairingManager {
     /// fingerprint of a phone paired before PRO-314 without a Keychain call.
     host_public: Mutex<Option<[u8; 32]>>,
     keep_awake: Mutex<KeepAwake>,
+    /// Whether the runtime hosts operating computers, and so owns the port.
+    machine: Mutex<machine_route::MachineSide>,
 }
 
 /// Reasons a `pairing_refused` message gives the phone.
@@ -212,6 +224,7 @@ impl PairingManager {
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
             keep_awake: Mutex::new(KeepAwake::default()),
+            machine: Mutex::default(),
         }
     }
 
@@ -247,6 +260,15 @@ impl PairingManager {
             settings.mobile.broadcast_settings_changed();
             settings.reload_keep_awake();
         }));
+        let machine = Arc::downgrade(self);
+        sink.listen(
+            crate::machine_wire::CHANGED_EVENT,
+            Box::new(move |payload| {
+                if let Some(manager) = machine.upgrade() {
+                    manager.machine_host_changed(payload);
+                }
+            }),
+        );
         let events = self.clone();
         sink.listen(
             "agent_event",
@@ -283,11 +305,13 @@ impl PairingManager {
         self.mobile.attach_models(cache);
     }
 
-    pub(crate) fn attach_runtime(&self, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
+    pub(crate) fn attach_runtime(self: &Arc<Self>, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
         *self.runtime.lock().unwrap() = Some(runtime);
         // What a phone may be offered is the attached runtime's (#730), and
         // the connections the previous attachment admitted are done.
         self.mobile.broadcast_capabilities_changed();
+        // A runtime that hosts operating computers owns the port (PRO-341).
+        self.reconcile_machine_soon();
     }
 
     /// No desktop sharing mutex spans an RPC. Once attached, transport failure
@@ -554,6 +578,8 @@ impl PairingManager {
             }
         }
         self.keep_awake.lock().unwrap().assertion = None;
+        // The runtime passes no more phones to a stopped window.
+        self.machine.lock().unwrap().stop();
     }
 
     /// Name this Mac for the user's other devices, or with `None` let it follow
@@ -967,6 +993,10 @@ impl PairingManager {
                 if manager.is_stopped() {
                     break;
                 }
+                // The runtime took the port meanwhile (PRO-341).
+                if manager.runtime_owns_direct() {
+                    break;
+                }
                 match manager.ensure_direct_listener() {
                     Ok(()) => {
                         manager.emit();
@@ -986,14 +1016,19 @@ impl PairingManager {
     fn ensure_direct_listener(self: &Arc<Self>) -> std::io::Result<()> {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
+        inner.direct_wanted = true;
         if inner.direct_listener_started {
             return Ok(());
         }
+        if self.runtime_owns_direct() {
+            // The runtime holds the port and passes phones here (PRO-341).
+            drop(inner);
+            return self.take_phones_from_runtime();
+        }
         let listener = direct::bind(self.direct_port)?;
         inner.direct_listener_started = true;
-        drop(inner);
         let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
+        inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     return;
@@ -1023,7 +1058,7 @@ impl PairingManager {
                     }
                 });
             }
-        });
+        }));
         Ok(())
     }
 
@@ -1947,83 +1982,6 @@ fn chosen_host_name(name: &str) -> Result<String> {
     Ok(name.into())
 }
 
-fn advertised_endpoints() -> Vec<String> {
-    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
-    let addresses: Vec<_> = interfaces
-        .into_iter()
-        .filter_map(|interface| {
-            let std::net::IpAddr::V4(address) = interface.ip() else {
-                return None;
-            };
-            usable_ipv4(address).then_some((interface_rank(&interface.name, address), address))
-        })
-        .collect();
-    let mut endpoints = direct_ipv4_endpoints(addresses);
-    // macOS publishes LocalHostName via its built-in mDNS responder. Resolve it
-    // anew on each phone connection so LAN address changes need no new pairing.
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "LocalHostName"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(name) = String::from_utf8(output.stdout) {
-                let name = name.trim();
-                if !name.is_empty()
-                    && name.len() <= 63
-                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                {
-                    endpoints.push(format!("ws://{name}.local:6768"));
-                }
-            }
-        }
-    }
-    if endpoints.is_empty() {
-        endpoints.push("ws://127.0.0.1:6768".into());
-    }
-    endpoints
-}
-
-fn direct_ipv4_endpoints(mut addresses: Vec<(u8, std::net::Ipv4Addr)>) -> Vec<String> {
-    addresses.sort_unstable();
-    let mut seen = std::collections::HashSet::new();
-    addresses.retain(|entry| seen.insert(entry.1));
-    addresses
-        .into_iter()
-        .take(63) // Leave room for Bonjour within the mobile contract limit.
-        .map(|(_, address)| format!("ws://{address}:6768"))
-        .collect()
-}
-
-fn usable_ipv4(address: std::net::Ipv4Addr) -> bool {
-    !address.is_loopback()
-        && !address.is_link_local()
-        && !address.is_unspecified()
-        && !address.is_multicast()
-        && !address.is_broadcast()
-        && !is_proxy_fake_ipv4(address)
-}
-
-fn is_proxy_fake_ipv4(address: std::net::Ipv4Addr) -> bool {
-    let octets = address.octets();
-    octets[0] == 198 && matches!(octets[1], 18 | 19)
-}
-
-fn interface_rank(name: &str, address: std::net::Ipv4Addr) -> u8 {
-    let octets = address.octets();
-    if octets[0] == 100 && octets[1] & 0xc0 == 0x40 {
-        return 0;
-    }
-    let name = name.to_ascii_lowercase();
-    if ["bridge", "docker", "veth", "vmnet", "vbox", "virbr"]
-        .iter()
-        .any(|marker| name.contains(marker))
-    {
-        3
-    } else {
-        1
-    }
-}
 
 pub(super) fn pairing_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -2571,49 +2529,5 @@ mod tests {
         assert_eq!(PairingManager::host_name("u1"), "Studio");
         // Another account on this Mac never saw that name.
         assert_ne!(PairingManager::host_name("u2"), "Studio");
-    }
-
-    #[test]
-    fn advertising_keeps_every_path_and_recomputes_after_network_changes() {
-        let lan = "192.168.1.2".parse().unwrap();
-        let vpn = "100.93.49.78".parse().unwrap();
-        assert_eq!(
-            direct_ipv4_endpoints(vec![(1, lan)]),
-            vec!["ws://192.168.1.2:6768"]
-        );
-        assert_eq!(
-            direct_ipv4_endpoints(vec![(1, lan), (0, vpn), (3, lan)]),
-            vec!["ws://100.93.49.78:6768", "ws://192.168.1.2:6768"]
-        );
-        assert_eq!(
-            direct_ipv4_endpoints(vec![(0, vpn)]),
-            vec!["ws://100.93.49.78:6768"]
-        );
-    }
-
-    #[test]
-    fn direct_candidates_include_lan_and_vpn_but_not_unusable_addresses() {
-        for address in ["192.168.1.2", "172.20.10.2", "100.93.49.78"] {
-            assert!(usable_ipv4(address.parse().unwrap()));
-        }
-        for address in [
-            "127.0.0.1",
-            "0.0.0.0",
-            "169.254.1.2",
-            "224.0.0.1",
-            "255.255.255.255",
-            "198.18.2.3",
-            "198.19.1.2",
-        ] {
-            assert!(!usable_ipv4(address.parse().unwrap()));
-        }
-    }
-
-    #[test]
-    fn direct_pairing_prefers_tailnet_and_avoids_proxy_fake_addresses() {
-        assert_eq!(interface_rank("utun4", "100.86.2.3".parse().unwrap()), 0);
-        assert_eq!(interface_rank("en0", "192.168.1.2".parse().unwrap()), 1);
-        assert_eq!(interface_rank("vmnet8", "172.16.1.2".parse().unwrap()), 3);
-        assert!(is_proxy_fake_ipv4("198.18.2.3".parse().unwrap()));
     }
 }

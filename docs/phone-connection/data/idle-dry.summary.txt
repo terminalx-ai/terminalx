@@ -1,0 +1,6 @@
+| run | keep-alive | span min | connects | drops | drops 1001 | drops 4408 | connected before drop, median s | p90 s | max s | timer keep-alives sent | answered | failed | reconnect median ms | p90 ms | probe at the end |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| idle-relay-0s | 0 ms | 0.7 | 4 | 3 | 3 | 0 | 8 | 8 | 8 | 0 | 0 | 0 | 7273 | 10125 | already down at return |
+| idle-relay-20s | 20000 ms | 0.8 | 4 | 3 | 2 | 1 | 11 | 15 | 15 | 0 | 0 | 0 | 3532 | 3600 | answered in 321 ms |
+| idle-relay-30s | 30000 ms | 0.8 | 4 | 3 | 2 | 1 | 8 | 18 | 18 | 0 | 0 | 0 | 3560 | 3618 | answered in 1507 ms |
+| idle-relay-45s | 45000 ms | 0.8 | 3 | 2 | 2 | 0 | 3 | 4 | 4 | 0 | 0 | 0 | 4235 | 4235 | no answer in 1.5 s |
