@@ -159,3 +159,59 @@ it("reparents the same terminal across view trees with a full idle cache", async
   view.unmount();
   for (let i = 0; i < IDLE_TERMINAL_LIMIT; i++) disposeInstance(`move-idle-${i}`);
 });
+
+describe("the header row", () => {
+  it("sits above the output in the layout, with the shell's icon and name, Move to dock and Clear", () => {
+    vi.useFakeTimers();
+    const inst = instance();
+    Object.assign(inst.term, { clear: vi.fn() });
+    const view = render(<TerminalView id="p1" visible create={() => inst} moveToDock />);
+    try {
+      const header = view.getByTestId("terminal-header");
+      const frame = view.getByTestId("terminal-drop-target");
+      // A row of the view, before the terminal's host: nothing over the output.
+      expect(header.parentElement).toBe(frame);
+      expect(header.compareDocumentPosition(frame.querySelector(".terminal-host")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      for (const el of [header, ...header.querySelectorAll("*")]) expect(el.className.toString()).not.toMatch(/\babsolute\b/);
+      expect(view.getByTestId("terminal-title").querySelector("svg")).not.toBeNull();
+      expect(view.getByTestId("terminal-title").textContent).toBe("Terminal");
+      expect(view.getByRole("button", { name: "Move to dock" })).toBeTruthy();
+      const clear = view.getByRole("button", { name: /^Clear/ });
+      expect(clear.querySelector("kbd")?.textContent).toBe("Ctrl+K");
+      fireEvent.click(clear);
+      expect(inst.term.clear).toHaveBeenCalledOnce();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears with Ctrl+K only while the focus is in the terminal", () => {
+    vi.useFakeTimers();
+    const inst = instance();
+    Object.assign(inst.term, { clear: vi.fn() });
+    const view = render(<><button type="button">outside</button><TerminalView id="p1" visible create={() => inst} /></>);
+    const press = () => act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true })); });
+    try {
+      act(() => view.getByRole("button", { name: "outside" }).focus());
+      press();
+      expect(inst.term.clear).not.toHaveBeenCalled();
+      act(() => view.getByRole("button", { name: "Redraw terminal" }).focus());
+      press();
+      expect(inst.term.clear).toHaveBeenCalledOnce();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers Move to tab for a docked shell, and no header where a view asks for none", () => {
+    const inst = instance();
+    const docked = render(<TerminalView id="p1" visible create={() => inst} redraw={false} moveToTab />);
+    expect(docked.getByRole("button", { name: "Move to tab" })).toBeTruthy();
+    docked.unmount();
+    const bare = render(<TerminalView id="p1" visible create={() => inst} redraw={false} />);
+    expect(bare.queryByTestId("terminal-header")).toBeNull();
+    bare.unmount();
+  });
+});
