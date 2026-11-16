@@ -120,8 +120,8 @@ describe("the Branch tab", () => {
     expect(screen.getByTestId("branch-you").textContent).toBe("You · 2 commits");
     const rows = screen.getAllByTestId("branch-commit").map((row) => [row.dataset.lane, row.querySelector("span[title]")?.textContent]);
     expect(rows).toEqual([
-      ["branch", "#ddddddd Fix header"],
-      ["base", "#eeeeeee Bump deps"],
+      ["branch", "ddddddd Fix header"],
+      ["base", "eeeeeee Bump deps"],
     ]);
     // Where main is now: its newest commit, named.
     expect(screen.getByTestId("branch-base-now").textContent).toBe("main now");

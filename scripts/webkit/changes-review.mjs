@@ -63,12 +63,14 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(url);
     await page.getByText("0 of 3 viewed").waitFor();
-    assert.deepEqual(await page.locator("datalist option").evaluateAll((options) => options.map((option) => option.value)), ["main", "origin/release"]);
-    await page.getByLabel("Comparison target").fill("origin/release");
-    await page.getByRole("button", { name: "Apply", exact: true }).click();
-    await page.getByText(/Against origin\/release/).waitFor();
+    await page.getByRole("button", { name: "Comparison target" }).click();
+    const suggestions = page.getByRole("dialog", { name: "Branches to compare against" });
+    assert.deepEqual(await suggestions.getByRole("button").evaluateAll((rows) => rows.map((row) => row.querySelector("span")?.textContent)), ["Automatic", "main", "origin/release"]);
+    await suggestions.getByRole("button", { name: /^origin\/release/ }).click();
+    await page.getByRole("button", { name: "Comparison target", exact: true }).filter({ hasText: "vs release" }).waitFor();
     await page.getByRole("radio", { name: "Folders" }).click();
     await page.getByRole("button", { name: "Folder src", exact: true }).click();
+    await page.getByRole("button", { name: "Filter files" }).click();
     await page.getByLabel("Filter changed files").fill("long-file");
     await page.getByRole("button", { name: /long-file-name.ts/ }).click();
     await page.locator(".cm-content").first().waitFor();
@@ -91,14 +93,16 @@ try {
         return box.width > 0 && box.x >= 0 && box.right <= innerWidth;
       }), `viewed checkbox remains visible at ${width}px`);
     }
-    await page.getByLabel("Changes scope").selectOption("commit");
-    await page.getByLabel("Commit to review").selectOption(sha);
-    await page.getByText("Commit changes · 1 file").waitFor();
+    await page.getByRole("button", { name: "Changes scope" }).click();
+    await page.getByRole("button", { name: /^aaaaaaa\s*Selected commit/ }).click();
+    await page.getByRole("button", { name: "Changes scope" }).filter({ hasText: "Commit aaaaaaa" }).waitFor();
+    await page.getByText("0 of 1 viewed").waitFor();
     await page.getByRole("button", { name: /committed.ts/ }).click();
     await page.locator(".cm-content").first().waitFor();
     assert((await page.locator(".cm-content").allTextContents()).join("\n").includes("after: commit"));
-    await page.getByRole("button", { name: "Back to all changes" }).click();
-    await page.getByText(/Against origin\/release/).waitFor();
+    await page.getByRole("button", { name: "Changes scope" }).click();
+    await page.getByRole("button", { name: /^All changes/ }).click();
+    await page.getByRole("button", { name: "Comparison target", exact: true }).filter({ hasText: "vs release" }).waitFor();
     assert.deepEqual(errors, []);
     console.log("ok branch suggestions, folder filtering, Viewed reload/invalidation, narrow layout, commit scope and return to all");
   }
