@@ -5,7 +5,7 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { cloudPipelineSettings } from "@/lib/issuePipeline";
 import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, Cloud, FileCode2, FolderOpen, FolderGit2, GitBranch, Github, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
+import { AtSign, Check, ChevronDown, CircleDot, Cloud, FileCode2, FolderOpen, FolderGit2, GitBranch, Github, GitPullRequest, Loader2, LogoLinear, MessageCircle, X } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,8 +32,10 @@ import { useSessionAgent } from "@/lib/useSessionAgent";
 import { readinessBlock, useAgentReadinessList } from "@/lib/agentReadiness";
 import { AgentSetupNotice } from "./AgentSetup";
 import { AgentMenu } from "./AgentMenu";
-import { StartFromPicker, type BranchTarget } from "./StartFromPicker";
+import { StartFromPicker, type BranchTarget, type StartFromTab } from "./StartFromPicker";
+import { BaseBranchMenu } from "./BaseBranchMenu";
 import { usePrMention } from "@/components/chat/usePrMention";
+import { useFileMention } from "@/components/chat/useFileMention";
 import { SessionOptions } from "./SessionOptions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { usePromptTextProps } from "@/lib/autocorrect";
@@ -177,7 +179,11 @@ export function NewSessionView({
   const [issue, setIssue] = useState<Issue | null>(null);
   const [pullRequest, setPullRequest] = useState<PullRequest | null>(null);
   const [startFromOpen, setStartFromOpen] = useState(!!store.startFromRequest);
-  useEffect(() => { if (store.startFromRequest) setStartFromOpen(true); }, [store.startFromRequest]);
+  /** The list Start from opens on: pull requests, or issues from the header's Issue chip. */
+  const [startFromTab, setStartFromTab] = useState<StartFromTab>("prs");
+  const openStartFrom = (tab: StartFromTab) => { setStartFromTab(tab); setStartFromOpen(true); };
+  useEffect(() => { if (store.startFromRequest) openStartFrom("prs"); }, [store.startFromRequest]);
+  const createMenu = useRowMenu();
   const [caret, setCaret] = useState(0);
 
   const preset = store.newSessionPreset;
@@ -308,13 +314,6 @@ export function NewSessionView({
     setIssueSource(seed.issueProjectPath);
   }, [seed, !!machine]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const branchTarget: BranchTarget = preset?.cwd
-    ? { kind: "open", cwd: preset.cwd }
-    : checkoutBranch
-      ? { kind: "existing", branch: checkoutBranch }
-      : useWorktree
-        ? { kind: "new" }
-        : { kind: "open", cwd: project?.path ?? "" };
   const pickBranch = (next: BranchTarget) => {
     if (!project) return;
     setPullRequest(null);
@@ -331,7 +330,17 @@ export function NewSessionView({
     setUseWorktree(true);
     setPullRequest(pr);
   };
-  const prMention = usePrMention(!remote && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { inline: true });
+  const prMention = usePrMention(!remote && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { floating: true });
+  // `@` names a file of the folder the session will work in; a cloud draft or a chat with no folder has none to list here.
+  const fileMention = useFileMention(!remote && !busy ? (projectless ? quickCwd : preset?.cwd ?? project?.path ?? null) : null, text, caret, setText, ref, setCaret);
+  /** What Start from picked, shown as a chip in the header; `clear` goes back to a new branch. */
+  const picked = pullRequest
+    ? { testId: "picked-pr", icon: <GitPullRequest className="size-[13px] shrink-0" aria-hidden />, text: `#${pullRequest.number} ${pullRequest.title}`, remove: "Remove pull request", clear: () => setPullRequest(null) }
+    : issue
+      ? { testId: "picked-issue", icon: issue.provider === "github" ? <Github className="size-[13px] shrink-0" aria-hidden /> : <LogoLinear className="size-[13px] shrink-0" aria-hidden />, text: `${issue.identifier} ${issue.title}`, remove: "Remove issue", clear: clearIssue }
+      : checkoutBranch
+        ? { testId: "picked-branch", icon: <GitBranch className="size-[13px] shrink-0" aria-hidden />, text: checkoutBranch, remove: "Remove branch", clear: () => pickBranch({ kind: "new" }) }
+        : null;
 
   const pickProject = async () => {
     try {
@@ -407,7 +416,8 @@ export function NewSessionView({
     let held = false;
     try {
       if (plan.kind === "create") {
-        setStarting("Checking your organization's limits…");
+        // The limits are still checked first; the wait reads as one step, the create the person asked for.
+        setStarting("Creating the workspace…");
         const request = cloudRequest();
         const unsettled = unsettledCreate.current;
         const resend =
@@ -656,28 +666,30 @@ export function NewSessionView({
       onAddMachine={() => setAddingMachine(true)}
     />
   ) : null;
-  const projectButton = "flex h-8 min-w-0 items-center gap-1.5 rounded-md px-2 text-[14px] font-medium text-foreground transition-colors hover:bg-veil-raised";
+  const projectButton = "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-[13px] text-foreground transition-colors hover:bg-veil-raised";
+  const chip = "flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground disabled:opacity-50";
+  const createLabel = projectless ? "Ask" : machine ? `Create on ${machine.name}` : "Create";
   const localGit = !projectless && !remote && isGit && !!project;
   const branchInfo = projectless ? null : cloud ? (whereShown ? null : (
-    <span className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
+    <span className="flex min-w-0 items-center gap-1.5 truncate px-2 text-[12.5px] text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
       <Cloud className="size-3.5 shrink-0" /> {cloud.orgName} cloud
     </span>
   )) : !isGit ? (
-    <span className="flex items-center gap-1 text-xs text-muted-foreground" title="Agents, terminals, and files are available. Git features require a repository.">
+    <span className="flex items-center gap-1.5 px-2 text-[12.5px] text-muted-foreground" title="Agents, terminals, and files are available. Git features require a repository.">
       <FolderOpen className="size-3.5" /> No Git
     </span>
   ) : preset?.cwd ? (
-    <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+    <span className="flex min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground">
       <GitBranch className="size-3.5 shrink-0" />
       <span className="truncate font-mono">{workspace?.name ?? preset.cwd.split("/").pop()}</span>
     </span>
   ) : useWorktree ? (
-    <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground" title={`Works on a new branch of its own, made from ${preset?.fromBranch ?? status?.defaultBranch ?? "the default branch"}, so it never touches your other work.`}>
+    <span className="flex min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground" title={`Works on a new branch of its own, made from ${preset?.fromBranch ?? status?.defaultBranch ?? "the default branch"}, so it never touches your other work.`}>
       <GitBranch className="size-3.5 shrink-0" />
       <span className="truncate">New branch</span>
     </span>
   ) : (
-    <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+    <span className="flex min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground">
       <GitBranch className="size-3.5 shrink-0" />
       <span className="truncate font-mono">{status?.branch ?? "current branch"}</span>
     </span>
@@ -686,30 +698,16 @@ export function NewSessionView({
   return (
     <div className={cn("flex min-h-0 flex-col", !modal && "h-full")} data-quick-start={quick ? "" : undefined}>
       <div className={cn("flex min-h-0 flex-1 flex-col items-center justify-center", !modal && "overflow-y-auto", modal ? "" : compact ? "p-3" : "px-6 py-8")}>
-        <div className="w-full max-w-3xl">
+        <div className="w-full max-w-[720px]">
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
-          {!remote && !projectless && preset && !project && <p role="alert" className="mb-3 text-sm text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
-          {!remote && (
-            <div className="mb-3 space-y-2 empty:hidden">
-              {setupTarget && (
-                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness} onRefresh={() => {
-                  void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
-                }} />
-              )}
-            </div>
-          )}
-          {cloud && starting && (
-            <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
-              {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
-            </div>
-          )}
 
-          <div className={cn("relative overflow-hidden rounded-2xl bg-composer shadow-surface hairline", modal && "shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
+          {/* Everything the form says is drawn inside this box: over a dimmed session there is nothing behind it to read text against. */}
+          <div className={cn("relative overflow-hidden rounded-[12px] bg-composer shadow-surface hairline", modal && "border border-border shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
-            <div className="flex h-12 items-center gap-1 border-b border-hairline px-2">
+            <div className="flex h-11 items-center gap-1 border-b border-hairline px-3" data-testid="new-session-header">
               {machine ? (
                 <>
                   {whereMenu}
@@ -720,9 +718,9 @@ export function NewSessionView({
                 <DropdownMenu {...folderMenu.root}>
                   <DropdownMenuTrigger asChild {...folderMenu.trigger}>
                     <button type="button" className={projectButton} title={quickCwd ?? (quick ? "A scratch folder made for this chat" : "The shared folder for ordinary chats")} aria-label="Working directory">
-                      {quickCwd ? <FolderOpen className="size-4 text-muted-foreground" /> : <MessageCircle className="size-4 text-muted-foreground" />}
+                      {quickCwd ? <FolderOpen className="size-[13px] text-muted-foreground" /> : <MessageCircle className="size-[13px] text-muted-foreground" />}
                       <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : defaultFolder}</span>
-                      <ChevronDown className="size-3.5 text-faint" />
+                      <ChevronDown className="size-3 shrink-0 text-faint" />
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="max-w-[18rem]">
@@ -744,10 +742,10 @@ export function NewSessionView({
               ) : (
                 <DropdownMenu {...projectMenu.root}>
                   <DropdownMenuTrigger asChild {...projectMenu.trigger}>
-                    <button type="button" className={projectButton}>
-                      {cloud ? <Cloud className="size-4 text-muted-foreground" /> : isGit ? <FolderGit2 className="size-4 text-muted-foreground" /> : <FolderOpen className="size-4 text-muted-foreground" />}
+                    <button type="button" className={projectButton} data-testid="project-chip">
+                      {cloud ? <Cloud className="size-[13px] shrink-0 text-muted-foreground" /> : isGit ? <FolderGit2 className="size-[13px] shrink-0 text-muted-foreground" /> : <FolderOpen className="size-[13px] shrink-0 text-muted-foreground" />}
                       <span className="truncate">{cloud ? (cloud.project?.fullName ?? "Cloud project") : (project?.name ?? "Choose project")}</span>
-                      <ChevronDown className="size-3.5 text-faint" />
+                      <ChevronDown className="size-3 shrink-0 text-faint" />
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
@@ -798,17 +796,24 @@ export function NewSessionView({
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}
-              {machine ? null : localGit && project ? (
-                <StartFromPicker projectPath={project.path} defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
-                  label={pullRequest ? `PR #${pullRequest.number}` : issue ? issue.identifier : branchTarget.kind === "new" ? "New branch" : branchTarget.kind === "existing" ? branchTarget.branch : workspace?.branch ?? status?.branch ?? "Current checkout"}
-                  open={startFromOpen} onOpenChange={setStartFromOpen} onBranch={pickBranch} onIssue={pickIssue} onPr={pickPr} onSession={selectSession} disabled={busy} />
-              ) : (
+              {/* A new worktree's branch is made from a base the reader can change; anything else names the checkout it uses. */}
+              {machine ? null : localGit && project && !preset?.cwd && useWorktree && !pullRequest && !checkoutBranch ? (
+                <BaseBranchMenu
+                  projectPath={project.path}
+                  value={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
+                  defaultBranch={status?.defaultBranch ?? "main"}
+                  onChange={(branch) => startSessionIn(project.path, null, branch)}
+                  disabled={busy}
+                />
+              ) : localGit && (pullRequest || checkoutBranch) ? null : (
                 branchInfo
               )}
               {!machine && !projectless && isGit && !preset?.cwd && (
                 <SessionOptions
+                  chip={useWorktree ? "New worktree" : "Current checkout"}
                   useWorktree={useWorktree}
-                  onUseWorktreeChange={cloud ? setUseWorktree : undefined}
+                  // A pull request or an existing branch is checked out in a worktree of its own; there is no other way to start from one.
+                  onUseWorktreeChange={cloud ? setUseWorktree : project && !pullRequest && !checkoutBranch ? (on) => pickBranch(on ? { kind: "new" } : { kind: "open", cwd: project.path }) : undefined}
                   switchLabel={cloud ? "New worktree on the cloud workspace" : undefined}
                   worktreeLabel={cloud ? "New worktree on the workspace" : `New branch from ${preset?.fromBranch ?? status?.defaultBranch ?? "the default branch"}`}
                   currentBranch={cloud ? "the workspace's checkout" : (status?.branch ?? "the current branch")}
@@ -817,27 +822,47 @@ export function NewSessionView({
               )}
               {!machine && !projectless && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
               {!machine && whereMenu}
+              {localGit && project && !issue && (
+                <button type="button" className={cn(chip, startFromOpen && startFromTab === "issues" && "bg-veil-raised text-foreground")} disabled={busy} data-testid="issue-chip" title="Start from an issue" onClick={() => openStartFrom("issues")}>
+                  <CircleDot className="size-[13px]" aria-hidden />
+                  Issue
+                  <ChevronDown className="size-3 text-faint" aria-hidden />
+                </button>
+              )}
+              {localGit && project && (
+                <div className="ml-auto flex min-w-0 items-center">
+                  <StartFromPicker
+                    projectPath={project.path}
+                    defaultBranch={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
+                    initialTab={startFromTab}
+                    open={startFromOpen}
+                    onOpenChange={setStartFromOpen}
+                    onBranch={pickBranch}
+                    onIssue={pickIssue}
+                    onPr={pickPr}
+                    onSession={selectSession}
+                    disabled={busy}
+                    picked={
+                      picked ? (
+                        <div className="flex h-7 min-w-0 max-w-[17rem] items-center rounded-md bg-info/10 text-[12.5px] text-info" data-start-pick data-testid={picked.testId}>
+                          <button type="button" aria-label="Start from" title={picked.text} disabled={busy} onClick={() => openStartFrom("prs")} className="flex h-full min-w-0 items-center gap-1.5 rounded-l-md pl-2 pr-1 hover:bg-info/10">
+                            {picked.icon}
+                            <span className="min-w-0 truncate">{picked.text}</span>
+                          </button>
+                          <button type="button" aria-label={picked.remove} disabled={busy} onClick={picked.clear} className="flex h-full shrink-0 items-center rounded-r-md pl-1 pr-1.5 hover:bg-info/10">
+                            <X className="size-3" aria-hidden />
+                          </button>
+                        </div>
+                      ) : undefined
+                    }
+                  />
+                </div>
+              )}
             </div>
 
-            <div className="relative px-4 pt-3">
+            <div className="relative px-4 pb-4 pt-4">
               {prMention.menu}
-              {issue && (
-                <div className="mb-2 flex max-w-full items-center gap-1.5 self-start rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-issue">
-                  {issue.provider === "github" ? <Github className="size-3.5 shrink-0" /> : <LogoLinear className="size-3.5 shrink-0" />}
-                  <span className="shrink-0 font-mono text-muted-foreground">{issue.identifier}</span>
-                  <span className="min-w-0 truncate">{issue.title}</span>
-                  <button type="button" aria-label="Remove issue" onClick={clearIssue} className="ml-0.5 shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground">
-                    <X className="size-3" />
-                  </button>
-                </div>
-              )}
-              {pullRequest && (
-                <div className="mb-2 flex items-center gap-1.5 rounded-md bg-veil-raised py-1 pl-2 pr-1 text-xs" data-testid="picked-pr">
-                  <span className="shrink-0 font-mono text-muted-foreground">PR #{pullRequest.number}</span>
-                  <span className="min-w-0 flex-1 truncate">{pullRequest.title}</span>
-                  <button type="button" aria-label="Remove pull request" onClick={() => setPullRequest(null)} className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground"><X className="size-3" /></button>
-                </div>
-              )}
+              {fileMention.menu}
               <AttachmentChips attach={attach} />
               <textarea
                 ref={ref}
@@ -849,7 +874,14 @@ export function NewSessionView({
                 onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
                 onKeyDown={(e) => {
                   if (e.nativeEvent.isComposing) return;
-                  if (prMention.onKeyDown(e)) return;
+                  if (prMention.onKeyDown(e) || fileMention.onKeyDown(e)) return;
+                  // Escape takes back what Start from picked before it closes the form.
+                  if (e.key === "Escape" && picked && !busy) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    picked.clear();
+                    return;
+                  }
                   if (matchesShortcut(e.nativeEvent, "composer.send")) {
                     e.preventDefault();
                     void create();
@@ -870,11 +902,11 @@ export function NewSessionView({
                         ? "Add notes for the agent (optional)"
                         : "What do you want to work on?"
                 }
-                className="w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none placeholder:text-faint"
+                className="block w-full resize-none bg-transparent text-[14px] leading-6 outline-none placeholder:text-faint"
               />
               {setupCommand && (
-                <p className="mt-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground" data-testid="setup-script-line">
-                  <FileCode2 className="size-3.5 shrink-0" aria-hidden />
+                <p className="mt-3 flex min-w-0 items-center gap-2 pb-2 text-xs text-muted-foreground" data-testid="setup-script-line">
+                  <FileCode2 className="size-[13px] shrink-0" aria-hidden />
                   <span className="min-w-0 truncate">
                     Setup script found · <code className="font-mono text-foreground">{setupCommand}</code> runs by itself in each new worktree, without asking
                   </span>
@@ -882,72 +914,115 @@ export function NewSessionView({
               )}
             </div>
 
-            <div className="flex items-center gap-1 px-2 pb-2">
-              <AgentMenu selection={agentSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
+            <div className="flex items-center gap-1 px-2.5 pb-2.5">
+              <AgentMenu split selection={agentSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
               {!remote && harness && !available && (
                 <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
                   {harness.name} isn't installed
                 </span>
               )}
-              <div className="ml-auto flex items-center gap-0.5">
-                <MicButton dictation={dictation} />
-                {!remote && <AttachButton attach={attach} />}
-                {orchestrateShown && (
-                  <WithTooltip label={ORCHESTRATE_TITLE} side="top">
-                    <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create(true)}>
-                      {busy && orchestrating ? <Loader2 className="animate-spin" /> : null}
-                      Orchestrate
+              <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                {!remote && (projectless ? !!quickCwd : !!project) && (
+                  <WithTooltip label="Mention a file" side="top">
+                    <Button variant="ghost" size="icon-sm" aria-label="Mention a file" disabled={busy} onClick={fileMention.start}>
+                      <AtSign />
                     </Button>
                   </WithTooltip>
                 )}
-                <Button size="sm" variant="accent" className="ml-1 gap-1.5" disabled={!canSend} onClick={() => void create()} aria-label={projectless ? "Ask" : machine ? `Create on ${machine.name}` : "Create"} title={sendKeys ? `Create (${keycaps(sendKeys).join("")})` : "Create"} data-testid="new-session-create">
-                  {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
-                  {projectless ? "Ask" : machine ? `Create on ${machine.name}` : "Create"}
-                  {sendKeys && !busy && <span className="font-sans opacity-70">{keycaps(sendKeys).join("")}</span>}
-                </Button>
+                {!remote && <AttachButton attach={attach} />}
+                <MicButton dictation={dictation} />
+                {/* One button in two parts: Create, and the other ways to start behind the chevron. */}
+                <div className={cn("ml-1.5 flex h-8 items-stretch overflow-hidden rounded-md", canSend ? "bg-accent text-accent-foreground shadow-button" : "bg-veil-strong text-muted-foreground")} data-testid="create-button">
+                  <button
+                    type="button"
+                    disabled={!canSend}
+                    onClick={() => void create()}
+                    aria-label={createLabel}
+                    data-testid="new-session-create"
+                    title={sendKeys ? `${createLabel} (${keycaps(sendKeys).join("")})` : createLabel}
+                    className="flex items-center gap-2 px-3 text-[12.5px] font-semibold transition-colors enabled:hover:bg-black/10 [&_svg]:size-3.5"
+                  >
+                    {busy && !orchestrating ? <Loader2 className="animate-spin" /> : null}
+                    {createLabel}
+                    {sendKeys && !busy && <span className="rounded border border-current/30 px-1 font-sans text-[11px] font-medium leading-4">{keycaps(sendKeys).join("")}</span>}
+                  </button>
+                  {orchestrateShown && (
+                    <DropdownMenu {...createMenu.root}>
+                      <DropdownMenuTrigger asChild {...createMenu.trigger}>
+                        <button type="button" disabled={!canSend} aria-label="More ways to create" className="flex items-center border-l border-black/15 px-1.5 transition-colors enabled:hover:bg-black/10">
+                          {busy && orchestrating ? <Loader2 className="size-[13px] animate-spin" /> : <ChevronDown className="size-[13px]" aria-hidden />}
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="max-w-[20rem]">
+                        <DropdownMenuItem onSelect={() => void create()}>
+                          <span>Create</span>
+                          {sendKeys && <span className="ml-auto pl-3 text-[11px] text-faint">{keycaps(sendKeys).join("")}</span>}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void create(true)} className="flex-col items-start gap-0">
+                          <span>Orchestrate</span>
+                          <span className="whitespace-normal text-[11px] leading-snug text-faint">{ORCHESTRATE_TITLE}</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
 
+            {/* What stands in the way of a start, said in the box, above its footer. */}
+            <div className="space-y-2 px-4 pb-3 empty:hidden" data-testid="new-session-notices">
+              {!remote && !projectless && preset && !project && <p role="alert" className="text-xs text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
+              {/* One notice, for one agent, only when it is known missing or signed out (#1064): never a card per agent, nothing while checking. */}
+              {setupTarget && (
+                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness} onRefresh={() => {
+                  void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
+                }} />
+              )}
+              {cloud && starting && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
+                  {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
+                </div>
+              )}
+              {!remote && harness && !available && (
+                <p className="text-xs text-muted-foreground">
+                  {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
+                  <code className="font-mono">{harness.installHint}</code>
+                </p>
+              )}
+              {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}
+              {cloud && cloud.mayStart === false && (
+                <div className="rounded-md bg-warning/10 px-3 py-2 text-xs text-warning" role="note" data-testid="cloud-start-locked">
+                  {NEW_SESSION_ADMIN_REASON}
+                </div>
+              )}
+              {error && (
+                <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {error} <AgentLoginsLink message={error} organizationId={errorOrg} className="ml-1 align-baseline text-foreground" />
+                </div>
+              )}
+              {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
+              {cloud && error && pausedFor && (
+                <AllowNewMachines
+                  providers={pausedFor}
+                  onAllowed={() => {
+                    setPausedFor(null);
+                    setError(null);
+                    void createCloud();
+                  }}
+                />
+              )}
+            </div>
+
+            {!remote && (
+              <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-hairline px-4 py-1.5 text-[11.5px] text-faint" data-testid="new-session-footer">
+                {signedIn.map((item) => (
+                  <span key={item.id} className="flex items-center gap-1 whitespace-nowrap" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
+                ))}
+                <p className="ml-auto whitespace-nowrap">Nothing starts until you press {createLabel}</p>
+              </div>
+            )}
+          </div>
           {machine && <MachineFormLine draft={machine} agentId={harness?.id ?? null} agentName={harness?.name ?? null} />}
-          {!remote && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint">
-              {signedIn.map((item) => (
-                <span key={item.id} className="flex items-center gap-1" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
-              ))}
-              <p className="ml-auto">Nothing starts until you press {projectless ? "Ask" : "Create"}.</p>
-            </div>
-          )}
-          {!remote && harness && !available && (
-            <p className="mt-2 px-1 text-xs text-muted-foreground">
-              {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
-              <code className="font-mono">{harness.installHint}</code>
-            </p>
-          )}
-          {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}
-          {cloud && cloud.mayStart === false && (
-            <div className="mt-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning" role="note" data-testid="cloud-start-locked">
-              {NEW_SESSION_ADMIN_REASON}
-            </div>
-          )}
-          {error && (
-            <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error} <AgentLoginsLink message={error} organizationId={errorOrg} className="ml-1 align-baseline text-foreground" />
-            </div>
-          )}
-          {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
-          {cloud && error && pausedFor && (
-            <div className="mt-2">
-              <AllowNewMachines
-                providers={pausedFor}
-                onAllowed={() => {
-                  setPausedFor(null);
-                  setError(null);
-                  void createCloud();
-                }}
-              />
-            </div>
-          )}
         </div>
       </div>
       {whereShown && <AddMachineDialog open={addingMachine} onOpenChange={setAddingMachine} onPaired={() => void refreshPairedMachines()} />}

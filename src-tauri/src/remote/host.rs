@@ -388,12 +388,14 @@ pub struct RelayInvite {
 /// and token, and a connection for any other device is a phone, which goes
 /// to the window.
 /// The machine refused a paired computer's device token or key on the relay.
+/// The `pairing_refused` reason: `code-inactive` (a token it does not know,
+/// a revoked or expired one) or `disconnected` (held off by the person, PRO-357).
 #[derive(Debug)]
-struct ComputerRefused;
+struct ComputerRefused(&'static str);
 
 impl std::fmt::Display for ComputerRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("device token refused")
+        write!(f, "device token refused ({})", self.0)
     }
 }
 
@@ -408,7 +410,8 @@ pub trait MachineRoutes: Send + Sync + 'static {
     /// id and its tracked connection, which `cancel` closes on revocation.
     /// `client_key_b64` is the connection's E2EE client key: a computer is
     /// admitted only with the key it paired with (docs/MACHINES.md rule 2).
-    fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>>;
+    /// `Ok(Err(reason))`: refused, with the `pairing_refused` reason.
+    fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>>;
     /// The connection ended.
     fn release_computer(&self, computer_id: &str, tracked: u64);
     /// Pass a phone's relay connection to the window. Whether one took it.
@@ -1012,7 +1015,8 @@ impl RelayHost {
                 // As on the direct route: the reason, sealed, then `4401`, so
                 // a revoked computer stops retrying instead of taking the
                 // relay for unreachable (docs/MACHINES.md "As built (PRO-345)").
-                let refused = json!({ "type": "pairing_refused", "v": 1, "reason": "code-inactive" });
+                let reason = error.downcast_ref::<ComputerRefused>().map(|refused| refused.0).unwrap_or(crate::machine_wire::REFUSED_CODE_INACTIVE);
+                let refused = json!({ "type": "pairing_refused", "v": 1, "reason": reason });
                 let _ = send_sealed(&mut socket, &mut session, &refused).await;
                 let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 4401.into(), reason: "credential refused".into() };
                 let _ = socket.close(Some(frame)).await;
@@ -1064,7 +1068,7 @@ impl RelayHost {
             let (device_id, token, key) = (relay_device_id.to_string(), token.to_string(), client_key_b64.to_string());
             let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, &key, cancel))
                 .await??
-                .ok_or(ComputerRefused)?;
+                .map_err(ComputerRefused)?;
             let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
             return Ok((device, Some((computer_id, tracked))));
         }
@@ -1498,8 +1502,8 @@ mod tests {
             fn is_computer(&self, relay_device_id: &str) -> bool {
                 relay_device_id == "relay-desk"
             }
-            fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Option<(String, u64)>> {
-                Ok((relay_device_id == "relay-desk" && token == "desk-token" && client_key_b64 == "desk-key").then(|| ("desk".to_string(), 1)))
+            fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token" && client_key_b64 == "desk-key").then(|| ("desk".to_string(), 1)).ok_or("code-inactive"))
             }
             fn release_computer(&self, _: &str, _: u64) {}
             fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {

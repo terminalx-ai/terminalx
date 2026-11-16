@@ -665,8 +665,8 @@ export const api = {
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
-  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
-    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null, detached = false) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch, detached }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -2355,6 +2355,8 @@ export interface PullRequest {
   checks: PrCheck[];
   body: string;
   author: string;
+  /** `owner/name` of the fork its head is on; only a pull request search reads it. */
+  headRepository?: string | null;
 }
 
 export const git = {
@@ -2694,6 +2696,8 @@ export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  /** Exclusive create: rejects when the path already exists, leaving that file as it is. */
+  createText: (path: string, content: string) => invoke<number>("create_text_file", { path, content }),
   /** A file's whole text, past the 4 MB the editor shows (the file tab's Copy file contents). */
   readWholeText: (path: string) => invoke<string>("read_whole_text_file", { path }),
   /** Save a copy at `to`: the exact bytes of the local file `from`, or `content`. */

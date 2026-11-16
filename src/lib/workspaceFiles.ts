@@ -129,7 +129,8 @@ export function localFileSource(root: string): FileSource {
       const file = await fs.readText(abs(rel));
       return { ...file, version: String(file.mtimeMs) };
     },
-    writeText: async (rel, text) => ({ version: String(await fs.writeText(abs(rel), text)) }),
+    // A null base means the file must not exist: an exclusive create, so a file made in the meantime is never emptied.
+    writeText: async (rel, text, baseEtag) => ({ version: String(await (baseEtag === null ? fs.createText(abs(rel), text) : fs.writeText(abs(rel), text))) }),
     stat: async (rel) => {
       const mtime = await fs.mtime(abs(rel));
       return mtime == null ? null : { version: String(mtime) };

@@ -357,6 +357,31 @@ fn revoked_grant(answer: &serde_json::Value) -> Option<&str> {
     answer["grantRequestId"].as_str().filter(|grant| !grant.is_empty())
 }
 
+/// "Disconnect" (PRO-357): close a paired computer's connections now and
+/// hold it off until the person lets it back. Its credential is kept.
+#[tauri::command]
+pub async fn machines_disconnect(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
+    host_command(state, machines, wire::DISCONNECT, serde_json::json!({ "id": id })).await
+}
+
+/// Let a disconnected computer connect again. Only a person may (`consent`).
+#[tauri::command]
+pub async fn machines_let_back(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
+    host_command(state, machines, wire::LET_BACK, serde_json::json!({ "id": id })).await
+}
+
+/// The activity log (PRO-357): the last 200 entries, newest first.
+#[tauri::command]
+pub async fn machines_activity(state: tauri::State<'_, crate::AppState>) -> CmdResult<Vec<crate::machine_host::activity::Entry>> {
+    let runtime = runtime(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let answer = runtime.machine_host(wire::ACTIVITY, serde_json::json!({})).map_err(err)?;
+        serde_json::from_value(answer["entries"].clone()).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// The app's own updater run, as the window reports each step after
 /// [`APP_UPDATE_REQUESTED_EVENT`] (`MachineAppUpdateReport`): forwarded to
 /// the runtime, which tells the computer that asked (`machine.updateChanged`).
