@@ -219,6 +219,7 @@ export function TerminalView({
   redraw = true,
   moveToDock = false,
   moveToTab = false,
+  shell = moveToDock || moveToTab,
   actions,
 }: {
   id: string;
@@ -233,6 +234,12 @@ export function TerminalView({
   moveToDock?: boolean;
   /** A shell in the dock can move back to a tab: its header offers "Move to tab". */
   moveToTab?: boolean;
+  /**
+   * A plain local shell: its header offers Clear and the terminal takes ⌘K for it. An agent's
+   * TUI, a cloud terminal, a setup or archive log are not: clearing them would drop a live
+   * screen, and ⌘K stays the command palette there. Defaults to the views that can move.
+   */
+  shell?: boolean;
   /** More controls for the header row, beside Move and Redraw. */
   actions?: ReactNode;
   /** @deprecated The header row is always on screen now; kept so existing callers compile. */
@@ -360,7 +367,7 @@ export function TerminalView({
     term.clear();
     term.focus();
   }, [id]);
-  useTerminalKey(TERMINAL_KEYS.clear.chord, frame, clear, shown);
+  useTerminalKey(TERMINAL_KEYS.clear.chord, frame, clear, shown && shell);
   const header = redraw || !!actions || moveToDock || moveToTab;
 
   return (
@@ -383,7 +390,7 @@ export function TerminalView({
                 Redraw terminal
               </button>
             )}
-            <button
+            {shell && <button
               type="button"
               className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2.5 text-xs whitespace-nowrap text-muted-foreground hover:bg-veil-raised hover:text-foreground"
               onClick={clear}
@@ -392,7 +399,7 @@ export function TerminalView({
               tabIndex={visible ? 0 : -1}
             >
               <Eraser className="size-3.5" aria-hidden />Clear <kbd aria-hidden className="rounded-sm bg-veil-strong px-1 font-sans text-[10.5px] font-medium text-foreground/80">{TERMINAL_KEYS.clear.label}</kbd>
-            </button>
+            </button>}
           </div>
         </div>
       )}

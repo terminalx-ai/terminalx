@@ -71,7 +71,8 @@ export function filterRows(paths: string[], query: string): { rows: Row[]; match
     for (const [path, isDir] of kids.get(rel) ?? []) {
       const inner = isDir ? mark(path) : false;
       if (hit(path)) {
-        matched++;
+        // Files only, as the total is: a folder whose name matches is shown but not counted.
+        if (!isDir) matched++;
         any = true;
         show.add(path);
       } else if (inner) {

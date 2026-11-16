@@ -965,6 +965,7 @@ pub fn run() {
             commands::read_whole_text_file,
             commands::export_file,
             commands::write_text_file,
+            commands::create_text_file,
             commands::file_mtime,
             commands::inspect_local_path,
             commands::open_local_path,

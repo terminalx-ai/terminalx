@@ -190,7 +190,7 @@ describe("the header row", () => {
     vi.useFakeTimers();
     const inst = instance();
     Object.assign(inst.term, { clear: vi.fn() });
-    const view = render(<><button type="button">outside</button><TerminalView id="p1" visible create={() => inst} /></>);
+    const view = render(<><button type="button">outside</button><TerminalView id="p1" visible create={() => inst} shell /></>);
     const press = () => act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true })); });
     try {
       act(() => view.getByRole("button", { name: "outside" }).focus());
@@ -199,6 +199,25 @@ describe("the header row", () => {
       act(() => view.getByRole("button", { name: "Redraw terminal" }).focus());
       press();
       expect(inst.term.clear).toHaveBeenCalledOnce();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves Ctrl+K and Clear alone in a view that is not a plain shell (an agent's terminal)", () => {
+    vi.useFakeTimers();
+    const inst = instance();
+    Object.assign(inst.term, { clear: vi.fn() });
+    const view = render(<TerminalView id="p1" visible create={() => inst} />);
+    try {
+      expect(view.queryByRole("button", { name: /^Clear/ })).toBeNull();
+      act(() => view.getByRole("button", { name: "Redraw terminal" }).focus());
+      const event = new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true });
+      act(() => { window.dispatchEvent(event); });
+      expect(inst.term.clear).not.toHaveBeenCalled();
+      // Not taken here, so the command palette's binding still sees it.
+      expect(event.defaultPrevented).toBe(false);
     } finally {
       view.unmount();
       vi.useRealTimers();

@@ -26,13 +26,23 @@ vi.mock("@/lib/editors", () => ({
 }));
 vi.mock("./FileTypeIcon", () => ({ FileTypeIcon: () => null }));
 
-const { FileTreeView } = await import("./FileTreeView");
+const { FileTreeView, filterRows } = await import("./FileTreeView");
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(cleanup);
+
+describe("filterRows", () => {
+  it("counts matching files against all files: a matching folder is shown but not counted", () => {
+    const result = filterRows(["aa/ab/x.txt"], "a");
+    expect(result.rows.map((row) => row.path)).toEqual(["aa", "aa/ab"]);
+    expect([result.matched, result.total]).toEqual([0, 1]);
+    const named = filterRows(["aa/ab/x.txt", "aa/a.md"], "a");
+    expect([named.matched, named.total]).toEqual([1, 2]);
+  });
+});
 
 describe("FileTreeView", () => {
   it.each(["right-click", "Shift+F10", "ContextMenu"])("opens actions for the intended file with %s", async (input) => {
