@@ -436,6 +436,8 @@ export function buildTimeLeft(building: Pick<EnvironmentVersion, "stage" | "star
     .sort((left, right) => right.finishedAt! - left.finishedAt!)[0];
   if (last) {
     const left = last.finishedAt! - last.startedAt! - (now - (building.startedAt ?? building.createdAt));
+    // Past the last build's length there is no honest estimate left to give.
+    if (left <= 0) return "taking longer than the last build";
     const minutes = Math.ceil(left / 60_000);
     return minutes > 1 ? `about ${minutes} minutes left` : "about a minute left";
   }

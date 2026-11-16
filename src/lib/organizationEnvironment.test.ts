@@ -225,7 +225,8 @@ describe("buildTimeLeft (PRO-389)", () => {
       { state: "failed", startedAt: 2_000_000, finishedAt: 2_010_000 },
     ];
     expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_120_000)).toBe("about 3 minutes left");
-    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_290_000)).toBe("about a minute left");
+    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_250_000)).toBe("about a minute left");
+    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_400_000)).toBe("taking longer than the last build");
   });
 
   it("says the step when no build has finished before", async () => {

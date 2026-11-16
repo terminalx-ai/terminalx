@@ -56,7 +56,10 @@ const environment = (versions) => ({
   contextRevision: "s:1",
 });
 
-const answers = ({ environment, failed }) => {
+// What today's build worker stores: the step's own output, with no exit status or line in it (PRO-413 adds them as fields).
+const SCRIPT_OUTPUT = "Reading package lists...\nBuilding dependency tree...\nE: Unable to locate package nope";
+
+const answers = ({ environment, failed, read }) => {
   const answers = window.__PW_STUB__.answers;
   answers.status_bar_settings = { visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 };
   const capabilities = { suspend: true, resume: true, releaseDisposition: "retain", locationSelection: "required", sourceSelection: "none", pricing: "provider-rate" };
@@ -88,7 +91,7 @@ const answers = ({ environment, failed }) => {
   answers.organization_environment_version = {
     ...failed,
     contextRevision: "s:1",
-    logs: [{ phase: "install", content: "Reading package lists...\nE: Unable to locate package nope\n/build/install.sh: line 9: apt-get exited\nexited with code 100", occurredAt: 1 }],
+    ...read,
   };
   answers.workspace_config_organization = { organization: { env: { NODE_ENV: "development" } }, canEdit: true, contextRevision: "s:1" };
   answers.cloud_agent_logins = { credentials: [{ provider: "claude" }] };
@@ -114,9 +117,9 @@ const box = (locator) => locator.evaluate((node) => {
 });
 const fontSize = (locator) => locator.evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
 
-async function flowAt(browser, server, step, colorScheme, envStatus = environment([failed, version(7, { publication: "published" })])) {
+async function flowAt(browser, server, step, colorScheme, envStatus = environment([failed, version(7, { publication: "published" })]), read = { logs: [{ phase: "install", content: SCRIPT_OUTPUT, occurredAt: 1 }] }) {
   const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, VIEWPORT, { colorScheme, locale: "en-US", extra: seed(step) });
-  await page.evaluate(answers, { environment: envStatus, failed });
+  await page.evaluate(answers, { environment: envStatus, failed, read });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const statusBarInSettings = await page.locator("[data-status-bar]").count();
   await page.evaluate(() => window.__PW_STUB__.emit?.("status_bar_settings", window.__PW_STUB__.answers.status_bar_settings));
@@ -158,27 +161,28 @@ try {
       await page.close();
     }
 
-    // 14.15 Environment: the failed card and the shared variables heading.
-    {
-      const { page } = await flowAt(browser, server, "environment", colorScheme);
+    // 14.15 Environment: the failed card and the shared variables heading, first as today's worker
+    // reports a failure (output only), then with the exit status and line the server is to send (PRO-413).
+    for (const [label, read, expected] of [
+      ["output only", { logs: [{ phase: "install", content: SCRIPT_OUTPUT, occurredAt: 1 }] }, { header: /after 2m 31s · failed while running the machine install script/, tail: /Unable to locate package nope\s*failed while running the machine install script · environment v7 stays active/ }],
+      ["exit status sent", { exitCode: 100, failureLine: 9, logs: [{ phase: "install", content: SCRIPT_OUTPUT, occurredAt: 1 }] }, { header: /after 2m 31s · exit 100 in the install script, line 9/, tail: /install script exited with 100 · environment v7 stays active/ }],
+    ]) {
+      const { page } = await flowAt(browser, server, "environment", colorScheme, undefined, read);
       const panel = page.locator(`[data-testid="cloud-setup-build-panel"]:visible`);
       await panel.getByRole("button", { name: "Fix with an agent" }).waitFor();
-      await panel.getByText(/exited with 100/).waitFor().catch(async (error) => {
-        console.log(await panel.textContent());
-        throw error;
-      });
-      const header = await panel.getByRole("alert").textContent();
+      await panel.getByText("Unable to locate package nope").first().waitFor();
+      const alert = await panel.getByRole("alert").textContent();
       const heading = page.getByRole("region", { name: "Shared environment variables" }).locator("> div").first();
       await page.getByText("Shared environment variables", { exact: true }).waitFor();
       const headingBox = await box(heading);
-      await page.screenshot({ path: `${SHOTS}/pro-389-environment-${colorScheme}.png` });
-      failures += report(`environment (${colorScheme})`, {
+      await page.screenshot({ path: `${SHOTS}/pro-389-environment-${label.replace(/ /g, "-")}-${colorScheme}.png` });
+      failures += report(`environment, ${label} (${colorScheme})`, {
         "the failed card offers Restart build, Fix with an agent and Copy logs": (await panel.getByRole("button", { name: /Restart build|Fix with an agent|Copy logs/ }).count()) === 3,
-        "its header gives the exit status and the line": /exit 100 in the install script, line 9/.test(header ?? ""),
-        "its log ends with what exited and what stays active": /install script exited with 100 · environment v7 stays active/.test(header ?? ""),
+        "its header says what failed": expected.header.test(alert ?? ""),
+        "its log tail ends with what failed and what stays active": expected.tail.test(alert ?? ""),
         "the internal error code is not shown": !/cloud_environment_install_failed/.test(await page.getByTestId("cloud-setup-flow").textContent()),
         "the shared variables heading is one line": headingBox.height <= 30,
-      }, { header, headingBox });
+      }, { alert, headingBox });
       // Fix with an agent opens the priced confirmation and starts nothing.
       await panel.getByRole("button", { name: "Fix with an agent" }).click();
       await page.locator(`[data-testid="cloud-setup-fix-with-agent"]:visible`).waitFor();

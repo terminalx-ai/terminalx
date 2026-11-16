@@ -21,6 +21,7 @@ import {
   failureSummary,
   isBuilding,
   organizationEnvironment,
+  recipesUnavailable,
   sameDefinition,
   stageLabel,
   type EnvironmentDefinition,
@@ -562,10 +563,12 @@ export function EnvironmentStep(props: StepProps) {
       if (!fresh()) return;
       setStatus(next);
       if (!options.keepError && !options.quiet) setError(null);
-      if (next.canManage)
+      // The recipe list changes only with a press here, never with a build's progress: the quiet poll leaves it.
+      // Only a server without recipes takes the agent away; a failed read keeps what was shown, and a run in progress.
+      if (next.canManage && !options.quiet)
         void organizationEnvironment.recipes(target).then(
           (listed) => fresh() && setRecipes(listed.recipes),
-          () => fresh() && setRecipes(null),
+          (failure) => fresh() && recipesUnavailable(failure) && setRecipes(null),
         );
       const shown = next.versions.find(isBuilding) ?? [...next.versions].sort((left, right) => right.number - left.number)[0] ?? null;
       if (shown && next.canManage) {
