@@ -2704,10 +2704,10 @@ use crate::AppState;
 use tauri::State;
 
 #[tauri::command]
-pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
+pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String, portable: Option<bool>) -> CmdResult<crate::continuation::Context> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
-        m.prepare_continuation(&session_id, &tab_id).map_err(err)
+        m.prepare_continuation(&session_id, &tab_id, portable == Some(true)).map_err(err)
     }).await.map_err(err)?
 }
 

@@ -50,6 +50,8 @@ class FakeRuntime implements WorkspaceTransport {
   output = "";
   writes: string[] = [];
   created = 0;
+  /** Sessions `session.create` made (a resend answered from the cache makes none). */
+  sessionsCreated = 0;
   agentEvents: { seq: number; id: string }[] = [];
   sessions: RuntimeSession[] = [session("s1", "Fix login")];
   updates = 0;
@@ -254,6 +256,7 @@ class FakeRuntime implements WorkspaceTransport {
         return ok(result);
       }
       case "session.create": {
+        this.sessionsCreated++;
         const result = { sessionId: "s9", tabId: "t9", pipeline: params.issue ? { id: "p9", cloud: true } : null, pipelineNote: null };
         this.cache.set(key!, result);
         return ok(result);
@@ -863,6 +866,46 @@ describe("workspace RPC client", () => {
       expect(old.sent.some((frame) => frame.method === "session.create")).toBe(false);
       await before.createAgentTab({ agent: "codex" });
       before.close();
+    });
+
+    it("session-base/1: a new session's base branch goes only to a runtime that takes it (PRO-348)", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      await client.createAgentTab({ agent: "claude", projectId: "p1", useWorktree: true, baseRef: "release/2" });
+      expect(runtime.sent.find((frame) => frame.method === "session.create")?.params).toMatchObject({ projectId: "p1", baseRef: "release/2", useWorktree: true });
+      client.close();
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "session-base/1"));
+      expect(() => before.createAgentTab({ agent: "claude", projectId: "p1", baseRef: "release/2" })).toThrow(WorkspaceRpcError);
+      expect(old.sent.some((frame) => frame.method === "session.create")).toBe(false);
+      // Without a base it starts from the default branch, as before.
+      await before.createAgentTab({ agent: "claude", projectId: "p1", baseRef: null });
+      expect(old.sent.find((frame) => frame.method === "session.create")?.params).not.toHaveProperty("baseRef");
+      before.close();
+    });
+
+    it("keeps a caller's create id: a create whose answer was lost, pressed again, is one session with one first prompt (PRO-348)", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      runtime.loseAnswers = true;
+      const id = client.requestId();
+      const request = { agent: "claude", prompt: "Add read markers", projectId: "p1", useWorktree: true, clientRequestId: id };
+      const first = client.createAgentTab(request);
+      await settle();
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      await expect(first).resolves.toMatchObject({ sessionId: "s9", tabId: "t9" });
+      // Create pressed again with the id the form kept: answered from the runtime's cache.
+      await expect(client.createAgentTab(request)).resolves.toMatchObject({ sessionId: "s9" });
+      const creates = runtime.sent.filter((frame) => frame.method === "session.create");
+      expect(creates.length).toBeGreaterThanOrEqual(3);
+      expect(new Set(creates.map((frame) => (frame.params as { clientRequestId: string }).clientRequestId))).toEqual(new Set([id]));
+      expect(creates.every((frame) => (frame.params as { prompt: string }).prompt === "Add read markers")).toBe(true);
+      expect(runtime.sessionsCreated).toBe(1);
+      client.close();
     });
 
     it("pipeline/1: the runtime's pipelines are read and steered, a merge is only ever noted, and an older runtime is never asked", async () => {

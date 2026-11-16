@@ -2158,7 +2158,8 @@ export interface TabPtyEvent {
 }
 
 export const agent = {
-  prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
+  /** `portable`: for a session on another computer (PRO-348): no path of this Mac, the bounded recent capture instead. */
+  prepareContinuation: (sessionId: string, tabId: string, portable = false) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", portable ? { sessionId, tabId, portable } : { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
   /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */

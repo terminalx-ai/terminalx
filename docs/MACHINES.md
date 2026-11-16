@@ -726,7 +726,7 @@ the pull request that adds it.
 | --- | --- | --- | --- |
 | `session.list` | `session/1` | Served | Every project's sessions; each names its `projectId` |
 | `session.get` | `session/1` | Served | |
-| `session.create` | `session/1` | Needs a project | `projectId` names where it runs; `repository` (`session-repository/1`) is not used |
+| `session.create` | `session/1` | Needs a project | `projectId` names where it runs; `repository` (`session-repository/1`) is not used; `baseRef` (`session-base/1`, PRO-348) names the branch a worktree is cut from |
 | `session.close` | `session/1` | Served | |
 | `session.send` | `session/1` | Served | With `agent-commands/1`, a durable receipt (decision 3) |
 | `session.subscribe` | `session/1` | Served | |
@@ -1567,7 +1567,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Wake and sleep, price, mirror, cloud resource notices | Hidden | Decision 1 |
 | Dropping files into a terminal | Refused with a message: the path is this computer's | Decision 7 |
 | Forwarded ports and previews | Ports tab where the machine grants `ports/1`; forwarding and previews on this computer | PRO-355 |
-| New session on a machine | Follow-up | PRO-348 |
+| New session on a machine | Works: the new-session form's "Where it runs" menu, issue start and handoff | PRO-348 |
 
 ### As built (PRO-347)
 
@@ -1589,3 +1589,49 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
+
+### As built (PRO-348): a new session on a machine
+
+- **Where it runs.** With Settings → Experimental → Machines on, the
+  new-session header has a "Where it runs" chip (01.07, 21.07). Its menu lists
+  This Mac, each paired machine, the organization cloud entries, then "Add a
+  machine…" (the pairing dialog). A machine's second line is the route, the
+  sessions running there, then one reason it may not start a session (no agent
+  installed or signed in, the form's project missing, no projects) or else its
+  free memory (`machineWhereRow`, `src/lib/machineNewSession.ts`). An offline
+  machine says when it was last seen; one that needs an update, is updating or
+  no longer allows this Mac says so. None of those can be chosen.
+- **The form on a machine.** Projects come from `machine.projects` (archived
+  ones left out), branches from `git.branches` on that project, and agents,
+  models and efforts from the machine's `runtime.agents`. The button reads
+  "Create on <name>", and a line under the form says whether the agent is
+  signed in there and the project exists there. The sign-in and the memory are
+  read from `runtime.agents[].signIn` and `lifecycle.resources` where the
+  machine reports them (PRO-350); a machine that does not is shown without
+  them. Choosing This Mac again clears the machine draft
+  (`machineSessionPreset`) and the create id.
+- **Create.** `session.create` with the project's `projectId` and
+  `useWorktree: true`: the runtime cuts the worktree beside the project on the
+  machine and sends the first prompt itself, so the prompt is part of the one
+  idempotent create. The form keeps one `clientRequestId` per request
+  (`CreateAttempt`): the client resends it across a dropped connection, and a
+  Create pressed again after the client gave up is answered from the runtime's
+  idempotency cache with the session already made. A refusal or a success
+  starts a new id. The session then opens in the machine session view.
+- **`session-base/1`.** New namespace: `session.create.baseRef` names the
+  branch the new worktree is cut from (`check_base_ref` refuses option-like,
+  `..`, `@{` and other non-ref text). Without it a worktree starts from the
+  project's default branch, as before. It is not one of `MACHINE_FEATURES`: a
+  machine without it still creates sessions, so it does not make the machine
+  "Needs update"; the branch menu says to update it instead.
+- **Issue start.** Beside an issue's Start session, a "Start on" menu lists the
+  paired machines with the same rows. Choosing one opens the form on that
+  machine with the issue in it; the session starts with the issue's prompt,
+  worktree name and, where the machine grants `pipeline/1`, its pipeline.
+- **Handoff.** The Continue dialog has "Runs on". For a machine the context is
+  prepared without any path of this Mac (`prepareContinuation` with
+  `portable`): the bounded recent capture instead of the saved transcript's
+  path. The form opens on the machine with that handoff as its prompt.
+- **Left out.** Docker and Local VM targets are PRO-312. The cloud entry's
+  second line shows the organization's project count, not a price: a price
+  needs a create quote, which the cloud form asks for when it is chosen.

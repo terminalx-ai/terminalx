@@ -343,8 +343,9 @@ impl Sessions {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
 
-    pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
-        self.tab("prepareContinuation", session, tab, json!({}))
+    /// `portable`: for another computer (PRO-348), with no path of this one in it.
+    pub fn prepare_continuation(&self, session: &str, tab: &str, portable: bool) -> Result<crate::continuation::Context> {
+        self.tab("prepareContinuation", session, tab, if portable { json!({ "portable": true }) } else { json!({}) })
     }
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {

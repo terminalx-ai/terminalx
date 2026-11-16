@@ -1461,6 +1461,9 @@ impl WorkspaceRpc {
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
                 }
+                if params.get("baseRef").is_some_and(|base| !base.is_null()) && !peer.granted("session-base/1") {
+                    return Err(RpcError::new("capability_not_granted", "Choosing the branch a session starts from was not negotiated."));
+                }
                 // On a machine, refused here without `machine/1` or a project.
                 if self.is_machine() {
                     project()?;
@@ -2878,8 +2881,13 @@ impl WorkspaceRpc {
             /// `machine/1`: the project the session runs in.
             #[serde(default)]
             project_id: Option<String>,
+            /// `session-base/1` (PRO-348): the branch the new worktree is cut
+            /// from, as `git.branches` lists it; the default branch without it.
+            #[serde(default)]
+            base_ref: Option<String>,
         }
         let mut p: Params = parse(params)?;
+        let base_ref = p.base_ref.take().filter(|_| p.use_worktree).map(|base| check_base_ref(&base)).transpose()?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
@@ -2944,7 +2952,7 @@ impl WorkspaceRpc {
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
-                base_ref: None,
+                base_ref,
                 checkout_branch: None,
                 checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
@@ -4067,6 +4075,29 @@ fn default_cols() -> u16 {
 
 fn default_rows() -> u16 {
     24
+}
+
+/// A base branch for `session.create` (`session-base/1`): a branch name as
+/// `git.branches` lists it, never something git could read as an option or a
+/// revision expression. Whether it exists is git's to say when the worktree
+/// is cut.
+fn check_base_ref(base: &str) -> Result<String, RpcError> {
+    let base = base.trim();
+    let valid = !base.is_empty()
+        && base.len() <= 255
+        && !base.starts_with('-')
+        && !base.starts_with('/')
+        && !base.ends_with('/')
+        && !base.ends_with(".lock")
+        && !base.contains("..")
+        && !base.contains("@{")
+        && !base.contains("//")
+        && base.chars().all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+    if valid {
+        Ok(base.to_string())
+    } else {
+        Err(RpcError::invalid("baseRef is not a branch name"))
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
