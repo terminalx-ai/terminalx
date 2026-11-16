@@ -34,14 +34,17 @@ export function useProjectAdded(): ProjectAdded | null {
   return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => added, () => null);
 }
 
-const settingsListeners = new Set<(projectPath: string) => void>();
+const settingsListeners = new Set<(projectPath: string, page: ProjectSettingsPage) => void>();
 
-/** Ask the app shell to open Settings on this project's scripts. */
-export function requestProjectSettings(projectPath: string) {
-  for (const listener of [...settingsListeners]) listener(projectPath);
+/** Which of a project's settings pages to open: its general page, or its Scripts (setup, run, actions). */
+export type ProjectSettingsPage = "general" | "scripts";
+
+/** Ask the app shell to open Settings on this project: its scripts unless another page is named. */
+export function requestProjectSettings(projectPath: string, page: ProjectSettingsPage = "scripts") {
+  for (const listener of [...settingsListeners]) listener(projectPath, page);
 }
 
-export function onProjectSettingsRequest(listener: (projectPath: string) => void): () => void {
+export function onProjectSettingsRequest(listener: (projectPath: string, page: ProjectSettingsPage) => void): () => void {
   settingsListeners.add(listener);
   return () => { settingsListeners.delete(listener); };
 }
