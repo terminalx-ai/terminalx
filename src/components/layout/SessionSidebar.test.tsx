@@ -120,7 +120,7 @@ describe("a project's picture", () => {
 });
 
 describe("a project's fold", () => {
-  it("folds its branches away from the project row and remembers it, the picture giving way to a chevron", async () => {
+  it("folds its branches away by the chevron at the row's end and remembers it, the picture staying put", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([session("here", "/repos/web", at(1)), session("there", "/repos/web", at(2), { branch: "dev" })]);
     mount();
@@ -137,6 +137,10 @@ describe("a project's fold", () => {
     expect(within(web).getByRole("button", { name: "Expand web" }).getAttribute("aria-expanded")).toBe("false");
     // Folded, the chevron points at the name; the fold is kept with the other sidebar sections.
     expect(within(web).getByTestId("project-fold").getAttribute("class")).toContain("-rotate-90");
+    // The chevron is the row's last control, after the hover actions; the picture is never faded out for it (PRO-373).
+    const header = within(web).getByRole("button", { name: "Expand web" }).parentElement!;
+    expect(header.lastElementChild).toBe(within(web).getByRole("button", { name: "Expand web" }));
+    expect(header.querySelector("[data-row-actions]")!.compareDocumentPosition(header.lastElementChild!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(prefs.getPrefs().sidebarSections["project:/repos/web"]).toBe("collapsed");
     await act(async () => { fireEvent.click(within(web).getByRole("button", { name: "Expand web" })); });
     expect(within(web).getByTestId("project-branches").getAttribute("class")).toContain("grid-rows-[1fr]");
