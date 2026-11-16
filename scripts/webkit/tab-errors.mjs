@@ -117,7 +117,8 @@ try {
     await opening.getByRole("button", { name: "Try again" }).click();
     await opening.waitFor({ state: "detached" });
     const opened = await page.evaluate(() => window.__ASKED__.started.filter((id) => id.startsWith("new-")));
-    const tabsAtEnd = await strip.getByRole("tab").count();
+    // Open settings.json added a file tab beside the chats (PRO-402); count the agent tabs.
+    const tabsAtEnd = (await strip.getByRole("tab").allInnerTexts()).filter((name) => !name.includes("settings.json")).length;
 
     failed += report(`tab errors, ${colorScheme}`, {
       "a close that timed out says so, names the tab, and leaves it open": closeText.includes("Couldn't close the chat. Try again.") && closeText.includes("Claude Code didn't stop within 10 seconds, so “claude tab” is still open.") && stillOpen,

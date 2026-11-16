@@ -49,7 +49,8 @@ export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">)
 const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; tone: "warning" | "info"; children: ReactNode; actions: ReactNode; aside?: ReactNode; note?: ReactNode }>(
   function AskShell({ icon, label, tone, children, actions, aside, note }, ref) {
     return (
-      <div ref={ref} className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-card">
+      // A toast rising off the composer rises past this card too, never onto its Allow and Deny (PRO-386).
+      <div ref={ref} data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-card">
         <div className={cn("flex items-center gap-1.5 px-4 pt-3 text-[11px] font-medium uppercase tracking-wide", tone === "warning" ? "text-warning" : "text-info")}>
           {icon}
           {label}

@@ -56,6 +56,8 @@ const HELP: &str = r#"terminalx — control a running TerminalX app
 Usage:
   terminalx status [--json]
   terminalx projects list [--json]
+  terminalx projects add FOLDER [--json]
+  terminalx projects remove PROJECT [--json]
   terminalx config show [--project PROJECT] [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
   terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
@@ -462,15 +464,29 @@ fn parse_with_stdin(
     };
     let action = match group.as_str() {
         "status" => rpc("status", json!({}), &mut tokens),
-        "projects" => {
-            expect_word(&mut tokens, "list", "projects")?;
-            let org = tokens.option("--org")?;
-            if tokens.flag("--cloud")? || org.is_some() {
-                cloud_rpc("projects.list", json!({"org": org}), &mut tokens)
-            } else {
-                rpc("projects.list", json!({}), &mut tokens)
+        "projects" => match tokens.required_front("projects command")?.as_str() {
+            "list" => {
+                let org = tokens.option("--org")?;
+                if tokens.flag("--cloud")? || org.is_some() {
+                    cloud_rpc("projects.list", json!({"org": org}), &mut tokens)
+                } else {
+                    rpc("projects.list", json!({}), &mut tokens)
+                }
             }
-        }
+            "add" => {
+                let folder = tokens.required_front("folder")?;
+                // The runtime has a working directory of its own: a relative
+                // path means this shell's folder, so it is resolved here.
+                let path = std::path::absolute(&folder)
+                    .map_err(|error| invalid(format!("Cannot resolve {folder}: {error}")))?;
+                rpc("projects.add", json!({"path": path, "refuseExisting": true}), &mut tokens)
+            }
+            "remove" => {
+                let project = tokens.required_front("project")?;
+                rpc("projects.remove", json!({"project": project}), &mut tokens)
+            }
+            other => Err(invalid(format!("Unknown projects command {other}. Use list, add or remove."))),
+        },
         "config" => {
             expect_word(&mut tokens, "show", "config")?;
             let project = tokens.option("--project")?;
@@ -2042,6 +2058,14 @@ mod tests {
     #[test]
     fn local_targets_keep_their_commands_and_refuse_cloud_only_options() {
         assert_eq!(rpc_of(&["projects", "list"]).0, "projects.list");
+        assert_eq!(rpc_of(&["projects", "add", "/code/api", "--json"]), ("projects.add".into(), json!({"path": "/code/api", "refuseExisting": true}), Duration::from_secs(30)));
+        // A relative folder is this shell's, not the runtime's.
+        let relative = rpc_of(&["projects", "add", "api"]).1;
+        assert_eq!(relative["path"], json!(std::env::current_dir().unwrap().join("api")));
+        assert_eq!(rpc_of(&["projects", "remove", "api"]), ("projects.remove".into(), json!({"project": "api"}), Duration::from_secs(30)));
+        for refused in [&["projects"][..], &["projects", "add"], &["projects", "remove"], &["projects", "add", "a", "b"], &["projects", "rename", "a"]] {
+            assert!(parse(&args(refused)).is_err(), "{refused:?}");
+        }
         assert_eq!(rpc_of(&["sessions", "list", "--project", "raccoon"]).0, "sessions.list");
         assert_eq!(rpc_of(&["send", "raccoon-session", "hello"]).0, "send");
         assert_eq!(rpc_of(&["read", "raccoon-session"]).0, "read");

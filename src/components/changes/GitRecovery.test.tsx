@@ -202,6 +202,7 @@ describe("local Git recovery", () => {
     await screen.findByTitle("Modified · src/recovery.ts");
     const unstaged = within(screen.getByRole("region", { name: "Unstaged" }));
     fireEvent.click(unstaged.getByRole("radio", { name: "Folders" }));
+    fireEvent.click(unstaged.getByRole("button", { name: "Filter files" }));
     fireEvent.change(unstaged.getByRole("searchbox", { name: "Filter changed files" }), { target: { value: "recovery" } });
     expect(screen.queryByRole("button", { name: /README.md/ })).toBeNull();
     expect(screen.getByRole("checkbox", { name: "Viewed src/recovery.ts" })).toHaveProperty("disabled", true);

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useShortcut } from "@/lib/hotkeys";
-import { openPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { openPeer, peerEditor, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { moveTabToPane, otherPane } from "@/lib/tabActions";
 import { paneRatio, panesOf, saveTabLayout, selectPaneTab, tabKey } from "@/lib/tabLayouts";
 import { tabViewIn } from "@/lib/tabFront";
@@ -166,7 +166,7 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
           </> : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
-          </> : tab.kind === "review" ? <ReviewTab entry={tab.editor} visible={active} focused={active && pane.id === focused.id} embedded />
+          </> : tab.kind === "review" ? <ReviewTab entry={peerEditor(tab)} visible={active} focused={active && pane.id === focused.id} embedded />
           : <BrowserView session={session} page={tab.page} active={active} />}
         </div>;
       })}

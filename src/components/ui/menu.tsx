@@ -143,6 +143,27 @@ export function MenuShortcut({ keys }: { keys: string[] }) {
   );
 }
 
+/** A key hint at an item's end, drawn as one keycap ("R", "⌘N") as the designed menus have them (02.13). */
+export function MenuKbd({ keys }: { keys: string | string[] }) {
+  const text = Array.isArray(keys) ? keys.join("") : keys;
+  if (!text) return null;
+  return (
+    <kbd aria-hidden data-menu-kbd="" className="ml-auto inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-[4px] px-1 pl-1 font-sans text-[10.5px] font-medium text-faint hairline">
+      {text}
+    </kbd>
+  );
+}
+
+/** An item's label with a quieter line under it saying what it does (02.14: "Hide project", "Remove project…"). */
+export function MenuItemText({ label, hint }: { label: React.ReactNode; hint: React.ReactNode }) {
+  return (
+    <span className="flex min-w-0 flex-1 flex-col">
+      <span className="truncate">{label}</span>
+      <span className="whitespace-normal text-[11.5px] leading-4 text-faint">{hint}</span>
+    </span>
+  );
+}
+
 // ---- Context menus share the dropdown's look; only the trigger differs.
 
 export const ContextMenu = Ctx.Root;

@@ -1,12 +1,14 @@
 import { CircleAlert, CircleCheck, CircleDashed, CircleX, Hourglass, LoaderCircle, ScanSearch, SkipForward, Sparkles, Square } from "@/icons";
 import { cn } from "@/lib/cn";
-import { PIECE_STATE_LABEL } from "@/lib/orchestration";
+import { PIECE_STATE_LABEL, type ShownPieceState } from "@/lib/orchestration";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import type { PieceState } from "@/types/orchestration";
 
 /** One glyph and colour per piece state: the Run view's labels and the sidebar's worker rows (PRO-281) draw the same. */
-export const PIECE_STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; className: string }> = {
+export const PIECE_STATE_STYLE: Record<ShownPieceState, { icon: typeof CircleCheck; className: string }> = {
   queued: { icon: CircleDashed, className: "text-faint" },
+  // Queued behind a piece that cannot go on by itself (18.03): the dashed circle, named for what holds it.
+  waiting: { icon: CircleDashed, className: "text-muted-foreground" },
   running: { icon: LoaderCircle, className: "text-accent" },
   stalled: { icon: Hourglass, className: "text-warning" },
   verifying: { icon: ScanSearch, className: "text-info" },
@@ -20,7 +22,7 @@ export const PIECE_STATE_STYLE: Record<PieceState, { icon: typeof CircleCheck; c
 };
 
 /** A piece's state as the Run view labels it: its mark and its name. */
-export function PieceStateMark({ state }: { state: PieceState }) {
+export function PieceStateMark({ state }: { state: ShownPieceState }) {
   const { icon: Icon, className } = PIECE_STATE_STYLE[state];
   return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-[13px]", className)}><Icon aria-hidden className="size-3.5 shrink-0" />{PIECE_STATE_LABEL[state]}</span>;
 }

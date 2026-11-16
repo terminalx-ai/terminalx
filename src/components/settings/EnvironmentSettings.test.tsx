@@ -99,13 +99,14 @@ describe("environment settings", () => {
   });
   it("imports ten valid rows and reports bad line numbers", async () => {
     await ready();
-    fireEvent.click(screen.getByRole("button", { name: "Paste variables" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste KEY=VALUE" }));
     const dialog = within(screen.getByRole("dialog"));
     fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: Array.from({ length: 10 }, (_, i) => `KEY_${i}=secret${i}`).join("\n") + "\nbad=sensitive\nKEY_0=again" } });
-    expect(dialog.getByRole("alert").textContent).toContain("Line 11:");
-    expect(dialog.getByRole("alert").textContent).toContain("Line 12:");
-    expect(dialog.getByRole("alert").textContent).not.toContain("sensitive");
-    fireEvent.click(dialog.getByRole("button", { name: "Import 10 valid variables" }));
+    const detected = within(dialog.getByRole("list", { name: "Detected variables" })).getAllByRole("listitem").map((item) => item.textContent);
+    expect(detected.slice(-2)).toEqual(["badline 11: has lowercase letters", "KEY_0line 12: listed twice"]);
+    expect(detected.join(" ")).not.toContain("sensitive");
+    expect(dialog.getByRole("status").textContent).toBe("2 lines skipped");
+    fireEvent.click(dialog.getByRole("button", { name: "Add 10 variables" }));
     await screen.findByRole("button", { name: "Reveal KEY_9" });
     expect(screen.getAllByRole("row")).toHaveLength(12);
   });
@@ -121,7 +122,7 @@ describe("environment settings", () => {
     const dialog = within(await screen.findByRole("dialog"));
     expect(invoke).toHaveBeenCalledWith("environment_read_file", { projectPath: "/repo", path: "/repo/.env" });
     expect(values["/repo"].FROM_FILE).toBeUndefined();
-    fireEvent.click(dialog.getByRole("button", { name: "Import 1 valid variables" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Add 1 variable" }));
     await repository.findByText("loaded");
     expect(values["/repo"].FROM_FILE).toBe("loaded");
     expect(values.user.FROM_FILE).toBeUndefined();
@@ -130,15 +131,19 @@ describe("environment settings", () => {
     await ready();
     expect(screen.getByRole("columnheader", { name: "Applies to" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "All projects" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Paste variables" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste KEY=VALUE" }));
     let dialog = within(screen.getByRole("dialog"));
-    const keychain = dialog.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" });
-    expect(keychain.getAttribute("aria-checked")).toBe("true");
-    fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: "SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP" } });
+    const keychain = dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" }) as HTMLInputElement;
+    expect(keychain.checked).toBe(true);
+    expect((dialog.getByRole("combobox", { name: "Applies to" }) as HTMLSelectElement).value).toBe("");
+    fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: "SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP\nPOSTHOG_KEY=phc_8Qm2xR7tLw0" } });
     const detected = within(dialog.getByRole("list", { name: "Detected variables" }));
-    expect(detected.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["SENTRY_AUTH_TOKENsecret", "VITE_RELAY_URL"]);
-    expect(dialog.getByRole("alert").textContent).toContain("Line 3:");
-    fireEvent.click(dialog.getByRole("button", { name: "Import 2 valid variables" }));
+    expect(detected.getAllByRole("listitem").map((item) => item.textContent)).toEqual(["SENTRY_AUTH_TOKENsecret", "VITE_RELAY_URL", "2FA_SEEDline 3: starts with a digit", "POSTHOG_KEYsecret"]);
+    expect(dialog.getByRole("status").textContent).toBe("1 line skipped");
+    // A detected variable can be left out.
+    fireEvent.click(detected.getByRole("checkbox", { name: "POSTHOG_KEY" }));
+    expect((detected.getByRole("checkbox", { name: "Line 3 skipped" }) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(dialog.getByRole("button", { name: "Add 2 variables" }));
     await screen.findByText("wss://relay.dev.example");
     const sent = invoke.mock.calls.find(([command]) => command === "environment_save")![1];
     expect(sent.inputs).toEqual([{ name: "SENTRY_AUTH_TOKEN", value: "sntrys_eyJpYXQiOjE3", secret: true }, { name: "VITE_RELAY_URL", value: "wss://relay.dev.example", secret: false }]);
@@ -147,16 +152,29 @@ describe("environment settings", () => {
     // Off: this save stores even a secret-looking value plainly.
     fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
     dialog = within(screen.getByRole("dialog"));
-    fireEvent.click(dialog.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" }));
+    fireEvent.click(dialog.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" }));
     fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "OTHER_TOKEN" } });
     fireEvent.change(dialog.getByLabelText("Value"), { target: { value: "visible" } });
     expect(dialog.getByText(/stored in TerminalX's settings/)).toBeTruthy();
     fireEvent.click(dialog.getByRole("button", { name: "Save variable" }));
     await screen.findByText("visible");
     expect(invoke.mock.calls.filter(([command]) => command === "environment_save").at(-1)![1].inputs).toEqual([{ name: "OTHER_TOKEN", value: "visible", secret: false }]);
-    // The next sheet starts with the switch on again.
+    // The next sheet starts with the box ticked again.
     fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
-    expect(within(screen.getByRole("dialog")).getByRole("switch").getAttribute("aria-checked")).toBe("true");
+    expect((within(screen.getByRole("dialog")).getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+  });
+  it("saves pasted variables to the project chosen under Applies to", async () => {
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Paste KEY=VALUE" }));
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("Variables"), { target: { value: "REPO_KEY=again\nNEW_ONE=x" } });
+    expect(dialog.queryByText(/already set here/)).toBeNull();
+    fireEvent.change(dialog.getByRole("combobox", { name: "Applies to" }), { target: { value: "/repo" } });
+    // REPO_KEY is already set in that project.
+    await dialog.findByText("line 1: already set here");
+    fireEvent.click(dialog.getByRole("button", { name: "Add 1 variable" }));
+    await waitFor(() => expect(values["/repo"].NEW_ONE).toBe("x"));
+    expect(values.user.NEW_ONE).toBeUndefined();
   });
   it("lists what TerminalX sets itself, including the workspace port block", async () => {
     await ready();

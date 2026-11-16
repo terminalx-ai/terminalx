@@ -32,7 +32,10 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 it("keeps a failed setup terminal with its result and reruns explicitly", async () => {
   render(<WorkspaceSetupPane run={run} />);
-  expect(screen.getByRole("status").textContent).toBe("Setup failed · Exit 7");
+  expect(screen.getByText("After setup")).toBeTruthy();
+  expect(screen.getByTestId("setup-script").textContent).toBe("bun install");
+  // This window did not see it start, so no duration.
+  expect(screen.getByRole("status").textContent).toBe("✗ Last setup failed · exit 7");
   expect(screen.getByTestId("setup-terminal").textContent).toBe(run.paneId);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rerun" })));
   expect(mocks.invoke).toHaveBeenCalledWith("workspace_setup", { operation: "rerun", sessionId: "s1" });
