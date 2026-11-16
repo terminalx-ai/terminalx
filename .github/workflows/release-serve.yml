@@ -14,6 +14,12 @@ name: Release terminalx-serve
 # (the desktop updater's latest.json is never involved), and only the newest
 # 10 are kept. Nothing here touches any other release.
 #
+# Releases are published unsigned. The owner signs SHA256SUMS locally with
+# `scripts/release/sign-runtime.py`, which uploads SHA256SUMS.sig; the signing
+# key never reaches GitHub. scripts/install/install.sh (terminalx.ai/install.sh)
+# and `terminalx-serve update` only install signed releases, so pruning always
+# keeps the newest signed one. The cloud server does not need the signature.
+#
 # The build job runs third-party build scripts and the freshly built binary,
 # so it gets a read-only token and no GH_TOKEN; only the publish job can
 # write. Built on Ubuntu 22.04: glibc floor 2.35 or lower.
@@ -242,7 +248,12 @@ jobs:
           gh release create "$TAG" "${files[@]}" SHA256SUMS \
             --target "$REF" --prerelease --latest=false \
             --title "$TAG" \
-            --notes "Cloud workspace and macOS arm64 guest runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest. Guest providers and desktop driver are separately installed."
+            --notes "Cloud workspace, headless server and macOS arm64 guest runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest. Guest providers and desktop driver are separately installed. Headless servers install it only once SHA256SUMS.sig is attached (scripts/release/sign-runtime.py $TAG)."
+          {
+            echo "Published $TAG unsigned. To offer it to headless servers, sign it locally:"
+            echo
+            echo "    scripts/release/sign-runtime.py $TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Prune runtime prereleases beyond the newest ${{ env.KEEP_RUNTIME_RELEASES }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -250,14 +261,23 @@ jobs:
         run: |
           set -euo pipefail
           # Only prereleases whose tag is a runtime tag are ever candidates.
-          gh api --paginate "repos/$GH_REPO/releases" \
-            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
-            | while IFS=$'\t' read -r created tag; do
-                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
-              done | sort -r \
+          # Third column: whether the release is signed (has SHA256SUMS.sig).
+          runtime=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name, ([.assets[].name] | index("SHA256SUMS.sig") != null)] | @tsv' \
+            | while IFS=$'\t' read -r created tag signed; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\t%s\n' "$created" "$tag" "$signed"; fi
+              done | sort -r)
+          # The newest signed release is what headless servers install; it is
+          # kept however many unsigned ones were published after it.
+          newest_signed=$(printf '%s\n' "$runtime" | awk -F'\t' '$3 == "true" { print $2; exit }')
+          printf '%s\n' "$runtime" | sed '/^$/d' \
             | tail -n +"$((KEEP_RUNTIME_RELEASES + 1))" | cut -f2 \
             | while read -r old; do
                 [[ "$old" =~ $RUNTIME_TAG_PATTERN ]] || continue
+                if [ "$old" = "$newest_signed" ]; then
+                  echo "keeping $old: the newest signed runtime release"
+                  continue
+                fi
                 echo "deleting $old"
                 gh release delete "$old" --cleanup-tag --yes
               done
