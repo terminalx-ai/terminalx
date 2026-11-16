@@ -5,17 +5,16 @@ import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { RegisteredSetting } from "@/components/settings/settingsRegistry";
-import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { minutesSeconds, useSecondsLeft } from "@/components/pairing/pairingText";
 import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { useDataPrivacy } from "@/lib/dataPrivacy";
-import { bootMachineHost, createMachineCode, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
+import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
 import { machineSectionKey } from "@/types/target";
-import type { MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
+import type { MachineActivityEntry, MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import type { MachineName } from "@/types/pairing";
 import { AddMachineDialog } from "./AddMachineDialog";
 import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connectionStatus";
@@ -31,11 +30,21 @@ const iconBox = "grid size-8 shrink-0 place-items-center rounded-md bg-muted";
  * Settings → Machines (PRO-349, screen 21.02): the switch that lets other
  * computers operate this Mac, this Mac's name and key label, the machines
  * this Mac operates, and the computers that operate it. Shown only with
- * Experimental → Machines on, until PRO-360. In data privacy mode remote
- * features are off, as on Devices.
+ * Experimental → Machines on, until PRO-360. Data privacy mode turns off
+ * both operating and being operated (PRO-357), and the page says so.
  */
 export function MachinesSettings() {
-  return useDataPrivacy().enabled ? <PrivacyEmptyState /> : <MachinesSettingsContent />;
+  return useDataPrivacy().enabled ? <MachinesPrivacyState /> : <MachinesSettingsContent />;
+}
+
+/** What data privacy mode turns off here: the runtime opens no listener, and no machine connection is made. */
+function MachinesPrivacyState() {
+  return (
+    <div role="status" className="grid gap-1 px-2 py-4 text-[12.5px] text-muted-foreground" data-testid="machines-privacy">
+      <p className="text-foreground">{PRIVACY_MESSAGE}</p>
+      <p>This Mac neither operates other computers nor lets them operate it. Nothing listens for them, and no connection to a machine is made. Paired machines and computers stay paired for when it is off.</p>
+    </div>
+  );
 }
 
 function MachinesSettingsContent() {
@@ -93,6 +102,7 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
             </RegisteredSetting>
           )}
           <ComputerList computers={view?.status?.computers ?? []} busy={host.busy} />
+          <ActivityLog />
         </section>
       </RegisteredSetting>
     </div>
@@ -309,6 +319,7 @@ function CardState({ state }: { state: MachineConnectionState }) {
     updating: "Updating",
     needsUpdate: "Needs update",
     accessRemoved: "Access removed",
+    disconnected: "Disconnected",
   };
   return (
     <span className={cn("flex items-center gap-1 text-[12px] font-normal", toneText(machineTone(state)))} data-testid="machine-card-state">
@@ -330,6 +341,8 @@ function cardLine(machine: PairedMachine, state: MachineConnectionState, running
     }
     case "accessRemoved":
       return `${machine.name} no longer lets this Mac operate it. Remove it here, or pair again.`;
+    case "disconnected":
+      return `${machine.name} disconnected this Mac. Try again once it lets this Mac back.`;
     case "direct":
     case "relay":
       return [system, `TerminalX ${machine.version}`, routeLabel(state.route.kind), running === null ? null : runningText(running)].filter(Boolean).join(" · ");
@@ -448,14 +461,27 @@ function ComputerList({ computers, busy }: { computers: PairedComputer[]; busy: 
 
 function computerLine(computer: PairedComputer): string {
   const platform = computer.platform ? osLabel({ family: computer.platform, version: null }) : null;
-  const how = computer.connected ? (computer.route ? routeLabel(computer.route) : null) : computer.lastSeenAt ? `last seen ${seenText(computer.lastSeenAt)}` : "not connected yet";
+  const how = computer.disconnectedAt
+    ? `disconnected ${seenText(computer.disconnectedAt)}, until you let it back`
+    : computer.connected
+      ? computer.route
+        ? routeLabel(computer.route)
+        : null
+      : computer.lastSeenAt
+        ? `last seen ${seenText(computer.lastSeenAt)}`
+        : "not connected yet";
   return [platform, how, `approved ${shortDate(computer.approvedAt)}`].filter(Boolean).join(" · ");
 }
 
-/** One computer that may operate this Mac. Revoke asks once: it ends the credential and closes the connection. */
+/**
+ * One computer that may operate this Mac. While it is connected, Disconnect
+ * closes its connection and holds it off until Let back (PRO-357); Revoke
+ * asks once: it ends the credential and closes the connection.
+ */
 function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const label = keyLabel(computer.keyId);
+  const held = computer.disconnectedAt != null;
   return (
     <li className={cn(card, confirming && "flex-wrap")} data-testid="operating-computer">
       <span className={iconBox}>
@@ -464,10 +490,16 @@ function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boole
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-medium">
           <span className="truncate">{computer.label}</span>
-          {computer.connected && (
-            <span className="flex shrink-0 items-center gap-1 text-[12px] font-normal text-add">
+          {computer.connected && !held && (
+            <span className="flex shrink-0 items-center gap-1 text-[12px] font-normal text-add" data-testid="computer-connected">
               <span className="size-1.5 rounded-full bg-add" aria-hidden />
               Connected now
+            </span>
+          )}
+          {held && (
+            <span className="flex shrink-0 items-center gap-1 text-[12px] font-normal text-warning" data-testid="computer-disconnected">
+              <span className="size-1.5 rounded-full bg-warning" aria-hidden />
+              Disconnected
             </span>
           )}
         </div>
@@ -485,10 +517,106 @@ function ComputerRow({ computer, busy }: { computer: PairedComputer; busy: boole
           </Button>
         </div>
       ) : (
-        <Button size="sm" variant="ghost" className="ml-1 shrink-0 text-[13px] text-destructive hover:text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
-          Revoke
-        </Button>
+        <>
+          {held ? (
+            <Button size="sm" variant="outline" className="ml-1 shrink-0" disabled={busy} onClick={() => void letComputerBack(computer.id)}>
+              Let back
+            </Button>
+          ) : (
+            computer.connected && (
+              <Button size="sm" variant="outline" className="ml-1 shrink-0" disabled={busy} onClick={() => void disconnectComputer(computer.id)}>
+                Disconnect
+              </Button>
+            )
+          )}
+          <Button size="sm" variant="ghost" className="shrink-0 text-[13px] text-destructive hover:text-destructive" disabled={busy} onClick={() => setConfirming(true)}>
+            Revoke
+          </Button>
+        </>
       )}
     </li>
+  );
+}
+
+const ROUTE_WORDS: Record<string, string> = { lan: "on this network", tailscale: "over Tailscale", relay: "through Relay" };
+
+/** One line of the activity log, in words. Never more than a name, a project, a route or a version. */
+export function activityText(entry: MachineActivityEntry): string {
+  const who = entry.computer || "A computer";
+  const detail = entry.detail ?? null;
+  switch (entry.kind) {
+    case "paired":
+      return `${who} was allowed to operate this Mac`;
+    case "connected":
+      return [`${who} connected`, detail ? ROUTE_WORDS[detail] ?? null : null].filter(Boolean).join(" ");
+    case "disconnected":
+      return `${who} disconnected`;
+    case "sessionCreated":
+      return detail ? `${who} started a session in ${detail}` : `${who} started a session`;
+    case "terminalOpened":
+      return detail ? `${who} opened a terminal in ${detail}` : `${who} opened a terminal`;
+    case "projectAdded":
+      return detail ? `Project ${detail} was added while a computer was connected` : `A project was added while a computer was connected`;
+    case "projectRemoved":
+      return detail ? `Project ${detail} was removed while a computer was connected` : `A project was removed while a computer was connected`;
+    case "update":
+      return detail ? `${who} asked to update TerminalX to ${detail}` : `${who} asked to update TerminalX`;
+    case "revoked":
+      return `${who}’s access was revoked`;
+    case "expired":
+      return `${who}’s access expired after 90 days unused`;
+    case "held":
+      return `${who} was disconnected until let back`;
+    case "letBack":
+      return `${who} was let back`;
+    default:
+      return `${who}: an event from a newer TerminalX`;
+  }
+}
+
+/**
+ * What operating computers did on this Mac (PRO-357): the last 200 entries,
+ * newest first, read again whenever the host changes and while the page is open.
+ */
+function ActivityLog() {
+  const view = useMachineHost().view;
+  const [entries, setEntries] = useState<MachineActivityEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      machinesApi
+        .activity()
+        .then((found) => {
+          if (!live) return;
+          setEntries(Array.isArray(found) ? found : []);
+          setError(null);
+        })
+        .catch((e) => live && setError(errorMessage(e)));
+    void read();
+    const timer = window.setInterval(() => void read(), 15_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [view]);
+
+  return (
+    <div className="mt-5" data-testid="machine-activity">
+      <h4 className="text-[13px] font-medium">Activity</h4>
+      <p className={cn(soft, "mt-0.5")}>Connections, sessions and terminals opened, and changes to access, with the computer and the time. Never what was typed or a file’s contents. The last 200 are kept.</p>
+      {error && <p role="alert" className="mt-2 text-[12.5px] text-destructive">{error}</p>}
+      {entries && entries.length === 0 && !error && <p className="mt-2 text-[12.5px] text-faint">Nothing yet.</p>}
+      {entries && entries.length > 0 && (
+        <ul className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-hairline" aria-label="Activity on this Mac">
+          {entries.map((entry, index) => (
+            <li key={`${entry.at}-${index}`} className="flex items-baseline gap-3 border-b border-hairline px-3 py-1.5 text-[12.5px] last:border-b-0" data-kind={entry.kind}>
+              <span className="min-w-0 flex-1 truncate">{activityText(entry)}</span>
+              <time className="shrink-0 text-[12px] text-faint" dateTime={new Date(entry.at).toISOString()}>{seenText(entry.at)}</time>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

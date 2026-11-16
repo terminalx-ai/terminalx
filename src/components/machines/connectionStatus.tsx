@@ -26,6 +26,7 @@ export function machineTone(state: MachineConnectionState): MachineTone {
     case "updating":
       return "updating";
     case "accessRemoved":
+    case "disconnected":
       return "removed";
     default:
       return "idle";
@@ -64,6 +65,8 @@ export function machineStateLabel(state: MachineConnectionState, machine: Paired
       return "Updating";
     case "accessRemoved":
       return "Access removed";
+    case "disconnected":
+      return "Disconnected";
     default:
       return "Not connected";
   }
@@ -93,6 +96,8 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
       return "Back in under a minute";
     case "accessRemoved":
       return "Revoked on that Mac";
+    case "disconnected":
+      return "Disconnected on that Mac";
     default:
       return "Not connected from this Mac";
   }
@@ -129,6 +134,8 @@ export function machineViewStatus(state: MachineConnectionState, name: string): 
       return `${name} is updating. Back in under a minute. Sessions there keep running.`;
     case "accessRemoved":
       return `${name} no longer allows this Mac. Pair again to reconnect.`;
+    case "disconnected":
+      return `${name} disconnected this Mac. Try again once it lets this Mac back.`;
     case "idle":
       return `Not connected to ${name}.`;
     default:

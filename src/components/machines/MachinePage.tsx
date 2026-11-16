@@ -29,6 +29,8 @@ export function pageStateLabel(view: MachineVersionView, state = view.shownState
       return "Updating";
     case "accessRemoved":
       return "Access removed";
+    case "disconnected":
+      return "Disconnected";
     default:
       return "Not connected";
   }

@@ -158,13 +158,14 @@ export function MachineConnectionNotice({ machineId, name, state }: { machineId:
       </div>
     );
   }
-  if (state.state === "offline" || state.state === "accessRemoved") {
+  if (state.state === "offline" || state.state === "accessRemoved" || state.state === "disconnected") {
     const removed = state.state === "accessRemoved";
+    const held = state.state === "disconnected";
     const Icon = removed ? ShieldX : Unplug;
     return (
       <div className={cn("flex shrink-0 items-center gap-2.5 border-b px-4 py-2 text-[12.5px]", removed ? "border-destructive/40" : "border-hairline")} role="status" data-testid="machine-session-unreachable">
         <Icon className={cn("size-3.5 shrink-0", removed ? "text-destructive" : "text-warning")} aria-hidden />
-        <span className="min-w-0 flex-1 text-foreground">{removed ? `${name} no longer allows this Mac. Pair again to reconnect.` : `${name} isn't reachable. Sessions there keep running.`}</span>
+        <span className="min-w-0 flex-1 text-foreground">{removed ? `${name} no longer allows this Mac. Pair again to reconnect.` : held ? `${name} disconnected this Mac. Try again once it lets this Mac back.` : `${name} isn't reachable. Sessions there keep running.`}</span>
         {removed ? (
           <Button size="xs" variant="outline" onClick={() => selectCloudWorkspace(machineSectionKey(machineId))}>
             Machine settings
