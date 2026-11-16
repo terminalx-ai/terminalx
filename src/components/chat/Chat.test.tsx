@@ -500,7 +500,7 @@ describe("chat scroll follow", () => {
     fireEvent.keyDown(field, { key: "g", ctrlKey: true });
     expect(screen.getByRole("status").textContent).toBe("2 of 2");
     expect(screen.getByText("x".repeat(21000) + "hidden clue")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Include tool output" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tool output" }));
     expect(screen.getByRole("status").textContent).toBe("1 of 1");
     expect(screen.queryByText("x".repeat(21000) + "hidden clue")).toBeNull();
     fireEvent.keyDown(field, { key: "Escape" });
@@ -647,8 +647,8 @@ describe("a message sent while the agent worked", () => {
       </TooltipProvider>
     );
     const { rerender } = render(view(events));
-    expect(screen.getByText("Stopped")).toBeTruthy();
-    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getByText(/^Stopped(?: · |$)/)).toBeTruthy();
+    expect(screen.getByTestId("working-line").textContent).toMatch(/^Working/);
     expect(screen.getAllByTestId("queued-message")).toHaveLength(1);
     expect(screen.getByTestId("queued-message").textContent).toContain("Then list the remaining steps.");
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
@@ -658,7 +658,7 @@ describe("a message sent while the agent worked", () => {
     expect(screen.queryByTestId("queued-message")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
     expect(screen.getAllByTestId("reader-message")).toHaveLength(3);
-    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getByTestId("working-line").textContent).toMatch(/^Working/);
   });
 
   it("offers no Send now once the turn it waited behind is over: the agent sends it itself", () => {
