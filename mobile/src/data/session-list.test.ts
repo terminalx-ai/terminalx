@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
-import { branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
+import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
   id, title: `Chat ${id}`, project: "terminalx", worktree: `branch-${id}`, modified: "2026-11-07T10:00:00Z",
@@ -57,6 +57,8 @@ describe("a row's status", () => {
     expect(row.status.words).toBe("Needs your answer");
     expect(row.needsYou).toBe(true);
     expect(row.tabs.map((tab) => tab.status.words)).toEqual(["No changes", "Working", "Needs your answer"]);
+    // A tab whose turn finished shows Done's tick; the session's own row still reads the branch (22.04).
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["done", "working", "answer"]);
     // A tap opens the tab that is waiting.
     expect(row.tabId).toBe("mixed-t2");
     const working = one(reported("w", [{ status: "idle" }, { status: "waiting", activity: "needs_permission" }, { status: "in_progress" }]));
@@ -66,6 +68,12 @@ describe("a row's status", () => {
   it("reads a waiting tab from an older Mac, which sends no row facts, as needing the person", () => {
     const row = one(session("old", { tabs: [{ id: "a", harness: "claude", status: "idle" }, { id: "b", harness: "claude", status: "waiting" }] }));
     expect([row.status.words, row.status.mark, row.needsYou, row.tabId]).toEqual(["Needs you", "answer", true, "b"]);
+  });
+
+  it("keeps an idle tab's mark idle, and a finished one-tab session's row on the branch's word", () => {
+    const row = one(reported("two", [{ status: "idle" }, { status: "completed" }]));
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["idle", "done"]);
+    expect(one(reported("n", [{ status: "completed" }])).status.mark).toBe("idle");
   });
 
   it("never shows the linked issue's state", () => {
@@ -183,6 +191,17 @@ describe("when, as a chat list says it", () => {
     expect(shortTime(now - 3 * 3_600_000, now)).toBe("3h");
     expect(shortTime(now - 3 * 86_400_000, now)).toMatch(/^\p{L}+/u);
     expect(shortTime(0, now)).toBe("");
+  });
+
+  it("says days as days ago where there is room, as the Cloud list does (22.06)", () => {
+    const now = Date.UTC(2026, 10, 16, 10, 25);
+    expect(agoTime(now - 6 * 60_000, now)).toBe("6m");
+    expect(agoTime(now - 5 * 3_600_000, now)).toBe("5h");
+    expect(agoTime(now - 30 * 3_600_000, now)).toBe("1 day ago");
+    expect(agoTime(now - 2 * 86_400_000, now)).toBe("2 days ago");
+    expect(agoTime(now - 3 * 86_400_000 - 60_000, now)).toBe("3 days ago");
+    expect(agoTime(now - 8 * 86_400_000, now)).toBe(shortTime(now - 8 * 86_400_000, now));
+    expect(agoTime(0, now)).toBe("");
   });
 
   it("says the time in words for VoiceOver", () => {

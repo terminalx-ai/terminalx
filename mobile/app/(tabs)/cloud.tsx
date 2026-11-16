@@ -7,12 +7,12 @@ import { workspaceTitle } from "@mobile/cloud/catalog";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { cloudSections, emptyOrganizationsLabel } from "@mobile/cloud/list";
 import { codeText, listStatus, roleLabel } from "@mobile/cloud/words";
-import { shortTime } from "@mobile/data/session-list";
+import { agoTime } from "@mobile/data/session-list";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { LargeTitle } from "@mobile/ui/glass";
-import { StateMark } from "@mobile/ui/MacIcon";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
+import { Spinner } from "@mobile/ui/Spinner";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useTheme } from "@mobile/ui/theme";
@@ -97,18 +97,19 @@ function WorkspaceRow({ item, title, first, last, onPress }: { item: CloudWorksp
   const repository = workspace.repositories?.find((entry) => entry.primary)?.fullName ?? workspace.repositories?.[0]?.fullName ?? null;
   const branch = workspace.launch?.workBranch ?? null;
   const where = [repository, branch].filter(Boolean).join(" · ");
-  const when = workspace.lastActivityAt ? shortTime(workspace.lastActivityAt) : "";
+  const when = workspace.lastActivityAt ? agoTime(workspace.lastActivityAt) : "";
   // What is said aloud also names the role (a manager's is assumed) and who else it is shared with.
   const facts = [status.words, role === "Manager" ? null : role, workspace.sharedWith ? `Shared with ${workspace.sharedWith}` : null].filter(Boolean);
-  const dot = status.mark === "attention" ? palette.danger : status.mark === "running" ? palette.success : status.mark === "changing" ? palette.info : palette.faint;
+  // As the Sessions list colours its words (22.06): blue work, amber waits, red trouble, green running, grey rest.
+  const tone = status.mark === "working" || status.mark === "changing" ? palette.info : status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : status.mark === "running" ? palette.success : palette.muted;
   return <Pressable accessibilityRole="button" accessibilityLabel={`${title}, ${facts.join(", ")}`} onPress={onPress} style={({ pressed }) => [styles.row, styles.cardRow, { backgroundColor: pressed ? palette.raised : palette.card, borderColor: palette.border }, first ? styles.cardTop : { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }, last && styles.cardBottom]}>
-    <View style={styles.mark}>{status.mark === "needs" || status.mark === "working" ? <StateMark state={status.mark} info={palette.info} warning={palette.warning} /> : <StatusDot color={dot} />}</View>
+    <View style={styles.mark}>{status.mark === "working" ? <Spinner size={18} color={palette.info} /> : <StatusDot color={tone} />}</View>
     <View style={styles.body}>
       <Text numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
-      <Text numberOfLines={1} style={[styles.status, { color: status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : palette.muted }]}>{status.words}{when ? <Text style={{ color: palette.faint, fontWeight: "400" }}>{` · ${when}`}</Text> : null}</Text>
+      <Text numberOfLines={1} style={[styles.status, { color: palette.muted }]}><Text style={[styles.words, { color: status.mark === "running" ? palette.muted : tone }]}>{status.words}</Text>{when ? ` · ${when}` : null}</Text>
       {where ? <Text numberOfLines={1} style={[styles.where, { color: palette.faint }]}>{where}</Text> : null}
     </View>
-    <View style={styles.chevron}><ChevronRight size={16} color={palette.faint} /></View>
+    <View style={styles.chevron}><ChevronRight size={18} color={palette.faint} /></View>
   </Pressable>;
 }
 
@@ -119,7 +120,7 @@ function EmptyOrganizations({ organizations, open, onToggle }: { organizations: 
   return <View style={[styles.folded, { backgroundColor: palette.card, borderColor: palette.border }]}>
     <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded: open }} onPress={onToggle} style={({ pressed }) => [styles.foldedRow, pressed && { backgroundColor: palette.raised }]}>
       <Text numberOfLines={1} style={[styles.foldedText, { color: palette.muted }]}>{label}</Text>
-      {open ? <ChevronDown size={16} color={palette.faint} /> : <ChevronRight size={16} color={palette.faint} />}
+      {open ? <ChevronDown size={18} color={palette.faint} /> : <ChevronRight size={18} color={palette.faint} />}
     </Pressable>
     {open ? organizations.map((organization) => <Text key={organization.orgId} numberOfLines={1} style={[styles.emptyName, { color: palette.muted, borderTopColor: palette.border }]}>{organization.name}</Text>) : null}
   </View>;
@@ -130,12 +131,11 @@ function Placeholders() {
   const { palette } = useTheme();
   return <View accessibilityLabel="Loading cloud workspaces" accessibilityRole="progressbar" testID="cloud-placeholders">
     <View style={[styles.barHeading, { backgroundColor: palette.raised }]} />
-    <View style={[styles.folded, styles.placeholderCard, { backgroundColor: palette.card, borderColor: palette.border }]}>{Array.from({ length: PLACEHOLDER_ROWS }, (_, index) => <View key={index} style={[styles.row, index > 0 && { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
-      <View style={styles.mark}><StatusDot color={palette.raised} /></View>
+    <View style={[styles.folded, styles.placeholderCard, { backgroundColor: palette.card, borderColor: palette.border }]}>{Array.from({ length: PLACEHOLDER_ROWS }, (_, index) => <View key={index} style={[styles.row, styles.placeholderRow, index > 0 && { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
+      <View style={[styles.barMark, { backgroundColor: palette.raised }]} />
       <View style={styles.body}>
-        <View style={[styles.barTitle, { backgroundColor: palette.raised, width: `${72 - index * 12}%` }]} />
-        <View style={[styles.barLine, { backgroundColor: palette.raised }]} />
-        <View style={[styles.barLine, { backgroundColor: palette.raised, width: "54%" }]} />
+        <View style={[styles.bar, { backgroundColor: palette.raised, width: `${[70, 55, 64][index % 3]}%` }]} />
+        <View style={[styles.bar, styles.barLine, { backgroundColor: palette.raised }]} />
       </View>
     </View>)}</View>
   </View>;
@@ -145,27 +145,31 @@ const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
   screen: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6 },
-  sectionHeader: { marginTop: 20, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
-  sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.7, textTransform: "uppercase" },
+  sectionHeader: { marginTop: 18, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
+  sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.84, textTransform: "uppercase" },
   signInError: { fontSize: 14, lineHeight: 19, textAlign: "center" },
   notice: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
   empty: { fontSize: 15, paddingHorizontal: 4, paddingVertical: 14 },
-  row: { minHeight: 68, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", gap: 12, alignItems: "flex-start" },
+  row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", gap: 12, alignItems: "flex-start" },
   cardRow: { borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth },
   cardTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
   cardBottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
-  chevron: { height: 22, justifyContent: "center" },
-  mark: { width: 16, height: 22, alignItems: "center", justifyContent: "center" },
-  body: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: 17, lineHeight: 22, letterSpacing: -0.3, fontWeight: "600" },
-  status: { fontSize: 14, lineHeight: 19, fontWeight: "600" },
-  where: { fontFamily: MONO, fontSize: 12, lineHeight: 17 },
-  folded: { marginTop: 20, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  chevron: { height: 21, justifyContent: "center" },
+  mark: { width: 18, height: 21, alignItems: "center", justifyContent: "center" },
+  body: { flex: 1, minWidth: 0 },
+  title: { fontSize: 16, lineHeight: 21, letterSpacing: -0.3, fontWeight: "600" },
+  status: { marginTop: 2, fontSize: 13, lineHeight: 18 },
+  words: { fontWeight: "600" },
+  where: { marginTop: 3, fontFamily: MONO, fontSize: 12, lineHeight: 16 },
+  folded: { marginTop: 14, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   placeholderCard: { marginTop: 0 },
+  placeholderRow: { alignItems: "center" },
   foldedRow: { minHeight: 48, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10 },
   foldedText: { flex: 1, fontSize: 15 },
   emptyName: { fontSize: 15, lineHeight: 20, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth },
   barHeading: { height: 10, width: "22%", borderRadius: 4, marginTop: 24, marginBottom: 12, marginHorizontal: 4 },
-  barTitle: { height: 15, borderRadius: 5, marginTop: 3, marginBottom: 4 },
-  barLine: { height: 11, width: "40%", borderRadius: 4, marginTop: 3 },
+  // Placeholder rows as 22.06 draws them: a round mark, the title, and a fainter line under it.
+  barMark: { width: 18, height: 18, borderRadius: 9 },
+  bar: { height: 12, borderRadius: 6, marginTop: 2 },
+  barLine: { width: "38%", marginTop: 8, opacity: 0.6 },
 });

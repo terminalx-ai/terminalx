@@ -15,7 +15,7 @@ vi.mock("./TranscriptList", () => ({ useTranscriptReveal: () => vi.fn() }));
 vi.mock("./PromptImages", () => ({ PromptImages: () => null }));
 vi.mock("lucide-react-native", () => {
   const icon = (name: string) => Object.assign(() => <i data-icon={name} />, { displayName: name });
-  return { Check: icon("check"), CheckCheck: icon("check-check"), Terminal: icon("terminal") };
+  return { Check: icon("check"), CheckCheck: icon("check-check"), SquareTerminal: icon("square-terminal") };
 });
 vi.mock("react-native", () => {
   const Box = ({ children, testID, accessibilityLabel }: { children?: ReactNode; testID?: string; accessibilityLabel?: string }) => <div data-testid={testID} aria-label={accessibilityLabel}>{children}</div>;
