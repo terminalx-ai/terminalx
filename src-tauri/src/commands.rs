@@ -593,16 +593,25 @@ fn credential_field_prompt(provider: &str, organization: &str, field: &crate::cl
 }
 
 /// What is sent as the credential: one field's value as typed, or several
-/// as a JSON object keyed by field name. The object is written straight from
-/// the typed values, so the only copy is the zeroized one.
+/// as a JSON object keyed by field name. The object is written into a buffer
+/// sized up front for the worst case (every character escaped as `\uXXXX`,
+/// six bytes for at most four), so it never grows: a growing `String` would
+/// free earlier partial copies of the secret without zeroing them. The only
+/// copy is the zeroized one.
 fn combined_credential(values: &[(String, zeroize::Zeroizing<String>)]) -> zeroize::Zeroizing<String> {
-    match values {
-        [(_, only)] => only.clone(),
-        _ => {
-            let fields: std::collections::BTreeMap<&str, &str> = values.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
-            zeroize::Zeroizing::new(serde_json::to_string(&fields).expect("serialize credential fields"))
-        }
+    if let [(_, only)] = values {
+        return only.clone();
     }
+    let fields: std::collections::BTreeMap<&str, &str> = values.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    // `{}` plus, per field, two quoted strings, a colon and a comma.
+    let capacity = 2 + fields.iter().map(|(name, value)| 6 * (name.len() + value.len()) + 6).sum::<usize>();
+    let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
+    let reserved = buffer.capacity();
+    serde_json::to_writer(&mut *buffer, &fields).expect("serialize credential fields");
+    debug_assert_eq!(buffer.capacity(), reserved, "the credential buffer grew");
+    // The bytes move into the String without a copy; the emptied Vec left behind holds nothing.
+    let bytes = std::mem::take(&mut *buffer);
+    zeroize::Zeroizing::new(String::from_utf8(bytes).expect("JSON is UTF-8"))
 }
 
 /// A key typed into a native secure field: it never passes through the
@@ -4716,6 +4725,11 @@ mod command_tests {
         assert_eq!(one.as_str(), "abc");
         let several = super::combined_credential(&[("secret".into(), zeroize::Zeroizing::new("s\"1".into())), ("account".into(), zeroize::Zeroizing::new("a1".into()))]);
         assert_eq!(serde_json::from_str::<serde_json::Value>(&several).unwrap(), serde_json::json!({ "account": "a1", "secret": "s\"1" }));
+        // The worst case (every character escaped) fits the buffer sized up front, so it never grew.
+        let controls = "\u{1}".repeat(40);
+        let escaped = super::combined_credential(&[("a".into(), zeroize::Zeroizing::new(controls.clone())), ("b".into(), zeroize::Zeroizing::new(controls.clone()))]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&escaped).unwrap(), serde_json::json!({ "a": controls, "b": controls }));
+        assert!(escaped.capacity() <= 2 + 2 * (6 * 41 + 6));
     }
     use crate::session_ops::{
         create_session_entry, new_tab_entry, notify_workspace_deleted,

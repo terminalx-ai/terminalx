@@ -20,7 +20,7 @@ import {
   type PendingCreate,
 } from "@/lib/cloudCreate";
 import { creatableProviders, noProviderRefusal } from "@/lib/hiddenProviders";
-import { cloudProviderLabel } from "@/lib/cloudProviders";
+import { cloudProviderLabel, orderedCloudProviderIds } from "@/lib/cloudProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -262,16 +262,19 @@ function cloneUrlOf(project: CloudProject): string | null {
 const PROVIDER_FLAG = /^cloud\.workspaces\.provider\.(.+)\.v1$/;
 
 /**
- * The providers an organization's capability flags offer (PRO-69), in the
- * order the server lists them, which is its registry's presentation order
- * (PRO-415). The app names none: each `cloud.workspaces.provider.<id>.v1`
- * flag that is on is one.
+ * The providers an organization's capability flags offer (PRO-69), in their
+ * descriptors' order (PRO-415). The app names none: each
+ * `cloud.workspaces.provider.<id>.v1` flag that is on is one. The flags reach
+ * the webview through the account status, whose map sorts them by key, so
+ * their own order says nothing and the descriptors decide.
  */
 function offeredByFlags(flags: Record<string, boolean>): CloudWorkspaceProviderId[] {
-  return Object.entries(flags).flatMap(([flag, on]) => {
-    const id = on ? PROVIDER_FLAG.exec(flag)?.[1] : undefined;
-    return id ? [id] : [];
-  });
+  return orderedCloudProviderIds(
+    Object.entries(flags).flatMap(([flag, on]) => {
+      const id = on ? PROVIDER_FLAG.exec(flag)?.[1] : undefined;
+      return id ? [id] : [];
+    }),
+  );
 }
 
 /**

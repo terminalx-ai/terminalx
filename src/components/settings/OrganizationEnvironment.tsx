@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import {
   changeLabel,
   cleanDefinition,
@@ -140,6 +141,8 @@ function RepositoryEditor({
 }
 
 export function OrganizationEnvironment({ contextRevision, organizationId = null }: { contextRevision: string; organizationId?: string | null }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const [providers, setProviders] = useState<ProviderOption[] | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);

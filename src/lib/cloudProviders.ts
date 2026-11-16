@@ -5,10 +5,11 @@ import { api, type CloudProviderDescriptor, type CloudProviderSummary } from "@/
 /**
  * What the app knows about cloud providers, all of it from the server's
  * descriptors (PRO-415): no code here or anywhere else in the app names a
- * provider. Every provider list the app reads (`api.cloudProviders`) is
- * remembered, so a workspace row that only carries a provider id still shows
- * its name and glyph, and the last list seen is kept between launches so the
- * first render before any list arrives is right too.
+ * provider. The last provider list the app read (`api.cloudProviders`) is
+ * kept, between launches too, so a workspace row that only carries a provider
+ * id shows its name and glyph from the first render. Components that show a
+ * name by id subscribe with `useCloudProviderDescriptors`, so they update when
+ * a list arrives.
  */
 
 const STORAGE_KEY = "terminalx.cloudProviderDescriptors.v1";
@@ -31,20 +32,27 @@ function load(): Known {
 function isDescriptor(value: unknown): value is CloudProviderDescriptor {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<CloudProviderDescriptor>;
-  return typeof item.id === "string" && typeof item.label === "string" && typeof item.order === "number" && Array.isArray(item.credentialFields);
+  return typeof item.id === "string" && typeof item.label === "string" && typeof item.order === "number" && typeof item.listed === "boolean" && Array.isArray(item.credentialFields);
 }
 
-/** Remember the descriptors of a provider list the server answered. */
+/**
+ * Take the descriptors of a provider list the server answered. A list is the
+ * whole registry as this organization sees it, so it replaces what was known:
+ * a provider the server no longer has, or one learned from another server (a
+ * development server's local Docker), is gone with the next list. The one
+ * exception is a hidden provider (`listed: false`): the server lists it only
+ * to an organization still connected to it, so another organization's list
+ * leaving it out does not mean it is gone, and its workspaces elsewhere keep
+ * their name. A hidden provider never gets a row of its own (see
+ * `cloudProviderOffered`).
+ */
 export function rememberCloudProviders(providers: readonly CloudProviderSummary[]): void {
-  const next = new Map(known);
-  let changed = false;
-  for (const provider of providers) {
-    if (!provider.descriptor) continue;
-    if (JSON.stringify(next.get(provider.id)) === JSON.stringify(provider.descriptor)) continue;
-    next.set(provider.id, provider.descriptor);
-    changed = true;
-  }
-  if (!changed) return;
+  const inList = new Set(providers.map((provider) => provider.id));
+  const next = new Map<string, CloudProviderDescriptor>();
+  for (const [id, descriptor] of known) if (!descriptor.listed && !inList.has(id)) next.set(id, descriptor);
+  for (const provider of providers) if (provider.descriptor) next.set(provider.id, provider.descriptor);
+  const fingerprint = (map: Known) => JSON.stringify([...map.entries()].sort(([left], [right]) => left.localeCompare(right)));
+  if (fingerprint(next) === fingerprint(known)) return;
   known = next;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify([...known.values()]));
@@ -103,6 +111,16 @@ const GLYPHS: Record<string, ComponentType<{ className?: string }>> = { ship: Sh
 export function cloudProviderIcon(provider: string | CloudProviderSummary | CloudProviderDescriptor | null | undefined): ComponentType<{ className?: string }> {
   const descriptor = !provider ? null : typeof provider === "string" ? known.get(provider) : "descriptor" in provider ? provider.descriptor : provider;
   return (descriptor && GLYPHS[descriptor.icon]) || Cloud;
+}
+
+/**
+ * Provider ids in their descriptors' order; an id without a known descriptor
+ * goes after every described one, ids breaking ties so the order never
+ * depends on how a map happened to sort them.
+ */
+export function orderedCloudProviderIds(ids: readonly string[]): string[] {
+  const order = (id: string) => known.get(id)?.order ?? Number.MAX_SAFE_INTEGER;
+  return [...ids].sort((left, right) => order(left) - order(right) || (left < right ? -1 : left > right ? 1 : 0));
 }
 
 /** A descriptor's `order`; a provider without one goes after every described one. */

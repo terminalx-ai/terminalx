@@ -55,7 +55,7 @@ import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
-import { cloudProviderLabel } from "@/lib/cloudProviders";
+import { cloudProviderLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
@@ -301,6 +301,8 @@ export function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
  * once.
  */
 export function useCloudSession(key: string): CloudSessionModel | null {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const parsed = parseCloudWorkspaceKey(key);
   const orgId = parsed?.orgId ?? "";
   const workspaceId = parsed?.workspaceId ?? "";

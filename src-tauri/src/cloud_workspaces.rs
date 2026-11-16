@@ -18,11 +18,15 @@ const CONTRACT: &str = "providers-v1";
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
 /// Which providers this client can show and drive: every one the server
-/// describes (PRO-415). The client names none; each provider comes with a
-/// descriptor that says what it is called, how it is drawn and ordered, and
-/// what its credential is. A server older than described providers leaves
-/// every provider out of its answers, since none is named.
-const SUPPORTED_PROVIDERS: &str = "described";
+/// describes (PRO-415). A provider comes with a descriptor that says what it
+/// is called, how it is drawn and ordered, and what its credential is, so the
+/// client needs no list of its own. The ids after `described` are only for a
+/// server older than described providers (or one rolled back): it skips the
+/// word it does not know and answers for the providers it always offered,
+/// without descriptors, where the client falls back to their display names.
+/// A server that knows `described` answers with its whole registry and
+/// ignores the rest.
+const SUPPORTED_PROVIDERS: &str = "described,machine0,box,hetzner";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -4000,7 +4004,11 @@ mod tests {
     // refuses anything that could not go into a path segment as it is.
     #[test]
     fn a_provider_id_is_any_registry_shaped_string() {
-        assert_eq!(SUPPORTED_PROVIDERS, "described");
+        // Described providers first; the fixed ids only for a server without them.
+        assert_eq!(SUPPORTED_PROVIDERS.split(',').next(), Some("described"));
+        for name in SUPPORTED_PROVIDERS.split(',').skip(1) {
+            assert!(serde_json::from_value::<CloudWorkspaceProviderId>(json!(name)).is_ok(), "{name}");
+        }
         for name in ["hetzner", "acme-cloud", "0x", &"a".repeat(63)] {
             let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(parsed.as_str(), name);
@@ -4068,7 +4076,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: described\r\n"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: described,machine0,box,hetzner\r\n"));
     }
 
     #[test]
