@@ -108,7 +108,8 @@ export default function SessionScreen() {
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
     <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} muted={override === "mute"} onNotifications={() => setNotifying(true)} />
-    <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={named} onClose={() => setNotifying(false)} />
+    {/* Named by the session's own title, as its notifications name it (22.07), not by the branch the header shows. */}
+    <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={summary?.title?.trim() || named} onClose={() => setNotifying(false)} />
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} actionsDisabled={!linked} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
