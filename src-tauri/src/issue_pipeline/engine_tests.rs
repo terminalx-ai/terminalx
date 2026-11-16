@@ -1485,7 +1485,11 @@ impl Run {
     /// The author pushes `commit` to the pull request while the reviewer reads.
     fn pushed(&self, commit: &str) {
         self.host.commit(commit);
-        self.host.world().pr.as_mut().unwrap().head_sha = commit.into();
+        let mut world = self.host.world();
+        world.pr.as_mut().unwrap().head_sha = commit.into();
+        // In a turn of its own that ends after the review was asked for.
+        let now = world.now;
+        world.replies.insert("author".into(), (now, "Pushed a fix.".into()));
     }
 
     /// The poller's pass, `minutes` from now.
@@ -1599,6 +1603,28 @@ fn a_branch_that_never_holds_still_is_left_to_a_person() {
     assert_eq!(stopped.state, State::NeedsYou);
     assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("did not hold still for 2 minutes within 30")), "{:?}", stopped.reason);
     assert_eq!(stopped.review_commit.as_deref(), Some(C2), "never reviewed while it moved");
+}
+
+#[test]
+fn a_commit_the_reviewer_pushed_itself_is_not_reviewed_as_the_authors() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    // On the pull request, but the author did nothing while the review ran.
+    run.host.commit(C2);
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((stopped.state, stopped.round, stopped.review_commit.as_deref()), (State::NeedsYou, 1, Some(C1)));
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("author session was not at work meanwhile")), "{:?}", stopped.reason);
+    assert!(!run.kinds().iter().any(|kind| kind == "reviewAgain"));
+
+    // An author turn still running counts as the author at work.
+    drop(run);
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.host.commit(C2);
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    run.host.agent(&author_tab(), true);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).review_commit.as_deref(), Some(C2));
 }
 
 #[test]
