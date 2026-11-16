@@ -12,7 +12,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { whitespaceDiff } from "@/lib/diffOptions";
-import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
+import { diffPhrases, languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 
 /**
  * A whole-file diff. Unified draws one column with deletions inline; split
@@ -78,7 +78,7 @@ export function DiffPane({ path, before, after, mode, base, originalPath, worksp
       }),
     });
     controller.current = comments;
-    const common = [raccoonTheme, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
+    const common = [raccoonTheme, diffPhrases, raccoonHighlight, languageFor(path), EditorView.editable.of(false), EditorState.readOnly.of(true), lineNumbers(), ...(wrap ? [EditorView.lineWrapping] : [])];
     let dispose: () => void;
     let scroller: HTMLElement;
     if (mode === "split") {

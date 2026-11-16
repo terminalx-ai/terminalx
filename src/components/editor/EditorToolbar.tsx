@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/menu";
 import type { ViewMode } from "@/lib/editors";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { FileCrumb, FileStatusBadge, type FileChange } from "./FileCrumb";
 
 /**
  * The file tab's View options (PRO-297): how the source view is drawn, and
@@ -69,9 +70,11 @@ export function ViewOptionsMenu({ copyKeys, onCopy, onDownload, onReveal, disabl
 
 const REVEAL_MIN_WIDTH = 220;
 
-export function EditorToolbar({ path, relativePath, markdown, viewMode, onViewModeChange, cloud, readOnly, dirty, truncated, saveDisabled, saveKeys, onSave, copyKeys, contentsDisabled, onCopy, onDownload }: {
+export function EditorToolbar({ path, relativePath, change = null, markdown, viewMode, onViewModeChange, cloud, readOnly, dirty, truncated, saveDisabled, saveKeys, onSave, copyKeys, contentsDisabled, onCopy, onDownload }: {
   path: string;
   relativePath: string;
+  /** The file's uncommitted change, for its status badge; none for an unchanged file. */
+  change?: FileChange | null;
   markdown: boolean;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
@@ -88,7 +91,6 @@ export function EditorToolbar({ path, relativePath, markdown, viewMode, onViewMo
   onCopy: () => void;
   onDownload: () => void;
 }) {
-  const slash = relativePath.lastIndexOf("/") + 1;
   // Below this width Reveal in Finder moves into View options, so the toolbar still fits.
   // The menu is portalled, outside the container query, so it reads the width itself.
   const bar = useRef<HTMLDivElement>(null);
@@ -106,9 +108,9 @@ export function EditorToolbar({ path, relativePath, markdown, viewMode, onViewMo
     <div ref={bar} className="@container/editor-toolbar h-8 shrink-0 border-b border-hairline" data-testid="editor-toolbar">
       {/* Below the minimum icon width, scroll instead of crushing or overlapping controls. */}
       <div className="flex h-full items-center gap-2 overflow-x-auto px-3 text-xs">
-        <span className="flex min-w-0 flex-1 text-muted-foreground" title={path}>
-          <span className="truncate">{relativePath.slice(0, slash)}</span>
-          <span className="min-w-0 shrink-0 truncate max-w-full">{relativePath.slice(slash)}</span>
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <FileCrumb path={path} relativePath={relativePath} />
+          <FileStatusBadge change={change} />
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {notes.length > 0 && (

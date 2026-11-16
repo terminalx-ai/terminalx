@@ -86,6 +86,26 @@ function chipOf(state: MachineConnectionState): ConnectionChip {
   }
 }
 
+/**
+ * Per machine, whether its last connection granted `ports/1`. A machine's
+ * forwards wait while it is away and return with it (PRO-355), so its Ports
+ * tab and forward chip stay through a reconnect; a machine that never granted
+ * it (an older TerminalX) shows neither, and its "Runs on" strip says to
+ * update it.
+ */
+const portsGranted = new Map<string, boolean>();
+
+/** Notes what a connection to `machineId` granted; answers whether ports are offered now. */
+export function machinePortsOffered(machineId: string, state: WorkspaceConnectionState): boolean {
+  if (state.state === "connected") portsGranted.set(machineId, state.capabilities.includes("ports/1"));
+  return portsGranted.get(machineId) === true;
+}
+
+/** Forgets every machine's last grant (tests). */
+export function resetMachinePortsGrants() {
+  portsGranted.clear();
+}
+
 /** Why nothing can be sent or changed on the machine now; null while it is connected. */
 export function machineSendBlocked(name: string, state: WorkspaceConnectionState): string | null {
   return state.state === "connected" ? null : `Can't send until ${name} is back`;
@@ -347,7 +367,8 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     // Removing a session's worktree from here is a follow-up (docs/MACHINES.md "Session feature parity").
     removableWorkspace: undefined,
     machine: { machineId, projectId, record: machine, name, state: machineState },
-    ports: { offered: connected && !!client?.hasCapability("ports/1"), state, connectionId: connection?.connectionId?.() ?? null },
+    // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
+    ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,
   };
 }

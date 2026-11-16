@@ -213,15 +213,16 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
     const timer = window.setTimeout(() => setFallback(true), 120);
     return () => window.clearTimeout(timer);
   }, [ownsDraft, placed, draft?.anchor]);
-  const header = chrome || error || notice || (ownsDraft && fallback);
+  const header = (chrome && comments.length > 0) || error || notice || (ownsDraft && fallback);
   return <Context.Provider value={value}>
     <div ref={container} className="flex h-full min-h-0 flex-col">
+      {/* No bar at all until there is something to say: an empty "0 review comments" would take the top of Changes. */}
       {header && <div className="shrink-0 border-b border-hairline px-3 py-2 text-xs">
-        {chrome && <div className="flex items-center gap-2">
+        {chrome && comments.length > 0 && <div className="flex items-center gap-2">
           <span>{comments.length} review {comments.length === 1 ? "comment" : "comments"}</span>
           <Button className="ml-auto" size="sm" variant="secondary" disabled={!tabId || !unsent.length || busy} onClick={() => add(unsent)}>Add all to chat{unsent.length ? ` (${unsent.length})` : ""}</Button>
         </div>}
-        {error && <div role="alert" className="mt-1 text-destructive">Review comments: {error} <button type="button" onClick={() => { setError(null); void load(); }}>Retry</button></div>}
+        {error && <div role="alert" className="mt-1 text-destructive first:mt-0">Review comments: {error} <button type="button" onClick={() => { setError(null); void load(); }}>Retry</button></div>}
         {notice && <p role="status" className="mt-1 text-muted-foreground">{notice}</p>}
         {ownsDraft && fallback && <div className="mt-2"><ReviewDraftCard /></div>}
         {chrome && !!comments.length && <details className="mt-1" onToggle={(e) => setShowAll(e.currentTarget.open)}><summary className="cursor-pointer text-muted-foreground">All review comments</summary><div className="max-h-64 overflow-auto">{showAll && comments.map((c) => <ReviewCommentCard key={c.id} comment={c} />)}</div></details>}

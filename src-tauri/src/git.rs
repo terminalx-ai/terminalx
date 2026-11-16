@@ -386,14 +386,23 @@ pub struct BranchInfo {
     pub name: String,
     pub current: bool,
     pub remote: bool,
+    /// When the branch's tip was committed (RFC 3339), for "updated 2h ago".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    /// Who wrote the tip commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
     let cur = current_branch(cwd);
-    let out = run(cwd, &["for-each-ref", "--format=%(refname:short)%09%(refname)", "refs/heads", "refs/remotes"])?;
+    let out = run(cwd, &["for-each-ref", "--format=%(refname:short)%09%(refname)%09%(committerdate:iso-strict)%09%(authorname)", "refs/heads", "refs/remotes"])?;
     let mut v = Vec::new();
     for line in out.lines() {
-        let (short, full) = line.split_once('\t').unwrap_or((line, ""));
+        let mut fields = line.splitn(4, '\t');
+        let short = fields.next().unwrap_or_default();
+        let full = fields.next().unwrap_or_default();
+        let mut text = || fields.next().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         if short.ends_with("/HEAD") {
             continue;
         }
@@ -401,6 +410,8 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
             name: short.to_string(),
             current: cur.as_deref() == Some(short),
             remote: full.starts_with("refs/remotes/"),
+            updated: text(),
+            author: text(),
         });
     }
     Ok(v)
@@ -1955,6 +1966,17 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn branches_carry_when_their_tip_was_committed_and_by_whom() {
+        let dir = repo();
+        let branches = list_branches(dir.path()).unwrap();
+        assert_eq!(branches.len(), 1);
+        let main = &branches[0];
+        assert_eq!((main.name.as_str(), main.current, main.remote, main.author.as_deref()), ("main", true, false, Some("T")));
+        let updated = main.updated.as_deref().expect("the tip's commit time");
+        assert!(updated.len() >= 20 && updated.as_bytes()[10] == b'T', "RFC 3339, got {updated}");
     }
 
     #[test]

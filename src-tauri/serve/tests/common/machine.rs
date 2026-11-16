@@ -41,9 +41,12 @@ pub fn pair(data: &Path, id: &str, token: &str, relay_device_id: Option<&str>) {
             platform: Some("macos".into()),
             client_public_key_b64: None,
             fingerprint: None,
-            approved_at: 1,
+            // Now: a credential unused for 90 days would expire (PRO-357).
+            approved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
             last_seen_at: None,
             relay_device_id: relay_device_id.map(str::to_string),
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         })
         .unwrap();

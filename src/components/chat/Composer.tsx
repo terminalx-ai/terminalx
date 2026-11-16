@@ -540,7 +540,7 @@ export function Composer({
   const sendHint = busy && followUps && alternateKeys
     ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
     : sendLabel;
-  const placeholder = heldReason ? heldReason : busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
+  const placeholder = heldReason ? heldReason : busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up — it waits until the agent pauses") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
   // The agent answered and named no model: the button says so, as the menu does.

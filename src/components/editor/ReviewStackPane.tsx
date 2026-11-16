@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, FileCode2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/controls";
 import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
 import { DiffPane } from "@/components/changes/DiffPane";
 import { DiffViewToggles } from "@/components/changes/DiffOptions";
@@ -195,10 +196,8 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
         {file.deletions > 0 && <span className="text-destructive">−{file.deletions}</span>}
       </span>
       <Button className="ml-auto" variant="ghost" size="icon-xs" aria-label={`Open ${file.path} in its own tab`} title="Open in its own tab" onClick={onOpen}><ExternalLink /></Button>
-      <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-        <input type="checkbox" aria-label={`Viewed ${file.path}`} className="size-3.5 accent-[var(--accent)]" checked={viewed} disabled={!onViewed}
-          title={!onViewed ? "Viewed marks require file identities from the workspace." : undefined} onChange={(e) => onViewed?.(e.target.checked)} />Viewed
-      </label>
+      <Checkbox label={`Viewed ${file.path}`} checked={viewed} disabled={!onViewed}
+        title={!onViewed ? "Viewed marks require file identities from the workspace." : undefined} onChange={(on) => onViewed?.(on)}>Viewed</Checkbox>
     </header>
     {/* Its own stacking context: the editor's gutters must not draw over the next file's sticky header. */}
     <div className={cn("isolate", viewed && "opacity-60")}>

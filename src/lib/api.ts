@@ -551,6 +551,12 @@ export const api = {
    */
   cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
     invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
+  /** The workspace's idle window and its choices (PRO-410), for whoever may manage it. */
+  cloudWorkspaceIdleSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceIdleSuspend>("cloud_workspace_idle_suspend", { workspaceId, orgId: orgId ?? null }),
+  /** Change how long the workspace may sit idle before it is stopped; 0 is never (PRO-410). */
+  cloudWorkspaceSetIdleSuspend: (workspaceId: string, idleSuspendMinutes: number, orgId?: string | null) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_idle_suspend", { workspaceId, idleSuspendMinutes, orgId: orgId ?? null }),
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
@@ -583,6 +589,11 @@ export const api = {
     invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
   cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
   cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
+  /** The connection's forwarding switches (PRO-355). */
+  cloudPortSettings: (connectionId: string) => invoke<CloudPortSettings>("cloud_port_settings", { connectionId }),
+  /** Change either switch; answers the switches as they now are. */
+  cloudPortSetSettings: (connectionId: string, settings: Partial<CloudPortSettings>) =>
+    invoke<CloudPortSettings>("cloud_port_set_settings", { connectionId, enabled: settings.enabled ?? null, auto: settings.auto ?? null }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -1212,8 +1223,20 @@ export interface CloudWorkspaceSetup {
     activeHourlyMicros: number | null;
   }[];
   defaults: CloudWorkspaceProviderSelection;
+  /** Already limited to the organization's idle cap; 0 is never. */
   allowedIdleSuspendMinutes: number[];
   allowedRetentionDays: number[];
+  /** The organization's idle cap (PRO-410); null or absent with none, or from an older server. */
+  maxIdleSuspendMinutes?: number | null;
+}
+
+/** A workspace's idle window and what it may be changed to (PRO-410). */
+export interface CloudWorkspaceIdleSuspend {
+  workspaceId: string;
+  /** Minutes without activity before it is stopped, 0 for never. */
+  idleSuspendMinutes: number | null;
+  allowedIdleSuspendMinutes: number[];
+  maxIdleSuspendMinutes: number | null;
 }
 
 export interface CloudWorkspaceQuoteInput extends CloudWorkspaceProviderSelection {
@@ -1266,6 +1289,8 @@ export interface CloudWorkspace {
   repositories?: CloudWorkspaceRepository[] | null;
   createdBy?: string | null;
   lastActivityAt?: number | null;
+  /** Minutes without activity before TerminalX stops it, 0 for never (PRO-410); absent from older servers. */
+  idleSuspendMinutes?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
   runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
   /** Monotonic per workspace (S1). */
@@ -1581,7 +1606,44 @@ export interface CloudPortForward {
   port: number;
   localPort: number;
   reassigned: boolean;
+  /**
+   * `open`: listening on this Mac now. `waiting`: kept while the connection is
+   * away or Forwarding is off, and opened again (same local port when free)
+   * once it is back: a paired machine's forwards return when it reconnects,
+   * a cloud workspace's do not (PRO-355). Absent from an older desktop: `open`.
+   */
+  state?: "open" | "waiting";
+  /** Opened by "Forward new ports automatically", not by the person. */
+  auto?: boolean;
 }
+
+/**
+ * A connection's forwarding switches (14.10, 14.11), kept by the desktop for
+ * as long as the connection is held. `enabled` is the master "Forwarding":
+ * off closes every listener and keeps them as `waiting`; on opens them again.
+ * `auto` forwards each port that starts listening after it was turned on,
+ * outside 32768–60999 (`AUTO_FORWARD_SKIPPED`).
+ */
+export interface CloudPortSettings {
+  enabled: boolean;
+  auto: boolean;
+}
+
+/** Ports auto-forwarding leaves alone: the ephemeral range, where clients bind, not servers. */
+export const AUTO_FORWARD_SKIPPED = { from: 32768, to: 60999 } as const;
+
+/**
+ * `cloud_port_forwards_changed`: a connection's forwards or switches changed,
+ * whoever changed them. `opened` lists forwards that opened without a click
+ * here (auto-forwarded, or returned after a reconnect), for the toast.
+ */
+export interface CloudPortForwardsChanged {
+  connectionId: string;
+  forwards: CloudPortForward[];
+  settings: CloudPortSettings;
+  opened: CloudPortForward[];
+}
+export const CLOUD_PORT_FORWARDS_CHANGED = "cloud_port_forwards_changed";
 
 export interface CloudWorkspacePreflight {
   ready: boolean;
@@ -2355,6 +2417,8 @@ export interface PullRequest {
   checks: PrCheck[];
   body: string;
   author: string;
+  /** `owner/name` of the fork its head is on; only a pull request search reads it. */
+  headRepository?: string | null;
 }
 
 export const git = {
@@ -2694,6 +2758,8 @@ export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  /** Exclusive create: rejects when the path already exists, leaving that file as it is. */
+  createText: (path: string, content: string) => invoke<number>("create_text_file", { path, content }),
   /** A file's whole text, past the 4 MB the editor shows (the file tab's Copy file contents). */
   readWholeText: (path: string) => invoke<string>("read_whole_text_file", { path }),
   /** Save a copy at `to`: the exact bytes of the local file `from`, or `content`. */
