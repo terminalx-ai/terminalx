@@ -514,7 +514,10 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
-  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: activeTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!activeTab && !isTerminalTab(activeTab) });
+  // The side panel follows the agent tab while a review, terminal or page is on screen (PRO-392): swapping it for a
+  // working-tree panel remounted it on Overview, and its "Latest turn" scope had no turn to read.
+  const panelTab = activeTab ?? (selected ? session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0] : undefined);
+  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: panelTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!panelTab && !isTerminalTab(panelTab) });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -1022,8 +1025,8 @@ export function SessionView({
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
       {!compact && prefs.panelOpen && !cloud &&
-        (activeTab ? (
-          <PanelHost session={session} tab={activeTab} checkFix={checkFix} />
+        (panelTab ? (
+          <PanelHost session={session} tab={panelTab} checkFix={checkFix} />
         ) : (
           <RightPanel
             cwd={session.cwd}

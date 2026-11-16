@@ -28,7 +28,8 @@ export const raccoonTheme: Extension = EditorView.theme({
   ".cm-changedText": { background: "color-mix(in oklab, var(--accent-add) 28%, transparent)" },
   ".cm-deletedText": { background: "color-mix(in oklab, var(--destructive) 28%, transparent)" },
   ".cm-mergeSpacer": { backgroundColor: "var(--veil-raised)" },
-  ".cm-collapsedLines": { color: "var(--ink-faint)", backgroundColor: "var(--veil-raised)", padding: "2px 12px" },
+  // `background`, not the colour alone: CodeMirror's own bar is a light gradient that showed as white stripes in dark mode.
+  ".cm-collapsedLines": { color: "var(--ink-faint)", background: "var(--veil-raised)", padding: "2px 12px" },
   ".cm-searchMatch": { backgroundColor: "color-mix(in oklab, var(--warning) 35%, transparent)" },
   ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in oklab, var(--warning) 60%, transparent)" },
   ".cm-panels": { backgroundColor: "var(--popover)", color: "var(--foreground)" },

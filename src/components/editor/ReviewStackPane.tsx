@@ -1,0 +1,160 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ExternalLink, FileCode2, RefreshCw } from "@/icons";
+import { Button } from "@/components/ui/button";
+import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
+import { DiffPane } from "@/components/changes/DiffPane";
+import { DiffViewToggles } from "@/components/changes/DiffOptions";
+import { diffMediaKind } from "@/components/changes/FileDiff";
+import { useSessionThreads } from "@/components/changes/ReviewThreads";
+import { cn } from "@/lib/cn";
+import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
+import { openDiff, updateDiffRange, type DiffEditorEntry } from "@/lib/editors";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
+import { useSessionStore } from "@/lib/sessions";
+import { useViewedChanges } from "@/lib/viewedChanges";
+import { selectSessionTab } from "@/lib/terminal";
+import type { ChangeRange } from "@/lib/changes";
+import type { ChangedFile } from "@/types/session";
+
+/**
+ * The scope's one review tab (PRO-392, design 05.01): every changed file one
+ * after another, each under a header with its path, its counts and Viewed,
+ * below a single toolbar row.
+ */
+export function ReviewStackPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
+  const source = useMemo(() => localGitSource(entry.root), [entry.root]);
+  const session = useSessionStore().sessions.find((s) => s.id === entry.sessionId);
+  const tabId = session?.activeTab ?? session?.tabs[0]?.id;
+  return <ReviewCommentsProvider chrome={false} onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}>
+    <ReviewStack entry={entry} source={source} visible={visible} />
+  </ReviewCommentsProvider>;
+}
+
+function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; source: GitSource; visible: boolean }) {
+  const { range, scope, target, uncommitted, focus, turnLabel } = entry.diff;
+  // The PR's review threads, found and kept current while this tab is shown (PRO-234).
+  useSessionThreads(source, entry.sessionId.startsWith("checkout:") ? undefined : entry.sessionId, visible);
+  const { mode, hideWhitespace } = useDiffOptions();
+  const [files, setFiles] = useState<ChangedFile[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  // The same Viewed marks as the Changes list: one checked here is checked there.
+  const viewed = useViewedChanges(source.key);
+  const live = scope === "all";
+  useEffect(() => {
+    if (!range) return;
+    let cancelled = false;
+    source.changesBetween(range.base, range.head, hideWhitespace).then(
+      (next) => { if (!cancelled) { setFiles(next); setError(null); } },
+      (e: unknown) => { if (!cancelled) setError(source.errorMessage(e)); },
+    );
+    return () => { cancelled = true; };
+  }, [source, range?.base, range?.head, hideWhitespace, tick]);
+  // A live comparison follows the workspace; a turn or commit snapshot stays as it was.
+  const refresh = useCallback(async () => {
+    if (!live) { setTick((t) => t + 1); return; }
+    setRefreshing(true);
+    try {
+      const next = await source.reviewRange(target ?? null, uncommitted ?? false);
+      if (next.base !== range?.base || next.head !== range?.head) updateDiffRange(entry.id, { base: next.base, head: next.head });
+      else setTick((t) => t + 1);
+    } catch (e) { setError(source.errorMessage(e)); }
+    finally { setRefreshing(false); }
+  }, [live, source, target, uncommitted, range?.base, range?.head, entry.id]);
+  useEffect(() => {
+    if (!visible || !live) return;
+    const onChange = () => void refresh();
+    window.addEventListener("focus", onChange);
+    window.addEventListener("workspace-files-changed", onChange);
+    return () => { window.removeEventListener("focus", onChange); window.removeEventListener("workspace-files-changed", onChange); };
+  }, [visible, live, refresh]);
+  // Opening a file from Changes scrolls this tab to it.
+  const scroller = useRef<HTMLDivElement>(null);
+  const loaded = files !== null;
+  useEffect(() => {
+    if (!loaded) return;
+    const section = [...(scroller.current?.querySelectorAll<HTMLElement>("[data-review-file]") ?? [])].find((el) => el.dataset.reviewFile === entry.rel);
+    section?.scrollIntoView?.({ block: "start" });
+  }, [loaded, focus, entry.rel]);
+  const openFile = (file: ChangedFile) => {
+    if (!range) return;
+    openDiff(entry.sessionId, entry.root, file.path, live ? { scope: "all", range, oldPath: file.oldPath, target, uncommitted } : { scope: "turn", range, oldPath: file.oldPath, turnLabel });
+  };
+
+  return <div className="flex h-full min-h-0 flex-col" data-testid="review-stack">
+    <div className="flex h-[34px] shrink-0 items-center gap-1 border-b border-hairline px-3">
+      <DiffViewToggles />
+      {live && <Button className="ml-auto" variant="ghost" size="icon-xs" aria-label="Refresh review" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
+    </div>
+    {error && <div role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => void refresh()}>Retry</Button></div>}
+    <div ref={scroller} className="min-h-0 flex-1 overflow-auto scrollbar-thin">
+      {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Choose All changes in the Changes panel to review the workspace.</p>
+        : files === null ? !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading changes…</p>
+        : !files.length ? <p className="p-4 text-sm text-muted-foreground">No changes in this scope.</p>
+        : files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace}
+          viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpen={() => openFile(file)} />)}
+    </div>
+  </div>;
+}
+
+type Pair = { before: string; after: string };
+
+function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onViewed, onOpen }: {
+  source: GitSource; file: ChangedFile; range: ChangeRange; mode: "unified" | "split"; hideWhitespace: boolean;
+  viewed: boolean; onViewed?: (on: boolean) => void; onOpen(): void;
+}) {
+  const { wrap } = useDiffOptions(diffFileKey(source.key, file.path));
+  const media = diffMediaKind(file.path);
+  const section = useRef<HTMLElement>(null);
+  // Files far below the fold are read once they come near, so a large review opens at once.
+  const [near, setNear] = useState(() => typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    if (near || !section.current) return;
+    const observer = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) { setNear(true); observer.disconnect(); } }, { rootMargin: "800px 0px" });
+    observer.observe(section.current);
+    return () => observer.disconnect();
+  }, [near]);
+  const [pair, setPair] = useState<Pair | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (!near || (media && media !== "svg")) return;
+    let cancelled = false;
+    setError(null);
+    void (async () => {
+      const next = await source.fileContentsAt(file.path, range.base, range.head);
+      const before = file.oldPath ? (await source.fileContentsAt(file.oldPath, range.base, range.head)).before : next.before;
+      if (before === "<file too large to show>" || next.after === "<file too large to show>") {
+        throw new Error("This file exceeds the text preview limit. Open it in its own tab or in the workspace.");
+      }
+      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "" });
+    })().catch((e: unknown) => { if (!cancelled) setError(source.errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [near, source, file.path, file.oldPath, range.base, range.head, media, retry]);
+  const binary = !!pair && (pair.before.includes("\0") || pair.after.includes("\0"));
+
+  return <section ref={section} data-review-file={file.path} aria-label={file.path} className="border-b border-hairline">
+    <header className="sticky top-0 z-10 flex h-10 min-w-0 items-center gap-2 border-b border-hairline bg-raised px-4">
+      <FileCode2 aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate font-mono text-[12.5px]" title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>{file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}</span>
+      <span className="shrink-0 font-mono text-xs tabular-nums">
+        {file.additions > 0 && <span className="text-add">+{file.additions}</span>}{" "}
+        {file.deletions > 0 && <span className="text-destructive">−{file.deletions}</span>}
+      </span>
+      <Button className="ml-auto" variant="ghost" size="icon-xs" aria-label={`Open ${file.path} in its own tab`} title="Open in its own tab" onClick={onOpen}><ExternalLink /></Button>
+      <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <input type="checkbox" aria-label={`Viewed ${file.path}`} className="size-3.5 accent-[var(--accent)]" checked={viewed} disabled={!onViewed}
+          title={!onViewed ? "Viewed marks require file identities from the workspace." : undefined} onChange={(e) => onViewed?.(e.target.checked)} />Viewed
+      </label>
+    </header>
+    {/* Its own stacking context: the editor's gutters must not draw over the next file's sticky header. */}
+    <div className={cn("isolate", viewed && "opacity-60")}>
+      {media && media !== "svg" ? <p className="px-4 py-3 text-xs text-muted-foreground">{media === "pdf" ? "PDF" : "Image"} changed. <Button size="xs" variant="outline" onClick={onOpen}>Open to compare</Button></p>
+        : error ? <div role="alert" className="px-4 py-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
+        : !pair ? <p role="status" className="min-h-16 px-4 py-3 text-xs text-muted-foreground">Loading file diff…</p>
+        : binary ? <p className="px-4 py-3 text-xs text-muted-foreground">Binary file changed.</p>
+        : <DiffPane stacked workspace={source.key} path={file.path} before={pair.before} after={pair.after} base={range.base} originalPath={file.oldPath} mode={mode} wrap={wrap} hideWhitespace={hideWhitespace} />}
+    </div>
+  </section>;
+}

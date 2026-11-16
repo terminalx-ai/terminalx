@@ -74,6 +74,12 @@ export interface DiffEditorEntry extends EditorBase {
     /** The fixed snapshot's name in the tab title ("Turn", "Commit 5be01f4"); chips from historical turns must not say "Latest turn". */
     turnLabel?: string;
     mode: DiffMode;
+    /**
+     * One review tab for the whole scope (PRO-392): every changed file stacked, `rel` being the file it was last opened
+     * on, and `focus` bumped to scroll to it again on a re-open.
+     */
+    stack?: boolean;
+    focus?: number;
   };
 }
 export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
@@ -138,6 +144,7 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         if (!reviewPath(e.root, e.rel)) continue;
         if (d.target != null && typeof d.target !== "string") continue;
         if (d.turnLabel !== undefined && typeof d.turnLabel !== "string") continue;
+        if (d.stack !== undefined && typeof d.stack !== "boolean") continue;
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
@@ -304,6 +311,31 @@ export function openDiff(sessionId: string, root: string, rel: string, diff: Omi
   if (!diff.range) throw new Error("No snapshots are available for this turn.");
   return openReview({ id, sessionId, root, workspaceRoot: root, rel, name: `${fileName(rel)} · ${diff.scope === "turn" ? diff.turnLabel ?? "Latest turn" : diff.uncommitted ? "Uncommitted changes" : "All changes"}`,
     kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff" } });
+}
+
+/** The scope's name in a review tab's title. */
+export function reviewScopeLabel(diff: Pick<DiffEditorEntry["diff"], "scope" | "turnLabel" | "uncommitted">): string {
+  return diff.scope === "turn" ? diff.turnLabel ?? "Latest turn" : diff.uncommitted ? "Uncommitted changes" : "All changes";
+}
+
+/**
+ * Open (or focus) the one review tab of a scope, which stacks every changed file (PRO-392), on `rel`.
+ * A live comparison's tab follows the newest range; a fixed snapshot is a tab of its own.
+ */
+export function openReviewStack(sessionId: string, root: string, rel: string, diff: Omit<DiffEditorEntry["diff"], "mode" | "stack" | "focus" | "oldPath">) {
+  const path = reviewPath(root, rel);
+  if (!path) throw new Error("This file is outside the repository.");
+  if (!diff.range) throw new Error("No snapshots are available for this turn.");
+  const id = JSON.stringify([sessionId, root, "review", diff.scope, diff.scope === "turn" ? diff.range : [diff.target, diff.uncommitted]]);
+  const existing = state.editors.find((e) => e.id === id);
+  if (existing?.kind === "diff") {
+    set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, rel: path, diff: { ...e.diff, range: diff.range, focus: (e.diff.focus ?? 0) + 1 } } : e) });
+    setActiveEditor(sessionId, id);
+    setLastFocused("editor");
+    return id;
+  }
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel: path, name: `Review · ${reviewScopeLabel(diff)}`,
+    kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff", stack: true, focus: 0 } });
 }
 
 export function openPr(sessionId: string, root: string, pr: PrAssociation) {

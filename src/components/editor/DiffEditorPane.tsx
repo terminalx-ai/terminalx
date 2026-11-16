@@ -4,7 +4,8 @@ import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "@/icons";
 import { DiffPane } from "@/components/changes/DiffPane";
-import { DiffOptions } from "@/components/changes/DiffOptions";
+import { DiffViewToggles } from "@/components/changes/DiffOptions";
+import { ReviewStackPane } from "./ReviewStackPane";
 import { diffMediaKind, FileDiff } from "@/components/changes/FileDiff";
 import { DiscardDialog } from "@/components/changes/DiscardDialog";
 import { Markdown } from "@/components/chat/Markdown";
@@ -19,12 +20,17 @@ import { useSessionThreads } from "@/components/changes/ReviewThreads";
 import { EditorPane } from "./EditorPane";
 import { MediaPane } from "./MediaPane";
 
-/** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
+/** A review tab: the scope's stacked files (PRO-392), or one file with its Entire file, Preview and Edit modes. */
 export function DiffEditorPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
+  return entry.diff.stack ? <ReviewStackPane entry={entry} visible={visible} /> : <SingleDiffPane entry={entry} visible={visible} />;
+}
+
+/** Keep each surface mounted: mode switches preserve the diff's scroll and the editor's buffer/undo. */
+function SingleDiffPane({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const source = useMemo(() => localGitSource(entry.root), [entry.root]);
   const session = useSessionStore().sessions.find((s) => s.id === entry.sessionId);
   const tabId = session?.activeTab ?? session?.tabs[0]?.id;
-  return <ReviewCommentsProvider onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
+  return <ReviewCommentsProvider chrome={false} onAdd={() => { if (tabId) selectSessionTab(entry.sessionId, { kind: "agent", id: tabId }); }} key={source.key} source={source} active={visible} tabId={tabId}><DiffEditorContent entry={entry} visible={visible} /></ReviewCommentsProvider>;
 }
 function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible: boolean }) {
   const { range, mode, scope, target, uncommitted, oldPath } = entry.diff;
@@ -117,12 +123,12 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   if (canEdit) modes.push({ value: "edit", label: "Edit" });
 
   return <div className="flex h-full min-h-0 flex-col" data-testid="diff-editor">
-    <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 py-1">
+    {/* One toolbar row (PRO-392): the file's path is in the diff's own header below. */}
+    <div className="flex h-[34px] shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3">
       <Segmented aria-label="Diff view" value={mode} onChange={(next) => void setDiffMode(entry.id, next)} options={modes} />
-      <span className="ml-auto truncate text-xs text-faint" title={entry.rel}>{entry.rel}</span>
-      {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
+      {mode === "diff" && <DiffViewToggles />}
+      {scope === "all" && <Button className="ml-auto" variant="ghost" size="icon-xs" aria-label="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
     </div>
-    {mode === "diff" && <DiffOptions />}
     {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath } : null} base={uncommitted ? undefined : range?.base}
       onClose={() => setDiscarding(false)} onDiscarded={() => void refresh()} />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}

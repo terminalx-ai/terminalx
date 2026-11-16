@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { getTerminalState } from "@/lib/terminal";
-import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
+import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, openReviewStack, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
 afterEach(async () => {
@@ -229,5 +229,21 @@ describe("attachment tabs (PRO-290)", () => {
     expect(() => openAttachment("s1", { path: "notes.md", name: "notes.md" })).toThrow();
     expect(() => openAttachment("s1", { path: `${folder}/../x/notes.md`, name: "notes.md" })).toThrow();
     expect(getEditors().editors).toHaveLength(0);
+  });
+});
+
+describe("review stack (PRO-392)", () => {
+  it("opens one Review tab per scope for every file, focused on the file opened, and restores it", () => {
+    const first = openReviewStack("s", "/repo", "src/slug.js", { scope: "turn", range: { base: "base", head: "head" } });
+    const again = openReviewStack("s", "/repo", "test/slug.test.js", { scope: "turn", range: { base: "base", head: "head" } });
+    expect(again).toBe(first);
+    const tabs = getEditors().editors.filter((e) => e.sessionId === "s");
+    expect(tabs).toHaveLength(1);
+    const entry = tabs[0]!;
+    expect(entry).toMatchObject({ name: "Review · Latest turn", rel: "test/slug.test.js", kind: "diff", diff: { stack: true, focus: 1 } });
+    expect(openReviewStack("s", "/repo", "a.ts", { scope: "all", range: { base: "b", head: null }, target: null, uncommitted: false })).not.toBe(first);
+    expect(getEditors().editors.find((e) => e.id !== first && e.sessionId === "s")?.name).toBe("Review · All changes");
+    const restored = restoreReviewTabs(serializeReviewTabs(getEditors())).editors.find((e) => e.id === first);
+    expect(restored).toMatchObject({ kind: "diff", diff: { stack: true } });
   });
 });
