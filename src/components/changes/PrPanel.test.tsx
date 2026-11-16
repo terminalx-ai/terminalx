@@ -563,7 +563,20 @@ it.each(["panel", "inline", "centre"])("loads review threads for the selected PR
   expect(screen.queryByText("No review threads.")).toBeNull();
 });
 
-const { mergeReadiness } = await import("./PrPanel");
+const { mergeReadiness, afterMerge } = await import("./PrPanel");
+
+it("acts on 'Archive this session after merge' only for the session's own pull request", () => {
+  const off = { archive: false, deleteBranch: false };
+  const on = { archive: true, deleteBranch: false };
+  // A linked PR: the menu did not offer the choice, so this session's workspace is left alone.
+  expect(afterMerge(false, off, true)).toBeNull();
+  expect(afterMerge(false, on, false)).toBeNull();
+  expect(afterMerge(true, off, true)).toBe("hold");
+  expect(afterMerge(true, on, false)).toBe("archive");
+  expect(afterMerge(true, on, true)).toBeNull();
+  expect(afterMerge(true, off, false)).toBeNull();
+  expect(afterMerge(true, undefined, true)).toBeNull();
+});
 const { checkCounts, checkSummary } = await import("@/lib/checks");
 const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
 

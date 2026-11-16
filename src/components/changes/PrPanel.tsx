@@ -33,6 +33,18 @@ type WorkspaceCleanup = {
   onDelete: () => void;
 };
 
+/**
+ * What "Archive this session after merge" asks of this session's workspace once the merge is through: where clean-up
+ * archives merged sessions, unticking it keeps this one; where it does not, ticking it opens the archive dialog. Only
+ * the session's own pull request offers the choice: merging a linked one says nothing about this workspace.
+ */
+export function afterMerge(current: boolean, choices: MergeChoices | undefined, cleanupOn: boolean): "hold" | "archive" | null {
+  if (!current || !choices) return null;
+  if (!choices.archive && cleanupOn) return "hold";
+  if (choices.archive && !cleanupOn) return "archive";
+  return null;
+}
+
 /** GitHub's lifecycle and queue take precedence over head-branch checks. */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } {
   const blocked = (label: string) => ({ ok: false, label });
@@ -340,10 +352,10 @@ export function PrPanel({
       await requestMergedSweep();
       // "Archive this session after merge": where clean-up archives merged workspaces, unticking keeps this one;
       // where it does not, ticking opens the archive dialog, which says what would be lost first.
-      if (!choices || !workspace || !cwd) return;
-      const on = mergedCleanupOn(getMergedCleanup().settings, workspace.projectPath);
-      if (!choices.archive && on) await holdMergedWorkspace(LOCAL_HOST, cwd, true).catch(() => {});
-      else if (choices.archive && !on) workspace.onDelete();
+      if (!workspace || !cwd) return;
+      const next = afterMerge(row.current, choices, mergedCleanupOn(getMergedCleanup().settings, workspace.projectPath));
+      if (next === "hold") await holdMergedWorkspace(LOCAL_HOST, cwd, true).catch(() => {});
+      else if (next === "archive") workspace.onDelete();
     });
   const archiveDefault = (row: SessionPr) => workspace && cwd && row.current ? mergedCleanupOn(cleanup.settings, workspace.projectPath) : null;
   const mergeMenu = (row: SessionPr, size: "xs" | "sm", disabled: boolean) => {

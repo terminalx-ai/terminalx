@@ -501,7 +501,14 @@ fn delete_merged_branch_with(target: &str, mut run: impl FnMut(&[&str]) -> Resul
     let reference = format!("repos/{owner}/{repo}/git/ref/heads/{branch}");
     let at = match run(&["api", "--hostname", host, &reference, "--jq", ".object.sha"]) {
         Ok(at) => at,
-        Err(error) if format!("{error:#}").contains("Not Found") => return Ok(()),
+        // GitHub also answers Not Found when the account cannot see the repository (SSO not authorised, a token
+        // without it): gone only when the repository itself can be read.
+        Err(error) if format!("{error:#}").contains("Not Found") => {
+            return match run(&["api", "--hostname", host, &format!("repos/{owner}/{repo}"), "--jq", ".full_name"]) {
+                Ok(_) => Ok(()),
+                Err(_) => bail!("this account cannot see the branch on GitHub"),
+            };
+        }
         Err(error) => return Err(error),
     };
     if at.trim() != head { bail!("it has moved since the merge"); }
@@ -2232,8 +2239,13 @@ mod tests {
         let mut n = 0;
         let moved = delete_merged_branch_with(target, |args| { n += 1; assert!(!args.contains(&"DELETE")); Ok(if n == 1 { view("MERGED", false) } else { "def".into() }) });
         assert!(format!("{:#}", moved.unwrap_err()).contains("moved"));
+        // Already gone: the ref is not there, and the repository can be read.
         let mut n = 0;
-        delete_merged_branch_with(target, |_| { n += 1; if n == 1 { Ok(view("MERGED", false)) } else { bail!("gh: Not Found (HTTP 404)") } }).unwrap();
+        delete_merged_branch_with(target, |args| { n += 1; match n { 1 => Ok(view("MERGED", false)), 2 => bail!("gh: Not Found (HTTP 404)"), _ => { assert_eq!(args[3], "repos/acme/one"); Ok("acme/one".into()) } } }).unwrap();
+        // Not Found because the account cannot see the repository: not reported as deleted.
+        let mut n = 0;
+        let hidden = delete_merged_branch_with(target, |args| { n += 1; assert!(!args.contains(&"DELETE")); if n == 1 { Ok(view("MERGED", false)) } else { bail!("gh: Not Found (HTTP 404)") } });
+        assert!(format!("{:#}", hidden.unwrap_err()).contains("cannot see"));
     }
 
     #[test]
