@@ -411,13 +411,6 @@ export function PrPanel({
   const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
-  // The branch's Push step below is left out only while this draft can push and create itself.
-  const draftPushes = showDraft && !!canCreate && source.canWrite;
-  useEffect(() => {
-    if (!cwd) return;
-    noteDraftPushes(cwd, draftPushes);
-    return () => noteDraftPushes(cwd, false);
-  }, [cwd, draftPushes]);
   const canDelete = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
     && canDeleteMergedWorkspace(checkedWorkspace.disposition);
@@ -559,6 +552,7 @@ export function PrPanel({
       {/* No pull request yet: its draft, filled in here, in place of a step to push first (PRO-394, design 05.06). */}
       {showDraft && status && currentBranch && status.defaultBranch && (
         <PrDraft
+          cwd={cwd}
           head={currentBranch}
           base={base ?? status.defaultBranch}
           bases={[...new Set([base ?? status.defaultBranch, ...bases])]}
@@ -790,12 +784,19 @@ function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen, onUnlink,
  * template when it has one), the branch against its base, and where checks
  * will show. Creating pushes unpushed commits first.
  */
-function PrDraft({ head, base, bases, onBase, onOpenBases, ahead, pushed, title, body, template, onTitle, onBody, draft, onDraft, canCreate, working, disabled, onCreate }: {
+function PrDraft({ cwd, head, base, bases, onBase, onOpenBases, ahead, pushed, title, body, template, onTitle, onBody, draft, onDraft, canCreate, working, disabled, onCreate }: {
   head: string; base: string; bases: string[]; onBase: (base: string) => void; onOpenBases: () => void;
   ahead: number; pushed: boolean; title: string; body: string; template: string | null;
   onTitle: (title: string) => void; onBody: (body: string) => void; draft: boolean; onDraft: (draft: boolean) => void;
-  canCreate: boolean; working: boolean; disabled: boolean; onCreate: () => void;
+  canCreate: boolean; working: boolean; disabled: boolean; onCreate: () => void; cwd?: string;
 }) {
+  // While this draft can push and create itself, the branch's Push step below is left to it (PRO-394).
+  // Here, not in PrPanel: the panel returns early for GitHub setup, so a hook there would change its hook count.
+  useEffect(() => {
+    if (!cwd || !canCreate) return;
+    noteDraftPushes(cwd, true);
+    return () => noteDraftPushes(cwd, false);
+  }, [cwd, canCreate]);
   const [changingBase, setChangingBase] = useState(false);
   return (
     <form className="flex min-w-0 flex-col gap-3 p-3" data-testid="pr-draft" onSubmit={(event) => { event.preventDefault(); if (canCreate && title.trim()) onCreate(); }}>
