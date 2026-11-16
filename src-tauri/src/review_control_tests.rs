@@ -652,3 +652,43 @@ fn branch_comments_use_the_pr_comparison_tree_and_renamed_path() {
         pipeline.review_commit.unwrap()
     );
 }
+
+/// The lead's own take-over of a piece of a plan a person approved (part of #1004) is decided
+/// by which tab asks, so the tab is proved as a review comment's author is: by its own secret.
+/// The session and tab a caller names are claims any process can make.
+#[test]
+fn only_the_leads_own_tab_proved_by_its_secret_takes_a_piece_of_an_approved_plan_over() {
+    let _home = crate::store::temp_home();
+    let root = tempfile::tempdir().unwrap();
+    let lead = session(root.path());
+    let (service, _sink) = headless_service();
+    // Its checkout cannot be read: a take-over past the approval stops there, before the lead is sent anything.
+    let elsewhere = tempfile::tempdir().unwrap();
+    index::update_session(&lead.id, |stored| {
+        stored.cwd = elsewhere.path().to_string_lossy().into_owned();
+        Ok(())
+    })
+    .unwrap();
+    let (tab, other_tab) = (lead.tabs[0].id.clone(), lead.tabs[1].id.clone());
+    let run: crate::orchestration::Run = serde_json::from_value(json!({
+        "id": "run-approved", "lead": {"sessionId": lead.id, "tabId": tab}, "projectPath": lead.project_path, "goal": "Two pieces", "state": "running",
+        "approval": {"at": "2026-11-15T09:00:00Z"}, "workerMode": "bypassPermissions", "created": "2026-11-15T09:00:00Z", "modified": "2026-11-15T09:00:00Z",
+        "pieces": [{"id": "cli", "title": "A piece", "brief": {"goal": "Do it"}, "owns": ["src/"], "dependsOn": [], "doneChecks": [{"type": "command", "run": "true"}], "agent": "claude", "state": "blocked", "attempts": 1}],
+    }))
+    .unwrap();
+    crate::orchestration::store::insert(&run).unwrap();
+    let take = |caller: Value, token: &str| {
+        service.execute("runs.takeOver", json!({"run": "run-approved", "piece": "cli", "caller": caller, "hookToken": token}), "take").unwrap_err().code
+    };
+    let caller = json!({"session": lead.id, "tab": tab});
+    // Naming the lead's tab proves nothing: no secret, a made-up one, or another tab's.
+    for token in [String::new(), "secret-elsewhere".into(), format!("secret-{other_tab}")] {
+        assert_eq!(take(caller.clone(), &token), "person_only", "{token:?}");
+    }
+    // The lead's other tab, proved by its own secret, is not the lead's conversation.
+    assert_eq!(take(json!({"session": lead.id, "tab": other_tab}), &format!("secret-{other_tab}")), "person_only");
+    assert_eq!(take(json!({"session": lead.id}), &format!("secret-{tab}")), "person_only", "no tab named");
+    // The lead's own tab with its secret is past the approval: its unreadable checkout is what stops it.
+    assert_eq!(take(caller, &format!("secret-{tab}")), "lead_not_found");
+    assert_eq!(crate::orchestration::store::get("run-approved").unwrap().piece("cli").unwrap().state, crate::orchestration::PieceState::Blocked);
+}

@@ -2131,7 +2131,7 @@ impl SessionManager {
             // A blocked piece (PRO-361, 18.03): the person's four actions, and checking what the lead did with one it took over.
             "takeOver" => {
                 self.accepting_work()?;
-                engine::shown(&engine::take_over(&host, string("id")?, string("piece")?, engine::By::Person).map_err(refused)?)
+                engine::shown(&engine::take_over(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?)
             }
             "finish" => {
                 self.accepting_work()?;

@@ -163,7 +163,9 @@ pub fn call(
                 Some("Restart an app-launched tab, or let a human shell read TERMINALX_HOME/run/control.token.".into()),
             )
         })?;
-    if command == "review.comment" {
+    // The tab's own secret, for commands whose answer depends on which agent tab asks: the
+    // session and tab a caller names are only claims.
+    if matches!(command, "review.comment" | "runs.takeOver") {
         params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
     }
     let request = ControlRequest {
@@ -952,7 +954,16 @@ impl ControlService {
                 match command {
                     "runs.takeOver" => {
                         self.manager.accepting_work().map_err(ControlError::internal)?;
-                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli).map_err(ControlError::of_run)?;
+                        // Only the run's own lead, from its own conversation, takes a piece of an approved
+                        // plan over itself. The session and tab the caller names are claims any process
+                        // can make: the lead's tab is proved by its own secret, else it is not the lead.
+                        let from_lead = match (params["caller"]["session"].as_str(), params["caller"]["tab"].as_str()) {
+                            (Some(session), Some(tab)) => session == run.lead.session_id
+                                && run.lead.tab_id.as_deref().is_none_or(|lead_tab| lead_tab == tab)
+                                && self.manager.authenticates_cli(session, tab, params["hookToken"].as_str().unwrap_or_default()),
+                            _ => false,
+                        };
+                        let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
                         Ok(json!({"run": engine::shown(&run), "piece": piece}))
                     }
                     "runs.finish" => {
