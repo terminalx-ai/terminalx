@@ -218,6 +218,11 @@ pub struct PhoneStatus {
     /// A phone that used the code, waiting for Allow.
     #[serde(default)]
     pub pending: Option<PendingPhone>,
+    /// A TerminalX window is open on this Mac: it pairs and serves phones,
+    /// or will once hosting is on, so `pair --phone` sends the person there
+    /// before asking anything.
+    #[serde(default)]
+    pub window_open: bool,
 }
 
 /// A phone waiting for Allow: the fingerprint it shows too.

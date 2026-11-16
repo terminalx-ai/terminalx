@@ -432,19 +432,20 @@ impl MachineHost {
         // phones on the port; a port still in use is the window's to give up.
         let takes_port = state.enabled && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
         let (pending, code, paused_until) = state.pairing.view(now_ms());
+        let phone_route = state.phone_route.as_ref().is_some_and(|route| route.attachment.valid());
         Status {
             enabled: state.enabled,
             host_key,
             machine_id: state.keypair.as_ref().map(HostKeypair::host_id),
             listening: state.listening.as_ref().map(|listening| listening.address.to_string()),
             takes_port,
-            phone_route: state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()),
+            phone_route,
             computers,
             error,
             pending,
             code,
             paused_until,
-            phones: self.phone_status(),
+            phones: wire::PhoneStatus { window_open: phone_route || self.window_available(), ..self.phone_status() },
         }
     }
 

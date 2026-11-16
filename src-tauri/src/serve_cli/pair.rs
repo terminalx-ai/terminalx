@@ -83,6 +83,11 @@ fn pair(args: &[String]) -> Result<i32> {
     std::env::set_var("TERMINALX_HOME", &canonical);
 
     let mut status = runtime.status()?;
+    // Before anything is turned on: a window pairs this Mac's phones.
+    if phone && (status.phone_route || status.phones.window_open) {
+        eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
+        return Ok(1);
+    }
     if !status.enabled {
         if phone {
             // Phones reach a server through the same listener computers use.

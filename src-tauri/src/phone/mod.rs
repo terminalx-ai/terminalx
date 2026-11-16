@@ -13,6 +13,7 @@
 pub(crate) mod registry;
 pub(crate) mod rpc;
 pub(crate) mod send_ids;
+pub(crate) mod sink;
 pub(crate) mod wire;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -80,8 +81,10 @@ pub(crate) struct PhoneHost {
     sink: OnceLock<Arc<dyn EventSink>>,
     owner: Mutex<Option<Arc<dyn Owner>>>,
     /// The account binding's generation: a connection admitted under an
-    /// older one is closed. The runtime, which keeps no account binding of
-    /// its own, answers 0.
+    /// older one is closed. The window answers its own binding's; the
+    /// runtime, the generation in the window's `account.json` mirror as it
+    /// last read it (`machine_host::phones`), never reading the file here:
+    /// this is asked on every request and event.
     generation: Box<dyn Fn() -> u64 + Send + Sync>,
 }
 

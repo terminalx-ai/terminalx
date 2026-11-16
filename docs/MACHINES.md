@@ -1863,7 +1863,12 @@ direct port now answers phones too, with nothing new on the phone's wire.
   change. A phone revoked by the window or removed at sign-out is refused at its
   next request. Each tick, the runtime also closes such phones and ends their
   grants, and it fences by the account mirror's binding generation, as the
-  window does.
+  window does. It reads that generation once a tick, not on every message, and
+  judges no phone while `account.json` cannot be read.
+- **Notices stay in their process.** The runtime's phone host publishes its
+  `mobile_notification` events on a sink that keeps them in the runtime
+  (`phone/sink.rs`). Every runtime event also streams to the window, so the
+  window's phones would otherwise get each notice twice.
 - **`host.describe`** answers `{ name, hasWindow, platform }`. `hasWindow` is
   false on a runtime no desktop app launched (`TERMINALX_LOCAL_DESKTOP`), and
   the phone shows such a machine with the server icon. Older phones read only
@@ -1878,8 +1883,9 @@ direct port now answers phones too, with nothing new on the phone's wire.
   no relay; the strict offer schema is unchanged). It prints the link as a
   half-block QR and as text, then asks "Allow? [y/N]" with the fingerprint the
   phone shows. If hosting is off it asks to turn it on first, since phones use
-  the same listener. It is refused (`window_takes_phones`) while a window
-  serves phones; that window pairs them in Settings → Devices.
+  the same listener. While a TerminalX window is open (`Status.phones.windowOpen`)
+  it sends the person to Settings → Devices before asking anything, and the
+  runtime refuses the code (`window_takes_phones`) while a window serves phones.
 - **Runtime IPC** (`machine_wire.rs`): `runtime.machineHost.phoneCode`,
   `phoneApprove` and `phoneDecline`. The first two are consent-guarded like
   `createCode`/`approve`. `phoneRevoke` is refused while a window serves phones,

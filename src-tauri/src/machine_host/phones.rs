@@ -15,7 +15,7 @@
 //! fingerprint the phone shows.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,9 +52,10 @@ const REFUSED_ANOTHER_PHONE: &str = "another-phone";
 const REFUSED_CODE_INACTIVE: &str = "code-inactive";
 
 /// The binding generation of the account this Mac is signed in to, as the
-/// window last wrote it; 0 signed out.
-fn account_generation() -> u64 {
-    load_account_mirror().ok().flatten().map(|mirror| mirror.binding_generation).unwrap_or(0)
+/// window last wrote it (`account.json`); 0 signed out. An error when the
+/// file cannot be read: nothing is decided on a guess.
+fn read_account_generation() -> Result<u64> {
+    Ok(load_account_mirror()?.map(|mirror| mirror.binding_generation).unwrap_or(0))
 }
 
 fn now_ms() -> i64 {
@@ -139,6 +140,11 @@ pub(crate) struct Phones {
     registry: DeviceRegistry,
     state: Mutex<State>,
     next: AtomicU64,
+    /// [`read_account_generation`] as last read, each tick: the phone RPC
+    /// asks for it on every request and event, which must not read a file.
+    generation: Arc<AtomicU64>,
+    /// Whether the last read succeeded; phones are not judged on a failed one.
+    generation_known: AtomicBool,
     /// Tells the machine host its status changed.
     changed: Box<dyn Fn() + Send + Sync>,
 }
@@ -148,8 +154,12 @@ impl Phones {
         // The account binding is the window's, in the shared `account.json`:
         // a sign-out or another account there ends every phone served here at
         // its next request or event, as it does the window's.
-        let host = Arc::new(PhoneHost::new(account_generation));
-        host.configure(sink)?;
+        let first = read_account_generation();
+        let generation = Arc::new(AtomicU64::new(*first.as_ref().unwrap_or(&0)));
+        let current = generation.clone();
+        let host = Arc::new(PhoneHost::new(move || current.load(Ordering::SeqCst)));
+        // Its notices stay in this process: the window has its own (`phone::sink`).
+        host.configure(Arc::new(crate::phone::sink::NoticesInProcess::new(sink)))?;
         Ok(Arc::new(Self {
             host,
             sessions,
@@ -157,6 +167,8 @@ impl Phones {
             registry: DeviceRegistry,
             state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
+            generation,
+            generation_known: AtomicBool::new(first.is_ok()),
             changed: Box::new(changed),
         }))
     }
@@ -169,6 +181,8 @@ impl Phones {
             connected,
             code: state.code.as_ref().map(|code| CodeExpiry { expires_at: code.expires_at }),
             pending: state.code.as_ref().and_then(|code| code.pending.as_ref()).map(|pending| pending.view.clone()),
+            // The machine host knows about windows.
+            window_open: false,
         }
     }
 
@@ -237,7 +251,7 @@ impl Phones {
     /// and their grants too. Blocking: it reads `devices.json`.
     fn close_unpaired(&self) {
         let connected: Vec<String> = self.state.lock().unwrap().connections.keys().cloned().collect();
-        if connected.is_empty() {
+        if connected.is_empty() || !self.generation_known.load(Ordering::SeqCst) {
             return;
         }
         let paired = match self.registry.list() {
@@ -247,7 +261,7 @@ impl Phones {
                 return;
             }
         };
-        let generation = account_generation();
+        let generation = self.generation.load(Ordering::SeqCst);
         for device_id in connected {
             let current = paired.iter().find(|device| device.id == device_id);
             let stale = current.is_none_or(|device| device.provenance == DeviceProvenance::Automatic && device.binding_generation != generation);
@@ -259,9 +273,26 @@ impl Phones {
         }
     }
 
+    /// Read the account generation again. A failed read keeps the last one
+    /// and judges no phone by it.
+    fn read_generation(&self) {
+        match read_account_generation() {
+            Ok(generation) => {
+                self.generation.store(generation, Ordering::SeqCst);
+                self.generation_known.store(true, Ordering::SeqCst);
+            }
+            Err(error) => {
+                if self.generation_known.swap(false, Ordering::SeqCst) {
+                    log::warn!("machine host: read the account for phones: {error:#}");
+                }
+            }
+        }
+    }
+
     /// A code or a request that ran out ends, and phones no longer paired
     /// are let go. Blocking: it may write `devices.json`.
     pub(crate) fn tick(&self, now: i64) {
+        self.read_generation();
         self.close_unpaired();
         let ended = {
             let mut state = self.state.lock().unwrap();
@@ -397,7 +428,7 @@ impl Phones {
         let actor = Actor {
             epoch: owner.identity.epoch.clone(),
             lease: owner.identity.lease.clone(),
-            generation: account_generation(),
+            generation: self.generation.load(Ordering::SeqCst),
             user_id: load_account_mirror().ok().flatten().map(|mirror| mirror.user_id),
         };
         if let Err(error) = owner.mobile(&actor, "revoke", json!({ "deviceId": device_id })) {
@@ -454,7 +485,8 @@ impl Phones {
         };
         let lookup = self.clone();
         let device = tokio::task::spawn_blocking(move || {
-            let generation = load_account_mirror().ok().flatten().map(|mirror| mirror.binding_generation);
+            // An unreadable account admits nobody, rather than every generation.
+            let generation = load_account_mirror().context("read the account for a phone")?.map(|mirror| mirror.binding_generation);
             lookup.registry.find_by_token(&auth.device_token, generation)
         })
         .await??
