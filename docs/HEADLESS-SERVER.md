@@ -140,10 +140,22 @@ SSH. After that,
 start a session on the server from TerminalX as you would locally. (A later
 version signs the agents in from the machine's page in TerminalX.)
 
-## Paired computers
+## Pair your phone
 
 ```sh
-terminalx-serve devices               # the computers that may operate this one
+terminalx-serve pair --phone
+```
+
+It shows a QR code. In TerminalX on your phone, open Machines → Add and scan
+it, or paste the link printed under it. The phone shows a fingerprint: check
+that it matches the one in your terminal, then answer `y`. The server then
+appears in the phone's Machines list with a server icon. The phone reaches it
+on the addresses shown, so it must be on the same network or Tailscale.
+
+## Paired computers and phones
+
+```sh
+terminalx-serve devices               # the computers and phones that may operate this one
 terminalx-serve devices revoke <id>   # remove one; it must pair again
 ```
 
