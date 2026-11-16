@@ -154,11 +154,11 @@ describe("the mapping store", () => {
   });
 
   it("saves a custom chord in the preferences and resolves it at once", () => {
-    expect(saveShortcut("app.toggleSidebar", ["mod+shift+b"])).toEqual({ ok: true });
-    expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
-    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+shift+b"]);
+    expect(saveShortcut("app.toggleSidebar", ["mod+alt+b"])).toEqual({ ok: true });
+    expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+alt+b"] });
+    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+alt+b"]);
     expect(isCustomized("app.toggleSidebar")).toBe(true);
-    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).shortcuts).toEqual({ "app.toggleSidebar": ["mod+alt+b"] });
   });
 
   it("unbinds an action with an empty list", () => {
@@ -168,7 +168,7 @@ describe("the mapping store", () => {
   });
 
   it("resets one action, and all of them", () => {
-    saveShortcut("app.toggleSidebar", ["mod+shift+b"]);
+    saveShortcut("app.toggleSidebar", ["mod+alt+b"]);
     saveShortcut("app.issues", []);
     expect(resetShortcut("app.toggleSidebar")).toEqual({ ok: true });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+b"]);
@@ -196,10 +196,10 @@ describe("the mapping store", () => {
   });
 
   it("asks before a reset takes back a default another action uses now", () => {
-    saveShortcut("app.toggleSidebar", ["mod+shift+b"]);
+    saveShortcut("app.toggleSidebar", ["mod+alt+b"]);
     saveShortcut("app.issues", ["mod+b"]);
     expect(resetShortcut("app.toggleSidebar")).toMatchObject({ ok: false, binding: "mod+b", conflict: { id: "app.issues" } });
-    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+shift+b"]);
+    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+alt+b"]);
     expect(resetShortcut("app.toggleSidebar", { replace: true })).toEqual({ ok: true });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+b"]);
     expect(bindingsOf("app.issues")).toEqual([]);
