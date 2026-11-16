@@ -70,8 +70,10 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * `machine.updateChanged` notification.
  * `machine/4` (PRO-350): `machine.agentSetup` and `machine.agentSetupRunning`,
  * an agent's install or sign-in in a terminal on the machine.
+ * `machine/5` (PRO-357): `machine.rotateCredential`, a fresh device token
+ * for the paired computer.
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -84,6 +86,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.update": "machine/3",
   "machine.agentSetup": "machine/4",
   "machine.agentSetupRunning": "machine/4",
+  "machine.rotateCredential": "machine/5",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",

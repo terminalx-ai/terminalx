@@ -583,7 +583,8 @@ been paired. Nothing should be reachable until the person asks for it.
   the workspace protocol reads or writes it.
 - On a headless server, installing the service does not turn it on.
   `terminalx-serve pair`, with the person's consent in that terminal, does.
-- Data privacy mode forces it off (PRO-357).
+- Data privacy mode forces it off, and stops this computer operating others
+  (PRO-357, [Trust model](#trust-model)).
 
 ## Protocol
 
@@ -833,6 +834,7 @@ the pull request that adds it.
 | `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
 | `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
 | `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
+| `machine.rotateCredential` | `machine/5` | Served | Manage only; a fresh device token for the paired computer that asks, kept beside its own until it connects with it ([Trust model](#trust-model), PRO-357) |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1639,7 +1641,10 @@ Screen 21.09, behind Settings → Experimental → Machines like the rest.
 
 ## Trust model
 
-PRO-357 adds the threat model and its tests here. What each party can see and do:
+What each party can see and do, then the threats PRO-357 reviewed: each has a
+mitigation and a test, or is an accepted risk. The boundary tests run in CI
+with the rest of the Rust tests (`src-tauri/src/machine_host/security_tests.rs`,
+named `security_tests::…` below).
 
 | Party | Can see | Can do | Cannot |
 | --- | --- | --- | --- |
@@ -1651,6 +1656,79 @@ PRO-357 adds the threat model and its tests here. What each party can see and do
 The pairing code is a secret until it is used. Whoever has it can ask to pair,
 which is why every computer pairing waits for "Allow" and a fingerprint the
 person compares on both screens.
+
+### Threats
+
+| Threat | Mitigation | Test |
+| --- | --- | --- |
+| **A stolen laptop** (the operating computer) | Its device token and client key are in its Keychain, never in a file. The token is bound to the client key: a copied token alone is refused (`4401`). The token rotates on every connection (`machine.rotateCredential`, `machine/5`). The new token replaces the old one when a connection is made with it, so a copy taken earlier, from a backup say, stops working once the owner's computer has connected twice more (once to be given a new token, once to use it), and not while one of its links stays up. A copy without the client key does nothing. One unused for 90 days, and not connected, expires. On the machine the person presses Disconnect or Revoke under "Computers that can operate this Mac", and the activity log shows what it did meanwhile. | `security_tests::a_credential_rotates_on_each_connection`, `…::a_credential_unused_for_ninety_days_expires`, `…::disconnect_closes_the_connection_and_holds_the_computer_off_until_it_is_let_back`, `pairing_tests::revoking_closes_the_connection_and_refuses_the_credential` |
+| **A stolen laptop** (the machine) | The registry keeps token hashes only, mode 0600; the activity log has no prompts, commands, paths or file contents. Beyond that the machine is the user's own account and disk (FileVault), as for every local session. | `registry` tests (hash only), `security_tests::the_activity_log_records_what_a_computer_did_and_nothing_secret`, `activity` tests |
+| **A stolen pairing code** | It works once and for five minutes. Using it only asks: the machine waits for "Allow", and the person compares a fingerprint that binds both keys and the code's token. Five wrong attempts in a minute pause pairing. | `security_tests::a_code_alone_adds_no_machine_without_allow_on_the_machine`, `pairing_tests::a_computer_pairs_by_code_once_the_machine_allows_it`, `…::decline_no_answer_and_closing_leave_no_record`, `…::five_wrong_attempts_pause_pairing_but_not_paired_computers` |
+| **A hostile relay** | Everything after the E2EE hello is sealed and counted (E2EE framing v2); the device token travels inside it. A changed, replayed or reordered frame closes the connection. The relay can only drop or delay. | `relay_e2ee::tests::e2ee_frame_nonce_is_fixed_and_replays_fail`, `…::transcript_and_key_schedule_match_the_phone_fixture` |
+| **A hostile account server** | It cannot read an offer (HPKE-sealed to the requester's key) and cannot pair a computer: an account grant still waits for "Allow" and the fingerprint (decision 5). A forged directory entry leads to a machine whose fingerprint does not match. Revoking a computer revokes its grant, best effort. | `pairing_tests::a_computer_paired_through_a_grant_still_waits_for_allow_and_its_revocation_removes_it` |
+| **A hostile agent on the machine** | It has a shell (decision 5), so the boundary is letting someone else in. Making a code, Allow and Let back need a person's witness (`serve_cli::consent`): the kernel says which process asks, and the runtime refuses itself, its descendants and its terminals. The window's attachment is no boundary here: any process of the user can attach. Revoke and Disconnect are not guarded, since they only take access away (Accepted risks). | `security_tests::an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back`, `serve_cli::consent` tests |
+| **A hostile agent on the operating computer** | It drives what the person drives: the machine's projects with full rights (decision 5). It cannot add a machine: a code waits for "Allow" on the machine. No `terminalx` command adds or removes one; only the app's own windows do. No method pairs others, changes the operate switch, or reaches the browser, computer use, dictation, Local VM or runs; `fs.*` stays inside the projects. | `security_tests::a_code_alone_adds_no_machine_without_allow_on_the_machine`, `…::no_terminalx_command_adds_or_removes_a_machine`, `…::an_operating_computer_cannot_change_the_switch_or_reach_this_machines_own_controls`, `…::an_operating_computer_reads_only_inside_the_machines_projects`, `pairing_tests::a_paired_computer_has_no_pairing_browser_or_computer_methods` |
+| **A replayed message** | E2EE frames carry a counter: a replay closes the connection. A code works once. A rotated token replaces the old one once a connection is made with it, and a token whose answer was lost is never promoted. A consent witness answers its own nonce once. | `relay_e2ee::tests::e2ee_frame_nonce_is_fixed_and_replays_fail`, `security_tests::a_credential_rotates_on_each_connection` |
+
+Data privacy mode turns off both sides: the runtime treats the operate switch as
+off (no listener, no relay registration, no code), and this computer makes no
+machine connection (`data_privacy::require_network`, the IPC gate in
+`src/lib/dataPrivacy.ts`). Settings → Machines says so. Test:
+`security_tests::data_privacy_mode_opens_no_listener_and_makes_no_machine_connection`,
+which runs in a child process because data privacy is one switch per process.
+
+### Accepted risks
+
+- **A paired computer has a shell** (decision 5, confirmed). Revoking ends its
+  credential, not what it already did; the UI says only that.
+- **A shell on the operating computer can remove a machine** by editing
+  `machines.json` or the Keychain. That loses this computer's own access and
+  gains nothing, so no integrity key guards it.
+- **Consent cannot yet tell the window from a detached process** of the same
+  user on a desktop runtime (`serve_cli::consent`); recognising the window is
+  PRO-369. A same-user process that opens a pseudo-terminal of its own to run
+  `terminalx-serve pair` also passes.
+- **A computer on a runtime before PRO-357** does not rotate its token (it
+  does not ask for `machine/5`). Its token still expires after 90 days unused.
+- **Whoever holds a computer's client key and token is that computer.** With
+  both copied, someone can connect before the owner's computer uses its
+  rotated token; connecting with the old token drops the rotated one, so the
+  owner's computer is refused ("Access removed") while the copy keeps working.
+  The machine cannot tell the two apart. The lockout is the sign: the person
+  revokes the computer on the machine, checks the activity log, and pairs again.
+- **An agent on the machine can Revoke or Disconnect a computer.** It attaches
+  as any process of the user can. That takes access away and gives it none.
+- **An expired computer's account grant** ends when the operating computer
+  removes the machine, as it is asked to on "Access removed"; the machine ends
+  its connections and relay credential itself.
+
+### As built (PRO-357)
+
+- **Activity log.** `<data dir>/machine-host/activity.jsonl`, mode 0600, the
+  last 200 entries (cut back from 400), read by a restarted runtime. Entries:
+  paired, connected (with its route), disconnected, session created and
+  terminal opened (with the project's name), project added or removed while a
+  computer is connected (not put down to it: no method adds one), update (the
+  version), revoked, expired, held (Disconnect) and let back. Each has the
+  computer's name and the time; never a prompt, a command, a path or a file.
+  `runtime.machineHost.activity` and `machines_activity` read it; Settings →
+  Machines lists it under "Computers that can operate this Mac".
+- **Rotation.** `machine.rotateCredential` (`machine/5`, Manage) answers a new
+  device token; the host keeps its hash beside the current one. Admission with
+  the new one promotes it and drops the old; admission with the old one drops
+  the new. The client asks on every connection and keeps the new token in the
+  Keychain before anything else.
+- **Expiry.** A credential unused for 90 days (from the later of its approval
+  and its last connection) is removed at admission, refused `code-inactive`
+  ("Access removed"), and swept whenever the host reads its settings. A
+  computer connected now never expires, however long its link has been up.
+  Expiry ends its connections and relay credential as Revoke does.
+- **Revoke with no runtime.** `terminalx-serve devices revoke` writes the
+  "revoked" entry itself when it removes the record directly.
+- **Disconnect.** `runtime.machineHost.disconnect` closes the computer's
+  connections and refuses it with `pairing_refused` `disconnected` until
+  `runtime.machineHost.letBack`, which needs a person like Allow. The operating
+  computer shows Disconnected and does not retry until "Try again".
 
 ## Session feature parity
 

@@ -5,6 +5,7 @@ import type {
   InspectedMachineCode,
   MachineAccountDirectory,
   MachineAccountOffer,
+  MachineActivityEntry,
   MachineConnectionView,
   MachineHostView,
   MachinePairingCode,
@@ -25,6 +26,12 @@ export const machinesApi = {
   approve: (requestId: string) => invoke<unknown>("machines_approve", { requestId }),
   decline: (requestId: string) => invoke<unknown>("machines_decline", { requestId }),
   revoke: (id: string) => invoke<unknown>("machines_revoke", { id }),
+  /** Close a computer's connections and refuse it until it is let back (PRO-357). */
+  disconnect: (id: string) => invoke<unknown>("machines_disconnect", { id }),
+  /** Let a disconnected computer connect again. Like Allow, only a person may. */
+  letBack: (id: string) => invoke<unknown>("machines_let_back", { id }),
+  /** What operating computers did on this Mac: the last 200 entries, newest first. */
+  activity: () => invoke<MachineActivityEntry[]>("machines_activity"),
   inspectCode: (code: string) => invoke<InspectedMachineCode>("machines_inspect_code", { code }),
   pair: (code: string, route: MachineRoute) => invoke<MachinePairResult>("machines_pair", { code, route }),
   cancelPairing: () => invoke<unknown>("machines_cancel_pairing"),
@@ -144,6 +151,16 @@ export function declineMachine(requestId: string): Promise<boolean> {
 /** End a computer's credential and close its connection. */
 export function revokeComputer(id: string): Promise<boolean> {
   return command(() => machinesApi.revoke(id));
+}
+
+/** Close a computer's connections; it may not reconnect until it is let back. */
+export function disconnectComputer(id: string): Promise<boolean> {
+  return command(() => machinesApi.disconnect(id));
+}
+
+/** Let a disconnected computer connect again. */
+export function letComputerBack(id: string): Promise<boolean> {
+  return command(() => machinesApi.letBack(id));
 }
 
 /**
