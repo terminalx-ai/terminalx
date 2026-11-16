@@ -8,7 +8,7 @@ import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import type { PreparedCreate } from "@/lib/cloudNewSession";
-import { managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
+import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
 import { limitOf } from "@/lib/runningLimit";
@@ -61,8 +61,9 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
   const { status } = useAccount();
   const key = store.cloudSessionPreset?.projectKey ?? null;
   return useMemo(() => {
-    if (!key) return null;
-    const orgId = key.slice("cloud:".length).split(":")[0];
+    // Only a cloud project presets this form; any other key is no cloud draft.
+    const orgId = cloudKeyOrgId(key);
+    if (!orgId) return null;
     const org = status.organizations?.find((item) => item.id === orgId);
     const orgName = org ? (org.isPersonal ? "Personal" : org.name) : "Organization";
     const placed = placeCloudProjects(catalog.orgs[orgId] ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {

@@ -31,7 +31,7 @@ import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
-import { isCloudKey, isMachineKey, machineKeyKind, machineSectionKey, parseMachineKey } from "@/types/target";
+import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind, machineSectionKey, parseMachineKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -56,6 +56,8 @@ import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialo
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
+import { updateMachineSession } from "@/lib/machineCatalog";
+import { setMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
@@ -264,7 +266,9 @@ export function AppShell() {
   useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
   useShortcut("session.archive", () => {
     const id = getSessionStore().selectedSessionId;
-    if (id && !isCloudKey(id)) void archiveSession(id, true).catch(() => {});
+    // A cloud session is archived from its workspace; a machine session on its machine (PRO-346).
+    if (id && isLocalKey(id)) void archiveSession(id, true).catch(() => {});
+    else if (machineKeyKind(id) === "session") void updateMachineSession(id as string, { archived: true }).catch(() => {});
   });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
@@ -289,6 +293,8 @@ export function AppShell() {
   const experimentalSwitches = useExperimentalSettings();
   const machinesOn = experimentalSwitches?.machines === true;
   useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
+  // Machine sessions join the overview, the dock badge, notices and attention stepping only while it is on (PRO-346).
+  useEffect(() => setMachineDashboardEnabled(machinesOn), [machinesOn]);
   // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
   const selectedWorkspace = store.selectedCloudWorkspace ?? null;
   const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;

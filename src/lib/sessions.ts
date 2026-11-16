@@ -14,6 +14,7 @@ import { bootTabLayouts } from "@/lib/tabLayouts";
 import { isCompactWindow } from "@/lib/appWindow";
 import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
+import { isLocalKey } from "@/types/target";
 import type {
   ProjectPatch,
   Workspace, WorkspaceRestorePreview, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
@@ -675,11 +676,11 @@ let reportedShown: string | null = null;
 
 /**
  * Tell the backend which local session this window shows, so the idle sweep leaves it in the list. Only a change of
- * local session is said: a cloud session (`cloud:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
+ * local session is said: a cloud or machine session (`cloud:…`, `machine:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
  * Best effort: a window that cannot say is still covered by `runIdleArchive`'s `keep`.
  */
 function reportShownSession(id: string | null) {
-  const local = id && !id.startsWith("cloud:") ? id : null;
+  const local = id && isLocalKey(id) ? id : null;
   if (local === reportedShown) return;
   reportedShown = local;
   void Promise.resolve()
@@ -698,7 +699,7 @@ let idleArchiveStarted = false;
  * each session's tabs; this window adds the session it shows. What it archives reaches every window as an update.
  */
 export async function runIdleArchive(): Promise<string[]> {
-  const shown = state.selectedSessionId && !state.selectedSessionId.startsWith("cloud:") ? [state.selectedSessionId] : [];
+  const shown = state.selectedSessionId && isLocalKey(state.selectedSessionId) ? [state.selectedSessionId] : [];
   try {
     return await api.archiveIdleSessions(shown);
   } catch {
