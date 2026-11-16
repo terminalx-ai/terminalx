@@ -39,6 +39,7 @@
   --color-raised: var(--surface-raised);
   --color-add: var(--accent-add);
   --color-merged: var(--accent-merged);
+  --color-merged-foreground: var(--accent-merged-fg);
   --color-merge: var(--accent-merge);
   --color-merge-foreground: var(--accent-merge-fg);
   --color-command: var(--accent-command);
@@ -271,6 +272,16 @@
   line-height: 1.7;
   overflow-wrap: anywhere;
   color: color-mix(in oklab, var(--foreground) 86%, transparent);
+}
+/* Pull request prose in the side panel (PRO-395, design 05.08): 12.5px, muted, not chat size. */
+.prose-pr .prose-chat {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+}
+.prose-pr .prose-chat pre,
+.prose-pr .prose-chat table {
+  font-size: 12px;
 }
 /* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
 .prose-chat p,

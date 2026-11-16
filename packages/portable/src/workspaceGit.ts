@@ -107,6 +107,27 @@ export interface PrReviewer {
   kind: "user" | "team" | "bot";
   state: string;
   requested: boolean;
+  /** Display name, when the account has one. Absent on older runtimes. */
+  name?: string;
+  /** When the latest review was submitted, or a pending request made. */
+  at?: string;
+}
+/** How a merged pull request merged. Absent on older runtimes. */
+export interface PrMerged {
+  at: string | null;
+  by: string | null;
+  commit: string | null;
+  /** It merged with a merge commit (two parents), not squash or rebase. */
+  mergeCommit: boolean;
+  /** GitHub no longer has the head branch. */
+  branchDeleted: boolean;
+}
+/** The repository's merge methods for this viewer. */
+export interface PrMergeMethods {
+  default: "MERGE" | "SQUASH" | "REBASE" | null;
+  merge: boolean;
+  squash: boolean;
+  rebase: boolean;
 }
 export interface PrActivity {
   id: string;
@@ -130,6 +151,10 @@ export interface PrConversation {
   reviewers: PrReviewer[];
   unresolvedThreads: number;
   activity: PrActivity[];
+  base?: string;
+  commits?: number | null;
+  merged?: PrMerged | null;
+  mergeMethods?: PrMergeMethods | null;
 }
 export type PrConversationAction =
   | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }

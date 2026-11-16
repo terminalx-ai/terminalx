@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequestDraft, Loader2, RefreshCw, Unplug, X } from "@/icons";
+import { ChevronDown, ChevronRight, CircleCheck, CircleDot, ExternalLink, Maximize2, GitMerge, GitPullRequest, GitPullRequestDraft, Loader2, RefreshCw, Unplug, X } from "@/icons";
+import type { PrConversation as Conversation } from "@terminalx/portable/workspaceGit";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
@@ -12,19 +13,18 @@ import { onPrLinksChanged, unlinkPr } from "@/lib/prLinks";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { requestMergedSweep } from "@/lib/mergedCleanup";
+import { getMergedCleanup, holdMergedWorkspace, LOCAL_HOST, mergedCleanupOn, requestMergedSweep, useMergedCleanup } from "@/lib/mergedCleanup";
+import { noteMerge } from "@/lib/mergeMethods";
+import { useSessionStore } from "@/lib/sessions";
+import { pipelineSettings } from "@/lib/issuePipeline";
 import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { Deployments, PrChecks } from "./PrChecks";
 import { actionsRuns, checkCounts, checkSummary, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import { NextLine } from "./NextStep";
-import { PrConversation, useDocumentVisible } from "./PrConversation";
+import { PrConversation, SectionHead, useDocumentVisible } from "./PrConversation";
+import { MergeMenu, type MergeChoices } from "./MergeMenu";
+import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
 import { ReviewThreads } from "./ReviewThreads";
 import { noteSessionPrs } from "@/lib/reviewThreads";
 
@@ -146,6 +146,12 @@ export function PrPanel({
   const [tick, setTick] = useState(0);
   // Conversation pagination is independent of check/discovery polling.
   const [conversationRefresh, setConversationRefresh] = useState(0);
+  // What each conversation read said that the panel shows outside it: the merge menu's methods, who approved.
+  const [conversations, setConversations] = useState<Record<string, Conversation>>({});
+  const cleanup = useMergedCleanup();
+  const store = useSessionStore();
+  const project = store.projects.find((entry) => entry.path === store.sessions.find((entry) => entry.id === sessionId)?.projectPath);
+  const shortcutMethod = project ? pipelineSettings(project).mergeMethod : null;
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => { setLoginSource(null); }, [source]);
@@ -320,10 +326,33 @@ export function PrPanel({
   };
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
-  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>
-    void act("merge", () => row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method)).then((done) => {
-      if (done) void requestMergedSweep();
+  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue", choices?: MergeChoices) =>
+    void act("merge", async () => {
+      await (row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method));
+      if (method === "queue") return;
+      noteMerge(row.pr!.url, method);
+      if (choices?.deleteBranch && source.deleteMergedBranch) {
+        try { await source.deleteMergedBranch(row.pr!.number, row.association?.url); }
+        catch (e) { return `Merged. Its branch on GitHub was kept: ${source.errorMessage(e)}.`; }
+      }
+    }).then(async (done) => {
+      if (!done) return;
+      await requestMergedSweep();
+      // "Archive this session after merge": where clean-up archives merged workspaces, unticking keeps this one;
+      // where it does not, ticking opens the archive dialog, which says what would be lost first.
+      if (!choices || !workspace || !cwd) return;
+      const on = mergedCleanupOn(getMergedCleanup().settings, workspace.projectPath);
+      if (!choices.archive && on) await holdMergedWorkspace(LOCAL_HOST, cwd, true).catch(() => {});
+      else if (choices.archive && !on) workspace.onDelete();
     });
+  const archiveDefault = (row: SessionPr) => workspace && cwd && row.current ? mergedCleanupOn(cleanup.settings, workspace.projectPath) : null;
+  const mergeMenu = (row: SessionPr, size: "xs" | "sm", disabled: boolean) => {
+    const pr = row.pr!;
+    const read = conversations[row.identity];
+    return <MergeMenu url={pr.url} base={pr.base} methods={read?.mergeMethods} commits={read?.commits} size={size} disabled={disabled} working={working === "merge"}
+      archive={archiveDefault(row)} canDeleteBranch={!!source.deleteMergedBranch && !source.cloud} shortcutMethod={row.current ? shortcutMethod : null}
+      onMerge={(method, choices) => merge(row, method, choices)} />;
+  };
 
   if (connection && connection.state !== "connected") {
     return <GitHubSetup key={source.key} status={connection} onConnectingChange={(value) => setLoginSource(value ? source : null)} onRefresh={() => setTick((value) => value + 1)} />;
@@ -375,13 +404,14 @@ export function PrPanel({
         <p className="px-4 text-[11px] text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
-      {(workspace || onSettle) && merged && (
+      {/* In the Branch tab, the merged card's WHAT NEXT says this (design 05.12). */}
+      {!inline && (workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
           <span className="flex-1 text-foreground">This branch has been merged.</span>
           {canDelete ? (
             <Button size="xs" variant="outline" onClick={workspace?.onDelete}>
-              Delete workspace
+              Archive the session
             </Button>
           ) : onSettle && !workspace ? (
             <Button size="xs" variant="outline" onClick={onSettle}>
@@ -390,6 +420,9 @@ export function PrPanel({
           ) : null}
         </div>
       )}
+      {/* Clean-up's word on a merged workspace goes under the merged pull request's WHAT NEXT; with no such row shown
+          (GitHub unreachable, say), it stands on its own here. */}
+      {inline && cwd && !source.cloud && !visibleRows.some((row) => row.current && row.pr?.state === "MERGED") && <div className="px-3"><MergedWorkspaceStep cwd={cwd} /></div>}
       {loading && prs.length === 0 && !inline && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
       {visibleRows.map((row) => {
         const pr = row.pr;
@@ -398,18 +431,28 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh this pull request.</div>
           <CommandDetails details={row.error} />
         </div>;
-        // This owns the description as well as its editor, including in a PR tab.
-        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh} onEdited={(title, body) => {
-          if (selected.current.generation !== generation) return;
-          setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
-        }} />;
         const ready = mergeReadiness(pr);
         const reviews = <ReviewThreads source={source} url={pr.url} number={pr.number} sessionId={sessionId} active={active} prState={pr.state} />;
         const checks = <PrChecks pr={pr} source={source} showSummary={!inline} disabled={!!working || loading || !fresh} fixBusy={fixBusy}
           onRerun={(failedOnly) => rerun(pr, failedOnly)}
           onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+        const isMerged = pr.state === "MERGED";
+        // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
+        const whatNext = isMerged && inline && row.current && cwd && !source.cloud
+          ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+          : undefined;
+        // This owns the description as well as its editor, including in a PR tab.
+        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh}
+          merged={isMerged} whatNext={whatNext}
+          checks={inline ? <InlineChecks pr={pr} checks={checks} reviews={reviews} /> : undefined}
+          onRead={(read) => { if (selected.current.generation === generation) setConversations((previous) => previous[row.identity] === read ? previous : { ...previous, [row.identity]: read }); }}
+          onEdited={(title, body) => {
+            if (selected.current.generation !== generation) return;
+            setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
+          }} />;
         const onUnlink = unlink(row);
-        if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks} actions={pr.state === "OPEN" && source.canWrite && (
+        const approvedBy = (conversations[row.identity]?.reviewers ?? []).filter((reviewer) => reviewer.state === "APPROVED").map((reviewer) => reviewer.name ?? reviewer.login);
+        if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} approvedBy={approvedBy} conversation={conversation} actions={pr.state === "OPEN" && source.canWrite && (
           <>
             {pr.isDraft && (
               <Button size="xs" variant="secondary" disabled={!!working || loading || !fresh} onClick={() => void act("ready", () => row.association && source.prAccess ? source.prAccess(row.association).ready() : source.readyPr(pr.number))}>
@@ -417,9 +460,9 @@ export function PrPanel({
               </Button>
             )}
             {canQueue(pr) && <Button size="xs" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
-            {ready.ok && !pr.mergeQueueEnabled && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
+            {ready.ok && !pr.mergeQueueEnabled && mergeMenu(row, "xs", !!working || loading || !fresh)}
           </>
-        )} /><div className="px-4 pb-3">{conversation}</div></div>;
+        )} /></div>;
         return (
           <div key={row.identity} className="border-b border-hairline px-3 py-3">
             <div className="flex items-start gap-2">
@@ -461,23 +504,12 @@ export function PrPanel({
                     </Button>
                   )}
                   {source.canWrite && canQueue(pr) && <Button size="sm" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
-                  {source.canWrite && !pr.mergeQueueEnabled && <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button size="sm" className={cn("bg-merge text-merge-foreground hover:opacity-90", !ready.ok && "opacity-60")} disabled={!!working || loading || !fresh || !ready.ok}>
-                        {working === "merge" ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => merge(row, "merge")}>Merge commit</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => merge(row, "squash")}>Squash and merge</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => merge(row, "rebase")}>Rebase and merge</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>}
+                  {source.canWrite && !pr.mergeQueueEnabled && mergeMenu(row, "sm", !!working || loading || !fresh || !ready.ok)}
                 </div>
               </div>
             )}
-            {conversation}
-            {reviews}
+            <div className="mt-3">{conversation}</div>
+            {!isMerged && reviews}
           </div>
         );
       })}
@@ -596,71 +628,93 @@ function LinkedTag() {
   );
 }
 
-function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen, onUnlink, unlinkDisabled = false }: { onOpen?: () => void; onUnlink?: () => void; unlinkDisabled?: boolean; pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode }) {
-  const failing = pr.checks.filter(isFailingCheck).length;
-  const [checksOpen, setChecksOpen] = useState(failing > 0);
-  useEffect(() => {
-    if (failing > 0) setChecksOpen(true);
-  }, [failing]);
-  const state = pr.state === "OPEN" ? (pr.isDraft ? "Draft" : "Open") : pr.state === "MERGED" ? "Merged" : "Closed";
-  const tone = ready.ok && pr.mergeState !== "UNSTABLE" ? "good" : failing > 0 || pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED" ? "bad" : "muted";
+const PILL = {
+  Ready: "bg-add/15 text-add",
+  Open: "bg-info/15 text-info",
+  Draft: "bg-muted text-muted-foreground",
+  Merged: "bg-merged/15 text-merged",
+  Closed: "bg-destructive/15 text-destructive",
+} as const;
+
+/** The pull request's state as a pill before its title (design 05.08, 05.10): Ready once it can merge. */
+function StatePill({ pr, ready }: { pr: PullRequest; ready: boolean }) {
+  const state = pr.state === "MERGED" ? "Merged" : pr.state === "CLOSED" ? "Closed" : pr.isDraft ? "Draft" : ready ? "Ready" : "Open";
+  const Icon = state === "Merged" || state === "Ready" ? GitMerge : state === "Closed" ? X : state === "Draft" ? GitPullRequestDraft : GitPullRequest;
   return (
-    <div className="flex flex-col gap-1.5 px-3" data-testid="branch-pr">
-      <div className="flex min-w-0 items-center gap-2 px-1">
-        {pr.state === "MERGED" ? (
-          <GitMerge className="size-3.5 shrink-0 text-merged" />
-        ) : pr.state === "OPEN" && pr.isDraft ? (
-          <GitPullRequestDraft className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : pr.state === "OPEN" ? (
-          <CircleDot className="size-3.5 shrink-0 text-add" />
-        ) : (
-          <X className="size-3.5 shrink-0 text-destructive" />
-        )}
-        <button type="button" onClick={() => void openUrl(pr.url)} className="group flex min-w-0 flex-1 items-center gap-1 text-left text-xs hover:underline" title={pr.title}>
-          <span className="truncate text-foreground">{pr.title}</span>
-          <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
-        </button>
-        {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
-        {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={unlinkDisabled} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
-        <span className="shrink-0 text-[11px] text-faint">
-          {onUnlink && <LinkedTag />}
-          #{pr.number} · {state}
-        </span>
-      </div>
-      {pr.checks.length > 0 && (
-        <div className="px-1 pl-6.5">
-          <button type="button" onClick={() => setChecksOpen((v) => !v)} aria-expanded={checksOpen} className="flex items-center gap-1 text-[11px] text-faint hover:text-foreground" data-testid="branch-pr-checks">
-            {checksOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            {checkSummary(pr.checks)}
-          </button>
-          {checksOpen && <div className="mt-0.5">{checks}</div>}
-        </div>
-      )}
-      {reviews}
-      <Deployments pr={pr} />
-      {pr.detailsError && <p role="alert" className="text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
-      {pr.state === "OPEN" && held && pr.mergeQueueEntry && <p className="px-1 text-[11px] text-muted-foreground">{ready.label}</p>}
-      {pr.state === "OPEN" && pr.mergeQueueEntry && pr.mergeQueueEntry.state !== "QUEUED" && pr.mergeQueueEntry.state !== "MERGEABLE" && <p className="px-1 text-[11px] text-faint">Queue position {pr.mergeQueueEntry.position}</p>}
-      {pr.state === "OPEN" && !held && (
-        <NextLine tone={tone} text={`${ready.label}${pr.reviewDecision ? ` · ${reviewLabel(pr.reviewDecision)}` : ""}`} actions={actions || undefined} />
-      )}
-    </div>
+    <span className={cn("flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px]", PILL[state])} data-testid="pr-state-pill">
+      <Icon aria-hidden className="size-3" />
+      {state}
+    </span>
   );
 }
 
-function MergeMenu({ disabled, working, onMerge }: { disabled: boolean; working: boolean; onMerge: (method: "merge" | "squash" | "rebase") => void }) {
+/** CHECKS between REVIEW and DESCRIPTION (design 05.08): the count, unfolded on asking or when one fails. */
+function InlineChecks({ pr, checks, reviews }: { pr: PullRequest; checks: ReactNode; reviews: ReactNode }) {
+  const failing = pr.checks.filter(isFailingCheck).length;
+  const [open, setOpen] = useState(failing > 0);
+  useEffect(() => {
+    if (failing > 0) setOpen(true);
+  }, [failing]);
+  const counts = checkCounts(pr.checks);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button size="xs" className="bg-merge text-merge-foreground hover:opacity-90" disabled={disabled}>
-          {working ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuItem onSelect={() => onMerge("merge")}>Merge commit</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onMerge("squash")}>Squash and merge</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onMerge("rebase")}>Rebase and merge</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <section aria-label="Checks" className="flex min-w-0 flex-col gap-1">
+      <SectionHead
+        title="Checks"
+        summary={pr.checks.length ? (
+          <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open} data-testid="branch-pr-checks" title={open ? "Hide checks" : "Show checks"}
+            className={cn("flex min-w-0 items-center gap-1 rounded outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring", counts.failed ? "text-destructive" : !counts.running && counts.passed === counts.total ? "text-add" : undefined)}>
+            <span className="truncate">{checkSummary(pr.checks)}</span>
+            {open ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />}
+          </button>
+        ) : "None reported"}
+      />
+      {open && <div>{checks}</div>}
+      {reviews}
+      <Deployments pr={pr} />
+    </section>
+  );
+}
+
+function InlinePr({ pr, ready, held, actions, conversation, approvedBy, onOpen, onUnlink, unlinkDisabled = false }: { onOpen?: () => void; onUnlink?: () => void; unlinkDisabled?: boolean; pr: PullRequest; ready: { ok: boolean; label: string }; held: boolean; actions: ReactNode; conversation: ReactNode; approvedBy: string[] }) {
+  const failing = pr.checks.filter(isFailingCheck).length;
+  const good = ready.ok && pr.mergeState !== "UNSTABLE";
+  const tone = good ? "good" : failing > 0 || pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED" ? "bad" : "muted";
+  const counts = checkCounts(pr.checks);
+  const readyDetail = [
+    counts.total ? `${counts.passed} of ${counts.total} checks passed` : null,
+    approvedBy.length ? `approved by ${approvedBy.slice(0, 2).join(", ")}${approvedBy.length > 2 ? ` and ${approvedBy.length - 2} more` : ""}` : pr.reviewDecision ? reviewLabel(pr.reviewDecision) : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className="flex flex-col gap-3 px-3 pb-3" data-testid="branch-pr">
+      <div className="flex min-w-0 items-center gap-2 px-1">
+        <StatePill pr={pr} ready={pr.state === "OPEN" && !pr.isDraft && good} />
+        <button type="button" onClick={() => void openUrl(pr.url)} className="group flex min-w-0 flex-1 items-center gap-1 text-left text-[13px] font-medium hover:underline" title={pr.title}>
+          <span className="truncate text-foreground">{pr.title}</span>
+          <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
+        </button>
+        <span className="shrink-0 font-mono text-[12px] text-faint">
+          {onUnlink && <LinkedTag />}
+          #{pr.number}
+        </span>
+        {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
+        {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={unlinkDisabled} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
+      </div>
+      {pr.detailsError && <p role="alert" className="px-1 text-xs text-destructive">Could not refresh merge details: {pr.detailsError}</p>}
+      {pr.state === "OPEN" && held && pr.mergeQueueEntry && <p className="px-1 text-[11px] text-muted-foreground">{ready.label}</p>}
+      {pr.state === "OPEN" && pr.mergeQueueEntry && pr.mergeQueueEntry.state !== "QUEUED" && pr.mergeQueueEntry.state !== "MERGEABLE" && <p className="px-1 text-[11px] text-faint">Queue position {pr.mergeQueueEntry.position}</p>}
+      {pr.state === "OPEN" && !held && (good ? (
+        <div className="flex min-w-0 items-center gap-2.5 rounded-lg border border-add/30 bg-add/5 px-3 py-2.5" data-testid="next-step" data-tone="good">
+          <CircleCheck aria-hidden className="size-4 shrink-0 text-add" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-medium text-foreground">{ready.label}</div>
+            {readyDetail && <div className="truncate text-[11.5px] text-muted-foreground" title={readyDetail}>{readyDetail}</div>}
+          </div>
+          {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
+        </div>
+      ) : (
+        <NextLine tone={tone} text={`${ready.label}${pr.reviewDecision ? ` · ${reviewLabel(pr.reviewDecision)}` : ""}`} actions={actions || undefined} />
+      ))}
+      <div className="px-1">{conversation}</div>
+    </div>
   );
 }

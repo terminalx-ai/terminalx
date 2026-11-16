@@ -71,8 +71,13 @@ export const DialogContent = React.forwardRef<
     layout?: "page" | "pinned";
     /** Classes for the backdrop, for a dialog that holds the whole window and dims it further. */
     overlayClassName?: string;
+    /**
+     * "conversation": over the session's centre column (`data-conversation-column`), near its top, for a dialog about
+     * that session (design 05.19). Centred on the window when there is no such column or it is too narrow.
+     */
+    anchor?: "window" | "conversation";
   }
->(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, ...props }, ref) => {
+>(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, anchor = "window", style, ...props }, ref) => {
   const own = React.useRef<HTMLDivElement | null>(null);
   const setRef = React.useCallback((node: HTMLDivElement | null) => {
     own.current = node;
@@ -81,6 +86,7 @@ export const DialogContent = React.forwardRef<
   }, [ref]);
   // Read as the dialog unmounts, while its node still says how it was drawn.
   React.useLayoutEffect(() => () => leaveGracefully(own.current), []);
+  const placed = useConversationPlacement(anchor === "conversation");
   return (
   <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay data-dialog-overlay className={cn("fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out", overlayClassName)} />
@@ -96,6 +102,7 @@ export const DialogContent = React.forwardRef<
         width,
         className,
       )}
+      style={placed ? { ...placed, ...style } : style}
       {...props}
     >
       <DeferDialogNotices />
@@ -117,6 +124,36 @@ export const DialogContent = React.forwardRef<
   );
 });
 DialogContent.displayName = "DialogContent";
+
+/** The column's inset as the dialog's own, kept while the window resizes; null to centre on the window. */
+function useConversationPlacement(on: boolean): React.CSSProperties | null {
+  const read = React.useCallback((): React.CSSProperties | null => {
+    if (!on || typeof document === "undefined") return null;
+    const column = document.querySelector<HTMLElement>("[data-conversation-column]");
+    const rect = column?.getBoundingClientRect();
+    // Too narrow for the dialog and its margins: the window's centre reads better than a squeezed column.
+    if (!rect || rect.width < 480) return null;
+    const top = Math.round(rect.top + 104);
+    return {
+      top,
+      bottom: "auto",
+      left: Math.round(rect.left + 16),
+      right: Math.round(window.innerWidth - rect.right + 16),
+      width: "auto",
+      maxHeight: `calc(100dvh - ${top}px - 1rem)`,
+      marginTop: 0,
+    };
+  }, [on]);
+  const [placed, setPlaced] = React.useState(read);
+  React.useLayoutEffect(() => {
+    if (!on) return;
+    const update = () => setPlaced(read());
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [on, read]);
+  return placed;
+}
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("mb-4 flex shrink-0 flex-col gap-1", className)} {...props} />;

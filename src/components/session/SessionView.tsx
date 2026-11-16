@@ -597,7 +597,7 @@ export function SessionView({
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="flex h-full min-h-0 min-w-0 flex-1">
-      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col" data-conversation-column>
         <header
           data-tauri-drag-region="deep"
           className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"

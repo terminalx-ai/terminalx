@@ -2462,6 +2462,8 @@ export const gh = {
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  /** After a merge: the head branch on GitHub, only when merged, in this repository and still at the merged head. */
+  deleteBranch: (cwd: string, number: number, url?: string) => invoke<void>("pr_delete_branch", { cwd, number, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 

@@ -3653,6 +3653,11 @@ pub async fn pr_merge(cwd: String, number: u64, method: String, url: Option<Stri
 }
 
 #[tauri::command]
+pub async fn pr_delete_branch(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
+    github_work(move || crate::github::delete_merged_branch(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_ready(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
     github_work(move || crate::github::ready_associated_pr(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }

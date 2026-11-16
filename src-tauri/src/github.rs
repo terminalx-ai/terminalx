@@ -476,6 +476,41 @@ pub fn merge_associated_pr(cwd: &Path, number: u64, method: &str, url: Option<&s
     merge_pr_target(&outside_checkouts(), &target, method)
 }
 
+/// "Delete the branch after merge" in the panel's merge menu: the pull request's head branch on GitHub, only once it has
+/// merged, only when it is in the same repository (a fork's branch is not ours), and only while it still points at the
+/// head that merged. Already gone (GitHub deletes merged branches itself when the repository is set to) is done.
+pub fn delete_merged_branch(cwd: &Path, number: u64, url: Option<&str>) -> Result<()> {
+    let _request = crate::github_process::scope();
+    let target = associated_target(number, url)?;
+    let dir = if url.is_some() { outside_checkouts() } else { cwd.to_path_buf() };
+    delete_merged_branch_with(&target, |args| run(&dir, args))
+}
+
+fn delete_merged_branch_with(target: &str, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
+    let view: Value = serde_json::from_str(&run(&["pr", "view", target, "--json", "state,url,headRefName,headRefOid,isCrossRepository"])?)?;
+    if view["state"] != "MERGED" { bail!("the pull request has not merged"); }
+    if view["isCrossRepository"] != false { bail!("it is in another repository"); }
+    let branch = view["headRefName"].as_str().filter(|b| !b.is_empty()).context("GitHub omitted the head branch")?;
+    let head = view["headRefOid"].as_str().filter(|h| !h.is_empty()).context("GitHub omitted the head commit")?;
+    if branch.starts_with('-') || !branch.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/')) {
+        bail!("its name cannot be deleted from here");
+    }
+    let identity = crate::pr_associations::identity(view["url"].as_str().context("GitHub omitted the pull request URL")?)?;
+    let parts: Vec<_> = identity.trim_start_matches("https://").split('/').collect();
+    let [host, owner, repo, "pull", _] = parts.as_slice() else { bail!("Invalid pull request URL"); };
+    let reference = format!("repos/{owner}/{repo}/git/ref/heads/{branch}");
+    let at = match run(&["api", "--hostname", host, &reference, "--jq", ".object.sha"]) {
+        Ok(at) => at,
+        Err(error) if format!("{error:#}").contains("Not Found") => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if at.trim() != head { bail!("it has moved since the merge"); }
+    match run(&["api", "--hostname", host, "--method", "DELETE", &format!("repos/{owner}/{repo}/git/refs/heads/{branch}")]) {
+        Err(error) if !format!("{error:#}").contains("Reference does not exist") => Err(error),
+        _ => Ok(()),
+    }
+}
+
 pub fn ready_associated_pr(cwd: &Path, number: u64, url: Option<&str>) -> Result<()> {
     let _request = crate::github_process::scope();
     if url.is_none() { return mark_ready(cwd, number); }
@@ -2179,6 +2214,26 @@ mod tests {
         assert_eq!(remote_repo("https://github.com/acme/widgets.git").as_deref(), Some("acme/widgets"));
         assert_eq!(remote_repo("https://gitlab.com/acme/widgets.git"), None);
         assert_eq!(remote_repo("git@host:a/b/c.git"), None);
+    }
+
+    #[test]
+    fn deleting_the_merged_branch_checks_state_fork_and_head() {
+        let view = |state: &str, cross: bool| serde_json::json!({"state":state,"url":"https://github.com/acme/one/pull/7","headRefName":"feature/x","headRefOid":"abc","isCrossRepository":cross}).to_string();
+        let target = "https://github.com/acme/one/pull/7";
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        delete_merged_branch_with(target, |args| {
+            calls.push(args.iter().map(|a| a.to_string()).collect());
+            Ok(match calls.len() { 1 => view("MERGED", false), 2 => "abc\n".into(), _ => String::new() })
+        }).unwrap();
+        assert_eq!(calls[1], ["api", "--hostname", "github.com", "repos/acme/one/git/ref/heads/feature/x", "--jq", ".object.sha"]);
+        assert_eq!(calls[2], ["api", "--hostname", "github.com", "--method", "DELETE", "repos/acme/one/git/refs/heads/feature/x"]);
+        assert!(delete_merged_branch_with(target, |_| Ok(view("OPEN", false))).is_err());
+        assert!(delete_merged_branch_with(target, |_| Ok(view("MERGED", true))).is_err());
+        let mut n = 0;
+        let moved = delete_merged_branch_with(target, |args| { n += 1; assert!(!args.contains(&"DELETE")); Ok(if n == 1 { view("MERGED", false) } else { "def".into() }) });
+        assert!(format!("{:#}", moved.unwrap_err()).contains("moved"));
+        let mut n = 0;
+        delete_merged_branch_with(target, |_| { n += 1; if n == 1 { Ok(view("MERGED", false)) } else { bail!("gh: Not Found (HTTP 404)") } }).unwrap();
     }
 
     #[test]
