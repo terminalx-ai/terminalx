@@ -1369,6 +1369,31 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     expect(mocks.app.api.interrupt).not.toHaveBeenCalled();
   });
 
+  it("keeps Stop, and its long press, while a question the phone cannot answer and a permission request are open", async () => {
+    takesControls();
+    // This Mac takes controls but no answers from the phone, and reports the tab as waiting on the reader, not in progress.
+    mocks.app.api.features = async () => ({ sessionControls: 1 });
+    mocks.app.api.tabControls = vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "default", status: "waiting" }));
+    mocks.alert.mockReset();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [...working(), question(3, ago(1))], hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Answer this question from your Mac.");
+    expect(text()).toContain("Needs your answer · 1 min");
+    await click("Stop");
+    expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
+    await act(async () => { button("Stop").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const [title, , choices] = mocks.alert.mock.calls[0] as [string, string, { text: string; onPress?: () => void }[]];
+    expect(title).toBe("Stop this session?");
+    await act(async () => { choices.find((choice) => choice.text === "Stop")!.onPress!(); });
+    expect(mocks.app.api.stop).toHaveBeenCalledWith("worktree", "claude");
+
+    await publish(at(4, ago(0), { type: "permission_decided", requestId: "q1", allowed: true, label: "Merge now", automatic: false }), permission(5, ago(0)));
+    expect(text()).toContain("Needs approval");
+    await click("Stop");
+    expect(mocks.app.api.interrupt).toHaveBeenCalledTimes(2);
+  });
+
   it("drops the status line while not connected; the composer keeps its buttons (22.01)", async () => {
     takesControls();
     mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });

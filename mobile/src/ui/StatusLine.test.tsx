@@ -155,7 +155,7 @@ describe("StatusLine", () => {
     expect(container.textContent).toContain("Needs your answer · 1 min");
   });
 
-  it("offers Stop only while working, only when the Mac takes it, and not twice", async () => {
+  it("offers Stop only while a turn is open, only when the Mac takes it, and not twice", async () => {
     await render(<StatusLine state={{ kind: "working", since: NOW }} />);
     expect(stop()).toBeUndefined();
     await render(<StatusLine state={{ kind: "working", since: NOW }} onStop={() => undefined} stopping />);
@@ -175,6 +175,20 @@ describe("StatusLine", () => {
     expect(onStop).not.toHaveBeenCalled();
     await render(<StatusLine state={{ kind: "done", at: ago(1) }} />);
     expect(container.querySelector("[data-spinner]")).toBeNull();
+  });
+
+  it("keeps Stop, and its long press, while the agent waits on a question or a permission request", async () => {
+    for (const state of [{ kind: "needs_answer", since: NOW }, { kind: "needs_approval", since: NOW }, { kind: "needs_you" }] as const) {
+      const onStop = vi.fn();
+      const onStopSession = vi.fn();
+      await render(<StatusLine state={state} onStop={onStop} onStopSession={onStopSession} />);
+      await act(async () => { stop()!.click(); });
+      expect(onStop).toHaveBeenCalledTimes(1);
+      await act(async () => { stop()!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+      expect(onStopSession).toHaveBeenCalledTimes(1);
+    }
+    await render(<StatusLine state={{ kind: "stopped", reason: null, at: ago(1) }} onStop={() => undefined} />);
+    expect(stop()).toBeUndefined();
   });
 
   it("draws nothing without a state", async () => {
