@@ -467,14 +467,14 @@ async fn the_direct_route_drops_and_the_machine_answers_through_the_relay() {
     let attached = rig.web.ok(&rig.supervisor, "pty.attach", json!({ "ptyId": pty_id })).await;
     let replayed = String::from_utf8_lossy(&STANDARD.decode(attached["data"].as_str().unwrap_or_default()).unwrap_or_default()).into_owned();
     assert!(replayed.contains("before-42"), "the shell's earlier output is replayed: {replayed:?}");
-    // Through the relay the machine knows the computer as its relay device,
-    // not as the direct route's computer id, and has no installation key to
-    // tie the two: the computer takes its terminal back (`pty.control`, its
-    // full rights), and its writes are numbered afresh for that device.
-    let refused = rig.web.call(&rig.supervisor, "pty.write", json!({ "ptyId": pty_id, "data": "echo refused\n", "seq": 1 })).await;
-    assert_eq!(refused["error"]["code"], "not_controller", "{refused}");
-    rig.web.ok(&rig.supervisor, "pty.control", json!({ "ptyId": pty_id })).await;
-    let wrote = rig.web.ok(&rig.supervisor, "pty.write", json!({ "ptyId": pty_id, "data": "echo after-$((50+8))\n", "seq": 1 })).await;
+    // Through the relay the machine knows the computer by the same id as on
+    // the direct route, so it still controls its terminal (the desktop never
+    // takes control back after a route change) and its write numbering
+    // carries on: a resent write is dropped, the next one runs.
+    assert_eq!(attached["control"], "you", "the computer still controls its terminal: {attached}");
+    let resent = rig.web.ok(&rig.supervisor, "pty.write", json!({ "ptyId": pty_id, "data": "echo before-$((40+2))\n", "seq": 1 })).await;
+    assert_eq!(resent["applied"], false, "the direct route's write is not typed again: {resent}");
+    let wrote = rig.web.ok(&rig.supervisor, "pty.write", json!({ "ptyId": pty_id, "data": "echo after-$((50+8))\n", "seq": 2 })).await;
     assert_eq!(wrote["applied"], true, "{wrote}");
     rig.web.output_until(&pty_id, "after-58").await;
     assert!(relay(&rig.supervisor.state()), "still on the relay: {:?}", rig.supervisor.state());

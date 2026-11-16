@@ -1029,8 +1029,12 @@ impl RelayHost {
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, notifications) =
-            Peer::for_installation(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), device.installation_key.clone());
+        // A paired computer is the same peer on every route: its registry id,
+        // as the direct route names it (`machine_host::direct`). Under its
+        // relay device id it would lose its terminals' control and its write
+        // numbering each time it moved between the direct route and the relay.
+        let peer_id = computer.as_ref().map_or_else(|| connection.relay_device_id.clone(), |(computer_id, _)| computer_id.clone());
+        let (peer, notifications) = Peer::for_installation(peer_id, device.authority, device.user_id.clone(), device.installation_key.clone());
         log::info!("relay host: attachment {} connected ({:?})", device.attachment_id, device.authority);
         let result = serve_rpc(&mut socket, &mut session, &self.rpc, &peer, notifications, &mut cancel, |request| {
             (request["method"] == "pairing.provisionRelay").then(|| {

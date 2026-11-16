@@ -43,7 +43,7 @@ use base64::{
 };
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
-use raccoon_lib::cloud_agents::crypto::{random_bytes, sha256_hex};
+use raccoon_lib::cloud_agents::crypto::random_bytes;
 use raccoon_lib::relay_e2ee::{host_id_of, random_token, token_hash};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -94,11 +94,6 @@ fn text(value: Value) -> Out {
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
-}
-
-fn sha256(bytes: &[u8]) -> [u8; 32] {
-    let hex = sha256_hex(bytes);
-    std::array::from_fn(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1069,357 +1064,33 @@ impl HostChallenge {
     }
 
     fn verify(&self, proof_b64: &str) -> bool {
-        let expected = nacl::hmac_sha256(sha256, &self.secret, &[b"terminalx-relay-host-proof/v1\0ack\0".as_slice(), self.transcript.as_slice()]);
+        let expected = nacl::hmac_sha256(&self.secret, &[b"terminalx-relay-host-proof/v1\0ack\0".as_slice(), self.transcript.as_slice()]);
         now_ms() <= self.expires_at && STANDARD.encode(expected) == proof_b64
     }
 }
 
-/// NaCl's `crypto_box` (X25519, HSalsa20, XSalsa20-Poly1305), laid out as
-/// NaCl and the hosted relay's library lay it out (the tag first), and
-/// HMAC-SHA-256: what the host challenge needs, written out because the test
-/// crate has no crypto crate of its own. Not constant time: test use only.
+/// NaCl's `crypto_box` and HMAC-SHA-256, from the crates the runtime opens
+/// and answers the host challenge with (`relay_e2ee::answer_relay_challenge`).
 mod nacl {
-    #![allow(clippy::needless_range_loop)]
+    use crypto_box::aead::{generic_array::GenericArray, Aead};
+    use crypto_box::{PublicKey, SalsaBox, SecretKey};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
-    type Gf = [i64; 16];
-
-    fn carry(o: &mut Gf) {
-        for i in 0..16 {
-            o[i] += 1 << 16;
-            let c = o[i] >> 16;
-            if i < 15 {
-                o[i + 1] += c - 1;
-            } else {
-                o[0] += 38 * (c - 1);
-            }
-            o[i] -= c << 16;
-        }
-    }
-
-    fn select(p: &mut Gf, q: &mut Gf, bit: i64) {
-        let mask = !(bit - 1);
-        for i in 0..16 {
-            let t = mask & (p[i] ^ q[i]);
-            p[i] ^= t;
-            q[i] ^= t;
-        }
-    }
-
-    fn pack(n: &Gf) -> [u8; 32] {
-        let mut t = *n;
-        carry(&mut t);
-        carry(&mut t);
-        carry(&mut t);
-        for _ in 0..2 {
-            let mut m: Gf = [0; 16];
-            m[0] = t[0] - 0xffed;
-            for i in 1..15 {
-                m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
-                m[i - 1] &= 0xffff;
-            }
-            m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
-            let bit = (m[15] >> 16) & 1;
-            m[14] &= 0xffff;
-            select(&mut t, &mut m, 1 - bit);
-        }
-        let mut out = [0u8; 32];
-        for i in 0..16 {
-            out[2 * i] = (t[i] & 0xff) as u8;
-            out[2 * i + 1] = (t[i] >> 8) as u8;
-        }
-        out
-    }
-
-    fn unpack(n: &[u8; 32]) -> Gf {
-        let mut o: Gf = [0; 16];
-        for i in 0..16 {
-            o[i] = n[2 * i] as i64 + ((n[2 * i + 1] as i64) << 8);
-        }
-        o[15] &= 0x7fff;
-        o
-    }
-
-    fn add(a: &Gf, b: &Gf) -> Gf {
-        std::array::from_fn(|i| a[i] + b[i])
-    }
-
-    fn sub(a: &Gf, b: &Gf) -> Gf {
-        std::array::from_fn(|i| a[i] - b[i])
-    }
-
-    fn mul(a: &Gf, b: &Gf) -> Gf {
-        let mut t = [0i64; 31];
-        for i in 0..16 {
-            for j in 0..16 {
-                t[i + j] += a[i] * b[j];
-            }
-        }
-        for i in 0..15 {
-            t[i] += 38 * t[i + 16];
-        }
-        let mut o: Gf = std::array::from_fn(|i| t[i]);
-        carry(&mut o);
-        carry(&mut o);
-        o
-    }
-
-    fn invert(i: &Gf) -> Gf {
-        let mut c = *i;
-        for a in (0..=253).rev() {
-            c = mul(&c, &c);
-            if a != 2 && a != 4 {
-                c = mul(&c, i);
-            }
-        }
-        c
-    }
-
-    /// X25519: `scalar` times the point `u`.
-    pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
-        let mut z = *scalar;
-        z[31] = (z[31] & 127) | 64;
-        z[0] &= 248;
-        let x = unpack(u);
-        let (mut a, mut b, mut c, mut d): (Gf, Gf, Gf, Gf) = ([0; 16], x, [0; 16], [0; 16]);
-        a[0] = 1;
-        d[0] = 1;
-        let mut k121665: Gf = [0; 16];
-        k121665[0] = 0xdb41;
-        k121665[1] = 1;
-        for i in (0..=254).rev() {
-            let bit = ((z[i >> 3] >> (i & 7)) & 1) as i64;
-            select(&mut a, &mut b, bit);
-            select(&mut c, &mut d, bit);
-            let e = add(&a, &c);
-            a = sub(&a, &c);
-            c = add(&b, &d);
-            b = sub(&b, &d);
-            d = mul(&e, &e);
-            let f = mul(&a, &a);
-            a = mul(&c, &a);
-            c = mul(&b, &e);
-            let e = add(&a, &c);
-            a = sub(&a, &c);
-            b = mul(&a, &a);
-            c = sub(&d, &f);
-            a = mul(&c, &k121665);
-            a = add(&a, &d);
-            c = mul(&c, &a);
-            a = mul(&d, &f);
-            d = mul(&b, &x);
-            b = mul(&e, &e);
-            select(&mut a, &mut b, bit);
-            select(&mut c, &mut d, bit);
-        }
-        pack(&mul(&a, &invert(&c)))
-    }
-
-    /// The public key of a secret key.
     pub fn public_key(secret: &[u8; 32]) -> [u8; 32] {
-        let mut nine = [0u8; 32];
-        nine[0] = 9;
-        x25519(secret, &nine)
+        *SecretKey::from(*secret).public_key().as_bytes()
     }
 
-    const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
-
-    fn word(bytes: &[u8]) -> u32 {
-        u32::from_le_bytes(bytes[..4].try_into().unwrap())
-    }
-
-    /// Salsa20's 20 rounds over `input`.
-    fn rounds(input: &[u32; 16]) -> [u32; 16] {
-        let mut x = *input;
-        let quarter = |x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize| {
-            x[b] ^= x[a].wrapping_add(x[d]).rotate_left(7);
-            x[c] ^= x[b].wrapping_add(x[a]).rotate_left(9);
-            x[d] ^= x[c].wrapping_add(x[b]).rotate_left(13);
-            x[a] ^= x[d].wrapping_add(x[c]).rotate_left(18);
-        };
-        for _ in 0..10 {
-            quarter(&mut x, 0, 4, 8, 12);
-            quarter(&mut x, 5, 9, 13, 1);
-            quarter(&mut x, 10, 14, 2, 6);
-            quarter(&mut x, 15, 3, 7, 11);
-            quarter(&mut x, 0, 1, 2, 3);
-            quarter(&mut x, 5, 6, 7, 4);
-            quarter(&mut x, 10, 11, 8, 9);
-            quarter(&mut x, 15, 12, 13, 14);
-        }
-        x
-    }
-
-    fn state(key: &[u8; 32], middle: [u32; 4]) -> [u32; 16] {
-        [
-            SIGMA[0],
-            word(&key[0..]),
-            word(&key[4..]),
-            word(&key[8..]),
-            word(&key[12..]),
-            SIGMA[1],
-            middle[0],
-            middle[1],
-            middle[2],
-            middle[3],
-            SIGMA[2],
-            word(&key[16..]),
-            word(&key[20..]),
-            word(&key[24..]),
-            word(&key[28..]),
-            SIGMA[3],
-        ]
-    }
-
-    fn hsalsa20(key: &[u8; 32], input: &[u8; 16]) -> [u8; 32] {
-        let x = rounds(&state(key, [word(&input[0..]), word(&input[4..]), word(&input[8..]), word(&input[12..])]));
-        let mut out = [0u8; 32];
-        for (slot, index) in [0, 5, 10, 15, 6, 7, 8, 9].into_iter().enumerate() {
-            out[slot * 4..slot * 4 + 4].copy_from_slice(&x[index].to_le_bytes());
-        }
-        out
-    }
-
-    /// `length` bytes of the Salsa20 stream for `key` and an 8-byte nonce.
-    fn salsa20_stream(key: &[u8; 32], nonce: &[u8], length: usize) -> Vec<u8> {
-        let mut out = Vec::with_capacity(length + 64);
-        let mut counter = 0u64;
-        while out.len() < length {
-            let input = state(key, [word(&nonce[0..]), word(&nonce[4..]), counter as u32, (counter >> 32) as u32]);
-            let mixed = rounds(&input);
-            for i in 0..16 {
-                out.extend_from_slice(&mixed[i].wrapping_add(input[i]).to_le_bytes());
-            }
-            counter += 1;
-        }
-        out.truncate(length);
-        out
-    }
-
-    fn poly1305(key: &[u8], message: &[u8]) -> [u8; 16] {
-        const MASK: u32 = 0x3ff_ffff;
-        let r0 = word(&key[0..]) & MASK;
-        let r1 = (word(&key[3..]) >> 2) & 0x3ff_ff03;
-        let r2 = (word(&key[6..]) >> 4) & 0x3ff_c0ff;
-        let r3 = (word(&key[9..]) >> 6) & 0x3f0_3fff;
-        let r4 = (word(&key[12..]) >> 8) & 0x00f_ffff;
-        let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
-        let (mut h0, mut h1, mut h2, mut h3, mut h4) = (0u32, 0u32, 0u32, 0u32, 0u32);
-        for chunk in message.chunks(16) {
-            let mut block = [0u8; 17];
-            block[..chunk.len()].copy_from_slice(chunk);
-            let high = if chunk.len() == 16 {
-                1 << 24
-            } else {
-                block[chunk.len()] = 1;
-                0
-            };
-            h0 += word(&block[0..]) & MASK;
-            h1 += (word(&block[3..]) >> 2) & MASK;
-            h2 += (word(&block[6..]) >> 4) & MASK;
-            h3 += (word(&block[9..]) >> 6) & MASK;
-            h4 += (word(&block[12..]) >> 8) | high;
-            let m = |a: u32, b: u32| a as u64 * b as u64;
-            let d0 = m(h0, r0) + m(h1, s4) + m(h2, s3) + m(h3, s2) + m(h4, s1);
-            let mut d1 = m(h0, r1) + m(h1, r0) + m(h2, s4) + m(h3, s3) + m(h4, s2);
-            let mut d2 = m(h0, r2) + m(h1, r1) + m(h2, r0) + m(h3, s4) + m(h4, s3);
-            let mut d3 = m(h0, r3) + m(h1, r2) + m(h2, r1) + m(h3, r0) + m(h4, s4);
-            let mut d4 = m(h0, r4) + m(h1, r3) + m(h2, r2) + m(h3, r1) + m(h4, r0);
-            let mut c = (d0 >> 26) as u32;
-            h0 = d0 as u32 & MASK;
-            d1 += c as u64;
-            c = (d1 >> 26) as u32;
-            h1 = d1 as u32 & MASK;
-            d2 += c as u64;
-            c = (d2 >> 26) as u32;
-            h2 = d2 as u32 & MASK;
-            d3 += c as u64;
-            c = (d3 >> 26) as u32;
-            h3 = d3 as u32 & MASK;
-            d4 += c as u64;
-            c = (d4 >> 26) as u32;
-            h4 = d4 as u32 & MASK;
-            h0 += c * 5;
-            c = h0 >> 26;
-            h0 &= MASK;
-            h1 += c;
-        }
-        let mut c = h1 >> 26;
-        h1 &= MASK;
-        h2 += c;
-        c = h2 >> 26;
-        h2 &= MASK;
-        h3 += c;
-        c = h3 >> 26;
-        h3 &= MASK;
-        h4 += c;
-        c = h4 >> 26;
-        h4 &= MASK;
-        h0 += c * 5;
-        c = h0 >> 26;
-        h0 &= MASK;
-        h1 += c;
-        let mut g0 = h0.wrapping_add(5);
-        c = g0 >> 26;
-        g0 &= MASK;
-        let mut g1 = h1.wrapping_add(c);
-        c = g1 >> 26;
-        g1 &= MASK;
-        let mut g2 = h2.wrapping_add(c);
-        c = g2 >> 26;
-        g2 &= MASK;
-        let mut g3 = h3.wrapping_add(c);
-        c = g3 >> 26;
-        g3 &= MASK;
-        let mut g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
-        // All ones when h - p did not go below zero: take g = h - p.
-        let take_g = (g4 >> 31).wrapping_sub(1);
-        g0 &= take_g;
-        g1 &= take_g;
-        g2 &= take_g;
-        g3 &= take_g;
-        g4 &= take_g;
-        let keep_h = !take_g;
-        h0 = (h0 & keep_h) | g0;
-        h1 = (h1 & keep_h) | g1;
-        h2 = (h2 & keep_h) | g2;
-        h3 = (h3 & keep_h) | g3;
-        h4 = (h4 & keep_h) | g4;
-        let words = [h0 | (h1 << 26), (h1 >> 6) | (h2 << 20), (h2 >> 12) | (h3 << 14), (h3 >> 18) | (h4 << 8)];
-        let mut tag = [0u8; 16];
-        let mut f = 0u64;
-        for (i, h) in words.into_iter().enumerate() {
-            f = h as u64 + word(&key[16 + 4 * i..]) as u64 + (f >> 32);
-            tag[4 * i..4 * i + 4].copy_from_slice(&(f as u32).to_le_bytes());
-        }
-        tag
-    }
-
-    /// `crypto_box`: sealed from `secret` to `public` under `nonce`, the
-    /// 16-byte tag first.
+    /// `plaintext` sealed from `secret` to `public` under `nonce`.
     pub fn seal_box(plaintext: &[u8], nonce: &[u8; 24], public: &[u8; 32], secret: &[u8; 32]) -> Vec<u8> {
-        let key = hsalsa20(&x25519(secret, public), &[0; 16]);
-        let subkey = hsalsa20(&key, nonce[..16].try_into().unwrap());
-        let stream = salsa20_stream(&subkey, &nonce[16..], 32 + plaintext.len());
-        let ciphertext: Vec<u8> = plaintext.iter().zip(&stream[32..]).map(|(byte, pad)| byte ^ pad).collect();
-        let mut sealed = poly1305(&stream[..32], &ciphertext).to_vec();
-        sealed.extend_from_slice(&ciphertext);
-        sealed
+        SalsaBox::new(&PublicKey::from(*public), &SecretKey::from(*secret)).encrypt(GenericArray::from_slice(nonce), plaintext).expect("crypto_box seals")
     }
 
-    /// HMAC-SHA-256 over the concatenation of `parts`, with `hash` as SHA-256.
-    pub fn hmac_sha256(hash: impl Fn(&[u8]) -> [u8; 32], key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-        let mut block = [0u8; 64];
-        if key.len() > 64 {
-            block[..32].copy_from_slice(&hash(key));
-        } else {
-            block[..key.len()].copy_from_slice(key);
-        }
-        let mut inner: Vec<u8> = block.iter().map(|byte| byte ^ 0x36).collect();
+    pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
         for part in parts {
-            inner.extend_from_slice(part);
+            mac.update(part);
         }
-        let mut outer: Vec<u8> = block.iter().map(|byte| byte ^ 0x5c).collect();
-        outer.extend_from_slice(&hash(&inner));
-        hash(&outer)
+        mac.finalize().into_bytes().into()
     }
 }
