@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use base64::Engine as _;
-use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem as _, OpModeS, Serializable};
+use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, OpModeS, Serializable};
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use serde_json::{json, Value};
 
