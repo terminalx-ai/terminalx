@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronRight, Copy, Ellipsis, Loader2, Plus, Trash2 } from "@/icons";
+import { Check, ChevronRight, Copy, Ellipsis, Info, Loader2, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -21,6 +21,7 @@ import { AddMachineDialog } from "./AddMachineDialog";
 import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connectionStatus";
 import { PlatformIcon, keyLabel, osLabel, routeLabel, seenText, shortDate, soft } from "./machineText";
 import { runningText, useRunningSessions } from "./useRunningSessions";
+import { MachinePage } from "./MachinePage";
 
 const heading = "text-[14px] font-semibold";
 const card = "flex min-h-14 items-center gap-3 rounded-lg border border-hairline px-3 py-2.5";
@@ -38,6 +39,13 @@ export function MachinesSettings() {
 }
 
 function MachinesSettingsContent() {
+  // A machine's page (21.10) in place of the list; Machines in its breadcrumb comes back.
+  const [page, setPage] = useState<string | null>(null);
+  if (page) return <MachinePage machineId={page} onBack={() => setPage(null)} />;
+  return <MachinesList onOpen={setPage} />;
+}
+
+function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
   const host = useMachineHost();
   useEffect(() => {
     void bootMachineHost();
@@ -76,7 +84,7 @@ function MachinesSettingsContent() {
       )}
       <RegisteredSetting setting="machines.yours">
         <section className="mt-6">
-          <YourMachines />
+          <YourMachines onOpen={onOpen} />
         </section>
       </RegisteredSetting>
       <RegisteredSetting setting="machines.computers">
@@ -252,7 +260,7 @@ function PairingCode() {
  * Machines this Mac can operate, from the same store as the sidebar, so a
  * machine paired or removed here shows there at once.
  */
-function YourMachines() {
+function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
   const store = useMachineConnections();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<PairedMachine | null>(null);
@@ -275,7 +283,7 @@ function YourMachines() {
       {store.machines.length > 0 && (
         <ul className="mt-2.5 grid gap-2" aria-label="Your machines">
           {store.machines.map((machine) => (
-            <MachineCard key={machine.machineId} machine={machine} onRemove={() => setRemoving(machine)} />
+            <MachineCard key={machine.machineId} machine={machine} onOpen={() => onOpen(machine.machineId)} onRemove={() => setRemoving(machine)} />
           ))}
         </ul>
       )}
@@ -300,6 +308,7 @@ function CardState({ state }: { state: MachineConnectionState }) {
     relay: "Connected",
     reconnecting: "Reconnecting",
     offline: "Offline",
+    updating: "Updating",
     needsUpdate: "Needs update",
     accessRemoved: "Access removed",
   };
@@ -332,7 +341,7 @@ function cardLine(machine: PairedMachine, state: MachineConnectionState, running
 }
 
 /** One machine this Mac operates. Choosing it opens the machine's page; the menu removes it. */
-function MachineCard({ machine, onRemove }: { machine: PairedMachine; onRemove: () => void }) {
+function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMachine; onOpen: () => void; onRemove: () => void }) {
   const store = useMachineConnections();
   const { state, connection } = machineConnection(store, machine.machineId);
   const running = useRunningSessions(connection, connectedState(state));
@@ -371,6 +380,10 @@ function MachineCard({ machine, onRemove }: { machine: PairedMachine; onRemove: 
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          {/* Its page (21.10): version, updates and details (PRO-354). */}
+          <DropdownMenuItem onSelect={onOpen}>
+            <Info /> Version and updates…
+          </DropdownMenuItem>
           <DropdownMenuItem className="text-destructive" onSelect={onRemove}>
             <Trash2 /> Remove from this Mac…
           </DropdownMenuItem>

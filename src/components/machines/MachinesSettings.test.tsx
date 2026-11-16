@@ -42,7 +42,7 @@ beforeEach(async () => {
   connections = [
     { machineId: MINI, state: { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.2:6768/machine/1" }, since: Date.now(), rttMs: 9 } },
     { machineId: STUDIO, state: { state: "offline", lastSeenAt: Date.now() - 86_400_000, retryInMs: 10_000 } },
-    { machineId: CI, state: { state: "needsUpdate", version: "0.2.27" } },
+    { machineId: CI, state: { state: "needsUpdate", version: "0.2.27", side: "machine" } },
   ];
   mocks.invoke.mockReset().mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
     if (command === "data_privacy_status") return { enabled: privacy, managed: false };

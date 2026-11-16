@@ -49,6 +49,10 @@ impl RecoveryKind {
     }
 }
 
+/// What "Continue here" sends, and what a tab switched to another account
+/// after hitting its usage limit is sent so its work goes on (#981).
+pub const CONTINUE_PROMPT: &str = "continue";
+
 /// The most of an agent's own words the chat shows under an error, in characters.
 pub const DETAIL_CHARS: usize = 240;
 

@@ -326,8 +326,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
-    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, or remove it.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline"], scope: "user",
+    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it.",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({

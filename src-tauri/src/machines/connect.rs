@@ -223,6 +223,11 @@ impl MachineEnv for StoreEnv {
             log::warn!("machines: forget the relay credential of machine {}: {error:#}", self.machine_id);
         }
     }
+
+    fn recorded_version(&self) -> Option<String> {
+        let record = self.machines.store().and_then(|store| store.get(&self.machine_id)).ok().flatten()?;
+        Some(record.version).filter(|version| !version.trim().is_empty())
+    }
 }
 
 /// A successful `machine.describe` on `route`: the name, os, version and

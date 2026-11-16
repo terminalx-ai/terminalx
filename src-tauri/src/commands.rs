@@ -3727,6 +3727,14 @@ pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id:
     }).await.map_err(err)?
 }
 
+/// The person is typing in a tab's composer (#981): automatic account
+/// switching leaves the tab alone meanwhile. Best effort.
+#[tauri::command]
+pub async fn tab_note_typing(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let Ok(sessions) = state.sessions() else { return Ok(()) };
+    tauri::async_runtime::spawn_blocking(move || sessions.note_typing(&session_id, &tab_id)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -> CmdResult<()> {
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;

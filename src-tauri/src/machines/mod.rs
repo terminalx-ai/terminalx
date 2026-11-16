@@ -33,6 +33,14 @@ use self::store::{MachineRoute, MachineStore, PairedMachine};
 /// two switches it shows change.
 pub const HOST_CHANGED_EVENT: &str = "machines_host_changed";
 
+/// Emitted with `{ version }` when another computer asks this Mac's app to
+/// update (`MACHINES_APP_UPDATE_REQUESTED_EVENT` in src/types/machines.ts):
+/// the runtime's [`crate::remote::machine_update::REQUESTED_EVENT`], re-emitted.
+pub const APP_UPDATE_REQUESTED_EVENT: &str = "machines_app_update_requested";
+
+/// The control call the window's updater reports go to (PRO-354).
+const APP_UPDATE_REPORT: &str = "runtime.machineUpdate.report";
+
 /// `MachineHostView` in src/types/machines.ts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +122,15 @@ impl Machines {
                 let Ok(status) = serde_json::from_str::<Status>(payload) else { return };
                 *machines.last_status.lock().unwrap() = Some(status.clone());
                 events.emit(HOST_CHANGED_EVENT, &view(Some(status)));
+            }),
+        );
+        let events = sink.clone();
+        sink.listen(
+            crate::remote::machine_update::REQUESTED_EVENT,
+            Box::new(move |payload| {
+                let Ok(requested) = serde_json::from_str::<serde_json::Value>(payload) else { return };
+                log::info!("machines: another computer asked this Mac to update to {}", requested["version"]);
+                events.emit(APP_UPDATE_REQUESTED_EVENT, &serde_json::json!({ "version": requested["version"] }));
             }),
         );
         let (machines, events) = (Arc::downgrade(self), sink.clone());
@@ -339,6 +356,30 @@ fn revoked_grant(answer: &serde_json::Value) -> Option<&str> {
     answer["grantRequestId"].as_str().filter(|grant| !grant.is_empty())
 }
 
+/// The app's own updater run, as the window reports each step after
+/// [`APP_UPDATE_REQUESTED_EVENT`] (`MachineAppUpdateReport`): forwarded to
+/// the runtime, which tells the computer that asked (`machine.updateChanged`).
+/// `available` is the version the app's updater offers, once it has checked.
+#[tauri::command]
+pub async fn machines_app_update_report(
+    phase: String,
+    step: Option<String>,
+    message: Option<String>,
+    available: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<()> {
+    const PHASES: [&str; 6] = ["checking", "downloading", "installing", "restarting", "upToDate", "failed"];
+    if !PHASES.contains(&phase.as_str()) {
+        return Err(format!("unknown app update phase {phase:?}"));
+    }
+    let runtime = runtime(&state)?;
+    let mut params = serde_json::json!({ "phase": phase, "step": step, "message": message });
+    if let Some(available) = available {
+        params["available"] = serde_json::json!(available);
+    }
+    tauri::async_runtime::spawn_blocking(move || runtime.machine_host(APP_UPDATE_REPORT, params).map(drop).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn machines_inspect_code(code: String, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<InspectedMachineCode> {
     let machines = machines.inner().clone();
@@ -384,6 +425,24 @@ mod tests {
     fn a_pair_result_serialises_as_the_ui_reads_it() {
         let failed = MachinePairResult::failed(pair::Failure { reason: "not-approved", message: "no".into() });
         assert_eq!(serde_json::to_value(failed).unwrap(), serde_json::json!({ "paired": false, "reason": "not-approved", "message": "no" }));
+    }
+
+    /// PRO-354: the runtime's request reaches the web views under the name
+    /// src/types/machines.ts listens for.
+    #[test]
+    fn an_app_update_request_is_re_emitted_to_the_window() {
+        let _home = crate::store::temp_home();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let mut events = sink.subscribe();
+        let machines = Arc::new(Machines::new(MachineSecrets::default(), None));
+        machines.configure(sink.clone(), "ai.terminalx.test").unwrap();
+        let emitter: Arc<dyn EventSink> = sink.clone();
+        emitter.emit(crate::remote::machine_update::REQUESTED_EVENT, &serde_json::json!({ "version": "0.2.40" }));
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push((event.event.to_string(), event.payload.to_string()));
+        }
+        assert!(seen.iter().any(|(event, payload)| event == APP_UPDATE_REQUESTED_EVENT && payload == r#"{"version":"0.2.40"}"#), "{seen:?}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
 import { useRouter } from "expo-router";
-import { Check, ChevronRight } from "lucide-react-native";
+import { Bell, Check, ChevronRight } from "lucide-react-native";
 import { settingsSummary } from "@mobile/notifications/model";
 import { useNotificationSettings } from "@mobile/notifications/store";
 import type { MacSettings } from "@mobile/data/host-api";
@@ -70,7 +70,7 @@ export default function SettingsScreen() {
 
     <SectionTitle>Notifications</SectionTitle>
     {/* Its own page (#990, design 22.07): the row says what is switched on. */}
-    <Card><Pressable accessibilityRole="button" accessibilityLabel={`Notifications, ${notificationSettings ? settingsSummary(notificationSettings) : ""}`} onPress={() => router.push("/notifications")} style={({ pressed }) => [styles.settingRow, pressed && { backgroundColor: palette.raised }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Notifications</Text>{notificationSettings ? <Text style={[styles.detail, { color: palette.muted }]}>{settingsSummary(notificationSettings)}</Text> : null}</View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>
+    <Card><Pressable accessibilityRole="button" accessibilityLabel={`Notifications, ${notificationSettings ? settingsSummary(notificationSettings) : ""}`} onPress={() => router.push("/notifications")} style={({ pressed }) => [styles.settingRow, pressed && { backgroundColor: palette.raised }]}><Bell size={20} color={palette.ink} /><View style={styles.flex}><Text style={[styles.rowName, { color: palette.ink }]}>Notifications</Text>{notificationSettings ? <Text style={[styles.detail, { color: palette.muted }]}>{settingsSummary(notificationSettings)}</Text> : null}</View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>
 
     <SectionTitle>Appearance</SectionTitle>
     <View style={styles.themeGrid}>{THEMES.map((theme) => {
@@ -110,6 +110,8 @@ const styles = StyleSheet.create({
   avatarText: { fontSize: 17, fontWeight: "600" },
   title: { fontSize: 17, fontWeight: "700" },
   rowTitle: { fontSize: 16, fontWeight: "600" },
+  // A row that opens a page (22.07's Notifications): its mark, then its name in plain 16 pt.
+  rowName: { fontSize: 16 },
   linkLabel: { fontSize: 16 },
   themeLabel: { fontSize: 14 },
   value: { fontSize: 14 },

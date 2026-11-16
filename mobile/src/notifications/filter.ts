@@ -26,8 +26,14 @@ export interface SubscribeFilter {
 export interface NotificationPresentation {
   title: string;
   body: string;
-  /** "TerminalX · <machine name>", only when the lock screen shows everything. */
+  /**
+   * The machine's name, only when the lock screen shows everything. iOS heads
+   * each notification with the app's name already, so 22.07's
+   * "TerminalX · Studio MacBook" reads as that heading and this line.
+   */
   subtitle?: string;
+  /** iOS groups by this: one stack per session (per Mac when none is named), as 22.07 draws them, not one for the app. */
+  thread: string;
   sound: boolean;
   /** Read when the notification is tapped or answered: `_layout.tsx` opens `sessionId`/`tabId`. */
   data: {
@@ -111,7 +117,8 @@ export function present(settings: NotificationSettings, hostId: string, machineN
     ...(show === "nothing" ? {} : answer),
   };
   const sound = settings.lockScreen.sound;
-  if (show === "everything") return { title: event.title, body: event.body, subtitle: `TerminalX · ${machineName}`, sound, data };
-  if (show === "sessionName") return { title: event.title, body: generic.body, sound, data };
-  return { title: generic.title, body: generic.body, sound, data };
+  const thread = event.sessionId ? `${hostId}:${event.sessionId}` : hostId;
+  if (show === "everything") return { title: event.title, body: event.body, subtitle: machineName, thread, sound, data };
+  if (show === "sessionName") return { title: event.title, body: generic.body, thread, sound, data };
+  return { title: generic.title, body: generic.body, thread, sound, data };
 }
