@@ -1005,6 +1005,10 @@ fn machine_rpc(action: &str, machine: &Option<String>, keyed: Option<&str>, mut 
             .ok_or_else(|| invalid("Name the machine with --machine MACHINE, or use a machine:… key."))?,
     };
     params["machine"] = json!(named);
+    // Who asks: a run's worker may not pair machines or start sessions on them.
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
     let timeout = machine_timeout(action, &params);
     Ok(Action::Rpc { command: format!("machine.{action}"), params, timeout })
 }
@@ -1024,8 +1028,11 @@ fn machine_wait(tokens: &mut Tokens, machine: &Option<String>, (any, all): (bool
 
 /// `terminalx machines …`: the machines this computer operates (PRO-356).
 fn parse_machines(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    let native = |action: &str, params: Value, tokens: &mut Tokens| -> Result<Action, ControlError> {
+    let native = |action: &str, mut params: Value, tokens: &mut Tokens| -> Result<Action, ControlError> {
         tokens.finish()?;
+        if let Some(caller) = calling_session() {
+            params["caller"] = caller;
+        }
         let timeout = machine_timeout(action, &params);
         Ok(Action::Rpc { command: format!("machine.{action}"), params, timeout })
     };

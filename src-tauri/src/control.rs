@@ -501,6 +501,10 @@ impl ControlService {
             let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
             return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
         }
+        // A run's worker stays within its limits on other machines too.
+        if let Some(action) = command.strip_prefix("machine.") {
+            refuse_limited_machine_caller(action, &params)?;
+        }
         #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
@@ -2113,6 +2117,26 @@ impl ControlService {
     fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         issue_operation(self.questions.as_ref(), command, params)
     }
+}
+
+/// `machine.*` a run's worker may not ask for (`orchestration::guard`): it
+/// pairs or forgets no machine, and starts no session on one. A session it
+/// starts here is marked a worker as it is made; one on a machine cannot be.
+const LIMITED_MACHINE_ACTIONS: [&str; 3] = ["add", "remove", "sessions.create"];
+
+fn refuse_limited_machine_caller(action: &str, params: &Value) -> Result<(), ControlError> {
+    if !LIMITED_MACHINE_ACTIONS.contains(&action) {
+        return Ok(());
+    }
+    let limited = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller));
+    if limited {
+        return Err(ControlError::new(
+            "forbidden",
+            "A worker of an orchestration run does not pair machines or start sessions on them. Report what the piece needs; the lead decides.",
+            None::<String>,
+        ));
+    }
+    Ok(())
 }
 
 fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str, params: Value) -> Result<Value, ControlError> {
