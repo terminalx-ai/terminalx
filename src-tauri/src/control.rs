@@ -778,11 +778,37 @@ impl ControlService {
             // `terminalx-serve projects add` on a headless server (PRO-353):
             // the runtime writes the store, so no write of its own is lost,
             // and a paired computer's `machine.changed` hears of it.
+            //
+            // `terminalx projects add` (#1078) passes `refuseExisting`: the
+            // same checks, but a folder that is already a project is refused
+            // with `already_added`, so a script learns nothing was added.
             "projects.add" => {
                 let path = required_string(&params, "path")?;
-                let project = projects::ensure(&path).map_err(|error| ControlError::new("invalid_project", format!("{error:#}"), None))?;
+                let refuse_existing = params.get("refuseExisting").and_then(Value::as_bool).unwrap_or(false);
+                let added = if refuse_existing { projects::add_new(&path) } else { projects::ensure(&path) };
+                let project = added.map_err(project_refusal)?;
                 self.sink.emit("projects_changed", &());
                 Ok(json!({ "project": project }))
+            }
+            // `terminalx projects remove` (#1078), as the sidebar's Remove
+            // project does it: the project's open conversations are archived
+            // (Show archived brings them back), the project leaves the list,
+            // and the folder on disk is not touched.
+            "projects.remove" => {
+                let selector = required_string(&params, "project")?;
+                let project = resolve_project_exactly(&selector)?;
+                let open: Vec<String> = index::load().map_err(ControlError::internal)?
+                    .into_iter()
+                    .filter(|session| !session.archived && session.project() == Some(project.path.as_str()))
+                    .map(|session| session.id)
+                    .collect();
+                if !open.is_empty() {
+                    crate::session_archive::set_archived(self.sink.as_ref(), &open, true, crate::session_archive::By::Person)
+                        .map_err(ControlError::internal)?;
+                }
+                projects::remove(&project.path).map_err(ControlError::internal)?;
+                self.sink.emit("projects_changed", &());
+                Ok(json!({ "project": project, "archivedSessions": open }))
             }
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
@@ -2360,6 +2386,35 @@ fn resolve_project(selector: &str) -> Result<Project, ControlError> {
     unique(partial, "project", selector)
 }
 
+/// [`resolve_project`] for a command that changes what it names: a project
+/// matched only by part of its name is refused, so `remove api` cannot take
+/// out `api-gateway`.
+fn resolve_project_exactly(selector: &str) -> Result<Project, ControlError> {
+    let project = resolve_project(selector)?;
+    let canonical = Path::new(selector).exists().then(|| canonical_or_original(selector));
+    if project.path == selector || project.name == selector || canonical.as_deref() == Some(project.path.as_str()) {
+        return Ok(project);
+    }
+    Err(ControlError::new(
+        "ambiguous_selector",
+        format!("{selector} only matches part of the name of project {}.", project.name),
+        Some(format!("Name the project by its full name ({}) or its path.", project.name)),
+    ))
+}
+
+/// A folder `projects.add` would not take, with the code the CLI reports.
+fn project_refusal(error: anyhow::Error) -> ControlError {
+    use projects::Refusal;
+    let message = format!("{error:#}");
+    match error.downcast_ref::<Refusal>() {
+        Some(Refusal::Missing(_)) => ControlError::new("not_found", message, Some("Check the path; create the folder or clone the repository first.".into())),
+        Some(Refusal::NotADirectory(_)) => ControlError::new("not_a_directory", message, Some("Name the folder the project lives in, not a file inside it.".into())),
+        Some(Refusal::AlreadyAdded(path)) => ControlError::new("already_added", message, Some(format!("Nothing was changed. Use it as it is: terminalx sessions create --project {path} ..."))),
+        Some(Refusal::Mirror) => ControlError::new("invalid_project", message, None),
+        None => ControlError::new("invalid_project", message, None),
+    }
+}
+
 fn selected_projects(selector: Option<String>) -> Result<Vec<Project>, ControlError> {
     match selector {
         Some(selector) => Ok(vec![resolve_project(&selector)?]),
@@ -2944,6 +2999,67 @@ mod tests {
         for (status, running) in [(TabStatus::Completed, true), (TabStatus::Idle, true), (TabStatus::Idle, false)] {
             assert_eq!(open_turn(&view(status, false, false, running)), None, "{status:?} {running}");
         }
+    }
+
+    /// `terminalx projects add|remove` (#1078): the app's checks and git
+    /// detection, a code for each refusal, and the windows told at once.
+    #[test]
+    fn the_cli_adds_and_removes_projects_as_the_app_does() {
+        let _home = crate::store::temp_home();
+        let parent = tempfile::tempdir().unwrap();
+        let repository = parent.path().join("api");
+        std::fs::create_dir(&repository).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repository).status().unwrap().success());
+        let gateway = parent.path().join("api-gateway");
+        std::fs::create_dir(&gateway).unwrap();
+        let file = parent.path().join("notes.txt");
+        std::fs::write(&file, "notes").unwrap();
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let add = |path: &Path| service.execute("projects.add", json!({"path": path, "refuseExisting": true}), "r");
+
+        let added = add(&repository).unwrap();
+        let path = std::fs::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
+        assert_eq!((added["project"]["path"].as_str(), added["project"]["name"].as_str(), added["project"]["kind"].as_str()), (Some(path.as_str()), Some("api"), Some("git")));
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        assert_eq!(add(&gateway).unwrap()["project"]["kind"], "folder");
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        // Added from outside the app, it does not take the reader's selection.
+        assert_eq!(projects::list().unwrap().1, None);
+
+        let refused = add(&repository).unwrap_err();
+        assert_eq!(refused.code, "already_added");
+        assert!(refused.recovery.unwrap().contains(&path));
+        assert_eq!(add(&file).unwrap_err().code, "not_a_directory");
+        assert_eq!(add(&parent.path().join("gone")).unwrap_err().code, "not_found");
+        assert!(heard.try_recv().is_err(), "nothing refused is announced");
+        assert_eq!(projects::list().unwrap().0.len(), 2);
+        // `terminalx-serve projects add` still takes a folder it has already.
+        assert_eq!(service.execute("projects.add", json!({"path": repository}), "r").unwrap()["project"]["path"], path.as_str());
+        heard.try_recv().unwrap();
+
+        // A session in it starts at once.
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": path, "useWorktree": false, "title": "first", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+
+        // Removing names the project exactly: part of a name is not enough.
+        assert_eq!(service.execute("projects.remove", json!({"project": "gate"}), "r").unwrap_err().code, "ambiguous_selector");
+        assert_eq!(service.execute("projects.remove", json!({"project": "nothing-like-it"}), "r").unwrap_err().code, "not_found");
+        assert!(heard.try_recv().is_err());
+
+        // Its conversations are archived, the project leaves the list, the folder stays.
+        let removed = service.execute("projects.remove", json!({"project": "api"}), "r").unwrap();
+        assert_eq!((removed["project"]["path"].as_str(), &removed["archivedSessions"]), (Some(path.as_str()), &json!([session.id])));
+        let event = heard.try_recv().unwrap();
+        assert_eq!(&*event.event, "session_updated");
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        assert!(index::get(&session.id).unwrap().archived);
+        assert_eq!(projects::list().unwrap().0.iter().map(|project| project.name.as_str()).collect::<Vec<_>>(), vec!["api-gateway"]);
+        assert!(repository.join(".git").is_dir());
+        // By its path, from a folder of another name.
+        service.execute("projects.remove", json!({"project": gateway}), "r").unwrap();
+        assert!(projects::list().unwrap().0.is_empty());
     }
 
     #[test]

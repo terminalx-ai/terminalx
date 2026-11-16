@@ -33,6 +33,10 @@ raccoon = { path = "..", default-features = false }
 [dev-dependencies]
 anyhow = "1"
 base64 = "0.22"
+# The test relay seals and checks the host challenge as the runtime opens it.
+crypto_box = { version = "0.9.1", features = ["std"] }
+hmac = "0.12"
+sha2 = "0.10"
 futures-util = "0.3"
 tokio-tungstenite = "0.28"
 libc = "0.2"

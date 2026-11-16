@@ -1,7 +1,7 @@
 import { useSettingsFile } from "@/lib/settingsFile";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState } from "react";
-import { Loader2, Pencil } from "@/icons";
+import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import type { MachineName } from "@/types/pairing";
@@ -44,69 +44,58 @@ export function MachineNameSettings() {
 
   const typed = draft?.trim() ?? "";
   const computerName = machine?.computerName ?? null;
+  // Saves a changed, non-empty name; an empty or unchanged one goes back to the saved name.
+  const commit = () => {
+    if (draft === null || saving) return;
+    if (!typed || typed === machine?.name) setDraft(null);
+    else void save(typed);
+  };
   return (
-    <RegisteredSetting setting="account.machineName"><div className="rounded-lg border border-hairline px-3 py-2" data-testid="machine-name-settings">
-      <div className="flex flex-col gap-1.5 py-2">
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <div id="machine-name-label" className="text-[13px] font-medium">This Mac’s name</div>
-            {draft === null && (
-              <div className="truncate text-sm" data-testid="machine-name">
-                {machine ? machine.name : <Loader2 className="size-3.5 animate-spin text-faint" aria-label="Loading this Mac’s name" />}
-              </div>
-            )}
-          </div>
-          {draft === null && (
-            <Button size="sm" variant="outline" className="shrink-0" disabled={!machine} onClick={() => machine && setDraft(machine.name)}>
-              <Pencil /> Rename
+    <RegisteredSetting setting="account.machineName"><div className="py-1" data-testid="machine-name-settings">
+      <div className="flex items-center justify-between gap-4 py-2">
+        <div className="min-w-0">
+          <label id="machine-name-label" htmlFor="machine-name" className="text-[13px] font-medium">This Mac’s name</label>
+          {machine && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Your other Macs show work started here as “You · on {machine.name}”.{" "}
+              {!machine.chosen
+                ? "It is the name in System Settings → General → About, and changes with it."
+                : computerName && computerName !== machine.name
+                  ? `In System Settings this Mac is called “${computerName}”.`
+                  : null}
+            </p>
+          )}
+          {machine?.chosen && computerName && computerName !== machine.name && draft === null && (
+            <Button size="xs" variant="link" className="h-auto px-0 text-xs text-accent" disabled={saving} onClick={() => void save(null)}>
+              Use “{computerName}”
             </Button>
           )}
         </div>
-        {draft !== null && (
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (typed) void save(typed);
+        <div className="relative w-64 max-w-[45%] shrink-0">
+          <input
+            id="machine-name"
+            data-testid="machine-name"
+            value={draft ?? machine?.name ?? ""}
+            placeholder={machine ? undefined : "Loading…"}
+            disabled={!machine}
+            maxLength={80}
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commit();
+              } else if (event.key === "Escape") {
+                setDraft(null);
+                setError(null);
+              }
             }}
-          >
-            <input
-              autoFocus
-              aria-labelledby="machine-name-label"
-              value={draft}
-              maxLength={80}
-              spellCheck={false}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setDraft(null);
-              }}
-              className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 text-xs outline-none focus:border-border"
-            />
-            <Button type="submit" size="sm" variant="secondary" disabled={saving || !typed || typed === machine?.name}>
-              {saving ? <Loader2 className="animate-spin" /> : null} Save
-            </Button>
-            <Button size="sm" variant="ghost" disabled={saving} onClick={() => setDraft(null)}>
-              Cancel
-            </Button>
-          </form>
-        )}
-        {machine && (
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Your other Macs show work started here as “You · on {machine.name}”.{" "}
-            {!machine.chosen
-              ? "It is the name in System Settings → General → About, and changes with it."
-              : computerName && computerName !== machine.name
-                ? `In System Settings this Mac is called “${computerName}”.`
-                : null}
-          </p>
-        )}
-        {machine?.chosen && computerName && computerName !== machine.name && draft === null && (
-          <div>
-            <Button size="xs" variant="ghost" className="-ml-2" disabled={saving} onClick={() => void save(null)}>
-              Use “{computerName}”
-            </Button>
-          </div>
-        )}
+            className="h-8 w-full rounded-md border border-hairline bg-well px-2.5 pr-7 text-[13px] outline-none focus:border-ring disabled:opacity-60"
+          />
+          {saving && <Loader2 className="absolute top-2 right-2 size-4 animate-spin text-faint" aria-label="Saving this Mac’s name" />}
+        </div>
       </div>
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div></RegisteredSetting>

@@ -186,6 +186,29 @@ other GitHub work. A first read can return agent status while the cache warms;
 read again to see the result. The existing tab `status` remains the agent's
 lifecycle state.
 
+### Adding and removing projects
+
+```text
+terminalx projects add <folder> --json
+terminalx projects remove <project> --json
+```
+
+`projects add` adds a local folder as a project, as the app's Add project does: the folder must
+exist and be a directory, a Git repository is added as one (`"kind": "git"`, else `"folder"`),
+and the sidebar lists it at once. A relative folder is resolved against the shell's working
+directory. The result is `{"project": {...}}` with the canonical `path`, which `sessions create
+--project` then accepts. The person's selected project is left as it is. Refusals:
+`not_found` (no such folder), `not_a_directory` (a file), `already_added` (it is a project
+already; nothing changed, use it as it is) and `invalid_project` (a local mirror of a cloud
+workspace, which is read-only). Create the folder or clone the repository first; add only a
+folder the person asked for or one you created for the task.
+
+`projects remove` takes the project's exact name or its path (part of a name is refused with
+`ambiguous_selector`) and does what the sidebar's Remove project does: the project's open
+conversations are archived (`"archivedSessions"` lists their ids; Show archived and `sessions
+unarchive` bring them back), the project leaves the list, and its folder on disk is not
+touched. Remove a project only when the person asked for it.
+
 ### Layered configuration
 
 ```text

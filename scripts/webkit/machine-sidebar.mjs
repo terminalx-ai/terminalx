@@ -37,7 +37,12 @@ const shoot = async (page, name) => {
   if (shots) await page.screenshot({ path: join(shots, `${name}.png`) });
 };
 
-const LAST_SEEN = Date.parse("2026-11-15T14:02:00");
+// Yesterday at 14:02 local time, whatever day the check runs: a fixed date read "at 14:02" on that day only.
+const LAST_SEEN = (() => {
+  const day = new Date();
+  day.setDate(day.getDate() - 1);
+  return day.setHours(14, 2, 0, 0);
+})();
 
 // Runs in the page, after the stub: the two machines, their projects and sessions, and their runtimes.
 const fixture = (machines) => `(() => {
@@ -227,7 +232,8 @@ for (const colorScheme of ["light", "dark"]) {
 
   // The overview: machine sessions in the table, a Where column naming each machine, and the All machines menu with a count per machine.
   {
-    await page.getByRole("button", { name: /^Dashboard/ }).first().click();
+    // The sidebar destination is "Overview" since PRO-384 (#1046).
+    await page.getByRole("button", { name: /^Overview/ }).first().click();
     await page.getByRole("button", { name: "Table", exact: true }).click();
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     await table.locator("tbody tr[data-session]").first().waitFor();
@@ -332,7 +338,7 @@ for (const colorScheme of ["light", "dark"]) {
     failed += report(`offline card (${colorScheme})`, {
       "the card is for the offline state": c.state === "offline",
       "it says Mac mini isn't reachable": c.text.includes("Mac mini isn’t reachable"),
-      "it says when it was last seen": /Last seen at 14:02\./.test(c.text),
+      "it says when it was last seen": /Last seen yesterday at 14:02\./.test(c.text),
       "it says sessions keep running and the list catches up": c.text.includes("Sessions there keep running, and this list catches up when it reconnects."),
       "it offers Try again and Machine settings": c.buttons.join(",") === "Try again,Machine settings",
       "it stays inside the sidebar": c.inside,

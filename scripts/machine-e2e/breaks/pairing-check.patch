@@ -1,0 +1,18 @@
+diff --git a/src-tauri/src/machine_host.rs b/src-tauri/src/machine_host.rs
+index 85198af5..89a1bfa9 100644
+--- a/src-tauri/src/machine_host.rs
++++ b/src-tauri/src/machine_host.rs
+@@ -1104,10 +1104,9 @@ impl MachineHost {
+     /// PRO-341 shape, which only a person with this user's files writes) and
+     /// is admitted by its token, as PRO-341 admitted it.
+     pub(crate) fn paired_with_key(&self, computer: registry::PairedComputer, client_key_b64: &str) -> Option<registry::PairedComputer> {
+-        let pinned = match computer.client_public_key_b64.as_deref() {
+-            Some(pinned) => bool::from(subtle::ConstantTimeEq::ct_eq(pinned.as_bytes(), client_key_b64.as_bytes())),
+-            None => true,
+-        };
++        // DELIBERATE BREAK (scripts/machine-e2e/breaks): a paired token is
++        // admitted with any client key, not only the one it paired with.
++        let pinned = !client_key_b64.is_empty() || computer.client_public_key_b64.is_none();
+         if pinned {
+             return Some(computer);
+         }

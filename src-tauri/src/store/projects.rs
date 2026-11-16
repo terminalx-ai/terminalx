@@ -540,10 +540,31 @@ pub fn canonical(path: &str) -> Result<String> {
     Ok(c.to_string_lossy().into_owned())
 }
 
+/// Why a folder cannot become a project. It travels inside the `anyhow::Error`,
+/// so a caller that answers with a code (`terminalx projects add`) can tell the
+/// cases apart by downcasting rather than by reading the message.
+#[derive(Debug, thiserror::Error)]
+pub enum Refusal {
+    #[error("No folder at {0}")]
+    Missing(String),
+    #[error("Not a directory: {0}")]
+    NotADirectory(String),
+    #[error("This folder is a local mirror of a cloud workspace. A mirror is a read-only copy and cannot be opened as a project or used by an agent; work in the cloud workspace, or copy the files somewhere else first.")]
+    Mirror,
+    #[error("{0} is already a project")]
+    AlreadyAdded(String),
+}
+
 /// Validate before persisting projects or choosing a process working directory.
 pub fn canonical_directory(path: &str) -> Result<String> {
-    let canonical = canonical(path)?;
-    anyhow::ensure!(Path::new(&canonical).is_dir(), "Not a directory: {path}");
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical.to_string_lossy().into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Refusal::Missing(path.to_string()).into()),
+        Err(error) => return Err(anyhow::Error::new(error).context(format!("resolve {path}"))),
+    };
+    if !Path::new(&canonical).is_dir() {
+        return Err(Refusal::NotADirectory(path.to_string()).into());
+    }
     Ok(canonical)
 }
 
@@ -581,7 +602,7 @@ pub fn by_public_id(id: &str) -> Result<Project> {
 pub fn refuse_mirror(path: &str) -> Result<()> {
     #[cfg(feature = "desktop")]
     if crate::cloud_mirror::holds(&super::root()?, Path::new(path)) {
-        anyhow::bail!("This folder is a local mirror of a cloud workspace. A mirror is a read-only copy and cannot be opened as a project or used by an agent; work in the cloud workspace, or copy the files somewhere else first.");
+        return Err(Refusal::Mirror.into());
     }
     let _ = path;
     Ok(())
@@ -606,6 +627,19 @@ pub fn add(path: &str) -> Result<Project> {
     f.last_selected = Some(path);
     save(&f)?;
     Ok(p)
+}
+
+/// Add a folder the reader named outside the app (`terminalx projects add`):
+/// the checks and git detection of [`ensure`], but a folder that is already a
+/// project is refused ([`Refusal::AlreadyAdded`]) rather than quietly accepted,
+/// and the reader's selected project is left as it is.
+pub fn add_new(path: &str) -> Result<Project> {
+    let canonical = canonical_directory(path)?;
+    refuse_mirror(&canonical)?;
+    if load()?.projects.iter().any(|project| project.path == canonical) {
+        return Err(Refusal::AlreadyAdded(canonical).into());
+    }
+    ensure(&canonical)
 }
 
 /// Register a folder as a project if it is not one yet, without making it the
