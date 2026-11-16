@@ -62,7 +62,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-const { AccountTab } = await import("./AccountTab");
+const { AccountTab, accountInitials } = await import("./AccountTab");
 
 beforeEach(() => {
   mocks.host = { ...host };
@@ -94,21 +94,41 @@ describe("account binding disclosure", () => {
     expect(screen.queryByText("What this Mac shares")).toBeNull();
 
     const section = screen.getByTestId("machine-name-settings");
-    await waitFor(() => expect(within(section).getByTestId("machine-name").textContent).toBe("Studio Mac"));
-    fireEvent.click(within(section).getByRole("button", { name: "Rename" }));
-    const input = within(section).getByRole("textbox", { name: "This Mac’s name" });
+    const input = within(section).getByRole("textbox", { name: "This Mac’s name" }) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("Studio Mac"));
     fireEvent.change(input, { target: { value: "  Desk Mac " } });
-    fireEvent.click(within(section).getByRole("button", { name: "Save" }));
+    fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(mocks.setMachineName).toHaveBeenCalledWith("Desk Mac"));
-    await waitFor(() => expect(within(section).getByTestId("machine-name").textContent).toBe("Desk Mac"));
+    await waitFor(() => expect(input.value).toBe("Desk Mac"));
     expect(section.textContent).toContain("“You · on Desk Mac”");
   });
 
-  it("keeps creation discoverable when an organization already exists", () => {
+  // PRO-375: organisation setup lives under Organizations; Account names the active one and links to its page.
+  it("has no organization setup on Account", () => {
     mocks.organization = "Existing organization";
     render(<AccountTab />);
-    expect(screen.getByRole("button", { name: "Create or switch organization" })).toBeTruthy();
+    expect(screen.queryByText("Organization setup")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create or switch organization" })).toBeNull();
+    expect(within(screen.getByTestId("account-identity")).getByText("Existing organization")).toBeTruthy();
     cleanup();
     mocks.organization = null;
+  });
+
+  it("shows initials, name and email in the identity header, and signs out from a row", () => {
+    render(<AccountTab />);
+    const identity = screen.getByTestId("account-identity");
+    expect(identity.textContent).toContain("P");
+    expect(within(identity).getByText("Paresh")).toBeTruthy();
+    expect(within(identity).getByText("owner@terminalx.ai")).toBeTruthy();
+    const signOutRow = screen.getByTestId("account-sign-out");
+    fireEvent.click(within(signOutRow).getByRole("button", { name: "Sign out" }));
+    expect(within(signOutRow).getByRole("button", { name: "Confirm sign out" })).toBeTruthy();
+    expect(signOutRow.textContent).toContain("QR and code pairings keep working");
+  });
+  it("takes initials from the first and last name, else the email", () => {
+    expect(accountInitials({ name: "Alex Kim", email: "a@b.c", organization: null })).toBe("AK");
+    expect(accountInitials({ name: " ada  de la mare ", email: "a@b.c", organization: null })).toBe("AM");
+    expect(accountInitials({ name: "Paresh", email: "a@b.c", organization: null })).toBe("P");
+    expect(accountInitials({ name: null, email: "zoe@b.c", organization: null })).toBe("Z");
   });
 });

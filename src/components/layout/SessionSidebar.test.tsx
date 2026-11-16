@@ -156,10 +156,15 @@ describe("project context menus (PRO-187)", () => {
     else if (input === "Shift+F10") fireEvent.keyDown(title, { key: "F10", shiftKey: true });
     else fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     const menu = await screen.findByRole("menu");
+    // The designed project menu (02.14, PRO-386), with the project's appearance and pipeline kept beside its settings.
+    const keys = (await import("@/lib/hotkeys")).shortcutKeys;
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
-      "New chat in web", "Reveal in Finder", "Pin project", "Name and appearance", "Issue pipeline…", "Remove from TerminalX…",
+      `New session${keys("app.newSession").join("")}`, `Start from a branch, issue or PR…${keys("app.startFrom").join("")}`,
+      "Project settings", "Scripts and actions", "Name and appearance", "Issue pipeline…", "Open in",
+      "Pin project", "Hide projectHidden from the sidebar; sessions keep running", "Remove project…The folder on disk is left as it is.",
     ]);
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Reveal in Finder" }));
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Finder" }));
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
   });
@@ -180,9 +185,11 @@ describe("project context menus (PRO-187)", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk here" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
     let menu = await screen.findByRole("menu");
     const expected = items(menu);
-    expect(within(menu).getByRole("menuitem", { name: linked ? "Unlink #187" : "Link to issue…" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitemcheckbox", { name: "Don’t share this session" }).getAttribute("aria-checked")).toBe(String(linked));
-    expect(within(menu).getByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /^Remove workspace…/ })).toBeTruthy();
+    // The issue and PR links are a submenu away (PRO-386).
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Issue and pull request" }), { key: "ArrowRight" });
+    expect(await screen.findByRole("menuitem", { name: linked ? "Unlink #187" : "Link to issue…" })).toBeTruthy();
+    expect(screen.getByRole("menuitemcheckbox", { name: "Don’t share this session" }).getAttribute("aria-checked")).toBe(String(linked));
     for (const input of ["right-click", "Shift+F10"]) {
       fireEvent.keyDown(menu, { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
@@ -191,6 +198,60 @@ describe("project context menus (PRO-187)", () => {
       menu = await screen.findByRole("menu");
       expect(items(menu), input).toEqual(expected);
     }
+  });
+});
+
+describe("project menu and listing (PRO-386)", () => {
+  it("says a project whose chats are all archived has them, and shows them on a click", async () => {
+    await boot([session("old", "/repos/web", "2026-11-05T00:00:00Z", { archived: true })]);
+    mount();
+    expect(screen.queryByText("No chats yet")).toBeNull();
+    fireEvent.click(screen.getByTestId("only-archived"));
+    expect(store.getSessionStore().showArchived).toBe(true);
+    expect(await screen.findByTestId("archived-sessions")).toBeTruthy();
+    act(() => store.setShowArchived(false));
+  });
+
+  it("opens Start from a branch, issue or PR, and each settings page, for the project", async () => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    const { onProjectSettingsRequest } = await import("@/lib/projectAdded");
+    const requested = vi.fn();
+    const stop = onProjectSettingsRequest(requested);
+    mount();
+    const pick = async (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    };
+    const before = store.getSessionStore().startFromRequest;
+    await pick("Start from a branch, issue or PR…");
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionPreset: { projectPath: "/repos/web", cwd: null }, startFromRequest: before + 1 });
+    await pick("Project settings");
+    await pick("Scripts and actions");
+    expect(requested.mock.calls).toEqual([["/repos/web", "general"], ["/repos/web", "scripts"]]);
+    stop();
+  });
+
+  it("hides a project from the sidebar, and its hidden line shows it again", async () => {
+    let hidden = false;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_projects") return { projects: [{ ...projects[0], hidden }], lastSelected: null };
+      if (command === "update_project") {
+        hidden = !!(args as { patch: { hidden?: boolean } }).patch.hidden;
+        return { ...projects[0], hidden };
+      }
+      return base(command, args);
+    });
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+    await act(async () => fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Hide project/ })));
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", expect.objectContaining({ patch: { hidden: true } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "web overview" })).toBeNull());
+    fireEvent.click(within(screen.getByTestId("hidden-projects")).getByRole("button", { name: /1 hidden project/ }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Show web in the sidebar" })));
+    expect(await screen.findByRole("button", { name: "web overview" })).toBeTruthy();
   });
 });
 
@@ -366,7 +427,7 @@ describe("the conversation list", () => {
     vi.mocked(dialog.ask).mockResolvedValue(true);
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
-    await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from TerminalX…" })); });
+    await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: /^Remove project…/ })); });
     expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
     // Archived together, in one change, before the project goes.
     const calls = mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived" || command === "remove_project").map(([command, args]) => [command, args]);
@@ -536,7 +597,7 @@ describe("renaming from the sidebar", () => {
       const alerts = await screen.findAllByRole("alert");
       expect(alerts.map((alert) => alert.textContent)).toEqual([
         expect.stringContaining("Check out a branch before renaming"),
-        expect.stringContaining("Couldn't create a branch at 3f2a91c: Repository configuration needs trust."),
+        expect.stringContaining("Couldn't create a branch at 3f2a91c:Repository configuration needs trust."),
       ]);
     } finally {
       for (const toast of getErrorToasts()) dismissError(toast.id);
@@ -609,7 +670,8 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Remove workspace, keep conversations…", "Delete…"]);
+    // The designed order (02.13, PRO-386): keys shown only where one is bound.
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Copy link", "Share session…", "Issue and pull request", "Remove workspace…The conversations are kept", "Archive", "Delete session…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -702,8 +764,8 @@ it("offers checkout cleanup separately from conversation deletion in the active 
   await boot([session("cleanup", "/repos/web", new Date().toISOString(), { cwd: "/repos/web/.raccoon/worktrees/cleanup", worktreeName: "cleanup" })]);
   mount();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk cleanup" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
-  const item = await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" });
-  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+  const item = await screen.findByRole("menuitem", { name: /^Remove workspace…/ });
+  expect(screen.getByRole("menuitem", { name: "Delete session…" })).toBeTruthy();
   fireEvent.click(item);
   const dialogs = await import("@/lib/dialogs");
   const Probe = () => <div data-testid="cleanup-request">{JSON.stringify(dialogs.useDialogs().workspaceRemove)}</div>;

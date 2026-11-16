@@ -62,12 +62,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("registry navigation", () => {
-  it("opens the registered privacy row through a stable row link", () => {
-    const view = render(<SettingsPage initialTab="general.dataPrivacy" onBack={vi.fn()} />);
-    const row = view.container.querySelector('[data-setting-id="general.dataPrivacy"]');
+  // PRO-375: the row moved from General to Account; a link to its old id still opens it there.
+  it.each(["account.dataPrivacy", "general.dataPrivacy"])("opens the registered privacy row through a stable row link (%s)", (link) => {
+    const view = render(<SettingsPage initialTab={link as "account.dataPrivacy"} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Account" })).toBeTruthy();
+    const row = view.container.querySelector('[data-setting-id="account.dataPrivacy"]');
     expect(row).toBeTruthy();
     expect(row?.contains(screen.getByRole("switch", { name: "Data privacy mode" }))).toBe(true);
     expect(document.activeElement).toBe(row);
+  });
+
+  it("leaves data privacy mode off General", () => {
+    const view = render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "General" })).toBeTruthy();
+    expect(view.container.querySelector('[data-setting-id="account.dataPrivacy"]')).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Data privacy mode" })).toBeNull();
   });
 
   it("opens a repository's cleanup controls, then saves its Scripts from the Scripts page", async () => {
@@ -80,7 +89,7 @@ describe("registry navigation", () => {
     expect(screen.queryByLabelText("Archive script")).toBeNull();
     fireEvent.click(within(screen.getByRole("navigation", { name: "Project settings" })).getByRole("button", { name: "Scripts" }));
     fireEvent.change(await screen.findByLabelText("Archive script"), { target: { value: "docker compose down" } });
-    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[1]);
+    fireEvent.blur(screen.getByLabelText("Archive script"));
     await screen.findByText("Archive script saved.");
     expect(mocks.updateProject).toHaveBeenCalledWith("/repos/two", { scripts: { setup: "", archive: "docker compose down" } });
   });

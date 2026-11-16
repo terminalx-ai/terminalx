@@ -75,6 +75,8 @@ async function mount() {
 }
 
 const section = (name: string) => screen.getByRole("region", { name });
+/** The machine's header button (its name starts the label); an away card under it adds buttons of its own. */
+const headerButton = (name: string) => within(section(name)).getByRole("button", { name: new RegExp(`^${name}`) });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -132,23 +134,22 @@ describe("the Machines section", () => {
     await screen.findByTestId("machines-section");
     expect(within(section("Mac mini")).getByTestId("machine-state-label").textContent).toBe("Direct");
     expect(within(section("dev-server")).getByTestId("machine-state-label").textContent).toBe("Relay");
-    expect(within(section("Mac mini")).getByRole("button").getAttribute("title")).toBe("On this network or Tailscale");
-    expect(within(section("dev-server")).getByRole("button").getAttribute("title")).toBe("Through TerminalX Relay");
+    expect(headerButton("Mac mini").getAttribute("title")).toBe("On this network or Tailscale");
+    expect(headerButton("dev-server").getAttribute("title")).toBe("Through TerminalX Relay");
 
     const label = () => within(section("Mac mini")).getByTestId("machine-state-label").textContent;
     setState("m1", { state: "connecting", trying: ["lan", "tailscale"] });
     expect(label()).toBe("Connecting");
     setState("m1", { state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 2, retryInMs: 500, trying: ["lan", "relay"] });
     expect(label()).toBe("Reconnecting");
-    expect(within(section("Mac mini")).getByRole("button").getAttribute("title")).toBe("Lost it 12 seconds ago");
+    expect(headerButton("Mac mini").getAttribute("title")).toBe("Lost it 12 seconds ago");
     setState("m1", { state: "offline", lastSeenAt: null, retryInMs: 10_000 });
     expect(label()).toBe(`Offline · seen ${clockTime(MAC_MINI.lastSeenAt!)}`);
     setState("m1", { state: "needsUpdate", version: "0.2.27", side: "machine" });
     expect(label()).toBe("Needs update");
     setState("m1", { state: "accessRemoved" });
     expect(label()).toBe("Access removed");
-    // PRO-352's away card adds Pair again under the row: read the row's own button.
-    expect(within(section("Mac mini")).getAllByRole("button")[0].getAttribute("title")).toBe("Revoked on that Mac");
+    expect(headerButton("Mac mini").getAttribute("title")).toBe("Revoked on that Mac");
   });
 
   it("says a last-seen time on the 24-hour clock (PRO-398)", () => {
@@ -185,9 +186,9 @@ describe("the Machines section", () => {
   it("opens a machine's view in the main slot with its header chip and where commands run", async () => {
     await mount();
     await waitFor(() => expect(Object.keys(store.getMachineConnections().connections)).toHaveLength(2));
-    fireEvent.click(within(section("Mac mini")).getByRole("button"));
+    fireEvent.click(headerButton("Mac mini"));
     expect(sessions.getSessionStore().selectedCloudWorkspace).toBe("machine:m1");
-    expect(within(section("Mac mini")).getByRole("button").getAttribute("aria-current")).toBe("page");
+    expect(headerButton("Mac mini").getAttribute("aria-current")).toBe("page");
     await screen.findByTestId("workspace-view");
     const opened = mocks.views.at(-1)!.opened;
     expect(opened).toMatchObject({ name: "Mac mini", provider: null, workspaceState: null, machine: { record: { machineId: "m1" }, status: "Connecting to Mac mini…", label: "Connecting" } });
@@ -215,7 +216,7 @@ describe("the Machines section", () => {
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Runs an older TerminalX");
 
     // dev-server through the relay: a server icon and the relay path.
-    fireEvent.click(within(section("dev-server")).getByRole("button"));
+    fireEvent.click(headerButton("dev-server"));
     await waitFor(() => expect(screen.getByTestId("machine-main").getAttribute("data-machine")).toBe("m2"));
     expect(screen.getByTestId("machine-path").textContent).toBe("Through TerminalX Relay · 41 ms");
   });
@@ -225,7 +226,7 @@ describe("the Machines section", () => {
     await mount();
     await screen.findByTestId("machines-section");
     expect((await within(section("Mac mini")).findByRole("alert")).textContent).toBe("Could not connect: machine_token_missing");
-    fireEvent.click(within(section("Mac mini")).getByRole("button"));
+    fireEvent.click(headerButton("Mac mini"));
     expect(within(screen.getByTestId("machine-main-empty")).getByRole("alert").textContent).toBe("Could not connect to Mac mini: machine_token_missing");
     attachRefusal = null;
     fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
@@ -236,7 +237,7 @@ describe("the Machines section", () => {
   it("leaves the machine's view and closes its connections when Machines is turned off", async () => {
     await mount();
     await waitFor(() => expect(Object.keys(store.getMachineConnections().connections)).toHaveLength(2));
-    fireEvent.click(within(section("Mac mini")).getByRole("button"));
+    fireEvent.click(headerButton("Mac mini"));
     await screen.findByTestId("workspace-view");
     act(() => {
       stop!();

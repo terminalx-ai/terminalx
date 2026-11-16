@@ -94,7 +94,7 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
     // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
-    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id } = props;
+    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id, titleAccessory } = props;
     return <div {...anchor} className="group/setting min-w-0 outline-none">
       <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
         <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
@@ -102,6 +102,7 @@ function defineSetting<const T extends SettingDefinition>(definition: T): T & Se
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
               <span id={id} className="min-w-0">{label}</span>
               {accessory}
+              {titleAccessory}
               <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
             </div>
             {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
@@ -167,12 +168,6 @@ export const SETTINGS_ROWS = [
     description: "Name this computer for your paired devices.",
     searchTerms: ["account", "this", "mac’s", "name"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machineName" }, layout: "content",
-  }),
-  defineSetting({
-    id: "account.organizations", section: "account", title: "Organization membership",
-    description: "Create, join, or open an organization.",
-    searchTerms: ["account", "organization", "membership"], scope: "user",
-    storage: { kind: "service", location: "TerminalX account organizations" }, layout: "content",
   }),
   defineSetting({
     id: "account.sharing", section: "account", title: "What this Mac shares",
@@ -492,8 +487,9 @@ export const SETTINGS_ROWS = [
     searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.routing" }, layout: "content",
   }),
+  // PRO-375: data privacy mode moved from General to Account; links to its old id still open it (LEGACY_IDS).
   defineSetting({
-    id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
+    id: "account.dataPrivacy", section: "account", title: "Data privacy mode",
     description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
     searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/data-privacy.json#enabled; macOS managed DataPrivacyMode preference" },
@@ -649,9 +645,15 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
-    id: "organizations.compute", section: "organizations", title: "Compute",
-    description: "Cloud providers, workspaces and usage.",
-    searchTerms: ["organizations", "compute"], scope: "organization",
+    id: "organizations.providers", section: "organizations", title: "Cloud providers",
+    description: "Connect the cloud providers this organization's workspaces run on.",
+    searchTerms: ["organizations", "cloud", "compute", "providers", "hetzner", "connect", "key"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "organizations.compute", section: "organizations", title: "Compute limits",
+    description: "Cloud workspace limits, pausing new workspaces, and usage.",
+    searchTerms: ["organizations", "cloud", "compute", "limits"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
@@ -693,7 +695,7 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "organizations.environment", section: "organizations", title: "Environment",
     description: "Configure and build the cloud workspace environment.",
-    searchTerms: ["organizations", "environment"], scope: "organization",
+    searchTerms: ["organizations", "cloud", "compute", "environment", "build", "versions"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
@@ -1042,10 +1044,16 @@ type RegisteredProps = Omit<RowProps, "children" | "control"> & (
 export function RegisteredSetting({ setting, ...props }: RegisteredProps) {
   return byId.get(setting)!.render(props);
 }
-/** Accept old section entry points and new row links; reject events and unknown strings. */
+/** Rows that moved to another section, by their old id. */
+const LEGACY_IDS: Readonly<Record<string, SettingId>> = { "general.dataPrivacy": "account.dataPrivacy" };
+/** Whether a link names one row (by its id, or a moved row's old id) rather than a section or nothing known. */
+export function isRowLink(target: unknown): boolean {
+  return typeof target === "string" && (byId.has(target) || Object.hasOwn(LEGACY_IDS, target));
+}
+/** Accept old section entry points, moved rows' old ids and new row links; reject events and unknown strings. */
 export function resolveSetting(target: unknown): SettingRegistration {
   if (typeof target === "string") {
-    const row = byId.get(target);
+    const row = byId.get(Object.hasOwn(LEGACY_IDS, target) ? LEGACY_IDS[target]! : target);
     if (row) return row;
     if (Object.hasOwn(SETTINGS_SECTIONS, target)) return byId.get(SETTINGS_SECTIONS[target as SettingsSection].entry)!;
   }

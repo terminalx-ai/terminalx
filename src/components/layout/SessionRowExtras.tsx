@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import { Archive, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -9,7 +10,7 @@ import type { StatusDescription } from "@terminalx/portable/sessionStatus";
 import { cn } from "@/lib/cn";
 import { getDraft, subscribeTabDrafts } from "@/lib/drafts";
 import { pty } from "@/lib/api";
-import { archiveSession, refreshWorkspaces, useSessionStore } from "@/lib/sessions";
+import { refreshWorkspaces, useSessionStore } from "@/lib/sessions";
 import { useTerminals } from "@/lib/terminal";
 import { usePrefs } from "@/lib/prefs";
 import type { SessionEntry } from "@/types/session";
@@ -118,7 +119,7 @@ export function ArchiveRowButton({ session, title }: { session: SessionEntry; ti
   if (session.archived) return null;
   return <WithTooltip label={error ?? "Archive"} shortcut="session.archive">
     <Button variant="ghost" size="icon-xs" aria-label={`Archive ${title}`} onClick={() => {
-      void archiveSession(session.id, true).catch(() => setError("Could not archive. Try again."));
+      void archiveWithUndo(session.id).catch(() => setError("Could not archive. Try again."));
     }}><Archive /></Button>
   </WithTooltip>;
 }
