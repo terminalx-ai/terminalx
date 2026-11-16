@@ -14,7 +14,7 @@ export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.";
 
 export const MACHINES_DESCRIPTION =
-  "Settings → Machines: let other computers that run TerminalX operate this Mac, and add machines this Mac can operate. Each computer pairs with a one-time code and a fingerprint you compare on both screens before choosing Allow.";
+  "Settings → Machines: let other computers that run TerminalX operate this Mac, and add machines this Mac can operate. Each computer pairs with a one-time code and a fingerprint you compare on both screens before choosing Allow. While it is on, agents in this Mac's sessions can operate the paired machines with the terminalx command line.";
 
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";

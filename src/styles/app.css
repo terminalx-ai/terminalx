@@ -272,6 +272,14 @@
   overflow-wrap: anywhere;
   color: color-mix(in oklab, var(--foreground) 86%, transparent);
 }
+/* A review thread's comments (PRO-392): 13px in the diff, beside 12px code, not the transcript's 15px. */
+.review-prose .prose-chat {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.review-prose .prose-chat code:not(pre code) {
+  font-size: 12.5px;
+}
 /* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
 .prose-chat p,
 .prose-chat li,

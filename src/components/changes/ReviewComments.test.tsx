@@ -64,45 +64,56 @@ for (const mode of ["unified", "split"] as const) {
     await waitFor(() => expect(invoke).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole("button", { name: "Comment on before line 2" }));
     fireEvent.click(screen.getByRole("button", { name: "Comment on before line 3" }), { shiftKey: true });
-    expect(screen.getByText("a.ts:2-3 (before at aaaaaaaaaaaa)")).toBeTruthy();
-    fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Keep the old behavior" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // The draft is written under its lines (PRO-392), not in a form above the diff.
+    const draft = await waitFor(() => { const el = document.querySelector<HTMLElement>('.diff-pane form[aria-label="Review comment draft"]'); expect(el).not.toBeNull(); return el!; });
+    expect(within(draft).getByText("lines 2–3 (before) · comment for the agent")).toBeTruthy();
+    expect(within(draft).getByText("Draft · not saved")).toBeTruthy();
+    fireEvent.change(within(draft).getByRole("textbox", { name: "Review comment" }), { target: { value: "Keep the old behavior" } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull());
     expect(comments[0]).toMatchObject({ side: "before", startLine: 2, endLine: 3, lineText: "old\nremoved" });
     const inline = await waitFor(() => { const article = document.querySelector(".diff-pane article"); expect(article).not.toBeNull(); return article as HTMLElement; });
     expect(within(inline).getByText("Keep the old behavior")).toBeTruthy();
     expect(screen.getByText("1 comment")).toBeTruthy();
+    expect(within(inline).getByText("Draft")).toBeTruthy();
+    expect(within(inline).getByText("on lines 2–3 (before)")).toBeTruthy();
     fireEvent.click(within(inline).getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Keep both lines" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Review comment" }), { target: { value: "Keep both lines" } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
     await waitFor(() => expect(comments[0].note).toBe("Keep both lines"));
     setDraft("review-tab", "Existing request");
     fireEvent.click(screen.getByRole("button", { name: "Add all to chat (1)" }));
     expect(getDraft("review-tab")).toBe("Existing request\n\na.ts:2-3 (before at aaaaaaaaaaaa)\n> old\n> removed\n\nKeep both lines");
     expect(comments[0].sent).toBe(false);
-    fireEvent.click(within(inline).getByRole("button", { name: "Delete" }));
+    const saved = await waitFor(() => { const article = document.querySelector<HTMLElement>(".diff-pane article"); expect(article).not.toBeNull(); return article!; });
+    fireEvent.click(within(saved).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(document.querySelector(".diff-pane article")).toBeNull());
   });
 }
-it("warns before discarding edits and keeps them when declined", async () => {
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+it("asks in the draft before discarding edits and keeps them when declined", async () => {
+  const confirm = vi.spyOn(window, "confirm");
   render(<ReviewCommentsProvider source={source("discard")} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Comment on after line 1" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Unfinished" } });
+  fireEvent.change(await screen.findByRole("textbox", { name: "Review comment" }), { target: { value: "Unfinished" } });
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(confirm).toHaveBeenCalledWith("Discard this unsaved review comment?");
+  // An in-app popover anchored to the draft (PRO-392), never the browser's confirm.
+  const ask = screen.getByRole("alertdialog", { name: "Discard this comment?" });
+  expect(ask.textContent).toContain("What you wrote on line 1 will be lost. It hasn't been sent to the agent.");
+  expect(confirm).not.toHaveBeenCalled();
+  fireEvent.click(within(ask).getByRole("button", { name: "Keep editing" }));
+  expect(screen.queryByRole("alertdialog")).toBeNull();
   expect((screen.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe("Unfinished");
-  confirm.mockReturnValue(true);
   fireEvent.keyDown(screen.getByRole("textbox", { name: "Review comment" }), { key: "Escape" });
-  expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull();
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull());
   await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Comment on after line 1"));
 });
 it("keeps saved quotes and displays Outdated when the selected lines change", async () => {
   const s = source("outdated");
   const view = render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Comment on after line 1" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Rename" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "Review comment" }), { target: { value: "Rename" } });
+  fireEvent.click(screen.getByRole("button", { name: "Comment" }));
   await waitFor(() => expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull());
   s.fileContentsAt = vi.fn(async () => ({ before: "old", after: "changed" }));
   view.rerender(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="changed" mode="unified" /></ReviewCommentsProvider>);
@@ -112,16 +123,18 @@ it("keeps saved quotes and displays Outdated when the selected lines change", as
   const details = screen.getByText("All review comments").parentElement as HTMLDetailsElement;
   details.open = true; fireEvent(details, new Event("toggle"));
   expect(await screen.findByText("Outdated")).toBeTruthy();
-  expect(screen.getByText("new")).toBeTruthy();
+  // The note is shown without a quote of its line (PRO-392).
+  expect(screen.getByText("Rename")).toBeTruthy();
 });
 it("keeps an unsaved draft across a file switch and reopening the panel", async () => {
   const s = source("retained");
   const view = render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Comment on after line 1" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Keep me" } });
+  fireEvent.change(await screen.findByRole("textbox", { name: "Review comment" }), { target: { value: "Keep me" } });
   view.unmount();
   render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="b" before="x" after="y" mode="split" /></ReviewCommentsProvider>);
-  expect((screen.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe("Keep me");
+  // Its line is not in this diff: it is kept above it.
+  expect(((await screen.findByRole("textbox", { name: "Review comment" })) as HTMLTextAreaElement).value).toBe("Keep me");
   expect(screen.getByText("a:1 (after)")).toBeTruthy();
 });
 it("uses the live workspace for Outdated, even while a historical diff is displayed", async () => {
@@ -171,7 +184,7 @@ it("relocates inline after an insertion and does not attach in another base", as
   const s = source("shift");
   s.fileContentsAt = vi.fn(async () => ({ before: "old", after: "inserted\none\ntarget\nlast" }));
   const view = render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after={"inserted\none\ntarget\nlast"} mode="unified" /></ReviewCommentsProvider>);
-  await waitFor(() => expect(document.querySelector(".diff-pane article")?.textContent).toContain("a:3"));
+  await waitFor(() => expect(document.querySelector(".diff-pane article")?.textContent).toContain("on line 3"));
   expect(comments[0].outdated).toBe(false);
   view.rerender(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={"b".repeat(40)} path="a" before="old" after={"inserted\none\ntarget\nlast"} mode="unified" /></ReviewCommentsProvider>);
   expect(document.querySelector(".diff-pane article")).toBeNull();
@@ -192,9 +205,13 @@ it("shows only one editor when Changes and the centre diff share a workspace", a
   const s = source("two-panels");
   render(<><ReviewCommentsProvider source={s} tabId="review-tab"><p>Changes panel</p></ReviewCommentsProvider><ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></>);
   fireEvent.click(await screen.findByRole("button", { name: "Comment on after line 1" }));
-  expect(screen.getAllByRole("textbox", { name: "Review comment" })).toHaveLength(1);
+  expect(await screen.findAllByRole("textbox", { name: "Review comment" })).toHaveLength(1);
+  // Drawn under its line in the centre diff, and nowhere else.
+  await waitFor(() => expect(document.querySelector(".diff-pane textarea")).not.toBeNull());
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  await waitFor(() => expect(screen.getAllByRole("textbox", { name: "Review comment" })).toHaveLength(1));
   fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Shared note" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Comment" }));
   await waitFor(() => expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull());
   await waitFor(() => expect(screen.getAllByText("1 review comment")).toHaveLength(2));
 });
@@ -206,12 +223,79 @@ it("clears a completed save after its draft moves to a reopened panel", async ()
   const s = source("save-handoff");
   const view = render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Comment on after line 1" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Review comment" }), { target: { value: "Save across panels" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "Review comment" }), { target: { value: "Save across panels" } });
+  fireEvent.click(screen.getByRole("button", { name: "Comment" }));
   view.unmount();
   render(<ReviewCommentsProvider source={s} tabId="review-tab"><p>Reopened</p></ReviewCommentsProvider>);
-  expect(screen.getByRole("textbox", { name: "Review comment" })).toBeTruthy();
+  expect(await screen.findByRole("textbox", { name: "Review comment" })).toBeTruthy();
   await act(async () => finish());
   await waitFor(() => expect(screen.queryByRole("textbox", { name: "Review comment" })).toBeNull());
   expect(comments).toHaveLength(1);
+});
+
+it("numbers removed lines, marks only changed lines and saves a draft with ⌘↵ (PRO-392)", async () => {
+  const s = source("gutter");
+  s.fileContentsAt = vi.fn(async () => ({ before: "same\nold", after: "same\nnew" }));
+  render(<ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before={"same\nold"} after={"same\nnew"} mode="unified" /></ReviewCommentsProvider>);
+  await waitFor(() => expect(document.querySelector(".cm-deleted-number")?.textContent).toBe("2"));
+  expect(document.querySelector(".cm-deletedLine .cm-change-del")?.textContent).toBe("−");
+  const markers = [...document.querySelectorAll(".cm-change-gutter .cm-gutterElement")].map((el) => el.textContent).filter(Boolean);
+  expect(markers).toEqual(["+"]);
+  // Changed characters are not underlined: the line's tint is flat.
+  expect(document.querySelector(".cm-changedText")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Comment on after line 2" }));
+  const text = await screen.findByRole("textbox", { name: "Review comment" });
+  fireEvent.change(text, { target: { value: "Name it" } });
+  fireEvent.keyDown(text, { key: "Enter", metaKey: true });
+  await waitFor(() => expect(comments).toHaveLength(1));
+  expect(comments[0]).toMatchObject({ side: "after", startLine: 2, endLine: 2, note: "Name it" });
+});
+
+it("gives a saved comment a filled Add to chat, Add all N and quiet Edit · Delete, without quoting its line", async () => {
+  comments = [
+    { id: "one", revision: 1, base, path: "a", side: "after", startLine: 1, endLine: 1, lineText: "new", note: "First", sent: false, outdated: false },
+    { id: "two", revision: 1, base, path: "b", side: "after", startLine: 1, endLine: 1, lineText: "other", note: "Second", sent: false, outdated: false },
+  ];
+  render(<ReviewCommentsProvider source={source("card")} tabId="review-tab" chrome={false}><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider>);
+  const card = await waitFor(() => { const el = document.querySelector<HTMLElement>(".diff-pane article"); expect(el).not.toBeNull(); return el!; });
+  expect(within(card).queryByText("new")).toBeNull();
+  expect(within(card).getByText("on line 1")).toBeTruthy();
+  expect(within(card).getByText("Draft")).toBeTruthy();
+  expect(screen.queryByText("2 review comments")).toBeNull();
+  fireEvent.click(within(card).getByRole("button", { name: "Add all 2 comments" }));
+  expect(getDraft("review-tab")).toContain("First");
+  expect(getDraft("review-tab")).toContain("Second");
+});
+
+it("marks each side of a split view on its own lines when an earlier hunk shifts them", async () => {
+  const before = "a\nb\nc\nx", after = "a\nnew1\nnew2\nb\nc\ny";
+  render(<ReviewCommentsProvider source={source("split-markers")} tabId="review-tab"><DiffPane base={base} path="a" before={before} after={after} mode="split" /></ReviewCommentsProvider>);
+  const marks = (side: "a" | "b") => [...document.querySelectorAll(`.cm-merge-${side} .cm-change-gutter .cm-gutterElement`)].map((el) => el.textContent).filter(Boolean);
+  await waitFor(() => expect(marks("b")).toEqual(["+", "+", "+"]));
+  // The before side's one changed line is its fourth ("x"), not the after side's 2, 3 and 6.
+  expect(marks("a")).toEqual(["−"]);
+});
+
+it("asks about an unsaved draft held by a hidden tab in the panel that starts a new comment", async () => {
+  const s = source("hidden-owner");
+  const view = render(<>
+    <div data-testid="hidden"><ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+  </>);
+  const hidden = within(screen.getByTestId("hidden"));
+  fireEvent.click(await hidden.findByRole("button", { name: "Comment on after line 1" }));
+  fireEvent.change(await hidden.findByRole("textbox", { name: "Review comment" }), { target: { value: "Unsaved" } });
+  // The tab that holds it is hidden (still mounted, inactive); another tab shows the same file.
+  view.rerender(<>
+    <div data-testid="hidden"><ReviewCommentsProvider source={s} tabId="review-tab" active={false}><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+    <div data-testid="shown"><ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+  </>);
+  const shown = within(screen.getByTestId("shown"));
+  fireEvent.click(await shown.findByRole("button", { name: "Comment on after line 1" }));
+  const ask = await shown.findByRole("alertdialog", { name: "Discard this comment?" });
+  expect(hidden.queryByRole("alertdialog")).toBeNull();
+  await waitFor(() => expect(shown.getAllByRole("textbox", { name: "Review comment" })).toHaveLength(1));
+  expect((shown.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe("Unsaved");
+  fireEvent.click(within(ask).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect((shown.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe(""));
+  expect(hidden.queryByRole("textbox", { name: "Review comment" })).toBeNull();
 });

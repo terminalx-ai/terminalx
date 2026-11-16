@@ -127,6 +127,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetPanelTabs } from "@/lib/panelTab";
 import { resetPurged } from "@/lib/cloudLifecycle";
 import { takeAgentLoginsRequest, takeAgentLoginsSignIn, takeOrganizationRequest } from "@/lib/settingsLinks";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
@@ -626,7 +631,7 @@ describe("cloud session actions", () => {
     await screen.findByText("Fix login redirect");
 
     await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(0));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     // Answer the permission.
     fireEvent.click(await screen.findByRole("button", { name: /^Allow/ }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "permission-decision")?.payload).toEqual({ requestId: "req-9", optionId: "allow" }));
@@ -1376,7 +1381,7 @@ describe("the session header's New tab menu", () => {
     await openConnected();
     mouseClick(plus());
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByText("New agent tab with")).toBeTruthy();
+    expect(within(menu).getByText("New tab")).toBeTruthy();
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM", "Ports and previewsside panel"]);
     expect(plus().getAttribute("aria-expanded")).toBe("true");
     // The tooltip around it must not mark the open menu's trigger closed.
@@ -1473,7 +1478,7 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     const allow = await screen.findByRole("button", { name: /^Allow/ });
     expect((allow as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
@@ -2156,7 +2161,7 @@ describe("sharing states found in the live two-user test", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission to run a command/);
+    await screen.findByText("Run a command");
     expect((await screen.findByTestId("permission-detail")).textContent).toBe("touch /tmp/bob-asked");
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
   });

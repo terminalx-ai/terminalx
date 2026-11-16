@@ -94,6 +94,9 @@ pub const RULES: &[Rule] = &[
     // A session it started would be its own hands outside its limits. One made all the same
     // (by a command this table does not read) is marked a worker as it is made.
     rule(&["terminalx", "tnx"], &["sessions", "create"], Limit::Delegate),
+    // Pairing or forgetting a machine is the person's; a session on one is outside the run (PRO-356).
+    rule(&["terminalx", "tnx"], &["machines", "add"], Limit::Delegate),
+    rule(&["terminalx", "tnx"], &["machines", "remove"], Limit::Delegate),
     rule(&["terminalx", "tnx"], &["runs", "create"], Limit::Delegate),
     rule(&["terminalx", "tnx"], &["runs", "start"], Limit::Delegate),
     // It starts the next try of a piece, a new worker, with the caller's words in its brief.

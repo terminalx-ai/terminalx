@@ -1701,6 +1701,15 @@ which runs in a child process because data privacy is one switch per process.
 - **An expired computer's account grant** ends when the operating computer
   removes the machine, as it is asked to on "Access removed"; the machine ends
   its connections and relay credential itself.
+- **Agents on the operating computer can operate its paired machines** through
+  the `terminalx` CLI (PRO-356), with the rights pairing gave the computer.
+  That is the ticket's purpose (a lead session on one computer driving
+  sessions on another). The control is the person's switch, Settings →
+  Experimental → Machines, read in native code before any `machine.*` command
+  reaches the window; its description says agents can use it. Unlike cloud
+  control there is no second switch: nothing is billed, and the machines are
+  the person's own. A run's worker may not pair a machine or start a session
+  on one.
 
 ### As built (PRO-357)
 
@@ -1908,6 +1917,57 @@ the "Port 5173 forwarded to 127.0.0.1:5173" toast.
 
 **Open** opens the address in this Mac's built-in browser (decision 7); the
 browser runs here, and only the stream crosses.
+
+### As built (PRO-356): the command line
+
+`terminalx machines list|status|add|remove` and `--machine <name or id>` on
+`projects list`, `sessions list|create|rename|archive|unarchive`, `tabs list`,
+`send`, `read`, `wait`, `permissions` and `worktrees list|delete`. A session's
+`machine:` key (decision 8) routes `send`, `read`, `wait`, `tabs`, `rename`
+and `archive` without `--machine`. `sessions list --all-machines` lists this
+computer's sessions (`machine: null`) and every paired machine's. Without any
+of these, every command sends the request it sent before. The full guide is
+`skill-guides/terminalx-cli.md`, "Paired machines".
+
+**No new protocol.** The CLI never opens a network connection. It sends
+`machine.<action>` over the control socket; the runtime hands it to the
+attached desktop (`local_runtime::window::supported`), and a runtime with no
+desktop answers `unsupported`.
+
+- **Native first** (`src-tauri/src/machine_control.rs`): the desktop refuses
+  everything with `machines_disabled` while Experimental → Machines is off.
+  `list`, `status`, `add` (`Machines::inspect` and `pair`, waiting for Allow)
+  and `remove` (as Settings → Machines → Remove) are answered here. `add`
+  takes two calls: the first shows the fingerprint and contacts nothing
+  (`fingerprint_confirmation_required`); the second names it with
+  `--fingerprint` and pairs, so the person compares it with the machine's
+  approval before pressing Allow, as with the dialog. For every
+  other action it resolves the machine (id, `machine:` key, or a name in any
+  case: `machine_unknown`, `ambiguous_selector`) and refuses at once by the
+  owner's state: `reconnecting` and `offline` are `machine_offline`, and
+  `needsUpdate`, `updating`, `accessRemoved` and `disconnected` have codes of
+  their own. `idle` and `connecting` go on. A `machine:` key in the params
+  must name the same machine.
+- **Then the window** (`machine_control_request`, answered through
+  `cloud_control_reply`; `src/lib/machineControl.ts`) runs it over the
+  machine's one connection with the code the machine views use: the catalog
+  for lists, `createMachineSession` for a new session (one
+  `clientRequestId` per `--idempotency-key`), live `session.send` and
+  `session.decide` (`agent-commands/1`), a replayed `session.subscribe` for
+  `read` and `wait` (the cloud wait's `settledReason`), `session.update` for
+  rename and archive, and `cleanup.scan` / `cleanup.remove` for worktrees. A
+  machine this window does not hold yet is attached and given 10 s; a
+  machine still not connected is `machine_offline`. A namespace the machine
+  did not grant is `machine_unsupported`, naming its version.
+- **Waits** are asked in calls of at most 30 s, as cloud waits are, so a
+  caller that goes away leaves nothing running.
+- **Limits.** A run's worker is refused `machines add|remove` and
+  `sessions create --machine` (`forbidden`; also in `orchestration::guard`
+  `RULES`): a session it starts locally is marked a worker as it is made, and
+  one on a machine cannot be. Orchestration runs with workers on another
+  machine stay out of scope (decision 7). Issue starts from the CLI, renaming
+  a machine's worktree, and `sessions report|usage|status|show` stay on this
+  computer.
 
 ### As built (PRO-358): two machines end to end in CI
 
