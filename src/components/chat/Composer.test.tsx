@@ -1410,6 +1410,17 @@ it.each([false, true])("waits for PR context before sending, unless Escape cance
   if (cancel) await act(async () => finish("/context/pr-12.md"));
 });
 
+// PRO-352: a held composer (its machine is away) sends nothing, Compact included.
+it("does not compact while its machine is away", async () => {
+  const send = vi.fn();
+  render(<Composer tab={tab} busy={false} draft="" onDraftChange={vi.fn()} onSend={send} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} contextUsed={90000} contextMax={100000} heldReason="Can't send until Mac mini is back" />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  const compact = (await screen.findByRole("button", { name: "Compact now" })) as HTMLButtonElement;
+  expect(compact.disabled).toBe(true);
+  fireEvent.click(compact);
+  expect(send).not.toHaveBeenCalled();
+});
+
 it("compacts from the ring through the CLI send path while keeping the draft", async () => {
   const send = vi.fn();
   const change = vi.fn();

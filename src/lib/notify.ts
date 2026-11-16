@@ -488,7 +488,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   playSound(kind);
   if (getSessions().selectedSessionId === session.key) return;
   const id = `${session.key}:${tab.tabId}:${Date.now()}`;
-notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() }];
+  notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() }];
   emit();
   expireNotice(id);
 }

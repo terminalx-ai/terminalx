@@ -111,6 +111,9 @@ export function machineCameBack(before: MachineConnectionState | undefined, afte
 
 function applyEvent(view: MachineConnectionView) {
   eventCount.set(view.machineId, (eventCount.get(view.machineId) ?? 0) + 1);
+  // Disconnected here, the machine reads Not connected in this window, whatever
+  // the owner says for another window that still holds it, until Try again.
+  if (disconnected.has(view.machineId)) return;
   const before = state.states[view.machineId];
   set({ states: { ...state.states, [view.machineId]: view.state } });
   const after = view.state;
@@ -165,6 +168,7 @@ export async function refreshPairedMachines(): Promise<void> {
   if (mine !== reads) return;
   const states = { ...state.states };
   for (const view of views) {
+    if (disconnected.has(view.machineId)) continue;
     if ((eventCount.get(view.machineId) ?? 0) === (before.get(view.machineId) ?? 0)) states[view.machineId] = view.state;
   }
   set({ ready: true, error: null, machines, states });
@@ -179,7 +183,8 @@ async function attach(machineId: string): Promise<void> {
   try {
     const connection = await workspaceConnection(target(machineId));
     const paired = state.machines.some((machine) => machine.machineId === machineId);
-    if (!connection || holders === 0 || !paired) {
+    // Disconnect pressed while this attach was under way: let go of it rather than store it.
+    if (!connection || holders === 0 || !paired || disconnected.has(machineId)) {
       closeWorkspaceConnection(target(machineId));
       return;
     }

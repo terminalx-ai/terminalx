@@ -732,7 +732,7 @@ export function Composer({
               }}
             />
             <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
-              turns={turns} compacting={compacting} compactDisabled={disabled || busy || sending}
+              turns={turns} compacting={compacting} compactDisabled={disabled || !!heldReason || busy || sending}
               onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}

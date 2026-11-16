@@ -260,6 +260,38 @@ describe("connection states the person sees (PRO-352, 21.09)", () => {
     expect(toasts.getMachineToasts()).toEqual([]);
   });
 
+  it("Disconnect pressed while an attach is under way lets go of that attach", async () => {
+    let answer!: (id: string) => void;
+    const plain = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "machine_remote_attach" && args?.machineId === "m1") return new Promise<string>((resolve) => (answer = resolve));
+      return plain(command, args);
+    });
+    stop = store.startMachineConnections();
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    store.disconnectMachine("m1");
+    answer("conn-m1");
+    await vi.waitFor(() => expect(store.getMachineConnections().connections.m2).toBeTruthy());
+    await flush();
+    expect(store.getMachineConnections().connections.m1).toBeUndefined();
+    expect(api.hasWorkspaceConnection({ kind: "machine", machineId: "m1" })).toBe(false);
+    expect(store.getMachineConnections().states.m1).toEqual({ state: "idle" });
+  });
+
+  it("keeps a disconnected machine Not connected here whatever later events and reads say, until Try again", async () => {
+    await started();
+    store.disconnectMachine("m1");
+    // Another window still holds it: the owner keeps reporting it connected.
+    changed({ machineId: "m1", state: DIRECT });
+    views = [{ machineId: "m1", state: DIRECT }, { machineId: "m2", state: { state: "idle" } }];
+    await store.refreshPairedMachines();
+    expect(store.getMachineConnections().states.m1).toEqual({ state: "idle" });
+
+    await store.reconnectMachine("m1");
+    changed({ machineId: "m1", state: DIRECT });
+    expect(store.getMachineConnections().states.m1).toMatchObject({ state: "direct" });
+  });
+
   it("Disconnect lets go of the machine until Try again, and a read of the list does not attach it again", async () => {
     await started();
     changed({ machineId: "m1", state: DIRECT });
