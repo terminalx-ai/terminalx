@@ -69,13 +69,11 @@ fn login(data: &Path) -> Result<i32> {
     println!("Waiting for you to approve it...");
     let session = match api.wait_for_session(&code, std::thread::sleep) {
         Ok(session) => session,
-        Err(error) => match error.downcast::<Refused>() {
-            Ok(refused) => {
-                eprintln!("Not signed in: {refused}. Run `terminalx-serve login` to try again.");
-                return Ok(1);
-            }
-            Err(error) => return Err(error),
-        },
+        Err(error) => {
+            let refused = error.downcast::<Refused>()?;
+            eprintln!("Not signed in: {refused}. Run `terminalx-serve login` to try again.");
+            return Ok(1);
+        }
     };
     machine_account::save(data, &session)?;
     println!("Signed in as {}.", session.who());

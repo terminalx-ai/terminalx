@@ -301,9 +301,12 @@ mod tests {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
 
+    /// What the service was sent: path, body and authorization.
+    type Seen = Arc<Mutex<Vec<(String, Value, Option<String>)>>>;
+
     /// A loopback account service answering each request with the next of
     /// `answers` (status, body), recording what it was sent.
-    fn service(answers: Vec<(u16, Value)>) -> (String, Arc<Mutex<Vec<(String, Value, Option<String>)>>>, std::thread::JoinHandle<()>) {
+    fn service(answers: Vec<(u16, Value)>) -> (String, Seen, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));

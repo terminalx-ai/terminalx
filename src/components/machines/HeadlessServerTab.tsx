@@ -131,7 +131,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
     <>
       <div className="grid grid-cols-[minmax(0,1fr)_330px] gap-5 px-5 pb-5 pt-4 max-[799px]:grid-cols-1" data-testid="headless-server">
         <div className="grid min-w-0 content-start gap-4">
-          <p className={soft}>A server runs TerminalX without a window. It needs no open port: it connects out to the relay, and directly when this Mac can reach it.</p>
+          <p className={soft}>A server runs TerminalX without a window. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here.</p>
           <ol className="grid gap-4">
             <StepRow n={1} title="Install TerminalX on the server">
               <CommandBox command={INSTALL_COMMAND} label="install command" />
@@ -163,7 +163,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
       </div>
       <footer className="flex min-h-[52px] flex-wrap items-center gap-2 border-t border-hairline px-5 py-2.5">
         <span className="mr-auto flex items-center gap-1.5 text-[12px] text-faint">
-          <BookOpen className="size-[13px] shrink-0" aria-hidden /> Agents sign in on the server after pairing, from its machine page.
+          <BookOpen className="size-[13px] shrink-0" aria-hidden /> Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.
         </span>
         {step.kind === "paired" ? (
           <Button size="sm" onClick={onDone}>Done</Button>

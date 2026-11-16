@@ -350,14 +350,14 @@ try {
       failed += report(`${name}, headless: empty`, {
         ...commonChecks(m),
         "tabs: Pairing code and Headless server (chosen), no On your account": JSON.stringify(m.tabs) === JSON.stringify([["Pairing code", "false"], ["Headless server", "true"]]) && !m.text.includes("On your account"),
-        "the intro and three numbered steps": m.text.includes("A server runs TerminalX without a window. It needs no open port: it connects out to the relay, and directly when this Mac can reach it.")
+        "the intro and three numbered steps": m.text.includes("A server runs TerminalX without a window. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here.")
           && m.steps.length === 3 && m.stepNumbers.join() === "1,2,3" && m.steps[0].startsWith("Install TerminalX on the server") && m.steps[1].startsWith("Create a pairing code there") && m.steps[2].startsWith("Paste the code here"),
         "the install command and what it supports": m.steps[0]?.includes(INSTALL_COMMAND) && m.steps[0]?.includes("Linux x64 and arm64, and macOS. Installs a user service that starts at boot."),
         "the On the server panel: placeholders for the server, this Mac by name": JSON.stringify(m.transcript) === JSON.stringify([
           "$ terminalx-serve pair", "TerminalX <version> · <OS> <arch>", "Name        <server name>", "Machine ID  <machine ID>", "", "Pairing code, valid for 5:00, works once:", "txm2.…", "",
           "Waiting for a computer to pair…", "✓Paresh’s MacBook Pro asks to operate this server. Fingerprint <fingerprint>.", "Allow? [y/N]"]),
         "the panel fits the dialog": m.panelInside === true,
-        "the footer note, Cancel, and Continue off": m.text.includes("Agents sign in on the server after pairing, from its machine page.") && (await dialog.getByRole("button", { name: "Continue" }).isDisabled()),
+        "the footer note, Cancel, and Continue off": m.text.includes("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.") && (await dialog.getByRole("button", { name: "Continue" }).isDisabled()),
       }, m);
       await dialog.getByRole("button", { name: "Copy install command" }).click();
       await dialog.getByRole("button", { name: "install command copied" }).waitFor();

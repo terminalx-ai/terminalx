@@ -1,5 +1,5 @@
 //! `terminalx-serve update`: install the newest signed runtime release next
-//! to the running one and restart the service on it (PRO-353).
+//! to the running one and hand the running runtime over to it in place (PRO-353).
 //!
 //! It checks exactly what `scripts/install/install.sh` checks, with the key
 //! compiled in here ([`super::RUNTIME_SIGNING_KEY`]): `SHA256SUMS` must carry
@@ -26,7 +26,8 @@ use super::{RUNTIME_SIGNING_KEY, SIGNATURE_NAMESPACE, SIGNER_PRINCIPAL};
 const USAGE: &str = "\
 Usage: terminalx-serve update [--check] [--data-dir <dir>]
 
-Install the newest signed TerminalX runtime and restart the service on it.
+Install the newest signed TerminalX runtime and hand the running one over to
+it, keeping its agents and terminals running.
 Its signature is checked against the TerminalX release key first; a release
 that is not signed, or does not verify, is refused. The version it replaces
 stays in ~/.terminalx/versions.
@@ -80,6 +81,13 @@ fn update(args: &[String]) -> Result<i32> {
     };
     if newest.version <= installed {
         println!("terminalx-serve {installed} is installed, and it is the newest signed runtime.");
+        // A runtime still running an older version (an update that had to
+        // wait for its work) takes this one over now.
+        let current = root.join("current").join("terminalx-serve");
+        let outcome = super::handover::hand_over(&data, &current, &installed.to_string())?;
+        if outcome != super::handover::Outcome::Current && outcome != super::handover::Outcome::NotRunning {
+            return Ok(if super::handover::report(&outcome, &installed.to_string()) { 0 } else { 1 });
+        }
         return Ok(0);
     }
     if check_only {
@@ -89,13 +97,9 @@ fn update(args: &[String]) -> Result<i32> {
     println!("Updating terminalx-serve {installed} to {} ({})...", newest.version, newest.tag);
     let dest = apply(&root, &source, &newest, asset, &fetch)?;
     println!("Installed {} ({} points at it).", dest.display(), root.join("current").display());
-    match super::service::restart_for(&data) {
-        Ok(true) => println!("Restarted the service on terminalx-serve {}.", newest.version),
-        Ok(false) => println!("No service runs this runtime; the next start uses terminalx-serve {}.", newest.version),
-        Err(error) => {
-            eprintln!("warning: the service was not restarted ({error:#}); it runs {installed} until it restarts.");
-            return Ok(1);
-        }
+    let outcome = super::handover::hand_over(&data, &dest.join("terminalx-serve"), &newest.version.to_string())?;
+    if !super::handover::report(&outcome, &newest.version.to_string()) {
+        return Ok(1);
     }
     Ok(0)
 }

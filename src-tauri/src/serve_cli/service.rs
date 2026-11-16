@@ -222,13 +222,24 @@ fn install(home: &Path, plan: &Plan) -> Result<i32> {
     if changed {
         crate::store::write_atomic(&path, text.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     }
-    if cfg!(target_os = "macos") {
-        launchd::install(&path, changed)?;
-    } else {
-        systemd::install(changed)?;
-    }
+    // A running service is never restarted here: that would end every agent
+    // and terminal it runs. A changed definition applies at its next start.
+    let deferred = if cfg!(target_os = "macos") { launchd::install(&path, changed)? } else { systemd::install(changed)? };
     println!("Installed the TerminalX runtime as a user service ({}).", path.display());
     println!("It starts at boot and runs: {}", plan.arguments().join(" "));
+    if deferred {
+        println!("The service runs now, so its new definition applies when it next starts (after a reboot), not now: restarting it would stop its agents and terminals.");
+    }
+    // Installed again over a running runtime (the installer run a second
+    // time): the running one is handed over to this version in place, as
+    // `update` does, rather than restarted, which would end its agents.
+    match super::handover::hand_over(&plan.data, &plan.executable, env!("CARGO_PKG_VERSION")) {
+        Ok(super::handover::Outcome::NotRunning | super::handover::Outcome::Current) => {}
+        Ok(outcome) => {
+            super::handover::report(&outcome, env!("CARGO_PKG_VERSION"));
+        }
+        Err(error) => eprintln!("warning: the running runtime was not handed over to this version ({error:#}); it runs its old version until it restarts."),
+    }
     println!("Other computers may not operate this server until you run `terminalx-serve pair`.");
     Ok(0)
 }
@@ -306,24 +317,6 @@ pub fn start_for(data: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Restart the installed service if it runs the runtime of `data`, so it
-/// runs the binary `current` now points at. `false` when no such service is
-/// installed.
-pub fn restart_for(data: &Path) -> Result<bool> {
-    let Some(home) = dirs::home_dir() else { return Ok(false) };
-    let path = definition_path(&home);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
-    if !serves(&text, data) {
-        return Ok(false);
-    }
-    if cfg!(target_os = "macos") {
-        launchd::restart(&path)?;
-    } else {
-        systemd::systemctl(&["restart", UNIT])?;
-    }
-    Ok(true)
-}
-
 /// What the service manager says.
 struct State {
     running: bool,
@@ -377,7 +370,8 @@ mod systemd {
         output("loginctl", &["show-user", user, "--property=Linger", "--value"]).is_ok_and(|said| said == "yes")
     }
 
-    pub(super) fn install(changed: bool) -> Result<()> {
+    /// Whether a changed unit waits for the service's next start.
+    pub(super) fn install(changed: bool) -> Result<bool> {
         // Without lingering, the user's services start at their first login,
         // not at boot, and stop at their last logout.
         match user_name() {
@@ -393,12 +387,12 @@ mod systemd {
         systemctl(&["daemon-reload"]).context("the systemd user manager is not reachable; log in again or run `sudo loginctl enable-linger $USER` first")?;
         systemctl(&["enable", UNIT])?;
         let active = systemctl(&["is-active", UNIT]).is_ok_and(|said| said == "active");
-        if active && changed {
-            systemctl(&["restart", UNIT])?;
-        } else if !active {
+        if !active {
             systemctl(&["start", UNIT])?;
         }
-        Ok(())
+        // Loaded by `daemon-reload`; used from the next start. A restart
+        // would kill the unit's whole control group: every agent.
+        Ok(active && changed)
     }
 
     pub(super) fn state() -> State {
@@ -449,27 +443,19 @@ mod launchd {
         bail!("launchd would not load the service: {}", failures.join("; "))
     }
 
-    pub(super) fn install(path: &Path, changed: bool) -> Result<()> {
+    /// Whether a changed definition waits for the service's next start.
+    pub(super) fn install(path: &Path, changed: bool) -> Result<bool> {
         match loaded() {
-            Some((domain, _)) if changed => {
-                let _ = output("launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
-                bootstrap(path)
-            }
-            Some(_) => Ok(()),
-            None => bootstrap(path),
+            // Booting it out to load the new one would end what it runs; the
+            // file is read again at the next login.
+            Some(_) => Ok(changed),
+            None => bootstrap(path).map(|()| false),
         }
     }
 
     pub(super) fn start(path: &Path) -> Result<()> {
         match loaded() {
             Some((domain, _)) => output("launchctl", &["kickstart", &format!("{domain}/{LABEL}")]).map(drop),
-            None => bootstrap(path),
-        }
-    }
-
-    pub(super) fn restart(path: &Path) -> Result<()> {
-        match loaded() {
-            Some((domain, _)) => output("launchctl", &["kickstart", "-k", &format!("{domain}/{LABEL}")]).map(drop),
             None => bootstrap(path),
         }
     }

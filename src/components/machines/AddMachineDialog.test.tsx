@@ -52,6 +52,8 @@ describe("Add a machine (screen 21.04)", () => {
     const tabs = within(within(dialog).getByRole("tablist")).getAllByRole("tab");
     expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")])).toEqual([["Pairing code", "true"], ["Headless server", "false"]]);
     expect(within(dialog).queryByText("On your account")).toBeNull();
+    // No stray source text (a leftover `return (` once rendered as a text node).
+    expect(dialog.textContent).not.toMatch(/return \(|=>|\{\s*\}/);
     expect(within(dialog).getByText("On the other computer, open Settings → Machines and choose Create pairing code.")).toBeTruthy();
     expect(within(dialog).getByText("The fingerprint shows here once a code is pasted.")).toBeTruthy();
     expect(within(dialog).getByRole("radio", { name: "Relay and nearby" }).getAttribute("aria-checked")).toBe("true");

@@ -155,9 +155,12 @@ terminalx-serve update
 (or `terminalx-serve update --check` to only look) installs the newest signed
 runtime release, checked the same way as the
 installer checks it, into a new `~/.terminalx/versions/<version>`, switches
-`~/.terminalx/current` to it and restarts the service. The previous version's
-folder stays, so you can switch back. Running the install command again does
-the same.
+`~/.terminalx/current` to it, and hands the running runtime over to it in place:
+its agents and terminals keep running, and nothing is restarted. If the runtime
+runs something an update cannot carry over, it says what and keeps the old
+version running; run `terminalx-serve update` again once that is done. The
+previous version's folder stays, so you can switch back. Running the install
+command again does the same.
 
 ## Remove
 

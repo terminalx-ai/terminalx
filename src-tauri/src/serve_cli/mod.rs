@@ -28,6 +28,8 @@ pub mod consent;
 #[cfg(unix)]
 pub mod control_client;
 pub mod devices;
+#[cfg(unix)]
+pub mod handover;
 pub mod login;
 pub mod pair;
 #[cfg(unix)]

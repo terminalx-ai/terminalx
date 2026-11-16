@@ -280,7 +280,7 @@ main() {
   fi
 
   say ""
-  say "TerminalX $VERSION is installed and runs as a user service."
+  say "TerminalX $VERSION is installed, with a user service (what it runs now is said above)."
   case ":${PATH:-}:" in
     *":$BIN_DIR:"*)
       say "Next, pair it with your computer:"

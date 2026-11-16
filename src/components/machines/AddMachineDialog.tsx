@@ -122,7 +122,6 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
 
   return (
     <>
-  return (
         <div className="grid grid-cols-[minmax(0,1fr)_260px] max-[699px]:grid-cols-1">
           <div className="grid min-w-0 content-start gap-3 p-5">
             <div className="grid gap-1">
