@@ -298,7 +298,7 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write as _};
+    use std::io::Read;
     use std::sync::{Arc, Mutex};
 
     /// A loopback account service answering each request with the next of
