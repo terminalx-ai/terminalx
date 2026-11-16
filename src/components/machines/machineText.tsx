@@ -51,6 +51,11 @@ export function PlatformIcon({ platform, className }: { platform: string | null;
   return <Icon className={className} aria-hidden data-icon={linux ? "server" : "monitor"} />;
 }
 
+/** "14:02": the 24-hour clock the screens use (21.02, 21.09), whatever the reader's locale. */
+export function clockTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
 /** "Nov 3" in the reader's locale. */
 export function shortDate(epochMs: number): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(epochMs));
@@ -81,9 +86,9 @@ export function routeLabel(kind: "lan" | "tailscale" | "relay"): string {
   return kind === "relay" ? "through Relay" : kind === "tailscale" ? "Direct over Tailscale" : "Direct on this network";
 }
 
-/** "today at 18:40", "yesterday at 18:40" or "Nov 3 at 18:40", in the reader's locale. */
+/** "today at 18:40", "yesterday at 18:40" or "Nov 3 at 18:40": the date in the reader's locale, the time on the 24-hour clock. */
 export function seenText(epochMs: number, now = Date.now()): string {
-  const time = new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const time = clockTime(epochMs);
   const day = (ms: number) => {
     const date = new Date(ms);
     return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();

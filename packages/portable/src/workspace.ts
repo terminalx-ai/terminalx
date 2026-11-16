@@ -127,6 +127,9 @@ export function agentPtyId(tabId: string): string {
   return `tab:${tabId}`;
 }
 
+/** Methods a machine serves per project: they name the project (docs/MACHINES.md "Project scoping"). */
+const PROJECT_SCOPED = /^(fs|git)\./;
+
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
 
@@ -813,6 +816,8 @@ export class WorkspaceRpcClient {
   private nextLocal = 0;
   private closed = false;
   private readonly dropWaiters = new Set<() => void>();
+  /** One view per project, so a project's client keeps its identity across renders. */
+  private readonly projectViews = new Map<string, WorkspaceRpcClient>();
 
   constructor(private readonly transport: WorkspaceTransport, private readonly newRequestId: () => string = randomRequestId, timeoutMs = 30_000) {
     this.rpc = new PortableRpcClient(
@@ -831,6 +836,35 @@ export class WorkspaceRpcClient {
 
   get connection(): WorkspaceConnectionState {
     return this.state;
+  }
+
+  /**
+   * This connection as one project of a machine sees it (`machine/1`,
+   * docs/MACHINES.md "Project scoping"): every `fs.*` and `git.*` call, a
+   * file watch and a terminal opened outside a session carry `projectId`.
+   * Everything else (sessions, tabs, terminals, ports) is the machine's and
+   * goes as it is. The same object for the same project, so it can be a
+   * React dependency. A call that already names a project keeps it.
+   */
+  forProject(projectId: string): WorkspaceRpcClient {
+    const known = this.projectViews.get(projectId);
+    if (known) return known;
+    const scoped = (method: string, params: Record<string, unknown> = {}) =>
+      PROJECT_SCOPED.test(method) && params.projectId === undefined ? { ...params, projectId } : params;
+    const view = new Proxy(this, {
+      get: (target, property) => {
+        if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => target.call<T>(method, scoped(method, params));
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => target.mutate<T>(method, scoped(method, params), id);
+        if (property === "watchFiles") return (path: string, onChange: (paths: string[] | null) => void) => target.watchFiles(path, onChange, { projectId });
+        if (property === "createPty")
+          return (params: Parameters<WorkspaceRpcClient["createPty"]>[0]) => target.createPty(params.sessionId === undefined && params.projectId === undefined ? { ...params, projectId } : params);
+        if (property === "forProject") return (other: string) => target.forProject(other);
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    this.projectViews.set(projectId, view);
+    return view;
   }
 
   get generation(): number | null {
@@ -964,7 +998,7 @@ export class WorkspaceRpcClient {
   }
 
   /** `sessionId` needs `pty/2`; an older runtime would open a terminal that belongs to no session. */
-  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string }): Promise<PtyInfo> {
+  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string; projectId?: string }): Promise<PtyInfo> {
     if (params.sessionId !== undefined) this.assertCapability("pty/2", "pty.create");
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
@@ -1561,11 +1595,11 @@ export class WorkspaceRpcClient {
    * be re-read: after a reconnect (changes made while away were not seen)
    * or a burst too large to name.
    */
-  watchFiles(path: string, onChange: (paths: string[] | null) => void): Promise<() => void> {
+  watchFiles(path: string, onChange: (paths: string[] | null) => void, scope: { projectId?: string } = {}): Promise<() => void> {
     let resumed = false;
     return this.subscribe({
       method: "fs.watch",
-      params: { path },
+      params: scope.projectId ? { path, projectId: scope.projectId } : { path },
       resumeParams: () => ({}),
       onReplay: () => {
         if (resumed) onChange(null);
