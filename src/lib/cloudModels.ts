@@ -108,3 +108,15 @@ export function useCloudModelClient(target: CloudTarget | null): WorkspaceRpcCli
   }, [key]);
   return useSyncExternalStore(subscribeCloudConnections, () => lease?.key === key && lease.state().state === "connected" ? lease.current()?.client ?? null : null, noReading);
 }
+
+/**
+ * Why an agent on a machine will not work there yet (PRO-350): "Codex is not
+ * signed in on dev-server. Sign in from its machine page." Only a definite
+ * signed out counts: a sign-in its CLI could not tell, or an older runtime
+ * that does not say, is no reason.
+ */
+export function machineAgentSignInReason(agents: readonly RuntimeAgent[] | null | undefined, harness: string | null | undefined, machineName: string): string | null {
+  const agent = harness ? agents?.find((entry) => entry.id === harness) : undefined;
+  if (!agent || agent.signIn !== "signedOut") return null;
+  return `${agent.name} is not signed in on ${machineName}. Sign in from its machine page.`;
+}

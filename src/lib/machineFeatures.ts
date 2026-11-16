@@ -41,6 +41,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "pipelines", label: "Issue pipelines", capability: "pipeline/1", action: "run issue pipelines" },
   { id: "pipelineReviewers", label: "Pipeline reviewers", capability: "pipeline/2", action: "choose pipeline reviewers" },
   { id: "updates", label: "Updating it from this Mac", capability: "machine/3", action: "update it from this Mac" },
+  { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {

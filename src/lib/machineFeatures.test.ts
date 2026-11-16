@@ -13,9 +13,9 @@ import {
   missingMachineFeatures,
 } from "./machineFeatures";
 
-// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–3.
+// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–4.
 const WITHHELD = ["keys/1", "mirror/1", "collab/1"];
-const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3"];
+const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4"];
 const without = (...names: string[]) => CURRENT.filter((name) => !names.includes(name));
 const connected = { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 4 } as const;
 
@@ -80,5 +80,14 @@ describe("machine features", () => {
     // Updating from here is the button beside the line, not something to update for.
     expect(machineFeaturesMessage("dev-server", "0.2.29", [machineFeature("machine/3")!])).toBeNull();
     expect(machineFeaturesMessage("dev-server", "0.2.29", [])).toBeNull();
+  });
+
+  it("hides Install and Sign in on a machine without machine/4 (PRO-350)", () => {
+    const feature = machineFeature("machine/4")!;
+    expect(feature).toEqual({ id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" });
+    expect(machineHasFeature(without("machine/4"), "machine/4")).toBe(false);
+    expect(machineHasFeature(CURRENT, "machine/4")).toBe(true);
+    expect(machineFeatureMessage("dev-server", "0.2.33", feature)).toBe("dev-server runs TerminalX 0.2.33. Update it to sign in its agents from here.");
+    expect(missingMachineFeatures(without("machine/4")).map((entry) => entry.id)).toEqual(["agentSetup"]);
   });
 });
