@@ -27,8 +27,8 @@
 //! a runtime the desktop launched, where the window (which has no terminal)
 //! must be let through, a process that detaches with `setsid` and asks with no
 //! terminal at all: the runtime cannot yet tell the window from it, because it
-//! does not know which process is the window. Recognising the window is a
-//! follow-up; before this guard, nothing was refused on any runtime.
+//! does not know which process is the window. Recognising the window is
+//! PRO-369; before this guard, nothing was refused on any runtime.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};

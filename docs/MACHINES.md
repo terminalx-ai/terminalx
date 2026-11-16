@@ -1030,7 +1030,7 @@ as a user service and is paired from its own terminal. The user's guide is
   own looks like a person anywhere; and on a desktop-launched runtime, which
   must let the terminal-less window through, a process that detaches with
   `setsid` and has no terminal is let through too, until the runtime can
-  recognise the window process itself (follow-up).
+  recognise the window process itself (PRO-369).
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
