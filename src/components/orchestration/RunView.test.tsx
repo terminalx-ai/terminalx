@@ -729,6 +729,8 @@ describe("a planned run in a project that asks for no approval (PRO-365)", () =>
     answers.orchestration_start = () => ({ run: startedBy({ ...run, limits: { workers: 4, dollars: 15, points: 10, ceiling: 95 } }), started: ["map"], waiting: [], failed: [] });
     await open(run);
     const start = screen.getByRole("button", { name: "Start run" }) as HTMLButtonElement;
+    // The plan card's limits open from its Budget chip (18.02, PRO-383).
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
     const points = screen.getByRole("spinbutton", { name: "Points of a window this run may use" });
     fireEvent.change(points, { target: { value: "10" } });
     fireEvent.blur(points);
@@ -1000,7 +1002,7 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
     const plan = { ...waiting(), integrationCheck: "cargo t && pnpm test" };
     answers.orchestration_update_plan = (args: unknown) => ({ ...plan, integrationCheck: (args as { plan: RunPlan }).plan.integrationCheck });
     await open(plan);
-    expect(screen.getByTestId("plan-integration-check").textContent).toContain("After each mergecargo t && pnpm test");
+    expect(screen.getByTestId("plan-integration-check").textContent).toBe("After each merge cargo t && pnpm test runs in the lead's checkout.");
     fireEvent.click(screen.getByRole("button", { name: "Edit plan" }));
     fireEvent.change(screen.getByLabelText(/^Integration check/), { target: { value: "  just check  " } });
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
@@ -1037,9 +1039,12 @@ describe("limits and budget (PRO-280)", () => {
   it("shows a subscription run's points of its window, the window and its reset, and its worker limit", async () => {
     await open(running());
     const budget = screen.getByTestId("run-budget").textContent ?? "";
-    // Dollars first, the subscription's points as a second line (owner decision, PRO-361).
-    expect(budget).toContain("Spend$0.00 of $15.00");
-    expect(screen.getByTestId("run-points").textContent).toBe("9 of 25 points · 5h window at 41% · resets 16:10 · pauses past 85%");
+    // A subscription's points lead, its window under them, and the dollars it would cost on an API key last (18.01, PRO-383).
+    expect(budget.startsWith("Budget")).toBe(true);
+    expect(screen.getByTestId("run-points").textContent).toBe("subscription 9 of 25 points");
+    expect(screen.getByTestId("run-window").textContent).toBe("5h window at 41% · resets 16:10");
+    expect(screen.getByTestId("run-window").title).toBe("The run pauses past 85% of the window");
+    expect(screen.getByTestId("run-spend").textContent).toBe("$0.00 API-equivalent, not billed");
     expect(screen.getByTestId("run-workers").textContent).toContain("1 running·4 workers at a time");
     expect(row("store").getAttribute("data-piece-state")).toBe("stalled");
     expect(row("store").textContent).toContain("Stalled");
@@ -1093,6 +1098,10 @@ describe("limits and budget (PRO-280)", () => {
     const summary = screen.getByRole("region", { name: "Plan summary" });
     expect(within(summary).getByRole("alert").textContent).toBe(warning);
     expect(summary.textContent).toContain("Budget25 points");
+    // The window and the run's own limits are under the Budget chip; the warning is shown without it.
+    expect(screen.queryByTestId("run-windows")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
+
     expect(screen.getByTestId("run-windows").textContent).toContain("Claude 5h at 70%, resets 16:10");
     expect(screen.getByTestId("run-windows").textContent).toContain("the window is shared with everything else you run");
     const workers = within(summary).getByRole("spinbutton", { name: "Workers at once in this run" });
@@ -1112,9 +1121,10 @@ describe("limits and budget (PRO-280)", () => {
     expect(budget).toContain("9 points usedNo limit");
     expect(budget).toContain("$12345.60 spentNo limit");
     expect(budget).not.toContain(" of $");
-    expect(budget).toContain("5h window at 41% · pauses past 85%");
-    // Dollars come first.
-    expect(budget.indexOf("$12345.60")).toBeLessThan(budget.indexOf("9 points"));
+    expect(budget).toContain("5h window at 41%");
+    expect(screen.getByTestId("run-window").title).toBe("The run pauses past 85% of the window");
+    // The subscription's points come first (PRO-383).
+    expect(budget.indexOf("9 points")).toBeLessThan(budget.indexOf("$12345.60"));
     expect(screen.getAllByTestId("run-no-limit")).toHaveLength(2);
   });
 
@@ -1133,6 +1143,7 @@ describe("limits and budget (PRO-280)", () => {
     const summary = screen.getByRole("region", { name: "Plan summary" });
     expect(within(summary).getAllByRole("alert").map((alert) => alert.textContent)).toEqual([warning]);
     expect(summary.textContent).toContain("BudgetNo points limit");
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
     expect(within(summary).queryByRole("spinbutton", { name: "Points of a window this run may use" })).toBeNull();
 
     // Back to a bound, starting from the default; then the window level off.
@@ -1427,5 +1438,50 @@ describe("what a run decides on its own (#1004)", () => {
     expect(notice.textContent).toContain("no new piece starts before the reset. You need do nothing.");
     expect(within(notice).getByTestId("run-resumes-at").textContent).toContain("Goes on by itself at");
     expect(within(notice).queryByRole("button", { name: "Resume now" })).toBeNull();
+  });
+});
+
+describe("what a queued piece waits for (PRO-383)", () => {
+  /** 18.03: pieces 1 and 2 done, 3 blocked, and 4 depends on all three. */
+  const held = (): Run => {
+    const run = waiting();
+    return {
+      ...run, state: "running", approval: { at: "2026-11-11T00:00:00Z" },
+      pieces: [
+        piece("map", "Map every settings read", { state: "done", attempts: 1, tier: "small", model: "haiku" }),
+        piece("store", "Typed store module", { state: "done", attempts: 1, tier: "large", model: "opus" }),
+        piece("cli", "Move CLI code", { state: "blocked", attempts: 3 }),
+        piece("docs", "Update the docs", { dependsOn: ["map", "store", "cli"] }),
+      ],
+      waiting: [{ piece: "docs", on: ["cli"] }],
+    };
+  };
+
+  it("names only the pieces not done, and calls one held by a blocked piece Waiting", async () => {
+    await open(held());
+    const report = within(row("docs")).getByTestId("piece-report").textContent;
+    expect(report).toBe("Waits for 3");
+    expect(row("docs").getAttribute("data-piece-state")).toBe("queued");
+    expect(row("docs").getAttribute("data-shown-state")).toBe("waiting");
+    expect(row("docs").textContent).toContain("Waiting");
+    fireEvent.click(within(row("docs")).getByTestId("piece-title"));
+    expect(detail().textContent).toContain("Waits for 3.");
+    expect(detail().textContent).not.toMatch(/Waits for [^.]*\b[12]\b/);
+  });
+
+  it("gives a queued piece its model's tier dot, and its panel no extra label", async () => {
+    await open(held());
+    expect(within(row("docs")).getByTestId("model-dot").className).toContain("text-add");
+    fireEvent.click(within(row("docs")).getByTestId("piece-title"));
+    expect(within(detail()).getByRole("heading").textContent).toBe("Update the docs");
+    expect(within(detail()).queryByText("piece")).toBeNull();
+  });
+
+  it("is Queued, not Waiting, while what it waits for is still going", async () => {
+    const run = held();
+    run.pieces[2] = { ...run.pieces[2], state: "running" };
+    await open(run);
+    expect(row("docs").getAttribute("data-shown-state")).toBe("queued");
+    expect(within(row("docs")).getByTestId("piece-report").textContent).toBe("Waits for 3");
   });
 });

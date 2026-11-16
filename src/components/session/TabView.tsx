@@ -44,6 +44,7 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
 import { modelLabel, useModels } from "@/lib/models";
@@ -170,7 +171,7 @@ export function TabView({
   const sendNotice = local && sendState.error != null ? requestRefusalNotice(sendState.error) : null;
   const sendBusy = sendNotice !== null;
   const [busyRefused, setBusyRefused] = useState<string | null>(null);
-  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
+  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null; target?: ResetTarget } | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -878,8 +879,10 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
-      onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
+      onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
+      onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt?.text) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true); } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
+      onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       agent={chatAgent}
       onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}
@@ -1149,7 +1152,7 @@ export function TabView({
       <span>{resetNotice(tab)}</span>
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
-    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {

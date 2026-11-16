@@ -79,6 +79,14 @@ it("automatically asks once for a second opinion, without exporting history or c
   expect(screen.getByTestId("review-settings").textContent).toContain("Codex · GPT-6 Mini · Plan (read-only)");
   expect(screen.getByText(/Share the selected turn's prompt, answer and recorded file diffs with Codex/)).toBeTruthy();
 });
+it("retries a failed turn's prompt as it was in a new tab, in the tab's own mode (PRO-378)", async () => {
+  mocks.launch.mockResolvedValue({ stage: "delivered" });
+  render(<ContinuationDialog session={session} source={{ ...source, permissionMode: "bypassPermissions" }} initialHarness="codex" reviewPrompt="Fix the flaky test" retry onClose={vi.fn()} />);
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session.id }), expect.objectContaining({ harness: "codex", permissionMode: "bypassPermissions" }), "Fix the flaky test", expect.any(Function), undefined, expect.any(Function), "review");
+  expect(screen.getByRole("heading", { name: "Retry in a new chat" })).toBeTruthy();
+  expect(screen.getByTestId("review-settings").textContent).not.toContain("Plan");
+});
 it("does not fall back to the source agent when the requested counterpart disappears", async () => {
   mocks.providers.mockResolvedValue([providers[0]]);
   render(<ContinuationDialog session={session} source={source} initialHarness="codex" reviewPrompt="Review" onClose={vi.fn()} />);

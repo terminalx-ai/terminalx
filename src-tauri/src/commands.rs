@@ -1626,6 +1626,27 @@ pub async fn cloud_workspace_set_access(
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_idle_suspend(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::WorkspaceIdleSuspend, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .idle_suspend(org_id.as_deref(), &workspace_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_set_idle_suspend(
+    workspace_id: String,
+    idle_suspend_minutes: i64,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudWorkspace, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .set_idle_suspend(org_id.as_deref(), &workspace_id, idle_suspend_minutes))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,
     state: tauri::State<'_, crate::AppState>,
@@ -4002,6 +4023,12 @@ pub async fn read_text_file(path: String) -> CmdResult<crate::files::TextFile> {
 #[tauri::command]
 pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
     tauri::async_runtime::spawn_blocking(move || crate::files::write_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+}
+
+/// Exclusive create: refused when the path already exists.
+#[tauri::command]
+pub async fn create_text_file(path: String, content: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::create_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]

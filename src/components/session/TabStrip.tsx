@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { closeEditor, isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
+import { closeEditor, isTabEditor, setLastFocused, useEditors } from "@/lib/editors";
 import { useShortcut } from "@/lib/hotkeys";
 import { useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -117,8 +117,9 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
   // Tab shortcuts act within the pane that contains this window's selected tab.
   const row = paneRow(useTabRow(session), selected ? `${selected.kind}:${selected.id}` : null);
   const editors = useEditors();
-  const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id && !isReviewEditor(editor));
-  const activeEditor = editors.editors.find((e) => e.id === editors.active[session.id] && !isReviewEditor(e))?.id ?? null;
+  // Files that are not tabs of the session (a cloud workspace's) are closed in their own pane.
+  const hasEditors = editors.editors.some((editor) => editor.sessionId === session.id && !isTabEditor(editor));
+  const activeEditor = editors.editors.find((e) => e.id === editors.active[session.id] && !isTabEditor(e))?.id ?? null;
   useEffect(() => { if (selected?.kind !== "review") setLastFocused("chat"); }, [selected?.kind, selected?.id]);
   const picker = useRowMenu();
   // Read when a key is pressed, so the bindings are made once and not on every render.

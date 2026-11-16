@@ -114,6 +114,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it("has no 11px text", async () => {
+  environment.status.mockResolvedValue(status({ rebuildRequired: true, pendingChanges: ["install-script"] }));
+  const { container } = mount();
+  await settled();
+  expect(container.innerHTML).not.toMatch(/text-\[11px\]|text-\[10px\]/);
+});
+
 it("shows the machine install script and each repository's setup as separate fields", async () => {
   mount();
   const form = await settled();
@@ -149,10 +156,11 @@ it("saves an edit against the revision the draft started from, and builds nothin
   environment.update.mockResolvedValue(status());
   mount();
   const form = await settled();
-  const save = within(form).getByRole("button", { name: "Save template" });
-  expect((save as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "Save template" })).toBeNull();
   fireEvent.change(within(form).getByLabelText("Machine install script"), { target: { value: "apt-get install -y ripgrep" } });
-  fireEvent.click(save);
+  const bar = screen.getByLabelText("Unsaved changes");
+  expect(bar.textContent).toMatch(/Changed: install script/);
+  fireEvent.click(within(bar).getByRole("button", { name: "Save template" }));
   await waitFor(() => expect(environment.update).toHaveBeenCalledTimes(1));
   expect(environment.update).toHaveBeenCalledWith(
     "local-docker",
@@ -171,8 +179,9 @@ it("does not save over a revision someone else made while the draft was open", a
   fireEvent.click(screen.getByLabelText("Refresh cloud environment"));
   expect(await screen.findByText(/changed since you started editing \(it is now revision 4\)/)).toBeTruthy();
   expect((within(form).getByLabelText("Machine install script") as HTMLInputElement).value).toBe("mine");
-  expect((within(form).getByRole("button", { name: "Save template" }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(within(form).getByRole("button", { name: "Discard changes" }));
+  const bar = screen.getByLabelText("Unsaved changes");
+  expect((within(bar).getByRole("button", { name: "Save template" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(within(bar).getByRole("button", { name: "Discard" }));
   expect((within(form).getByLabelText("Machine install script") as HTMLInputElement).value).toBe("theirs");
 });
 
@@ -181,15 +190,16 @@ it("asks before a build starts a machine, and sends nothing until confirmed", as
   environment.build.mockResolvedValue(version({ id: "version-3", number: 3, state: "queued", stage: "queued", publication: null }));
   mount();
   await settled();
-  const section = screen.getByLabelText("Build a version");
-  expect(section.textContent).toMatch(/Not built yet: the machine install script, repository setup steps\./);
-  fireEvent.click(within(section).getByRole("button", { name: "Build version…" }));
+  const section = screen.getByLabelText("Unbuilt changes");
+  expect(section.textContent).toMatch(/Unbuilt changes/);
+  expect(section.textContent).toMatch(/Changed: install script, setup steps/);
+  fireEvent.click(within(section).getByRole("button", { name: "Build environment" }));
   expect(section.textContent).toMatch(/starts a temporary builder machine on Local Docker/);
   expect(section.textContent).toMatch(/bills the organization's account/);
   expect(environment.build).not.toHaveBeenCalled();
-  fireEvent.click(within(section).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(section).getByRole("button", { name: "Cancel build" }));
   expect(environment.build).not.toHaveBeenCalled();
-  fireEvent.click(within(section).getByRole("button", { name: "Build version…" }));
+  fireEvent.click(within(section).getByRole("button", { name: "Build environment" }));
   fireEvent.click(within(section).getByRole("button", { name: "Start build" }));
   await waitFor(() => expect(environment.build).toHaveBeenCalledTimes(1));
   expect(environment.build).toHaveBeenCalledWith("local-docker", expect.stringMatching(/^[0-9a-f-]{36}$/), true, "rev-1");
@@ -200,8 +210,8 @@ it("replays the same build after a lost response and starts a new one after a re
   mount();
   await settled();
   const press = async () => {
-    const section = screen.getByLabelText("Build a version");
-    fireEvent.click(await within(section).findByRole("button", { name: "Build version…" }));
+    const section = screen.getByLabelText("Environment builds");
+    fireEvent.click(await within(section).findByRole("button", { name: "Build environment" }));
     fireEvent.click(within(section).getByRole("button", { name: "Start build" }));
   };
   environment.build.mockRejectedValueOnce({ code: "cloud_environment_outcome_unknown", status: null });
@@ -222,24 +232,37 @@ it("will not build a template with unsaved changes", async () => {
   mount();
   const form = await settled();
   fireEvent.change(within(form).getByLabelText("Machine install script"), { target: { value: "changed" } });
-  const section = screen.getByLabelText("Build a version");
-  expect((within(section).getByRole("button", { name: "Build version…" }) as HTMLButtonElement).disabled).toBe(true);
-  expect(section.textContent).toMatch(/Save or discard your changes first/);
+  const section = screen.getByLabelText("Environment builds");
+  expect((within(section).getByRole("button", { name: "Build environment" }) as HTMLButtonElement).disabled).toBe(true);
+  const bar = screen.getByLabelText("Unsaved changes");
+  expect(within(bar).queryByRole("button", { name: "Build environment" })).toBeNull();
+  expect(bar.textContent).toMatch(/Saving makes a new revision\. It builds nothing\./);
 });
 
-it("lists versions with their state and rolls back only after a confirmation", async () => {
+it("lists versions as rows with a status icon, relative age and ACTIVE badge, and activates only after a confirmation", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true, now: Date.UTC(2026, 9, 1, 1) });
   environment.rollback.mockResolvedValue("rev-1");
-  mount();
-  await settled();
-  const versions = screen.getByLabelText("Environment versions");
-  expect(within(versions).getByLabelText("Version 2").textContent).toMatch(/Built · Active/);
-  const previous = within(versions).getByLabelText("Version 1");
-  expect(previous.textContent).toMatch(/Kept for rollback/);
-  expect(within(within(versions).getByLabelText("Version 2")).queryByRole("button", { name: "Roll back to this…" })).toBeNull();
-  fireEvent.click(within(previous).getByRole("button", { name: "Roll back to this…" }));
-  expect(previous.textContent).toMatch(/Running workspaces and the template are not changed/);
-  expect(environment.rollback).not.toHaveBeenCalled();
-  fireEvent.click(within(previous).getByRole("button", { name: "Roll back" }));
+  try {
+    mount();
+    await settled();
+    expect(screen.getByLabelText("Environment builds").textContent).toMatch(/Last build 1h ago · v2 active/);
+    const versions = screen.getByLabelText("Environment versions");
+    const current = within(versions).getByLabelText("Version 2");
+    expect(current.textContent).toMatch(/Environment v2/);
+    expect(current.textContent).toMatch(/1h ago/);
+    expect(within(current).getByLabelText("Active")).toBeTruthy();
+    expect(current.textContent).toMatch(/Active/);
+    expect(current.textContent).not.toMatch(/\d+\/\d+\/\d{4}/);
+    expect(within(current).queryByRole("button", { name: "Activate" })).toBeNull();
+    const previous = within(versions).getByLabelText("Version 1");
+    expect(within(previous).getByLabelText("Built")).toBeTruthy();
+    fireEvent.click(within(previous).getByRole("button", { name: "Activate" }));
+    expect(previous.textContent).toMatch(/Running workspaces and the template are not changed/);
+    expect(environment.rollback).not.toHaveBeenCalled();
+    fireEvent.click(within(previous).getByRole("button", { name: "Activate v1" }));
+  } finally {
+    vi.useRealTimers();
+  }
   await waitFor(() => expect(environment.rollback).toHaveBeenCalledWith("version-1", "rev-1"));
 });
 
@@ -254,9 +277,11 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   mount();
   await settled();
   const row = screen.getByLabelText("Version 3");
-  expect(row.textContent).toMatch(/Failed while running the machine install script/);
-  expect(row.textContent).toMatch(/cloud_environment_install_failed/);
-  fireEvent.click(within(row).getByRole("button", { name: "Show log" }));
+  expect(within(row).getByLabelText("Failed")).toBeTruthy();
+  expect(row.textContent).toMatch(/Failed in install script/);
+  expect(row.textContent).not.toMatch(/cloud_environment_install_failed/);
+  expect(within(row).queryByRole("button", { name: "Build again…" })).toBeNull();
+  fireEvent.click(within(row).getByRole("button", { name: "View log" }));
   expect(environment.version).toHaveBeenCalledWith("version-3");
   expect(within(row).getByLabelText("Build log of version 3").textContent).toBe("Loading the log…");
   finishLog({ ...failed, logs: [{ phase: "install", content: "E: Unable to locate package", occurredAt: 1 }] });
@@ -321,8 +346,8 @@ it("asks for a new build, not a replay, once the template has changed since a lo
   mount();
   await settled();
   const press = async () => {
-    const section = screen.getByLabelText("Build a version");
-    fireEvent.click(await within(section).findByRole("button", { name: "Build version…" }));
+    const section = screen.getByLabelText("Environment builds");
+    fireEvent.click(await within(section).findByRole("button", { name: "Build environment" }));
     fireEvent.click(within(section).getByRole("button", { name: "Start build" }));
   };
   environment.build.mockRejectedValueOnce({ code: "cloud_environment_outcome_unknown", status: null });
@@ -344,7 +369,7 @@ it("keeps an action's error on screen while a build is being followed", async ()
     environment.cancel.mockRejectedValue({ code: "cloud_environment_version_not_found", status: 404 });
     mount();
     await settled();
-    fireEvent.click(within(screen.getByLabelText("Version 3")).getByRole("button", { name: "Cancel build" }));
+    fireEvent.click(within(screen.getByLabelText("Version 3")).getByRole("button", { name: "Cancel" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/no longer available/);
     const before = environment.status.mock.calls.length;
     await act(async () => {
