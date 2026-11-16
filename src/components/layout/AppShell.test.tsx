@@ -87,6 +87,8 @@ vi.mock("@/lib/sessions", () => ({
   selectSession: vi.fn(),
   startIdleArchive: vi.fn(),
   useSessionStore: () => sessionStore,
+  getSessionStore: () => sessionStore,
+  archiveSession: machineSessions.archiveLocal,
 }));
 // The latest handler registered for each shortcut, so a test can press one.
 const shortcuts = vi.hoisted(() => new Map<string, () => void>());
@@ -103,7 +105,13 @@ vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({
 // PRO-345: paired machines stay attached while Experimental → Machines is on.
 const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
+// PRO-346: machine sessions in the overview, badge and notices follow the switch; Archive goes to the machine.
+const machineSessions = vi.hoisted(() => ({ enabled: vi.fn(), update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
+// The shell reads the switch back (PRO-348): on once it was last set on.
+vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled, useMachineDashboardEnabled: () => machineSessions.enabled.mock.lastCall?.[0] === true }));
+vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
+vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
 vi.mock("@/components/cloud/CloudWorkspaceMain", () => ({ CloudWorkspaceMain: ({ workspaceKey }: { workspaceKey: string }) => <main data-testid="cloud-workspace-main" data-key={workspaceKey} /> }));
 vi.mock("@/lib/orchestration", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/orchestration")>()),
@@ -149,7 +157,7 @@ vi.mock("@/lib/models", () => ({
 }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
-vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
+vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
 vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
@@ -269,6 +277,50 @@ describe("a paired machine in the main slot (PRO-345)", () => {
     sessionStore.view = "welcome";
     render(<AppShell />);
     expect((await screen.findByTestId("cloud-workspace-main")).getAttribute("data-key")).toBe("cloud:org:w1");
+  });
+});
+
+describe("machine sessions (PRO-346)", () => {
+  afterEach(() => {
+    sessionStore.selectedSessionId = null;
+    machineSessions.enabled.mockClear();
+    machineSessions.update.mockClear();
+    machineSessions.archiveLocal.mockClear();
+  });
+
+  it("join the overview, badge and notices only while Machines is on", async () => {
+    render(<AppShell />);
+    expect(machineSessions.enabled).toHaveBeenLastCalledWith(false);
+    cleanup();
+    runShortcut.machines = true;
+    render(<AppShell />);
+    expect(machineSessions.enabled).toHaveBeenLastCalledWith(true);
+  });
+
+  it("opens a machine session as a session, not the machine's workspace view (PRO-347)", async () => {
+    runShortcut.machines = true;
+    sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
+    render(<AppShell />);
+    expect((await screen.findByTestId("machine-session")).getAttribute("data-key")).toBe("machine:m1:P1:s1");
+    expect(screen.queryByTestId("machine-main")).toBeNull();
+    cleanup();
+    // Machines off: nothing of the machine is shown.
+    runShortcut.machines = false;
+    render(<AppShell />);
+    expect(screen.queryByTestId("machine-session")).toBeNull();
+  });
+
+  it.each([
+    ["a local session", "5d3f0a8e-4b1c-4f7e-9a2d-1c6b8e0f2a91", "local"],
+    ["a machine session", "machine:m1:P1:s1", "machine"],
+    ["a cloud session", "cloud:org:w1:s1", "none"],
+    ["a machine's project", "machine:m1:P1", "none"],
+  ])("archive %s where it lives, never a machine key on this Mac", (_name, key, where) => {
+    sessionStore.selectedSessionId = key as never;
+    render(<AppShell />);
+    act(() => shortcuts.get("session.archive")!());
+    expect(machineSessions.archiveLocal.mock.calls).toEqual(where === "local" ? [[key, true]] : []);
+    expect(machineSessions.update.mock.calls).toEqual(where === "machine" ? [[key, { archived: true }]] : []);
   });
 });
 

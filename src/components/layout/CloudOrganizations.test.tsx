@@ -107,7 +107,7 @@ afterEach(() => {
   resetCloudSessions();
 });
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const orgSection = (orgId: string) => screen.getAllByTestId("cloud-org-list").find((section) => section.getAttribute("data-org") === orgId)!;
 
 describe("cloud organizations in the sidebar", () => {
@@ -182,7 +182,7 @@ describe("cloud organizations in the sidebar", () => {
     mount();
     const list = screen.getByTestId("conversation-list");
     // Local first, then the organizations by name, as sections like the local one.
-    const headings = within(list).getAllByRole("button", { name: /^(Local|Acme|Beta)$/ }).map((button) => button.textContent);
+    const headings = within(list).getAllByRole("button", { name: /^(Local|Acme|Beta)$/ }).map((button) => button.getAttribute("aria-label"));
     expect(headings).toEqual(["Local", "Acme", "Beta"]);
     expect(within(list).queryByRole("button", { name: "Projects" })).toBeNull();
     const acme = orgSection(ORG);

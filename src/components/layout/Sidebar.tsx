@@ -18,7 +18,7 @@ export function Sidebar({
   onToggle,
   onOpenSettings,
   onOpenAccount,
-  onOpenHome,
+  onNewSession,
   onOpenIssues,
   onOpenAgents,
   onOpenStats,
@@ -29,7 +29,7 @@ export function Sidebar({
   onToggle: () => void;
   onOpenSettings: () => void;
   onOpenAccount: () => void;
-  onOpenHome: () => void;
+  onNewSession: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
   onOpenStats: () => void;
@@ -70,7 +70,7 @@ export function Sidebar({
           onHide={onToggle}
           onOpenSettings={onOpenSettings}
           onOpenAccount={onOpenAccount}
-          onOpenHome={onOpenHome}
+          onNewSession={onNewSession}
           onOpenIssues={onOpenIssues}
           onOpenAgents={onOpenAgents}
           onOpenStats={onOpenStats}

@@ -106,7 +106,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let (cols, rows) = size()?;
                 let home = dirs::home_dir().context("no home directory")?;
                 // One step at a time per agent, whichever pane or window asks.
-                crate::harness::setup::begin(harness, id, step, || setup_panes(terminals, harness), || {
+                crate::harness::setup::begin(harness, Some(id), step, || setup_panes(terminals, harness), || {
                     // In the place of the step before, whose output stays above this one's.
                     terminals.respawn(sink.clone(), id, crate::pty::PaneSpec { cwd: &home.to_string_lossy(), cols, rows, command: Some(&command), env: &[] })
                 })?;
@@ -119,6 +119,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 // Queued, not written here: a program that is not reading
                 // must hold up neither this request nor the pane's gate (#661).
                 manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
+                manager.note_pane_typing(id);
                 Ok(Value::Null)
             }
             "resize" => { let (cols, rows) = size()?; manager.mobile.desktop_input(id, || terminals.resize(id, cols, rows))?; Ok(Value::Null) }
@@ -227,6 +228,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "resourceSample" => return Ok(serde_json::to_value(manager.resource_sample()?)?),
         "resourceKill" => return Ok(serde_json::to_value(manager.resource_kill(string(&params, "paneId")?, params["confirmed"].as_bool().context("confirmed must be a boolean")?)?)?),
         "usage" => return Ok(serde_json::to_value(manager.usage_snapshot())?),
+        // The account a new session starts on, as automatic switching would choose it (#981).
+        "accountChoice" => return Ok(serde_json::to_value(manager.launch_account_choice(string(&params, "harness")?, params["project"].as_str(), params["account"].as_str()))?),
         "refreshUsage" => return Ok(serde_json::to_value(manager.refresh_usage(params["manual"].as_bool().context("manual must be a boolean")?))?),
         "resetCodexUsage" => return Ok(serde_json::to_value(manager.reset_codex_usage()?)?),
         "activity" => return Ok(serde_json::to_value(crate::store::activity::summary()?)?),
@@ -239,6 +242,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "saveTerminalSelection" => json!(save_terminal_selection(session, tab, string(&params, "text")?)?),
         "resumeConversation" => { manager.resume_conversation(session, tab, string(&params, "harness")?, string(&params, "providerSessionId")?)?; Value::Null }
         "switchAccount" => json!(manager.switch_account(session, tab, string(&params, "account")?)?),
+        // The person is typing in the tab's composer: it is not switched to another account meanwhile (#981).
+        "noteTyping" => { manager.note_typing(session, tab); Value::Null }
         // `opened`: only shown, which does not start an agent nobody is about to use.
         "ensureStarted" if params["opened"].as_bool() == Some(true) => { manager.start_on_open(session, tab)?; Value::Null }
         "ensureStarted" => { manager.ensure_started(session, tab)?; Value::Null }
@@ -253,7 +258,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "resendUnsent" => serde_json::to_value(manager.resend_unsent(session, tab)?)?,
         "resendMessage" => serde_json::to_value(manager.resend_message(session, tab, params["seq"].as_u64().context("seq is required")?)?)?,
         "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
-        "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+        "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab), params["portable"].as_bool() == Some(true))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64(),
             serde_json::from_value(params.get("files").cloned().unwrap_or_else(|| json!([])))?)?)?,

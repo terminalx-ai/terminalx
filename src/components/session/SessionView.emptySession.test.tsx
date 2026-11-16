@@ -71,7 +71,7 @@ function Main() {
   return (
     <TooltipProvider>
       <nav aria-label="Sidebar">
-        <ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />
+        <ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />
       </nav>
       {selected ? (
         <div key={selected.id} data-testid="main" data-session={selected.id}>
@@ -87,7 +87,7 @@ function Main() {
 
 /** A session with no tabs open in the project's own checkout, whose conversations were closed: the one #721 could not open. */
 function emptySession(patch: Partial<SessionEntry> = {}): SessionEntry {
-  return sessionEntry("empty", MAIN, [], { title: "Github preparation", pinned: true, ...patch });
+  return sessionEntry("empty", MAIN, [], { title: "Github preparation", pinned: false, ...patch });
 }
 
 async function load(sessions: SessionEntry[]) {
@@ -308,8 +308,8 @@ describe("a branch's sessions as tabs", () => {
     const c = sessionEntry("c", FEATURE, [], { worktreeName: "feature", branch: "feature", title: "Session c" });
     await load([...backend.sessions.filter((entry) => entry.id !== "other"), c]);
     render(<Main />);
-    // In the sidebar the branch is one row for `a` and `b`, whose tabs share the row of tabs; `c` has a row of its own.
-    await click(within(sidebar()).getByRole("button", { name: "feature, 2 sessions" }));
+    // In the sidebar the branch is one row for `a` and `b` (named by the latest, `a`), whose tabs share the row of tabs; `c` has a row of its own.
+    await click(within(sidebar()).getByRole("button", { name: "feature, Session a" }));
     const opened = store().selectedSessionId;
     expect(["a", "b"]).toContain(opened);
     expect(stripNames()).toEqual(expect.arrayContaining(["Docs", "Review"]));
@@ -412,7 +412,7 @@ describe("closing a session's last running tab", () => {
 
   it("offers nothing when the session keeps an agent tab open", async () => {
     render(<Main />);
-    await click(within(sidebar()).getByRole("button", { name: "feature, 2 sessions" }));
+    await click(within(sidebar()).getByRole("button", { name: "feature, Session a" }));
     // `a` has three agent tabs: closing one leaves two running.
     await click(within(strip()).getByRole("tab", { name: "Review" }));
     expect(store().selectedSessionId).toBe("a");

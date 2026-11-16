@@ -10,7 +10,7 @@ const { check, readiness, status } = vi.hoisted(() => ({
   status: { accounts: undefined as unknown },
 }));
 vi.mock("@/lib/agentReadiness", () => ({ checkAgentReadiness: check }));
-vi.mock("@/lib/agentAccounts", () => ({ agentAccounts: { readiness } }));
+vi.mock("@/lib/agentAccounts", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/agentAccounts")>()), agentAccounts: { readiness } }));
 const localWindows = [
   { agent: "claude", key: "five", label: "5 hours", usedPercent: 42, resetsAt: Date.now() + 3600000, updatedAt: Date.now(), stale: false },
   { agent: "codex", key: "week", label: "Codex weekly", usedPercent: 81, resetsAt: null, updatedAt: Date.now(), stale: false },

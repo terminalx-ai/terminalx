@@ -23,8 +23,8 @@ import { AttachButton, DropHint, useAttachments } from "@/components/chat/useIma
 import { AttachmentChips } from "@/components/chat/ComposerAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
-import { api, errorMessage, type FileInput, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
-import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
+import { api, errorMessage, experimental, type FileInput, type ImageInput, type Issue, type PullRequest } from "@/lib/api";
+import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import { worktreeNameFromPrompt } from "@/lib/worktreeNames";
 import { clearNewSessionPreset, createChat, createQuickChat, linkSessionIssue, refreshHarnesses, startSessionIn, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { useCloudModelClient } from "@/lib/cloudModels";
@@ -47,13 +47,30 @@ import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/l
 import { showRunView } from "@/lib/orchestration";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
-import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { cloudStartError, quoteText, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { PHASES, failureMessage, isClientError, phaseOf } from "@/lib/cloudCreate";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
+import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
+import { refreshPairedMachines } from "@/lib/machineConnections";
+import { CreateAttempt, agentSignIn, createMachineSession } from "@/lib/machineNewSession";
+import { AddMachineDialog } from "@/components/machines/AddMachineDialog";
+import { MachineBranchMenu, MachineFormLine, MachineProjectMenu, WhereMenu, takeNewSessionSeed, useMachineDraft, useNewSessionSeed, type CloudWhere } from "./MachineNewSession";
+
+/** Why a create on a machine did not happen, in words; a lost answer says pressing Create again is safe. */
+export function machineStartError(error: unknown, name: string): string {
+  if (error instanceof WorkspaceRpcError) {
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    return message ? message.slice(0, 300) : `${name} refused the new session (${error.code}).`;
+  }
+  return `${name} stopped answering before it confirmed the session. Press Create again: it does not start a second one.`;
+}
 
 /** The first line of a setup script, with a mark when there is more, or null when none is saved. */
 function setupScriptSummary(script: string | undefined): string | null {
@@ -119,14 +136,42 @@ export function NewSessionView({
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
   // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A projectless chat is local.
   const cloudDraft = useCloudDraft();
-  const cloud = projectless ? null : cloudDraft;
+  // A machine chosen in "Where it runs" (PRO-348): the same form, run on that machine. Behind Experimental → Machines.
+  const machinesOn = useMachineDashboardEnabled();
+  const localWanted = store.newSessionPreset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
+  const machineDraft = useMachineDraft(store.harnesses, store.projects.find((p) => p.path === localWanted)?.name ?? null);
+  const machine = projectless ? null : machineDraft;
+  const cloud = projectless || machine ? null : cloudDraft;
+  const [addingMachine, setAddingMachine] = useState(false);
+  /** The branch a machine session's worktree is cut from; null is its project's default. */
+  const [machineBase, setMachineBase] = useState<string | null>(null);
+  /** The create's idempotency id, kept across a Create pressed again after a lost answer. */
+  const [machineAttempt] = useState(() => new CreateAttempt(() => crypto.randomUUID()));
+  const machineKey = machine ? `${machine.machineId}:${machine.project?.projectId ?? ""}` : null;
+  useEffect(() => {
+    // Another machine or project, or This Mac again: nothing of the last one carries over.
+    setMachineBase(null);
+    machineAttempt.reset();
+  }, [machineKey, machineAttempt]);
+  // An issue's start or a handoff opened the form on a machine with something in it: taken once.
+  const seed = useNewSessionSeed();
+  const [issueSource, setIssueSource] = useState<string | null>(null);
   /** A folder the chat runs in instead of its default directory; it does not become a project. */
   const [quickCwd, setQuickCwd] = useState<string | null>(null);
   const folderMenu = useRowMenu();
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
-  const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
+  /**
+   * A create whose outcome is not known (the server stopped answering): the
+   * next Create resends this exact request, so its key cannot make a second
+   * workspace (PRO-409).
+   */
+  const unsettledCreate = useRef<PreparedCreate | null>(null);
+  /** The workspace Create just made: the form stays busy until its first session opens or its start fails. */
+  const [launching, setLaunching] = useState<{ orgId: string; workspaceId: string; projectKey: string } | null>(null);
+  const launchSeen = useRef(false);
+  const catalog = useCloudCatalog();
   const [starting, setStarting] = useState<string | null>(null);
   /** An existing branch, not open anywhere, to check out in the session's worktree. */
   const [checkoutBranch, setCheckoutBranch] = useState<string | null>(null);
@@ -147,53 +192,59 @@ export function NewSessionView({
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
   const project = projectless ? null : (store.projects.find((p) => p.path === wanted) ?? (preset ? null : store.projects[0]) ?? null);
   // A projectless chat cuts no worktree, whatever the folder it is pointed at.
-  const isGit = projectless ? false : cloud ? true : project?.kind !== "folder";
-  const useWorktree = isGit && (!!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
+  const isGit = projectless ? false : machine ? machine.project?.kind !== "folder" : cloud ? true : project?.kind !== "folder";
+  // On a machine a session always gets a new worktree beside its project there.
+  const useWorktree = isGit && (!!machine || !!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
-  const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
+  const cloudModelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
-  const readiness = useAgentReadinessList(store.harnesses, !cloud);
+  // A machine's agents, models and efforts are its own.
+  const modelClient = machine ? machine.client : cloudModelClient;
+  const remote = !!cloud || !!machine;
+  const readiness = useAgentReadinessList(store.harnesses, !remote);
   // Fresh local probes take precedence over discovery cached before an install or removal.
-  const harnesses = store.harnesses.map((item) => {
+  const harnesses = machine ? machine.harnesses : store.harnesses.map((item) => {
     const state = readiness.values?.[item.id]?.state;
     return state && state !== "unknown" ? { ...item, available: state !== "missing" } : item;
   });
   // Only the agents that are installed and whose local login was found just now: a guess is not "signed in".
-  const signedIn = cloud ? [] : harnesses.filter((item) => item.available && readiness.values?.[item.id]?.state === "ready");
-  const setupCommand = !projectless && !cloud ? setupScriptSummary(project?.scripts?.setup) : null;
+  const signedIn = remote ? [] : harnesses.filter((item) => item.available && readiness.values?.[item.id]?.state === "ready");
+  const setupCommand = !projectless && !remote ? setupScriptSummary(project?.scripts?.setup) : null;
   // A project's own default account comes first (#980); a chat has none.
-  const agentSelection = useSessionAgent(harnesses, !cloud, modelClient, undefined, cloud ? undefined : readiness.values, projectless || cloud ? null : project?.path ?? null);
+  const agentSelection = useSessionAgent(harnesses, !remote, modelClient, undefined, remote ? undefined : readiness.values, projectless || remote ? null : project?.path ?? null);
   const { harness, modelId, effort, mode, accountId } = agentSelection;
   // Only with several accounts does a start name one; with one, the request is as it always was.
   const onAccount = accountId ? { account: accountId } : {};
-  const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
+  const pipelineLaunch = usePipelineLaunch(machine ? null : cloud?.project?.key ?? project?.path ?? null,
     cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
     projectless ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
     cloud ? "Cloud workspaces require a person to merge." : undefined,
     // A picked issue makes this a session started from an issue: switches nobody touched follow it.
     issue ? "issue" : "session");
   // Orchestrate (PRO-337): a session of a local git project can lead a run; a cloud draft, a chat or the compact window cannot.
-  const orchestrateShown = useOrchestrateOffered({ local: !projectless && !cloud && !!project, git: isGit, cloud: !!cloud, quick: projectless, compact });
+  const orchestrateShown = useOrchestrateOffered({ local: !projectless && !remote && !!project, git: isGit, cloud: remote, quick: projectless, compact });
   /** The start in progress is an Orchestrate start. */
   const [orchestrating, setOrchestrating] = useState(false);
   // A cloud session runs the agent installed on the workspace, not on this computer.
-  const available = cloud ? !!harness : (harness?.available ?? false);
+  const available = remote ? !!harness : (harness?.available ?? false);
+  // The chosen agent's login on the machine, when it says (PRO-350); a definite "signed out" holds Create back.
+  const machineSignIn = machine ? agentSignIn(machine.agents, harness?.id) : null;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
 
   useEffect(() => {
     let cancelled = false;
     const at = preset?.cwd ?? project?.path;
-    // Never a local path for a cloud draft.
-    if (!at || !isGit || cloud) return setStatus(null);
+    // Never a local path for a cloud or machine draft.
+    if (!at || !isGit || cloud || machine) return setStatus(null);
     api.workStatus(at).then((s) => !cancelled && setStatus(s)).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [project, preset, isGit, cloud]);
+  }, [project, preset, isGit, cloud, !!machine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
-    if (!project || preset?.cwd || !useWorktree || cloud) {
+    if (!project || preset?.cwd || !useWorktree || cloud || machine) {
       setWorkspaceName(null);
       return;
     }
@@ -205,7 +256,7 @@ export function NewSessionView({
     return () => {
       cancelled = true;
     };
-  }, [project?.path, preset?.cwd, useWorktree, !!cloud]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project?.path, preset?.cwd, useWorktree, !!cloud, !!machine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** An issue names the branch after itself, as a session started from the Issues list does. */
   const pickIssue = (picked: Issue) => {
@@ -227,7 +278,21 @@ export function NewSessionView({
     setIssue(null);
     setCheckoutBranch(null);
     setPullRequest(null);
+    setIssueSource(null);
   }, [project?.path, !!cloud, projectless]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A branch or pull request of this Mac's checkout means nothing on a machine; an issue goes along.
+  useEffect(() => {
+    if (!machine) return;
+    setCheckoutBranch(null);
+    setPullRequest(null);
+  }, [!!machine]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!seed || !machine) return;
+    takeNewSessionSeed(seed);
+    if (seed.prompt) setText(seed.prompt);
+    setIssue(seed.issue);
+    setIssueSource(seed.issueProjectPath);
+  }, [seed, !!machine]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pickBranch = (next: BranchTarget) => {
     if (!project) return;
@@ -245,9 +310,9 @@ export function NewSessionView({
     setUseWorktree(true);
     setPullRequest(pr);
   };
-  const prMention = usePrMention(!cloud && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { floating: true });
+  const prMention = usePrMention(!remote && !projectless && isGit && !busy ? project?.path ?? null : null, text, caret, setText, ref, setCaret, { floating: true });
   // `@` names a file of the folder the session will work in; a cloud draft or a chat with no folder has none to list here.
-  const fileMention = useFileMention(!cloud && !busy ? (projectless ? quickCwd : preset?.cwd ?? project?.path ?? null) : null, text, caret, setText, ref, setCaret);
+  const fileMention = useFileMention(!remote && !busy ? (projectless ? quickCwd : preset?.cwd ?? project?.path ?? null) : null, text, caret, setText, ref, setCaret);
   /** What Start from picked, shown as a chip in the header; `clear` goes back to a new branch. */
   const picked = pullRequest
     ? { testId: "picked-pr", icon: <GitPullRequest className="size-[13px] shrink-0" aria-hidden />, text: `#${pullRequest.number} ${pullRequest.title}`, remove: "Remove pull request", clear: () => setPullRequest(null) }
@@ -265,7 +330,7 @@ export function NewSessionView({
     }
   };
 
-  const dictationContext = useDictationContext(NEW_SESSION_TARGET, cloud ? undefined : preset?.cwd ?? project?.path ?? quickCwd ?? undefined, !!cloud, text);
+  const dictationContext = useDictationContext(NEW_SESSION_TARGET, remote ? undefined : preset?.cwd ?? project?.path ?? quickCwd ?? undefined, remote, text);
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref, dictationContext);
   useDictationShortcuts(dictation);
   const keymap = useKeymap();
@@ -277,12 +342,14 @@ export function NewSessionView({
   // A screenshot or a file alone is a prompt, as it is in the session composer.
   const canSend = useMemo(
     () =>
-      cloud
-        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
+      machine
+        ? !!machine.client && !!machine.project && !!harness && (text.trim().length > 0 || !!issue) && !hasImages && !busy && machineSignIn !== "signedOut"
+        : cloud
+        ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && cloud.project.selected && cloud.mayStart === true
         : projectless
           ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
           : !!project && !!harness && available && (text.trim().length > 0 || hasImages || !!issue || !!pullRequest) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy && !prMention.attaching,
-    [cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching, confirm],
+    [machine, machineSignIn, cloud, projectless, project, harness, available, text, hasImages, issue, pullRequest, useWorktree, preset?.cwd, workspaceName, busy, prMention.attaching],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -311,7 +378,11 @@ export function NewSessionView({
     if (isRoleRefusal(e)) void refreshAccountRoles(true);
   };
 
-  /** Start in the cloud: reuse or wake a workspace of the project, or prepare a new one for confirmation. */
+  /**
+   * Start in the cloud: reuse or wake a workspace of the project, or create
+   * one. Pressing Create is the decision to create: nothing asks again
+   * (PRO-409), and the button stays busy until the session opens.
+   */
   const createCloud = async () => {
     if (!cloud?.project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
@@ -319,38 +390,132 @@ export function NewSessionView({
     setError(null);
     setLimitOrg(null);
     setPausedFor(null);
-    const plan = planCloudStart(cloud.project);
+    const project = cloud.project;
+    const plan = planCloudStart(project);
+    // Held past this call while a new workspace starts; `followLaunch` opens its session.
+    let held = false;
     try {
       if (plan.kind === "create") {
         setStarting("Checking your organization's limits…");
-        setConfirm(await prepareCloudCreate(cloud.project, cloudRequest()));
+        const request = cloudRequest();
+        const unsettled = unsettledCreate.current;
+        const resend =
+          unsettled &&
+          unsettled.project.key === project.key &&
+          unsettled.form.prompt === request.prompt &&
+          unsettled.form.agent === request.agent &&
+          unsettled.form.model === request.model &&
+          unsettled.form.effort === (request.effort ?? "") &&
+          unsettled.form.mode === request.mode;
+        const prepared = resend ? unsettled : await prepareCloudCreate(project, request);
+        unsettledCreate.current = null;
+        setStarting(`Creating the workspace on ${quoteText(prepared.quote, prepared.providerLabel).machine}…`);
+        let snapshot;
+        try {
+          snapshot = await confirmCloudCreate(prepared);
+        } catch (e) {
+          if (isClientError(e) && e.retryWithSameIdempotencyKey) unsettledCreate.current = prepared;
+          throw e;
+        }
+        setText("");
+        launchSeen.current = false;
+        setLaunching({ orgId: prepared.orgId, workspaceId: snapshot.workspace.id, projectKey: project.key });
+        setStarting("Starting the workspace…");
+        held = true;
       } else {
         setStarting(plan.kind === "wake" ? `Resuming ${plan.node.item.workspace.name}…` : "Starting the session…");
         await startInWorkspace(plan, cloudRequest());
         setText("");
       }
     } catch (e) {
-      showCloudError(e, cloud.project.orgId);
+      showCloudError(e, project.orgId);
     } finally {
-      setStarting(null);
-      setBusy(false);
+      if (!held) {
+        setStarting(null);
+        setBusy(false);
+      }
     }
   };
 
-  const confirmCreate = async () => {
-    if (!confirm) return;
+  // The new workspace's start, read from the catalog: where it is, and the
+  // end of the wait (its session is there, it failed, or the form moved on).
+  const launchProjectKey = cloud?.project?.key ?? null;
+  useEffect(() => {
+    if (!launching) return;
+    const release = (failure: string | null = null) => {
+      launchSeen.current = false;
+      setLaunching(null);
+      setStarting(null);
+      setBusy(false);
+      if (failure) {
+        setErrorOrg(launching.orgId);
+        setError(failure);
+      }
+    };
+    if (launchProjectKey !== launching.projectKey) return release();
+    const item = findCloudWorkspace(catalog, launching.orgId, launching.workspaceId);
+    // Not listed yet; once it was, gone means deleted or archived elsewhere.
+    if (!item) return launchSeen.current ? release() : undefined;
+    launchSeen.current = true;
+    if (item.workspace.launch?.sessionId) return release();
+    const phase = phaseOf(item);
+    if (phase === "failed") return release(failureMessage(item));
+    if (phase === "canceled") return release("The workspace's start was canceled.");
+    // Up with no first session to open (an older server): the sidebar row is the way in.
+    if (phase === "running") return release();
+    const label = PHASES.find((entry) => entry.id === phase)?.label ?? "Starting";
+    setStarting(`Starting the workspace: ${label.toLowerCase()}…`);
+  }, [launching, catalog, launchProjectKey]);
+
+  /**
+   * Create on the chosen machine: `session.create` with its project, in a new
+   * worktree there, the first prompt inside the one idempotent call. A Create
+   * pressed again after a lost answer reuses the id, so the session and its
+   * first prompt happen once; the session opens in the machine session view.
+   */
+  const createOnMachine = async () => {
+    if (!machine?.client || !machine.project || !harness || !canSend) return;
+    if (dictation.dictating) await stopDictation();
+    const client = machine.client;
+    const projectId = machine.project.projectId;
+    const baseRef = useWorktree ? machineBase : null;
+    // The id follows what the person asked for, not the prompt read below: an issue's comments may change between tries.
+    const id = machineAttempt.idFor({ machine: machine.machineId, projectId, agent: harness.id, model: modelId, effort, mode, text, issue: issue?.id ?? null, baseRef, useWorktree });
     setBusy(true);
     setError(null);
-    setLimitOrg(null);
-    setStarting("Creating the workspace…");
     try {
-      await confirmCloudCreate(confirm);
-      setConfirm(null);
+      let prompt = text;
+      if (issue) {
+        const read = issueSource ?? project?.path ?? null;
+        const about = read ? await issuePromptWithComments(read, issue) : issuePrompt(issue);
+        prompt = [text.trim(), about].filter(Boolean).join("\n\n");
+      }
+      const title = (issue ? `${issue.identifier} ${issue.title}` : text.trim().split("\n")[0] ?? "").slice(0, 80);
+      const nativeCodex = (await experimental.nativeCodexFor(harness.id)) || undefined;
+      const made = await createMachineSession(client, {
+        machineId: machine.machineId,
+        projectId,
+        agent: harness.id,
+        model: modelId,
+        effort,
+        mode,
+        prompt,
+        title,
+        useWorktree,
+        worktreeName: issue ? issueWorktreeName(issue.identifier, issue.title) : null,
+        baseRef,
+        issue: issue ? { ref: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url }, body: ("description" in issue && typeof issue.description === "string" ? issue.description : null) ?? issue.body ?? null, pipeline: true } : null,
+        nativeCodex,
+      }, id);
+      machineAttempt.settle(null);
       setText("");
-      setStarting("Starting the workspace. The session opens when its agent is running.");
+      setIssue(null);
+      setIssueSource(null);
+      // The session is there and open; a first prompt that did not go says why in its transcript too.
+      if (made.startError) console.error("the first prompt on the machine did not go", made.startError);
     } catch (e) {
-      showCloudError(e, confirm.orgId);
-      setStarting(null);
+      machineAttempt.settle(e);
+      setError(machineStartError(e, machine.name));
     } finally {
       setBusy(false);
     }
@@ -394,6 +559,7 @@ export function NewSessionView({
 
   const create = async (orchestrateAsked = false) => {
     if (projectless) return createProjectless();
+    if (machine) return createOnMachine();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
     const orchestrate = orchestrateAsked && orchestrateShown;
@@ -455,15 +621,39 @@ export function NewSessionView({
     }
   };
 
+  // "Where it runs" (PRO-348): This Mac, each paired machine, each organization's cloud. Only while Machines is on.
+  const whereShown = machinesOn && !projectless;
+  const cloudWhere: CloudWhere[] = cloudChoices.map((section) => {
+    const startable = section.mayStart === true ? section.projects.find((choice) => choice.selected) : undefined;
+    const current = cloud?.project && cloud.project.orgId === section.orgId ? cloud.project.key : null;
+    return {
+      orgId: section.orgId,
+      orgName: section.orgName,
+      startKey: current ?? startable?.key ?? null,
+      projectCount: section.projects.length,
+      locked: section.mayStart === false ? NEW_SESSION_ADMIN_REASON : !startable && !current ? "No cloud projects yet" : null,
+    };
+  });
+  const whereMenu = whereShown ? (
+    <WhereMenu
+      lead={!!machine}
+      current={machine ? { kind: "machine", machineId: machine.machineId, name: machine.name, machine: machine.machine } : cloud?.project ? { kind: "cloud", orgId: cloud.project.orgId, orgName: cloud.orgName } : { kind: "local" }}
+      localProject={project ? { name: project.name, path: project.path } : null}
+      localWorktree={useWorktree}
+      cloud={cloudWhere}
+      disabled={busy}
+      onAddMachine={() => setAddingMachine(true)}
+    />
+  ) : null;
   const projectButton = "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-[13px] text-foreground transition-colors hover:bg-veil-raised";
   const chip = "flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground disabled:opacity-50";
-  const createLabel = projectless ? "Ask" : "Create";
-  const localGit = !projectless && !cloud && isGit && !!project;
-  const branchInfo = projectless ? null : cloud ? (
+  const createLabel = projectless ? "Ask" : machine ? `Create on ${machine.name}` : "Create";
+  const localGit = !projectless && !remote && isGit && !!project;
+  const branchInfo = projectless ? null : cloud ? (whereShown ? null : (
     <span className="flex min-w-0 items-center gap-1.5 truncate px-2 text-[12.5px] text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
       <Cloud className="size-3.5 shrink-0" /> {cloud.orgName} cloud
     </span>
-  ) : !isGit ? (
+  )) : !isGit ? (
     <span className="flex items-center gap-1.5 px-2 text-[12.5px] text-muted-foreground" title="Agents, terminals, and files are available. Git features require a repository.">
       <FolderOpen className="size-3.5" /> No Git
     </span>
@@ -491,7 +681,7 @@ export function NewSessionView({
           {/* The scene needs room a small window does not have. */}
           {!compact && !modal && <RaccoonScene className="mb-1" />}
           <DictationStatus dictation={dictation} />
-          {!cloud && (
+          {!remote && (
             <div className="mb-3 space-y-2 empty:hidden">
               {(harness ? [harness] : store.harnesses).map((item) => (
                 <AgentSetup newSession key={item.id} harness={item} value={readiness.values?.[item.id] ?? null} checking={readiness.checking || busy} onRefresh={() => {
@@ -500,16 +690,19 @@ export function NewSessionView({
               ))}
             </div>
           )}
-          {cloud && confirm && (
-            <CloudCreateConfirm prepared={confirm} orgName={cloud.orgName} busy={busy} onConfirm={() => void confirmCreate()} onCancel={() => setConfirm(null)} />
-          )}
 
           {/* Everything the form says is drawn inside this box: over a dimmed session there is nothing behind it to read text against. */}
           <div className={cn("relative overflow-hidden rounded-[12px] bg-composer shadow-surface hairline", modal && "border border-border shadow-2xl", attach.dragging && "ring-2 ring-accent/60")} data-composer-box {...attach.dropZoneProps}>
             <DropHint dragging={attach.dragging} />
 
             <div className="flex h-11 items-center gap-1 border-b border-hairline px-3" data-testid="new-session-header">
-              {projectless ? (
+              {machine ? (
+                <>
+                  {whereMenu}
+                  <MachineProjectMenu draft={machine} disabled={busy} />
+                  <MachineBranchMenu draft={machine} base={machineBase} onBase={setMachineBase} disabled={busy} />
+                </>
+              ) : projectless ? (
                 <DropdownMenu {...folderMenu.root}>
                   <DropdownMenuTrigger asChild {...folderMenu.trigger}>
                     <button type="button" className={projectButton} title={quickCwd ?? (quick ? "A scratch folder made for this chat" : "The shared folder for ordinary chats")} aria-label="Working directory">
@@ -592,7 +785,7 @@ export function NewSessionView({
                 </DropdownMenu>
               )}
               {/* A new worktree's branch is made from a base the reader can change; anything else names the checkout it uses. */}
-              {localGit && project && !preset?.cwd && useWorktree && !pullRequest && !checkoutBranch ? (
+              {machine ? null : localGit && project && !preset?.cwd && useWorktree && !pullRequest && !checkoutBranch ? (
                 <BaseBranchMenu
                   projectPath={project.path}
                   value={preset?.fromBranch ?? status?.defaultBranch ?? "main"}
@@ -603,7 +796,7 @@ export function NewSessionView({
               ) : localGit && (pullRequest || checkoutBranch) ? null : (
                 branchInfo
               )}
-              {!projectless && isGit && !preset?.cwd && (
+              {!machine && !projectless && isGit && !preset?.cwd && (
                 <SessionOptions
                   chip={useWorktree ? "New worktree" : "Current checkout"}
                   useWorktree={useWorktree}
@@ -615,7 +808,8 @@ export function NewSessionView({
                   pipeline={pipelineLaunch}
                 />
               )}
-              {!projectless && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
+              {!machine && !projectless && isGit && preset?.cwd && <SessionOptions pipeline={pipelineLaunch} />}
+              {!machine && whereMenu}
               {localGit && project && !issue && (
                 <button type="button" className={cn(chip, startFromOpen && startFromTab === "issues" && "bg-veil-raised text-foreground")} disabled={busy} data-testid="issue-chip" title="Start from an issue" onClick={() => openStartFrom("issues")}>
                   <CircleDot className="size-[13px]" aria-hidden />
@@ -688,7 +882,9 @@ export function NewSessionView({
                 placeholder={
                   projectless
                     ? "Ask anything"
-                    : !project && !cloud
+                    : machine && !machine.project
+                      ? `Add a project on ${machine.name} to get started`
+                      : !project && !remote
                       ? "Add a project to get started"
                       : issue
                         ? "Add notes for the agent (optional)"
@@ -708,20 +904,20 @@ export function NewSessionView({
 
             <div className="flex items-center gap-1 px-2.5 pb-2.5">
               <AgentMenu split selection={agentSelection} disabled={busy} />
-              {!cloud && harness && !available && (
+              {!remote && harness && !available && (
                 <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
                   {harness.name} isn't installed
                 </span>
               )}
               <div className="ml-auto flex shrink-0 items-center gap-0.5">
-                {!cloud && (projectless ? !!quickCwd : !!project) && (
+                {!remote && (projectless ? !!quickCwd : !!project) && (
                   <WithTooltip label="Mention a file" side="top">
                     <Button variant="ghost" size="icon-sm" aria-label="Mention a file" disabled={busy} onClick={fileMention.start}>
                       <AtSign />
                     </Button>
                   </WithTooltip>
                 )}
-                {!cloud && <AttachButton attach={attach} />}
+                {!remote && <AttachButton attach={attach} />}
                 <MicButton dictation={dictation} />
                 {/* One button in two parts: Create, and the other ways to start behind the chevron. */}
                 <div className={cn("ml-1.5 flex h-8 items-stretch overflow-hidden rounded-md", canSend ? "bg-accent text-accent-foreground shadow-button" : "bg-veil-strong text-muted-foreground")} data-testid="create-button">
@@ -730,6 +926,7 @@ export function NewSessionView({
                     disabled={!canSend}
                     onClick={() => void create()}
                     aria-label={createLabel}
+                    data-testid="new-session-create"
                     title={sendKeys ? `${createLabel} (${keycaps(sendKeys).join("")})` : createLabel}
                     className="flex items-center gap-2 px-3 text-[12.5px] font-semibold transition-colors enabled:hover:bg-black/10 [&_svg]:size-3.5"
                   >
@@ -762,14 +959,14 @@ export function NewSessionView({
 
             {/* What stands in the way of a start, said in the box, above its footer. */}
             <div className="space-y-2 px-4 pb-3 empty:hidden" data-testid="new-session-notices">
-              {!cloud && !projectless && preset && !project && <p role="alert" className="text-xs text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
-              {!cloud && !harness && <p role="status" className="text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
+              {!remote && !projectless && preset && !project && <p role="alert" className="text-xs text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
+              {!remote && !harness && <p role="status" className="text-xs text-muted-foreground">{readiness.checking ? "Checking agents…" : "Sign in to an agent to start a chat. Your draft is kept."}</p>}
               {cloud && starting && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status" data-testid="cloud-start-status">
                   {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
                 </div>
               )}
-              {!cloud && harness && !available && (
+              {!remote && harness && !available && (
                 <p className="text-xs text-muted-foreground">
                   {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
                   <code className="font-mono">{harness.installHint}</code>
@@ -799,7 +996,7 @@ export function NewSessionView({
               )}
             </div>
 
-            {!cloud && (
+            {!remote && (
               <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-hairline px-4 py-1.5 text-[11.5px] text-faint" data-testid="new-session-footer">
                 {signedIn.map((item) => (
                   <span key={item.id} className="flex items-center gap-1 whitespace-nowrap" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
@@ -808,8 +1005,10 @@ export function NewSessionView({
               </div>
             )}
           </div>
+          {machine && <MachineFormLine draft={machine} agentId={harness?.id ?? null} agentName={harness?.name ?? null} />}
         </div>
       </div>
+      {whereShown && <AddMachineDialog open={addingMachine} onOpenChange={setAddingMachine} onPaired={() => void refreshPairedMachines()} />}
     </div>
   );
 }

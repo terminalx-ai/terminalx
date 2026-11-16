@@ -143,6 +143,7 @@ export function Composer({
   handoffs,
   disabledReason,
   disabled = false,
+  heldReason = null,
   settingsLockedReason = null,
   modelLockedReason = null,
   modeLockedReason = null,
@@ -194,6 +195,12 @@ export function Composer({
   disabledReason?: string | null;
   /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
   disabled?: boolean;
+  /**
+   * Typing stays, sending waits (21.09): a machine that is away. The draft is
+   * kept as typed and goes nowhere until the person sends it once the machine
+   * is back; nothing is queued on this computer. Shown as the input's placeholder.
+   */
+  heldReason?: string | null;
   /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
   settingsLockedReason?: string | null;
   /** Set when the model and effort cannot be changed from here whoever asks (an agent started by hand that takes them only at startup, #437). */
@@ -443,7 +450,7 @@ export function Composer({
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
-    if ((!text && !sendable.length) || disabled || prMention.attaching) return;
+    if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
     const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
@@ -482,7 +489,7 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, sendable, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
@@ -533,7 +540,7 @@ export function Composer({
   const sendHint = busy && followUps && alternateKeys
     ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
     : sendLabel;
-  const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
+  const placeholder = heldReason ? heldReason : busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
   // The agent answered and named no model: the button says so, as the menu does.
@@ -725,7 +732,7 @@ export function Composer({
               }}
             />
             <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
-              turns={turns} compacting={compacting} compactDisabled={disabled || busy || sending}
+              turns={turns} compacting={compacting} compactDisabled={disabled || !!heldReason || busy || sending}
               onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
@@ -743,14 +750,14 @@ export function Composer({
               </WithTooltip>
             ) : (
               <SetupCheckCoach tabId={tab.id}>
-                <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
+                <WithTooltip label={sending ? "Sending…" : (heldReason ?? sendHint)} keys={keysOf("composer.send")}>
                   <Button
                     size="icon-sm"
                     className={CORNER}
                     variant={draft.trim() || sendable.length ? "accent" : "secondary"}
                     aria-label={sending ? "Sending" : "Send"}
                     aria-busy={sending}
-                    disabled={disabled || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
+                    disabled={disabled || !!heldReason || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
                     onClick={() => void send()}
                   >
                     <ArrowUp />

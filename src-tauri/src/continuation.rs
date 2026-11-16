@@ -32,10 +32,13 @@ pub struct Context {
     pub partial_capture: Option<String>,
 }
 
-pub fn prepare(session_id: &str, tab_id: &str, tracked: Option<PathBuf>) -> Result<Context> {
+/// `portable` (PRO-348): the context goes to another computer, where no path
+/// of this one can be read. The saved transcript is not named; the bounded
+/// recent capture from this Mac's own history carries the conversation.
+pub fn prepare(session_id: &str, tab_id: &str, tracked: Option<PathBuf>, portable: bool) -> Result<Context> {
     let entry = index::get(session_id)?;
     let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("Source conversation no longer exists."))?;
-    let native = tracked.filter(|p| !p.as_os_str().is_empty()).or_else(|| resolve(&entry.cwd, tab));
+    let native = if portable { None } else { tracked.filter(|p| !p.as_os_str().is_empty()).or_else(|| resolve(&entry.cwd, tab)) };
     let log = store::log_path(session_id, tab_id)?;
     prepare_from_paths(&entry, tab, native.as_deref(), &log)
 }

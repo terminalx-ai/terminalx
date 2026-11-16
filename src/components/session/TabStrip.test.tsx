@@ -258,6 +258,14 @@ describe("the cloud new-tab menu's disabled hint", () => {
     expect(newTabBlockedReason(model({ backend: { readOnlyReason: "View only: shared to watch." } as never }))).toBe("View only: shared to watch.");
   });
 
+  it("names the machine on a machine session until it is connected (PRO-347)", () => {
+    const machine = { machineId: "m1", projectId: "p1", record: null, name: "Mac mini", state: { state: "direct" } } as never;
+    expect(newTabBlockedReason(model({ machine, manage: true }))).toBeNull();
+    expect(newTabBlockedReason(model({ machine, manage: true, connected: false }))).toBe("Tabs and terminals open once Mac mini is connected.");
+    // The composer's reason while it is away is the one the menu shows too.
+    expect(newTabBlockedReason(model({ machine, connected: false, backend: { readOnlyReason: "Can't send until Mac mini is back" } as never }))).toBe("Can't send until Mac mini is back");
+  });
+
   it("reads as a sentence, not the uppercase section header", () => {
     render(<NewTabHint>New tabs and terminals need a workspace admin.</NewTabHint>);
     const hint = screen.getByRole("note");
