@@ -158,7 +158,7 @@ struct NotificationFilter {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "scope", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "scope", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 enum SessionScope {
     All,
     Only { ids: Vec<String> },
