@@ -2586,9 +2586,7 @@ fn start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone() {
     let host = FakeHost::new(&github_issue());
     host.world().reviewer_tabs = true;
     let run = Run::start_in(host, true);
-    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
-    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
-    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    let stuck = stuck_without_author(&run);
     let pr = stuck.pr.clone().expect("the pull request was opened");
     let events = stuck.events.len();
     {
@@ -2606,12 +2604,72 @@ fn start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone() {
     assert_eq!(taken.pr.as_ref().map(|link| link.number), Some(pr.number));
     assert!(taken.auto_merge);
     assert!(taken.events.len() > events && taken.events[..events] == stuck.events[..], "its record is kept");
-    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("Tab t2 took this pipeline over")));
+    let moves: Vec<_> = taken.events.iter().filter(|event| event.kind == "authorMoved").map(|event| event.message.as_str()).collect();
+    assert_eq!(moves.len(), 1, "no move that did not stick is recorded: {moves:?}");
+    assert!(moves[0].contains("Tab t2 took this pipeline over") && moves[0].contains("t1 is no longer in this session"), "{}", moves[0]);
+    assert!(!taken.author_followed);
     assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
     // Asked again, it is the same pipeline; the review carries it to a merge.
     assert_eq!(engine::start_existing(&run.host, "author", "t2", None, None, true, actor.clone()).unwrap().author.tab_id, "t2");
     let refused = engine::start_existing(&run.host, "author", "t3", None, None, true, actor).unwrap_err();
     assert!(refused.to_string().contains("Use its author tab, t2"), "{refused:#}");
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+/// Stuck as in #1014: the PR is open and its review stopped on the gone author tab.
+fn stuck_without_author(run: &Run) -> Pipeline {
+    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
+    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
+    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    stuck
+}
+
+#[test]
+fn adopt_pr_corrects_a_successor_terminalx_chose_wrongly() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    stuck_without_author(&run);
+    {
+        // The lead works in t2; the session shows another agent tab, t3.
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        session.tabs.push(session_tab("t2"));
+        session.tabs.push(session_tab("t3"));
+        session.active_tab = Some("t3".into());
+    }
+    // A background pass makes the shown tab the author.
+    let guessed = act(&run.host, &run.id, Action::Refresh).unwrap();
+    assert_eq!((guessed.author.tab_id.as_str(), guessed.author_followed), ("t3", true));
+    // The lead's report is not the author's, but its adoption is honoured.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    assert_eq!(run.pipeline().state, State::NeedsYou);
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor).unwrap();
+    assert_eq!((taken.author.tab_id.as_str(), taken.author_followed), ("t2", false));
+    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("from tab t3, which TerminalX had made the author")));
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    // Chosen by the agent now, not guessed: another tab cannot take it.
+    let other = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t3".into()) };
+    assert!(engine::start_existing(&run.host, "author", "t3", None, None, true, other).is_err());
+}
+
+#[test]
+fn adopt_pr_from_the_tab_already_chosen_takes_the_stopped_step_again() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    stuck_without_author(&run);
+    restart_into(&run.host, "t2");
+    // A background pass already made t2 the author; the pipeline is still stopped.
+    let moved = act(&run.host, &run.id, Action::Refresh).unwrap();
+    assert_eq!((moved.author.tab_id.as_str(), moved.state), ("t2", State::NeedsYou));
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor).unwrap();
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("confirmed as the author")));
     assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 

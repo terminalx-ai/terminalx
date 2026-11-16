@@ -477,6 +477,13 @@ struct Step<'a> {
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
 /// person's own action asks for one.
 fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
+    run_with(host, id, even_if_stopped, on_error, true, action)
+}
+
+/// [`run`], where `follow` says whether a gone author tab is replaced by the
+/// session's current one before the step's work (#1014). A takeover names
+/// the tab itself, so it does not.
+fn run_with(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, follow: bool, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
     let _request = crate::github_process::scope();
     // Track stage work separately from read-only requests and timer passes.
     let _running = (on_error == OnError::NeedsYou).then(Running::start);
@@ -499,7 +506,9 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         Err(error) => (IssuePipelineSettings::default(), Some(format!("{error:#}"))),
     };
     let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background, ended: None };
-    step.follow_session();
+    if follow {
+        step.follow_session();
+    }
     if let Err(error) = action(&mut step) {
         match on_error {
             OnError::Report | OnError::Background => return Err(error),
@@ -604,11 +613,12 @@ impl Step<'_> {
             super::Succession::Latest => "the session's most recent agent tab",
         };
         let message = format!("Tab {tab_id} became the author: the author's tab {} is no longer in this session, and {tab_id} is {why}.", self.p.author.tab_id);
-        self.move_author(tab_id, message);
+        self.move_author(tab_id, true, message);
     }
 
-    fn move_author(&mut self, tab_id: String, message: String) {
+    fn move_author(&mut self, tab_id: String, followed: bool, message: String) {
         self.p.author.tab_id = tab_id;
+        self.p.author_followed = followed;
         let session_id = self.p.author.session_id.clone();
         self.record("authorMoved", message).session_id = Some(session_id);
     }
@@ -2335,6 +2345,7 @@ fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Opt
                 store::set_switches(&step.p.id, |pipeline| pipeline.resolve_conflicts = value)?;
             }
             step.p.author = next;
+            step.p.author_followed = false;
             step.enter(Stage::Work, "The new author conversation is continuing the work.");
             step.record("handoff", "Pipeline ownership moved to a new conversation in this session; the original history was left unchanged.");
             Ok(())
@@ -2389,6 +2400,7 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         resolution: None,
         interrupted_resolution: None,
             preserve_resolution_edits: false,
+        author_followed: false,
         cloud,
         issue_body,
         stopped: false,
@@ -2439,10 +2451,14 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
     let lock = step_lock(&format!("start:{session_id}"));
     let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
     let mut existing = store::for_session(session_id)?;
-    if let Some(found) = existing.as_ref().filter(|found| found.author.session_id == session_id && found.author.tab_id != tab_id) {
-        // Its author tab is gone: this tab takes the pipeline over, with its
-        // pull request, record and switches (#1014).
-        if host.session(session_id)?.tab(&found.author.tab_id).is_none() {
+    if let Some(found) = existing.as_ref().filter(|found| found.author.session_id == session_id) {
+        // Its author tab is gone, or TerminalX chose the author when it went:
+        // this tab takes the pipeline over, with its pull request, record and
+        // switches (#1014). A chosen author asked to adopt the pull request
+        // takes again the step that stopped on the tab that was gone.
+        let other = found.author.tab_id != tab_id;
+        let gone = other && host.session(session_id)?.tab(&found.author.tab_id).is_none();
+        if gone || (found.author_followed && (other || adopt_pr)) {
             existing = Some(take_over(host, found, tab_id, &actor)?);
         }
     }
@@ -2509,22 +2525,28 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
 /// A pipeline that stopped because that tab could not be reached, while
 /// opening the pull request or starting its review, takes that step again.
 fn take_over(host: &dyn Host, pipeline: &Pipeline, tab_id: &str, actor: &super::SwitchActor) -> Result<Pipeline> {
-    let (session_id, old) = (pipeline.author.session_id.clone(), pipeline.author.tab_id.clone());
-    run(host, &pipeline.id, true, OnError::Report, |step| {
+    let session_id = pipeline.author.session_id.clone();
+    run_with(host, &pipeline.id, true, OnError::Report, false, |step| {
         let session = step.author.clone().context("The author session is gone")?;
         let tab = session.tab(tab_id).with_context(|| format!("tab {tab_id} not found in session {session_id}"))?;
-        if session.tab(&old).is_some() {
+        // As it is now, not as the caller read it: a step may have moved it since.
+        let old = step.p.author.tab_id.clone();
+        let present = session.tab(&old).is_some();
+        if present && !step.p.author_followed && old != tab_id {
             bail!("This session already participates in a pipeline. Use its author tab, {old}.");
         }
         if !step.p.may_author(&session, tab) {
             bail!("Tab {tab_id} cannot be this pipeline's author: it is a terminal, a conversation the pipeline opened to review or resolve, or not a PTY conversation.");
         }
-        // Loading the step may have moved the pipeline to this tab already;
-        // otherwise the tab asked for is the author, whichever the session shows.
-        if step.p.author.tab_id != tab_id {
-            let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
-            step.move_author(tab_id.to_string(), format!("Tab {tab_id} took this pipeline over, asked by {by}: the author's tab {old} is no longer in this session."));
-        }
+        let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+        let message = if old == tab_id {
+            format!("Tab {tab_id}, which TerminalX had made the author, was confirmed as the author by {by}.")
+        } else if present {
+            format!("Tab {tab_id} took this pipeline over, asked by {by}, from tab {old}, which TerminalX had made the author when the author's own tab went.")
+        } else {
+            format!("Tab {tab_id} took this pipeline over, asked by {by}: the author's tab {old} is no longer in this session.")
+        };
+        step.move_author(tab_id.to_string(), false, message);
         if step.p.state != State::NeedsYou || step.p.stopped || !matches!(step.p.reason, Some(StopReason::Failed { .. })) {
             return Ok(());
         }

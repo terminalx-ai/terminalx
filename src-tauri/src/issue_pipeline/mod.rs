@@ -191,6 +191,11 @@ pub struct Pipeline {
     /// A restarted merge may contain manual edits and must not be aborted automatically.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_resolution_edits: bool,
+    /// TerminalX chose the author itself, because the tab the pipeline had
+    /// was gone (#1014). A guess, not a choice: `pipelines start <tab>
+    /// --adopt-pr` may still hand the pipeline to the tab the work is in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub author_followed: bool,
     /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
     /// the merge is a person's, made from their computer with their own `gh`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
