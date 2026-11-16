@@ -283,12 +283,14 @@ pub(crate) struct WindowControl {
     pairing: Option<Arc<crate::pairing::PairingManager>>,
     computer: Arc<crate::computer::ComputerService>,
     browser: std::sync::Arc<crate::browser::BrowserRuntime>,
+    /// Paired machines, for `machine.*` (PRO-356).
+    machines: Option<Arc<crate::machines::connect::MachineConnections>>,
 }
 
 #[cfg(feature = "desktop")]
 impl WindowControl {
     pub(crate) fn new(sink: Arc<dyn EventSink>, computer: Arc<crate::computer::ComputerService>, browser: Arc<crate::browser::BrowserRuntime>) -> Self {
-        Self { sink, computer, browser, pairing: None, questions: None }
+        Self { sink, computer, browser, pairing: None, questions: None, machines: None }
     }
 
     #[cfg(unix)]
@@ -296,6 +298,7 @@ impl WindowControl {
         use tauri::Manager;
         self.pairing = Some(pairing);
         self.questions = Some(ask);
+        self.machines = app.try_state::<Arc<crate::machines::connect::MachineConnections>>().map(|state| state.inner().clone());
         crate::hooks::serve_private(endpoint, |_| crate::hooks::HookReply::refused("Agent hooks belong to the background owner."), move |request| {
             let result = (|| {
                 let runtime = app.state::<crate::AppState>().runtime().ok_or_else(|| ControlError::new("desktop_unavailable","The desktop has no runtime attachment.",None::<String>))?;
@@ -362,6 +365,12 @@ impl WindowControl {
             return self.computer.call(method, params, request_id).map_err(computer_error);
         }
         if command.starts_with("browser.") { return crate::browser::control::handle(&self.browser, command, params); }
+        // Paired machines (PRO-356): resolved and checked here, run over the
+        // machine's connection in the window.
+        if let Some(action) = command.strip_prefix("machine.") {
+            let machines = self.machines.as_ref().ok_or_else(|| ControlError::new("unsupported", "This TerminalX has no paired machines.", None::<String>))?;
+            return crate::machine_control::execute(machines, self.sink.as_ref(), action, params);
+        }
         if let Some(action) = command.strip_prefix("cloud.") {
             if action != "status" && !crate::cloud_control::enabled() { return Err(crate::cloud_control::disabled_error()); }
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
@@ -653,6 +662,14 @@ impl ControlService {
             }
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
+        }
+        // Paired machines live in the desktop app; the window above serves them.
+        if command.starts_with("machine.") {
+            return Err(ControlError::new(
+                "unsupported",
+                format!("{command} needs the TerminalX desktop app: machines are paired with it."),
+                Some("Run it on the computer that paired the machine, with TerminalX open.".into()),
+            ));
         }
         // The Local VM (`container_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
         if let Some(action) = command.strip_prefix("vm.") {
@@ -1093,7 +1110,47 @@ impl ControlService {
         sessions.retain(|session| session.archived == archived);
         self.manager.annotate_row_statuses_among(&mut sessions, &stored);
         let sessions: Vec<Value> = sessions.iter().map(crate::session_usage::with_cost).collect();
+        if params.get("allMachines").and_then(Value::as_bool) == Some(true) {
+            return Ok(self.with_machine_sessions(sessions, archived));
+        }
         Ok(json!({"sessions": sessions}))
+    }
+
+    /// `sessions list --all-machines` (PRO-356): this computer's sessions,
+    /// each with `machine: null`, then every paired machine's, each naming
+    /// its machine; `machines` says how each machine stands. Machines that
+    /// cannot be read leave this computer's list whole, with the reason.
+    fn with_machine_sessions(&self, local: Vec<Value>, archived: bool) -> Value {
+        let mut sessions: Vec<Value> = local
+            .into_iter()
+            .map(|mut session| {
+                session["machine"] = Value::Null;
+                session
+            })
+            .collect();
+        match self.window_call("machine.sessions.listAll", json!({"archived": archived})) {
+            Ok(mut answer) => {
+                if let Some(Value::Array(rows)) = answer.get_mut("sessions").map(Value::take) {
+                    sessions.extend(rows);
+                }
+                json!({"sessions": sessions, "machines": answer.get("machines").cloned().unwrap_or_else(|| json!([]))})
+            }
+            Err(error) => json!({"sessions": sessions, "machines": [], "machinesError": error}),
+        }
+    }
+
+    /// A window service from the control socket: the attached desktop's.
+    fn window_call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        #[cfg(unix)]
+        if let Some(lifetime) = &self.local_lifetime {
+            return lifetime.window.call(command, params);
+        }
+        #[cfg(all(feature = "desktop", unix))]
+        if let Some(desktop) = &self.desktop {
+            return desktop.execute(command, params, "");
+        }
+        let _ = params;
+        Err(ControlError::new("unsupported", format!("{command} needs the TerminalX desktop app."), None::<String>))
     }
 
     /// `sessions usage <session>`, or `--children-of <lead>`: the lead's own
