@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { closeWorkspaceConnection, errorMessage, workspaceConnection, workspaceTargetKey, type CloudWorkspaceConnection, type MachineWorkspaceTarget } from "@/lib/api";
 import { detachCloudTerminals } from "@/lib/cloudTerminals";
 import { machinesApi } from "@/lib/machines";
+import { dropMachineConnected, noteMachineConnected } from "@/lib/machineToasts";
 import { getSessionStore, selectCloudWorkspace } from "@/lib/sessions";
 import { isMachineKey } from "@/types/target";
 import type { MachineConnectionState, MachineConnectionView, PairedMachine } from "@/types/machines";
@@ -89,10 +90,37 @@ function isView(value: unknown): value is MachineConnectionView {
 
 const linked = (current: MachineConnectionState | undefined) => current?.state === "direct" || current?.state === "relay";
 
+/** Machines this window let go of with "Disconnect": not attached again until "Try again". */
+const disconnected = new Set<string>();
+/** Machines whose "Try again" has not connected yet: their next link says "Connected" (21.09). */
+const retried = new Set<string>();
+
+/** States a machine is away in: coming back from one of them is worth a "Connected to …" toast. */
+const AWAY = new Set<MachineConnectionState["state"]>(["reconnecting", "offline", "updating", "needsUpdate", "accessRemoved"]);
+
+/**
+ * Whether a state change is a machine coming back (21.09's "Connected to Mac
+ * mini" toast): a link after the machine was away, or after "Try again". The
+ * first link of a launch, or of turning Machines on, is not news; nor is a
+ * move between direct and the relay.
+ */
+export function machineCameBack(before: MachineConnectionState | undefined, after: MachineConnectionState, triedAgain: boolean): boolean {
+  if (!linked(after) || linked(before)) return false;
+  return triedAgain || (!!before && AWAY.has(before.state));
+}
+
 function applyEvent(view: MachineConnectionView) {
   eventCount.set(view.machineId, (eventCount.get(view.machineId) ?? 0) + 1);
   const before = state.states[view.machineId];
   set({ states: { ...state.states, [view.machineId]: view.state } });
+  const after = view.state;
+  if (after.state === "direct" || after.state === "relay") {
+    const name = state.machines.find((machine) => machine.machineId === view.machineId)?.name;
+    if (name && machineCameBack(before, after, retried.has(view.machineId))) noteMachineConnected(view.machineId, name, after.route);
+    retried.delete(view.machineId);
+  } else if (linked(before)) {
+    dropMachineConnected(view.machineId);
+  }
   // A machine paired in another window, or one whose `machine.describe` just
   // renamed it or moved its last-seen time: read the records again. Before the
   // first read has answered, that read brings them.
@@ -142,7 +170,7 @@ export async function refreshPairedMachines(): Promise<void> {
   set({ ready: true, error: null, machines, states });
   const paired = new Set(machines.map((machine) => machine.machineId));
   for (const machineId of Object.keys(state.connections)) if (!paired.has(machineId)) detach(machineId);
-  if (holders > 0) for (const machine of machines) void attach(machine.machineId);
+  if (holders > 0) for (const machine of machines) if (!disconnected.has(machine.machineId)) void attach(machine.machineId);
 }
 
 async function attach(machineId: string): Promise<void> {
@@ -199,6 +227,8 @@ export function startMachineConnections(): () => void {
 export async function reconnectMachine(machineId: string): Promise<void> {
   const { [machineId]: _cleared, ...attachErrors } = state.attachErrors;
   set({ attachErrors });
+  disconnected.delete(machineId);
+  retried.add(machineId);
   if (holders > 0 && !state.connections[machineId]) {
     await attach(machineId);
     return;
@@ -210,8 +240,29 @@ export async function reconnectMachine(machineId: string): Promise<void> {
   }
 }
 
+/**
+ * "Disconnect" (the chip's popover, 21.09): this window lets go of the
+ * machine's connection, and the native owner stops once no window holds it.
+ * The machine and its sessions keep running; nothing reconnects until "Try
+ * again". Its state reads Not connected meanwhile.
+ */
+export function disconnectMachine(machineId: string) {
+  disconnected.add(machineId);
+  retried.delete(machineId);
+  dropMachineConnected(machineId);
+  if (state.connections[machineId]) detach(machineId);
+  set({ states: { ...state.states, [machineId]: IDLE } });
+}
+
+/** Whether this window disconnected the machine (and has not tried again since). */
+export function isMachineDisconnected(machineId: string): boolean {
+  return disconnected.has(machineId);
+}
+
 /** For tests: forget everything read and held. */
 export function resetMachineConnectionsForTests() {
+  disconnected.clear();
+  retried.clear();
   state = { ready: false, machines: [], states: {}, connections: {}, attachErrors: {}, error: null };
   holders = 0;
   attaching.clear();

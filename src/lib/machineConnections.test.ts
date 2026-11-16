@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
-import type { MachineConnectionView } from "@/types/machines";
+import type { MachineConnectionState, MachineConnectionView } from "@/types/machines";
 
 // The store against the real `workspaceConnection` and `NativeWorkspaceTransport`,
 // with the Tauri commands and the event bus mocked as the native side answers them.
@@ -219,5 +219,63 @@ describe("machine connections", () => {
     });
     stop = store.startMachineConnections();
     await vi.waitFor(() => expect(store.getMachineConnections()).toMatchObject({ ready: true, error: "machines_store_unreadable", machines: [] }));
+  });
+});
+
+describe("connection states the person sees (PRO-352, 21.09)", () => {
+  const DIRECT = { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.2:6768/machine/1" }, since: 1, rttMs: 9 } as const;
+  const RELAY = { state: "relay", route: { kind: "relay", endpoint: null }, since: 1, rttMs: 40 } as const;
+
+  it("counts a link as coming back only after the machine was away, or after Try again", () => {
+    expect(store.machineCameBack(undefined, DIRECT, false)).toBe(false);
+    expect(store.machineCameBack({ state: "connecting", trying: ["lan"] }, DIRECT, false)).toBe(false);
+    expect(store.machineCameBack({ state: "connecting", trying: ["lan"] }, DIRECT, true)).toBe(true);
+    const away: MachineConnectionState[] = [
+      { state: "reconnecting", lostAt: 1, attempt: 1, retryInMs: 250, trying: ["lan"] },
+      { state: "offline", lastSeenAt: 1, retryInMs: 10_000 },
+      { state: "updating", version: "0.2.34", since: 1 },
+      { state: "accessRemoved" },
+    ];
+    for (const before of away) {
+      expect(store.machineCameBack(before, RELAY, false)).toBe(true);
+    }
+    // Moving between direct and the relay is not news.
+    expect(store.machineCameBack(RELAY, DIRECT, true)).toBe(false);
+    expect(store.machineCameBack({ state: "offline", lastSeenAt: 1, retryInMs: 10_000 }, { state: "reconnecting", lostAt: 1, attempt: 1, retryInMs: 250, trying: [] }, true)).toBe(false);
+  });
+
+  it("raises Connected to the machine when it comes back, and not on the first link", async () => {
+    const toasts = await import("@/lib/machineToasts");
+    toasts.resetMachineToastsForTests();
+    await started();
+    changed({ machineId: "m1", state: { state: "connecting", trying: ["lan"] } });
+    changed({ machineId: "m1", state: DIRECT });
+    expect(toasts.getMachineToasts()).toEqual([]);
+
+    changed({ machineId: "m1", state: { state: "offline", lastSeenAt: 7, retryInMs: 10_000 } });
+    changed({ machineId: "m1", state: DIRECT });
+    expect(toasts.getMachineToasts()).toMatchObject([{ kind: "connected", machineId: "m1", name: "Mac mini", route: { kind: "tailscale" } }]);
+    // Lost again: the toast goes with the link.
+    changed({ machineId: "m1", state: { state: "reconnecting", lostAt: 9, attempt: 1, retryInMs: 250, trying: ["lan"] } });
+    expect(toasts.getMachineToasts()).toEqual([]);
+  });
+
+  it("Disconnect lets go of the machine until Try again, and a read of the list does not attach it again", async () => {
+    await started();
+    changed({ machineId: "m1", state: DIRECT });
+    store.disconnectMachine("m1");
+    expect(store.getMachineConnections().connections.m1).toBeUndefined();
+    expect(store.getMachineConnections().states.m1).toEqual({ state: "idle" });
+    expect(store.isMachineDisconnected("m1")).toBe(true);
+    await vi.waitFor(() => expect(commands("cloud_remote_detach").map(([, args]) => args)).toEqual([{ connectionId: "conn-m1" }]));
+
+    await store.refreshPairedMachines();
+    expect(store.getMachineConnections().connections.m1).toBeUndefined();
+    expect(commands("machine_remote_attach").filter(([, args]) => (args as { machineId: string }).machineId === "m1")).toHaveLength(1);
+
+    await store.reconnectMachine("m1");
+    expect(store.isMachineDisconnected("m1")).toBe(false);
+    expect(store.getMachineConnections().connections.m1).toBeTruthy();
+    expect(commands("machine_remote_attach").filter(([, args]) => (args as { machineId: string }).machineId === "m1")).toHaveLength(2);
   });
 });

@@ -15,7 +15,12 @@
 // - the header's + lists the machine's projects; choosing one opens the
 //   machine's view with the new-agent form on that project, and Start agent
 //   sends `session.create` with its projectId and selects the new session;
-// - Mac mini going offline keeps its section and its sessions, dimmed;
+// - Mac mini going offline keeps its section and its sessions, dimmed, with
+//   the "Mac mini isn't reachable" card under them (PRO-352, 21.09): when it
+//   was last seen, Try again and Machine settings, inside the sidebar, no
+//   text under 12 px; Try again asks the native side to reconnect;
+// - Mac mini revoking this Mac shows "no longer allows this Mac" with Pair
+//   again; coming back removes the card;
 // - the sidebar never scrolls sideways; with Machines off nothing shows.
 //
 // Pictures of each state go to MACHINE_SIDEBAR_SHOTS when it is set (the
@@ -130,7 +135,9 @@ const fixture = (machines) => `(() => {
     }
     return true;
   };
-  answers.machines_reconnect = null;
+  // Try again (PRO-352): counted, so the check sees it asked the native side.
+  window.__PW_RECONNECTS__ = 0;
+  answers.machines_reconnect = () => { window.__PW_RECONNECTS__++; return null; };
   answers.cloud_remote_detach = null;
   window.__PW_MACHINE__ = (machineId, state) => {
     views[machineId] = state;
@@ -299,6 +306,57 @@ for (const colorScheme of ["light", "dark"]) {
       "dev-server stays as it was": m.sections.find((section) => section.machine === "m-server")?.reachable === "true",
     }, m);
     await shoot(page, `offline-${colorScheme}`);
+  }
+
+  // PRO-352 (21.09): the offline section's card, and Try again.
+  {
+    const card = page.locator('[data-testid="machine-section"][data-machine="m-mini"] [data-testid="machine-away-card"]');
+    await card.waitFor();
+    const c = await card.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const aside = node.closest("aside, nav, [data-testid='sidebar']")?.getBoundingClientRect() ?? null;
+      const texts = [...node.querySelectorAll("*")].filter((el) => el.childElementCount === 0 && el.textContent.trim()).map((el) => parseFloat(getComputedStyle(el).fontSize));
+      return {
+        state: node.getAttribute("data-state"),
+        text: node.textContent.replace(/\s+/g, " ").trim(),
+        buttons: [...node.querySelectorAll("button")].map((button) => button.textContent.trim()),
+        inside: !aside || (box.left >= aside.left - 1 && box.right <= aside.right + 1),
+        smallest: Math.min(...texts),
+      };
+    });
+    const before = await page.evaluate(() => window.__PW_RECONNECTS__);
+    await card.getByRole("button", { name: "Try again" }).click();
+    await page.waitForTimeout(200);
+    const after = await page.evaluate(() => window.__PW_RECONNECTS__);
+    failed += report(`offline card (${colorScheme})`, {
+      "the card is for the offline state": c.state === "offline",
+      "it says Mac mini isn't reachable": c.text.includes("Mac mini isn’t reachable"),
+      "it says when it was last seen": /Last seen at 14:02\./.test(c.text),
+      "it says sessions keep running and the list catches up": c.text.includes("Sessions there keep running, and this list catches up when it reconnects."),
+      "it offers Try again and Machine settings": c.buttons.join(",") === "Try again,Machine settings",
+      "it stays inside the sidebar": c.inside,
+      "no text under 12 px": c.smallest >= 12,
+      "Try again asks to reconnect": after > before,
+    }, { ...c, before, after });
+    await shoot(page, `offline-card-${colorScheme}`);
+
+    await page.evaluate(() => window.__PW_MACHINE__("m-mini", { state: "accessRemoved" }));
+    await page.locator('[data-testid="machine-away-card"][data-state="accessRemoved"]').waitFor();
+    const removed = await page.locator('[data-testid="machine-away-card"][data-state="accessRemoved"]').evaluate((node) => ({
+      text: node.textContent.replace(/\s+/g, " ").trim(),
+      buttons: [...node.querySelectorAll("button")].map((button) => button.textContent.trim()),
+    }));
+    failed += report(`access removed card (${colorScheme})`, {
+      "it says Mac mini no longer allows this Mac": removed.text.includes("Mac mini no longer allows this Mac"),
+      "it offers Pair again and Machine settings": removed.buttons.join(",") === "Pair again,Machine settings",
+    }, removed);
+    await shoot(page, `access-removed-card-${colorScheme}`);
+
+    await page.evaluate(() => window.__PW_MACHINE__("m-mini", { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: Date.now(), rttMs: 3 }));
+    await page.waitForTimeout(300);
+    failed += report(`back (${colorScheme})`, {
+      "the card is gone": (await page.locator('[data-testid="machine-away-card"]').count()) === 0,
+    });
   }
   await page.close();
 }

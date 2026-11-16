@@ -5,7 +5,12 @@ const calls = vi.hoisted(() => ({ reconnect: vi.fn(async () => undefined), selec
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => null) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 vi.mock("@/components/cloud/CloudTerminalPane", () => ({ CloudTerminalPane: () => <div data-testid="cloud-terminal" /> }));
-vi.mock("@/lib/machineConnections", () => ({ reconnectMachine: calls.reconnect }));
+const disconnected = vi.hoisted(() => new Set<string>());
+vi.mock("@/lib/machineConnections", () => ({
+  reconnectMachine: calls.reconnect,
+  refreshPairedMachines: vi.fn(async () => undefined),
+  isMachineDisconnected: (machineId: string) => disconnected.has(machineId),
+}));
 vi.mock("@/lib/sessions", () => ({ selectCloudWorkspace: calls.select }));
 
 const { MACHINE_LOCAL_ONLY, MachineConnectionNotice } = await import("./MachineSession");
@@ -20,6 +25,11 @@ describe("a machine session while its machine is away (21.09, PRO-347)", () => {
     expect(notice.textContent).toContain("Trying this network, then Relay. The agent keeps working there.");
   });
 
+  it("names the routes it is trying, in the order it tries them", () => {
+    render(<MachineConnectionNotice machineId="m1" name="Mac mini" state={{ state: "reconnecting", lostAt: Date.now(), attempt: 2, retryInMs: 500, trying: ["relay"] }} />);
+    expect(screen.getByTestId("machine-session-reconnecting").textContent).toContain("Trying Relay. The agent keeps working there.");
+  });
+
   it("says an update brings it back", () => {
     render(<MachineConnectionNotice machineId="m1" name="dev-server" state={{ state: "updating", version: "0.2.34", since: Date.now() }} />);
     expect(screen.getByTestId("machine-session-reconnecting").textContent).toContain("dev-server is updating");
@@ -32,11 +42,25 @@ describe("a machine session while its machine is away (21.09, PRO-347)", () => {
     expect(calls.reconnect).toHaveBeenCalledWith("m1");
   });
 
-  it("sends a machine that removed this Mac to its settings", () => {
+  it("offers to pair again with a machine that removed this Mac, and its settings", () => {
     render(<MachineConnectionNotice machineId="m1" name="Studio" state={{ state: "accessRemoved" }} />);
-    expect(screen.getByTestId("machine-session-unreachable").textContent).toContain("Studio no longer allows this Mac. Pair again to reconnect.");
+    const notice = screen.getByTestId("machine-session-unreachable");
+    expect(notice.textContent).toContain("Studio no longer allows this Mac. Pair again to reconnect.");
+    expect(notice.querySelector('[data-testid="machine-message"]')?.getAttribute("data-kind")).toBe("accessRemoved");
+    expect(screen.getByRole("button", { name: "Pair again" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Machine settings" }));
     expect(calls.select).toHaveBeenCalledWith("machine:m1");
+  });
+
+  it("says nothing for a machine not attached yet, and Not connected with Try again once this Mac disconnected it", () => {
+    const first = render(<MachineConnectionNotice machineId="m1" name="Mac mini" state={{ state: "idle" }} />);
+    expect(first.container.textContent).toBe("");
+    first.unmount();
+    disconnected.add("m1");
+    render(<MachineConnectionNotice machineId="m1" name="Mac mini" state={{ state: "idle" }} />);
+    expect(screen.getByTestId("machine-session-disconnected").textContent).toContain("Not connected to Mac mini. Sessions there keep running.");
+    fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(calls.reconnect).toHaveBeenCalledWith("m1");
   });
 
   it("says nothing while it is connected", () => {

@@ -647,13 +647,13 @@ describe("composer history (PRO-85)", () => {
   // The draft lives outside the composer, as a tab's does, so it outlasts a remount.
   const drafts = new Map<string, string>();
 
-  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold" }) {
+  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps, held = null }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold"; held?: string | null }) {
     const [draft, setDraft] = useState(drafts.get(id) ?? "");
     const change = (text: string) => {
       drafts.set(id, text);
       setDraft(text);
     };
-    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} heldReason={held} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
   }
 
   const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
@@ -797,6 +797,27 @@ describe("composer history (PRO-85)", () => {
     await waitFor(() => expect(field().value).toBe("work in progress"));
     press("ArrowUp");
     expect(field().value).toBe("third message");
+  });
+
+  // PRO-352 (21.09): while a machine is away, what is typed stays, and nothing goes until the person sends it once it is back.
+  it("keeps a prompt typed while its machine is away, and sends it only when the person does after it is back", async () => {
+    const onSend = vi.fn();
+    const view = render(<HistoryComposer onSend={onSend} held="Can't send until Mac mini is back" />);
+    expect(field().disabled).toBe(false);
+    expect(field().placeholder).toBe("Can't send until Mac mini is back");
+    type("check the relay e2e again");
+    press("Enter");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+
+    // Back: nothing was queued, and the prompt goes when the person sends it.
+    view.rerender(<HistoryComposer onSend={onSend} />);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+    press("Enter");
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("check the relay e2e again", []));
   });
 
   it("clears the composer after an ordinary send, and Shift+Return still does not send", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MachineProject, RuntimeSession } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, MachineProject, RuntimeSession } from "@terminalx/portable/workspace";
 import type { MachineConnectionsState } from "@/lib/machineConnections";
 import type { MachineCatalogEntry, MachineCatalogState } from "@/lib/machineCatalog";
 import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
@@ -123,6 +123,34 @@ describe("projecting machine sessions", () => {
     ] })], "live") } });
     expect(dashboard.machineSessionMark(row)).toBe("waiting");
     expect(dashboard.machineAttentionTab(row)?.tabId).toBe("b");
+  });
+});
+
+describe("waking after the machine finished a turn (PRO-352)", () => {
+  it("shows a turn that finished while this Mac slept as finished, with its unread mark, once the machine is back", () => {
+    const scope = catalog.machineAgentScope(MINI.machineId);
+    const tab = (status: "in_progress" | "completed") =>
+      ({ sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: 0 }) as unknown as AgentTabInfo;
+    const live = { machines: [MINI], agentTabs: (machineId: string) => agents.getCloudAgents(catalog.machineAgentScope(machineId)).tabs };
+
+    // Before sleep: the machine said the turn was working.
+    agents.applyLiveTabs(scope, [tab("in_progress")]);
+    const before = dashboard.projectMachineSessions({ ...live, catalog: { machines: { [MINI.machineId]: entry([session("s1", "in_progress")], "live") } } });
+    expect(before[0].tabs[0].status).toBe("in_progress");
+
+    // Asleep: only what was saved, and a saved "working" is not believed.
+    const asleep = dashboard.projectMachineSessions({ ...live, catalog: { machines: { [MINI.machineId]: entry([session("s1", "in_progress")], "cache") } } });
+    expect(asleep[0].tabs[0].status).toBe("idle");
+
+    // Awake: the reconnect lists the tab again, finished.
+    agents.applyLiveTabs(scope, [tab("completed")]);
+    const awake = { [MINI.machineId]: entry([session("s1", "completed")], "live") };
+    const after = dashboard.projectMachineSessions({ ...live, catalog: { machines: awake } });
+    expect(after[0].tabs[0].status).toBe("completed");
+    expect(dashboard.machineSessionMark(after[0])).toBe("completed");
+    // The sidebar row carries the unread mark.
+    const [row] = catalog.buildMachineSessions(MINI.machineId, awake[MINI.machineId], live.agentTabs(MINI.machineId));
+    expect(row.tabs[0].unread).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, LoaderCircle, Plus, RotateCw, ShieldX, Unplug, X } from "@/icons";
+import { ChevronDown, ChevronUp, LoaderCircle, Plus, RotateCw, Unplug, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { syncLiveTabs } from "@/lib/cloudAgents";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { closeCloudTerminal, selectCloudTerminal, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { shortcutKeys } from "@/lib/hotkeys";
-import { reconnectMachine } from "@/lib/machineConnections";
+import { isMachineDisconnected, reconnectMachine, refreshPairedMachines } from "@/lib/machineConnections";
 import { machineAgentScope } from "@/lib/machineCatalog";
 import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -19,11 +19,12 @@ import { selectCloudWorkspace } from "@/lib/sessions";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { machineSectionKey, parseMachineKey } from "@/types/target";
 import type { MachineConnectionState } from "@/types/machines";
-import { MachineChip, MachineLocation, useTick } from "./connectionStatus";
+import { MachineChip, MachineLocation, tryingText, useTick } from "./connectionStatus";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
+import { MachineMessage } from "./MachineMessage";
+import { AddMachineDialog } from "./AddMachineDialog";
 
-/** Built-in browser, computer use, dictation into a terminal and Local VM run on the computer a person sits at (decision 7). */
-export const MACHINE_LOCAL_ONLY = "Browser and computer use aren't available on another machine.";
+export { MACHINE_LOCAL_ONLY } from "./MachineMessage";
 
 /** The header's first mark for a machine session: the machine, its state and route (21.08, 21.09). */
 export function MachineSessionChip({ cloud }: { cloud: CloudSessionModel }) {
@@ -141,13 +142,16 @@ export function MachineSessionStrips({
 /**
  * The session while its machine is not there (21.09, "Session while
  * reconnecting" and the inline messages): what is happening, and that the
- * agent keeps working on the machine. The composer says it cannot send.
+ * agent keeps working on the machine. The composer keeps what is typed and
+ * says it cannot send until the machine is back.
  */
 export function MachineConnectionNotice({ machineId, name, state }: { machineId: string; name: string; state: MachineConnectionState }) {
   useTick(state.state === "reconnecting");
+  const [pairing, setPairing] = useState(false);
   if (state.state === "connecting" || state.state === "reconnecting" || state.state === "updating") {
     const title = state.state === "updating" ? `${name} is updating` : state.state === "connecting" ? `Connecting to ${name}` : `Reconnecting to ${name}`;
-    const detail = state.state === "updating" ? "Back in under a minute. The agent keeps working there." : "Trying this network, then Relay. The agent keeps working there.";
+    const trying = state.state === "updating" ? "Back in under a minute." : tryingText(state.trying);
+    const detail = [trying, "The agent keeps working there."].filter(Boolean).join(" ");
     return (
       <div className="flex shrink-0 items-start gap-2.5 border-b border-hairline px-4 py-2.5 text-[12.5px]" role="status" data-testid="machine-session-reconnecting">
         <LoaderCircle className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" aria-hidden />
@@ -158,22 +162,52 @@ export function MachineConnectionNotice({ machineId, name, state }: { machineId:
       </div>
     );
   }
-  if (state.state === "offline" || state.state === "accessRemoved") {
-    const removed = state.state === "accessRemoved";
-    const Icon = removed ? ShieldX : Unplug;
+  if (state.state === "offline") {
     return (
-      <div className={cn("flex shrink-0 items-center gap-2.5 border-b px-4 py-2 text-[12.5px]", removed ? "border-destructive/40" : "border-hairline")} role="status" data-testid="machine-session-unreachable">
-        <Icon className={cn("size-3.5 shrink-0", removed ? "text-destructive" : "text-warning")} aria-hidden />
-        <span className="min-w-0 flex-1 text-foreground">{removed ? `${name} no longer allows this Mac. Pair again to reconnect.` : `${name} isn't reachable. Sessions there keep running.`}</span>
-        {removed ? (
-          <Button size="xs" variant="outline" onClick={() => selectCloudWorkspace(machineSectionKey(machineId))}>
-            Machine settings
-          </Button>
-        ) : (
-          <Button size="xs" variant="outline" onClick={() => void reconnectMachine(machineId)}>
-            <RotateCw /> Try again
-          </Button>
-        )}
+      <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="machine-session-unreachable" data-state="offline">
+        <MachineMessage
+          kind="unreachable"
+          name={name}
+          action={
+            <Button size="xs" variant="outline" onClick={() => void reconnectMachine(machineId)}>
+              <RotateCw /> Try again
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+  if (state.state === "accessRemoved") {
+    // Revoked on the machine: pairing again is the way back (AC: "offers pairing again").
+    return (
+      <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="machine-session-unreachable" data-state="accessRemoved">
+        <MachineMessage
+          kind="accessRemoved"
+          name={name}
+          action={
+            <>
+              <Button size="xs" variant="outline" onClick={() => setPairing(true)}>
+                Pair again
+              </Button>
+              <Button size="xs" variant="ghost" onClick={() => selectCloudWorkspace(machineSectionKey(machineId))}>
+                Machine settings
+              </Button>
+            </>
+          }
+        />
+        <AddMachineDialog open={pairing} onOpenChange={setPairing} onPaired={() => void refreshPairedMachines().then(() => reconnectMachine(machineId))} />
+      </div>
+    );
+  }
+  if (state.state === "idle" && isMachineDisconnected(machineId)) {
+    // Let go of with Disconnect: nothing reconnects until Try again. (Idle before the first read at launch says nothing.)
+    return (
+      <div className="flex shrink-0 items-center gap-2.5 border-b border-hairline px-4 py-2 text-[12.5px]" role="status" data-testid="machine-session-disconnected">
+        <Unplug className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="min-w-0 flex-1 text-foreground">Not connected to {name}. Sessions there keep running.</span>
+        <Button size="xs" variant="outline" onClick={() => void reconnectMachine(machineId)}>
+          <RotateCw /> Try again
+        </Button>
       </div>
     );
   }

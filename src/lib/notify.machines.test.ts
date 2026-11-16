@@ -159,6 +159,12 @@ describe("machine sessions in the dock badge", () => {
 });
 
 describe("machine session notices", () => {
+  it("say what a waiting session waits for (21.09)", async () => {
+    const { notify } = await boot(true);
+    expect(notify.machineWaitText("Bisect the flaky relay e2e", 1)).toBe("Bisect the flaky relay e2e is waiting for an approval.");
+    expect(notify.machineWaitText("Bisect the flaky relay e2e", 0)).toBe("Bisect the flaky relay e2e is waiting for you.");
+  });
+
   it("raise a new wait on a connected machine, and the notice opens the machine session", async () => {
     const mini = new FakeMachine();
     mini.sessions = [session("in_progress")];
@@ -177,8 +183,9 @@ describe("machine session notices", () => {
     await settle();
     await settle();
     const notice = result.current.find((n) => n.sessionId === KEY);
-    expect(notice).toMatchObject({ kind: "waiting", tabId: "t1", harness: "claude" });
-    expect(notice?.body).toContain("Bisect the flaky relay e2e · Mac mini");
+    // 21.09: the machine needs the person, with Open.
+    expect(notice).toMatchObject({ kind: "waiting", tabId: "t1", title: "Mac mini needs you", action: "open" });
+    expect(notice?.body).toMatch(/^Bisect the flaky relay e2e is waiting for (an approval|you)\.$/);
 
     notify.openNotice(notice!);
     expect(sessions.getSessions().selectedSessionId).toBe(KEY);

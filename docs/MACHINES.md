@@ -1513,6 +1513,56 @@ build's machine client against each, and each release's own `want` list
 against this build's runtime. See `.github/workflows/ci.yml`, job
 `machine-compat`.
 
+### As built (PRO-352): connection states the person sees
+
+Screen 21.09, behind Settings → Experimental → Machines like the rest.
+
+- **Chip and popover.** The header chip (`MachineChip`,
+  `src/components/machines/connectionStatus.tsx`) keeps its label and hover
+  text per state and now opens a popover: Path (route and round trip, or the
+  state's hover text while away), Encryption ("End to end" and the machine's
+  key label, `keyLabel(machineId)`), TerminalX (version and system), Running
+  (sessions working or waiting, and `lifecycle.resources` free memory) while
+  connected, else Last seen; then Machine settings (the machine's view) and
+  Disconnect, or Try again while it is away. The rows are
+  `machineDetailRows`; a value not known yet is left out.
+- **Disconnect** is this window's: `disconnectMachine` closes its
+  connection (the native owner stops when no window holds it) and keeps the
+  machine detached across list reads until Try again (`reconnectMachine`).
+  The state reads Not connected, and the session says so with Try again. No
+  protocol change: it is `cloud_remote_detach`.
+- **Sidebar.** An offline machine's rows stay dimmed, and under them
+  `MachineAwayCard` says it isn't reachable, when it was last seen, that its
+  sessions keep running and the list catches up when it reconnects, with Try
+  again and Machine settings. Access removed says the machine no longer
+  allows this Mac, with Pair again (the Add machine dialog) and Machine
+  settings.
+- **Session.** Reconnecting names the routes being tried, from the state's
+  `trying` ("Trying Relay."). Offline and access removed are the inline
+  messages (`MachineMessage`, `src/components/machines/MachineMessage.tsx`),
+  with Try again or Pair again. The composer takes the backend's
+  `sendHeldReason`: the field stays editable, its placeholder says "Can't
+  send until Mac mini is back", Send and Return do nothing; nothing is queued
+  on this computer, and the prompt goes when the person sends it after the
+  machine is back.
+- **Inline messages**: unreachable, needs update (`MachineFeatureNotice`, as
+  before), agent not signed in (the tab), project missing (the new-session
+  form, when the project it was on here has no namesake on the machine:
+  `MachineDraft.missingProject`), access removed, and the local-only line.
+- **Toasts** (`src/lib/machineToasts.ts`, `MachineToasts`): "Connected to
+  Mac mini" with the route and running sessions when a machine comes back
+  from reconnecting, offline, updating, needs update or access removed, or
+  after Try again (`machineCameBack`), never for the first link of a launch;
+  it goes after 6 s or when the link drops. "Mac mini needs you" with Open is
+  the machine session notice (`raiseMachineAttention`), with what the session
+  waits for. "Couldn't pair with dev-server" with Try again (when the same
+  code may be tried) is raised when a pairing fails while this window is not
+  focused, since the dialog says it inline otherwise; the next attempt or
+  closing the dialog takes it back.
+- **On return** nothing new was needed: the reconnect resubscribes from the
+  cursors and `applyLiveTabs` marks a tab that finished meanwhile unread, so
+  the overview, sidebar and badge show it finished and unread.
+
 ## Trust model
 
 PRO-357 adds the threat model and its tests here. What each party can see and do:
@@ -1554,8 +1604,8 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
 | Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
 | Rename, archive, pin | Works | PRO-346 |
-| Header chip (machine, state, route), "Runs on" strip | Works | 21.08, PRO-347 |
-| Reconnecting and unreachable states in the session | Works; the composer says it can't send until the machine is back | 21.09, PRO-347 |
+| Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
+| Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
 | Agent sign-in notice | Works; names the machine ("Sign in from its page") | 21.09, PRO-350 |
 | Cost chip, agent account label, Continue in a new tab, Fix check errors | Follow-up | PRO-408 |
 | Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
