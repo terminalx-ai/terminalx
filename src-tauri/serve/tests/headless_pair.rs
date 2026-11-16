@@ -58,9 +58,10 @@ struct Terminal {
 impl Terminal {
     fn start(mut command: Command) -> Self {
         let (mut master, mut slave) = (0, 0);
-        let mut size = libc::winsize { ws_row: 40, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0 };
-        // SAFETY: openpty fills both descriptors; no name or termios is asked for.
-        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) }, 0);
+        let size = libc::winsize { ws_row: 40, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty fills both descriptors and only reads `size` (macOS
+        // declares it `*mut`, Linux `*const`); no name or termios is asked for.
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::from_ref(&size).cast_mut()) }, 0);
         // SAFETY: both were just opened and are owned here alone.
         let (master, slave) = unsafe { (std::fs::File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         command
