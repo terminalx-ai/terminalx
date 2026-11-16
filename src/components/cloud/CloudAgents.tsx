@@ -35,6 +35,7 @@ import {
   DEV_SCOPE_NOTICE,
   errorText,
   isDevScope,
+  takesLiveCommands,
   flushCloudAgentCache,
   loadCloudAgents,
   markCloudAgentRead,
@@ -823,7 +824,7 @@ function CloudAgentPane({
             unreadNotes={collab.unreadNotes[tab.tabId] ?? 0}
           />
         )}
-        {isDevScope(scope) && (
+        {isDevScope(scope) && connected && !takesLiveCommands(scope, client) && (
           <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
             {DEV_SCOPE_NOTICE}
           </p>
@@ -855,7 +856,7 @@ function CloudAgentPane({
             sending={sending}
             footer={
               <div className="flex flex-col">
-                {live && draft.trim() && !isDevScope(scope) && !blocked && (
+                {live && draft.trim() && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
                   <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
                     <span>Send now queues it for when the agent pauses.</span>
                     <Button size="xs" variant="outline" onClick={() => void steer()}>
