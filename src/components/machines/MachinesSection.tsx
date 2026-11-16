@@ -1,17 +1,29 @@
+import { ChevronDown, Folder, FolderGit2, Plus } from "@/icons";
+import { Button } from "@/components/ui/button";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
+import { useFold } from "@/components/layout/useFold";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
+import { useMachineProjects, type MachineProjectNode } from "@/lib/machineCatalog";
+import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { selectCloudWorkspace, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import { machineSectionKey } from "@/types/target";
 import type { MachineConnectionState, PairedMachine } from "@/types/machines";
 import { MachineIcon, MachineStateMark, machineStateHint, machineStateLabel, useTick } from "./connectionStatus";
+import { MachineProjectGroup, shownMachineSessions } from "./MachineSidebarRows";
+import { startMachineSession } from "./machineNewSession";
 
 /**
- * The sidebar's machines (PRO-345, screen 21.01): one section per paired
- * machine, its header the machine's name with its live state (`Direct`,
- * `Relay`, `Offline · seen 14:02`). Choosing it opens the machine's view.
- * Shown only with Experimental → Machines on; PRO-346 adds its projects and
- * sessions under each header.
+ * The sidebar's machines (PRO-345, PRO-346, screen 21.01): one section per
+ * paired machine. Its header is the machine's name with its live state
+ * (`Direct`, `Relay`, `Offline · seen 14:02`), a + that starts a session in
+ * one of its projects, and a fold; choosing the name opens the machine's view.
+ * Under it come its projects, each with its sessions. A machine that cannot be
+ * reached keeps its section, dimmed, with the sessions it last reported.
+ * Shown only with Experimental → Machines on.
  */
 export function MachinesSection() {
   const on = useExperimentalSettings()?.machines === true;
@@ -23,7 +35,7 @@ export function MachinesSection() {
       {store.machines.map((machine) => {
         const { state, attachError } = machineConnection(store, machine.machineId);
         return (
-          <MachineHeader
+          <MachineSection
             key={machine.machineId}
             machine={machine}
             state={state}
@@ -36,34 +48,129 @@ export function MachinesSection() {
   );
 }
 
-function MachineHeader({ machine, state, attachError, selected }: { machine: PairedMachine; state: MachineConnectionState; attachError: string | null; selected: boolean }) {
+function MachineSection({ machine, state, attachError, selected }: { machine: PairedMachine; state: MachineConnectionState; attachError: string | null; selected: boolean }) {
   const now = useTick(state.state === "reconnecting");
   const label = machineStateLabel(state, machine, { seen: true });
   const hint = attachError ? `Could not connect: ${attachError}` : machineStateHint(state, machine.name, now);
+  const sectionKey = machineSectionKey(machine.machineId);
+  const [open, toggle] = useFold(sectionKey, true);
+  const store = useSessionStore();
+  const filter = useSidebarFilter();
+  const { entry, projects } = useMachineProjects(machine.machineId);
+  // What it shows comes from the machine's live answers, or from what it last said.
+  const reachable = entry?.source === "live";
+  const showArchived = store.showArchived && filter.filter === "all";
+  const groups = projects
+    .map((node) => ({ node, sessions: shownMachineSessions(node.sessions, { showArchived, shows: filter.shows, selectedId: store.selectedSessionId }) }))
+    // A filter shows only the projects it found something in.
+    .filter(({ sessions }) => !filter.active || sessions.length > 0);
+  const startable = projects.filter((node) => !node.project.archived);
+  // The header's + and fold sit over the end of its row, beside the section rather than in it:
+  // the section's own control is the header button that opens the machine.
   return (
-    <section aria-label={machine.name} className="mb-5 min-w-0" data-testid="machine-section" data-machine={machine.machineId} data-state={state.state}>
-      <button
-        type="button"
-        onClick={() => selectCloudWorkspace(machineSectionKey(machine.machineId))}
-        aria-current={selected ? "page" : undefined}
-        title={hint}
-        className={cn(
-          "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-          selected ? "bg-selected" : "hover:bg-selected/40",
-        )}
+    <div className="relative mb-5 min-w-0">
+      <section
+        aria-label={machine.name}
+        className="min-w-0"
+        data-testid="machine-section"
+        data-machine={machine.machineId}
+        data-state={state.state}
+        data-reachable={reachable ? "true" : "false"}
       >
-        <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{machine.name}</span>
-        <MachineStateMark state={state} className="ml-0.5" />
-        <span className="min-w-0 shrink truncate text-[12px] text-faint" data-testid="machine-state-label">
-          {label}
-        </span>
-      </button>
-      {attachError && (
-        <p className="truncate px-2 pt-0.5 text-[12px] text-destructive" role="alert" title={attachError}>
-          Could not connect: {attachError}
-        </p>
-      )}
-    </section>
+        <div className={cn("flex h-7 min-w-0 items-center rounded-md pr-14", selected ? "bg-selected" : "hover:bg-selected/40")}>
+          <button
+            type="button"
+            onClick={() => selectCloudWorkspace(sectionKey)}
+            aria-current={selected ? "page" : undefined}
+            title={hint}
+            className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
+            {/* The name keeps its room; a long state ("Offline · seen 14:02") gives way first. */}
+            <span className="min-w-0 max-w-[60%] shrink-0 truncate text-[13px] font-medium text-foreground">{machine.name}</span>
+            <MachineStateMark state={state} className="ml-0.5" />
+            <span className="min-w-0 shrink truncate text-[12px] text-faint" data-testid="machine-state-label">
+              {label}
+            </span>
+          </button>
+        </div>
+        {attachError && (
+          <p className="truncate px-2 pt-0.5 text-[12px] text-destructive" role="alert" title={attachError}>
+            Could not connect: {attachError}
+          </p>
+        )}
+        {open && groups.length > 0 && (
+          <div
+            className={cn("mt-0.5 flex flex-col gap-px pl-3.5 transition-opacity", !reachable && "opacity-60")}
+            data-testid="machine-projects"
+            title={reachable ? undefined : `${machine.name} cannot be reached: these are the sessions it last reported.`}
+          >
+            {groups.map(({ node, sessions }) => (
+              <MachineProjectGroup key={node.key} node={node} sessions={sessions} reachable={reachable} filtered={filter.active} />
+            ))}
+          </div>
+        )}
+      </section>
+      <div className="absolute right-1 top-0 flex h-7 items-center gap-0.5" data-testid="machine-header-actions" data-machine={machine.machineId}>
+        <NewMachineSession machine={machine} projects={startable} />
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-label={open ? `Collapse ${machine.name}` : `Expand ${machine.name}`}
+          data-testid="machine-fold"
+          className="text-faint"
+        >
+          <ChevronDown className={cn("transition-transform", !open && "-rotate-90")} />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The header's +: straight into the new-agent form when the machine has one project, else a menu of them. */
+function NewMachineSession({ machine, projects }: { machine: PairedMachine; projects: MachineProjectNode[] }) {
+  const label = `New session on ${machine.name}`;
+  const menu = useRowMenu();
+  if (projects.length <= 1) {
+    const only = projects[0];
+    return (
+      <WithTooltip label={only ? `New session in ${only.project.name}` : `${machine.name} lists no projects yet`}>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={label}
+          disabled={!only}
+          className="text-faint"
+          data-testid="machine-new-session"
+          onClick={() => only && startMachineSession(machine.machineId, only.project.projectId)}
+        >
+          <Plus />
+        </Button>
+      </WithTooltip>
+    );
+  }
+  return (
+    <DropdownMenu {...menu.root}>
+      <WithTooltip label={label}>
+        <DropdownMenuTrigger asChild {...menu.trigger}>
+          <Button variant="ghost" size="icon-xs" aria-label={label} className="text-faint" data-testid="machine-new-session">
+            <Plus />
+          </Button>
+        </DropdownMenuTrigger>
+      </WithTooltip>
+      <DropdownMenuContent align="end" className="w-[15rem]">
+        <DropdownMenuLabel>New session in…</DropdownMenuLabel>
+        {projects.map((node) => {
+          const Glyph = node.project.kind === "git" ? FolderGit2 : Folder;
+          return (
+            <DropdownMenuItem key={node.key} onSelect={() => startMachineSession(machine.machineId, node.project.projectId)} title={node.project.path}>
+              <Glyph /> <span className="truncate">{node.project.name}</span>
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 vi.mock("@/lib/cloudTerminals", () => ({ detachCloudTerminals: vi.fn(), errorCode: () => "unknown" }));
-vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: { state: "signed-out" } }) }));
+vi.mock("@/lib/account", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/account")>()), getAccount: () => ({ status: { state: "signed-out" } }) }));
 vi.mock("@/lib/terminal", () => ({
   closeSessionShells: vi.fn(), dropSessionTerminals: vi.fn(), dropTabTerminals: vi.fn(),
   setArchivedTerminalSessions: vi.fn(), setSelectedAgent: vi.fn(),
