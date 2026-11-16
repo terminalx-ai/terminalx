@@ -87,17 +87,36 @@ server then appears under Machines on your computer, with its projects.
   computer connects to the server directly (TCP port 6768), so that port must
   be reachable from your computer: on the same network, over Tailscale, or
   through your firewall.
-- **From anywhere, with no inbound port:** sign the server in to your TerminalX
-  account, and it is also reachable through the TerminalX relay:
+- **From anywhere, with no inbound port:** through the TerminalX relay, once
+  the server is signed in to your TerminalX account:
 
   ```sh
   terminalx-serve login
   ```
 
-  It shows a code and a link. Open the link on any device, sign in with the
-  account you use in TerminalX, and enter the code. `terminalx-serve logout`
-  signs it out again. The relay carries end-to-end encrypted traffic only;
-  pairing still needs the code and `Allow? [y/N]` on the server.
+  It prints a link. Open it on any device where you are signed in to
+  TerminalX, check that it shows the same code as the server's terminal, and
+  approve. `terminalx-serve logout` signs the server out again. The server
+  keeps its session in `~/.terminalx/data/account/session.json`, readable by
+  you only. The relay carries end-to-end encrypted traffic only, and pairing
+  still needs the code and `Allow? [y/N]` on the server.
+
+  Registering a signed-in server with the relay comes in a coming update of
+  TerminalX; until then, reach the server on the same network or over
+  Tailscale.
+
+## Add a project
+
+Sessions run in a project: a folder on the server, usually a Git clone. Add
+one on the server:
+
+```sh
+git clone https://github.com/you/your-repo.git ~/your-repo
+terminalx-serve projects add ~/your-repo
+terminalx-serve projects            # lists them
+```
+
+Paired computers see it at once.
 
 ## Sign in the agents on the server
 
@@ -133,7 +152,8 @@ terminalx-serve devices revoke <id>   # remove one; it must pair again
 terminalx-serve update
 ```
 
-installs the newest signed runtime release, checked the same way as the
+(or `terminalx-serve update --check` to only look) installs the newest signed
+runtime release, checked the same way as the
 installer checks it, into a new `~/.terminalx/versions/<version>`, switches
 `~/.terminalx/current` to it and restarts the service. The previous version's
 folder stays, so you can switch back. Running the install command again does
