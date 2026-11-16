@@ -51,6 +51,12 @@ const REFUSED_NOT_APPROVED: &str = "not-approved";
 const REFUSED_ANOTHER_PHONE: &str = "another-phone";
 const REFUSED_CODE_INACTIVE: &str = "code-inactive";
 
+/// The binding generation of the account this Mac is signed in to, as the
+/// window last wrote it; 0 signed out.
+fn account_generation() -> u64 {
+    load_account_mirror().ok().flatten().map(|mirror| mirror.binding_generation).unwrap_or(0)
+}
+
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -139,9 +145,10 @@ pub(crate) struct Phones {
 
 impl Phones {
     pub(crate) fn new(sessions: SessionManager, sink: Arc<dyn EventSink>, lifetime: Arc<Lifetime>, changed: impl Fn() + Send + Sync + 'static) -> Result<Arc<Self>> {
-        // The runtime keeps no account binding of its own: no generation
-        // to fence by.
-        let host = Arc::new(PhoneHost::new(|| 0));
+        // The account binding is the window's, in the shared `account.json`:
+        // a sign-out or another account there ends every phone served here at
+        // its next request or event, as it does the window's.
+        let host = Arc::new(PhoneHost::new(account_generation));
         host.configure(sink)?;
         Ok(Arc::new(Self {
             host,
@@ -224,9 +231,38 @@ impl Phones {
         }
     }
 
-    /// A code or a request that ran out ends. Blocking: it may write
-    /// `devices.json`.
+    /// Close the connections of phones no longer paired: revoked from the
+    /// window or `devices revoke` with no runtime to ask, or removed at
+    /// sign-out. Their requests are refused already; this ends the idle ones
+    /// and their grants too. Blocking: it reads `devices.json`.
+    fn close_unpaired(&self) {
+        let connected: Vec<String> = self.state.lock().unwrap().connections.keys().cloned().collect();
+        if connected.is_empty() {
+            return;
+        }
+        let paired = match self.registry.list() {
+            Ok(paired) => paired,
+            Err(error) => {
+                log::warn!("machine host: read the paired phones: {error:#}");
+                return;
+            }
+        };
+        let generation = account_generation();
+        for device_id in connected {
+            let current = paired.iter().find(|device| device.id == device_id);
+            let stale = current.is_none_or(|device| device.provenance == DeviceProvenance::Automatic && device.binding_generation != generation);
+            if stale {
+                log::info!("machine host: phone {device_id} is no longer paired; closing it");
+                self.end_grants(&device_id);
+                self.close(&device_id, ConnectionSignal::Cancel);
+            }
+        }
+    }
+
+    /// A code or a request that ran out ends, and phones no longer paired
+    /// are let go. Blocking: it may write `devices.json`.
     pub(crate) fn tick(&self, now: i64) {
+        self.close_unpaired();
         let ended = {
             let mut state = self.state.lock().unwrap();
             if let Some(pending) = state.code.as_ref().and_then(|code| code.pending.as_ref()) {
@@ -361,7 +397,7 @@ impl Phones {
         let actor = Actor {
             epoch: owner.identity.epoch.clone(),
             lease: owner.identity.lease.clone(),
-            generation: 0,
+            generation: account_generation(),
             user_id: load_account_mirror().ok().flatten().map(|mirror| mirror.user_id),
         };
         if let Err(error) = owner.mobile(&actor, "revoke", json!({ "deviceId": device_id })) {

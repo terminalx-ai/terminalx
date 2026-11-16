@@ -123,8 +123,14 @@ fn revoke_phone(data: &Path, phone: &Phone) -> Result<i32> {
     let removed = if control_client::running(data) {
         let runtime = Runtime::connect(data)?;
         let attachment = runtime.attach()?;
-        let answer = attachment.call(machine_wire::PHONE_REVOKE, json!({ "id": phone.id }))?;
-        answer["revoked"].as_bool().unwrap_or(false)
+        match attachment.call(machine_wire::PHONE_REVOKE, json!({ "id": phone.id })) {
+            Ok(answer) => answer["revoked"].as_bool().unwrap_or(false),
+            Err(error) if control_client::refusal_code(&error) == Some("window_takes_phones") => {
+                eprintln!("TerminalX is open on this Mac and serves its phones: remove {} in Settings → Devices.", phone.label);
+                return Ok(1);
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         crate::phone::registry::revoke_in(data, &phone.id)?.is_some()
     };

@@ -182,6 +182,12 @@ pub struct MachineHost {
     phones: OnceLock<Arc<phones::Phones>>,
 }
 
+/// Refused while a window takes this Mac's phones: it pairs and removes them.
+#[cfg(unix)]
+fn window_takes_phones(recovery: &str) -> ControlError {
+    ControlError::new("window_takes_phones", "TerminalX is open on this Mac, so its window looks after phones.", Some(recovery.into()))
+}
+
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();
 
 /// The runtime's machine host, once it started.
@@ -1200,11 +1206,7 @@ impl MachineHost {
     fn phone_code(&self) -> Result<Value, ControlError> {
         let phones = self.served_phones()?.clone();
         if self.phone_route().is_some() {
-            return Err(ControlError::new(
-                "window_takes_phones",
-                "TerminalX is open on this Mac, so its window pairs phones.",
-                Some("Pair the phone in TerminalX: Settings → Devices.".into()),
-            ));
+            return Err(window_takes_phones("Pair the phone in TerminalX: Settings → Devices."));
         }
         let (keypair, port) = {
             let state = self.state.lock().unwrap();
@@ -1321,6 +1323,11 @@ impl MachineHost {
             wire::PHONE_REVOKE => {
                 let target: wire::ForComputer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and id are required"))?;
                 self.attachment(&target.epoch, &target.lease)?;
+                // A window serving phones holds their connections and grants:
+                // it removes them itself, so they close at once.
+                if self.phone_route().is_some() {
+                    return Err(window_takes_phones("Remove the phone in TerminalX: Settings → Devices."));
+                }
                 let revoked = self.served_phones()?.revoke(&target.id).map_err(ControlError::internal)?;
                 Ok(json!({ "revoked": revoked }))
             }
