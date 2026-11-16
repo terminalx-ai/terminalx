@@ -529,6 +529,9 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  // The side panel follows the agent tab while a review, terminal or page is on screen (PRO-392): swapping it for a
+  // working-tree panel remounted it on Overview, and its "Latest turn" scope had no turn to read.
+  const panelTab = activeTab ?? (selected ? session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0] : undefined);
   // With a check's log (or another review tab) on screen, Fix errors still goes to the session's
   // agent: its last chat tab, so the log tab's hand-off bar has somewhere to send (PRO-394).
   const fixTab = selected?.kind === "agent" ? activeTab
@@ -1063,8 +1066,8 @@ export function SessionView({
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
       {!compact && prefs.panelOpen && !cloud &&
-        (activeTab ? (
-          <PanelHost session={session} tab={activeTab} checkFix={checkFix} />
+        (panelTab ? (
+          <PanelHost session={session} tab={panelTab} checkFix={checkFix} />
         ) : (
           <RightPanel
             cwd={session.cwd}
