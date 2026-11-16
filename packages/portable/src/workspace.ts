@@ -1091,6 +1091,8 @@ export class WorkspaceRpcClient {
     worktreeName?: string | null;
     /** The desktop's Native Codex setting (#644): a Codex tab goes through Codex's app server where it can. An older runtime ignores it. */
     nativeCodex?: boolean;
+    /** `machine/1`: the machine project the session is created in (docs/MACHINES.md "Project scoping"); a machine refuses a session without one. */
+    projectId?: string;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
     if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));

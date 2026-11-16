@@ -8,8 +8,10 @@ import { WorkspaceView } from "@/components/cloud/CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
 import { machineSessionTab, useMachineProjects } from "@/lib/machineCatalog";
-import type { AgentFocus } from "@/components/cloud/CloudAgents";
-import { parseMachineKey } from "@/types/target";
+import type { AgentFocus, AgentProjects } from "@/components/cloud/CloudAgents";
+import { selectCloudSession } from "@/lib/sessions";
+import { machineSessionKey, parseMachineKey } from "@/types/target";
+import { takeMachineNewSession, useMachineNewSession } from "./machineNewSession";
 import { MachineChip, MachineLocation } from "./connectionStatus";
 
 /**
@@ -23,11 +25,26 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
   const machineId = parsed?.machineId ?? "";
   const store = useMachineConnections();
   // A session key (`machine:<m>:<p>:<s>`) opens the machine's view on that session's agent tab (PRO-346).
-  const { sessions } = useMachineProjects(machineId);
+  const { sessions, projects } = useMachineProjects(machineId);
   const row = parsed?.sessionId ? (sessions.find((session) => session.key === machineKey) ?? null) : null;
   const focusSession = parsed?.sessionId ?? null;
   const focusTab = row ? machineSessionTab(row) : null;
   const focusAgent = useMemo<AgentFocus | null>(() => (focusSession ? { sessionId: focusSession, tabId: focusTab } : null), [focusSession, focusTab]);
+  // A new agent tab on a machine is created in one of its projects (`session.create` needs one): the
+  // sidebar's + chooses it, else the form starts on the focused session's project.
+  const request = useMachineNewSession(machineId);
+  const listed = useMemo(() => projects.filter((node) => !node.project.archived).map((node) => ({ projectId: node.project.projectId, name: node.project.name })), [projects]);
+  const preferred = parsed?.projectId ?? null;
+  const agentProjects = useMemo<AgentProjects>(
+    () => ({
+      projects: listed,
+      preferred,
+      request: request ? { projectId: request.projectId, nonce: request.nonce } : null,
+      onRequestTaken: () => request && takeMachineNewSession(request),
+      onCreated: (sessionId, projectId) => selectCloudSession(machineSessionKey(machineId, projectId, sessionId)),
+    }),
+    [listed, preferred, request, machineId],
+  );
   const { machine, state, connection, attachError } = machineConnection(store, machineId);
   const name = machine?.name ?? "Machine";
   const [clientState, setClientState] = useState<WorkspaceConnectionState>({ state: "idle" });
@@ -39,7 +56,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
 
   let body;
   if (connection && machine) {
-    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} initialAgent={!!focusAgent} focusAgent={focusAgent} />;
+    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} initialAgent={!!focusAgent || !!request} focusAgent={focusAgent} agentProjects={agentProjects} />;
   } else {
     body = (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground" data-testid="machine-main-empty">
