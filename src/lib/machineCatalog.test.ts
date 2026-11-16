@@ -319,4 +319,19 @@ describe("machine catalog", () => {
     mini.setState({ state: "reconnecting" } as WorkspaceConnectionState);
     expect(catalog.allMachineSessions()[0].rowStatus).toEqual({ tabs: [{ status: "idle", activity: null }], branch: "seats", started: true });
   });
+
+  it("orders a machine's sessions as the local sidebar does: pinned first, then the newest message", () => {
+    const entry = {
+      projects: [project("P1", "terminalx")],
+      sessions: [
+        session("newest", "P1", "Newest", { lastMessageAt: "2026-11-14T12:00:00Z" }),
+        session("pinned-old", "P1", "Pinned, oldest", { lastMessageAt: "2026-11-14T08:00:00Z", pinned: true }),
+        session("middle", "P1", "Middle", { lastMessageAt: "2026-11-14T10:00:00Z" }),
+      ],
+      unread: [],
+      source: "cache" as const,
+      syncedAt: null,
+    };
+    expect(catalog.buildMachineSessions("m1", entry, []).map((row) => row.sessionId)).toEqual(["pinned-old", "newest", "middle"]);
+  });
 });

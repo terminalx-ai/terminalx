@@ -4,7 +4,8 @@ import type { CloudWorkspaceConnection } from "@/lib/api";
 import { applyLiveTabs, getCloudAgents, subscribeAllCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import type { CloudAgentScope } from "@/lib/cloudAgentApi";
 import { getMachineConnections, subscribeMachineConnections } from "@/lib/machineConnections";
-import { compareMessageActivity, keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
+import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
+import { compareSidebarSessions } from "@/lib/sidebarView";
 import { cloudTabTitle } from "@/lib/cloudRowState";
 import { machineProjectKey, machineSectionKey, machineSessionKey, parseMachineKey, type MachineKey } from "@/types/target";
 import type { TabStatus } from "@/types/session";
@@ -366,7 +367,9 @@ export function buildMachineSessions(machineId: string, entry: MachineCatalogEnt
       source: entry.source,
     });
   }
-  return rows.sort((a, b) => compareMessageActivity(a, b, a.key, b.key));
+  // Pinned first, then by messages: the local sidebar's own order.
+  const order = (row: MachineSessionRow) => ({ id: row.key, pinned: row.pinned, created: row.created, lastMessageAt: row.lastMessageAt, hasMessages: row.hasMessages });
+  return rows.sort((a, b) => compareSidebarSessions(order(a), order(b), "updated"));
 }
 
 /** A machine's projects with their sessions, in the machine's own order; archived projects only while they have sessions. */
