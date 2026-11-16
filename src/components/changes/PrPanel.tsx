@@ -5,7 +5,7 @@ import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, fs, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openCheckLog, openPr, useEditors } from "@/lib/editors";
 import { useVisibleSessionTab } from "@/lib/visibleTab";
-import { checksMarkOf, noteChecksMark } from "@/lib/panelMarks";
+import { checksMarkOf, noteChecksMark, noteDraftPushes } from "@/lib/panelMarks";
 import { showRerunFailed } from "@/lib/checkToasts";
 import type { PrReviewer } from "@terminalx/portable/workspaceGit";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -41,9 +41,9 @@ type WorkspaceCleanup = {
 /**
  * Where a pull request stands for merging, in a few words. GitHub's lifecycle
  * and queue take precedence over head-branch checks; checks still running are
- * said as a wait ("Waiting for 2 checks", PRO-394), never as "Blocked", even
- * while GitHub's merge state says BLOCKED because of them. `waiting` counts
- * those checks.
+ * said as a wait ("Waiting for 2 checks", PRO-394), not as "Blocked", when
+ * they are all that holds the PR (GitHub's BLOCKED included); a review still
+ * needed or a branch behind its base is said first. `waiting` counts them.
  */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string; waiting?: number } {
   const blocked = (label: string) => ({ ok: false, label });
@@ -63,10 +63,12 @@ export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string; w
   if (pr.mergeQueueEnabled && pr.autoMergeEnabled) return blocked("Waiting to enter merge queue");
   const counts = checkCounts(pr.checks.filter((check) => pr.requiredChecks == null || pr.requiredChecks.includes(check.name)));
   if (counts.failed) return blocked("Checks failing");
-  if (counts.running) return { ok: false, label: `Waiting for ${counts.running} ${counts.running === 1 ? "check" : "checks"}`, waiting: counts.running };
-  if (pr.mergeState === "BLOCKED") return blocked("Blocked");
+  // Checks still running are the wait only when nothing else holds the PR: review and a stale base
+  // are said first. GitHub reports BLOCKED while required checks run, so that alone is still a wait.
   if (pr.mergeState === "BEHIND") return blocked("Behind base");
   if (pr.reviewDecision === "CHANGES_REQUESTED" || pr.reviewDecision === "REVIEW_REQUIRED") return blocked("Blocked");
+  if (counts.running) return { ok: false, label: `Waiting for ${counts.running} ${counts.running === 1 ? "check" : "checks"}`, waiting: counts.running };
+  if (pr.mergeState === "BLOCKED") return blocked("Blocked");
   if (pr.mergeState === "UNSTABLE" && !counts.unknown && pr.mergeable === "MERGEABLE") {
     return { ok: true, label: "Unstable: optional checks failing" };
   }
@@ -408,6 +410,14 @@ export function PrPanel({
   const latestCurrent = visibleRows.filter((row) => row.current && row.pr?.head === currentBranch).sort((a, b) => (b.pr?.number ?? 0) - (a.pr?.number ?? 0))[0]?.pr;
   const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
+  const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
+  // The branch's Push step below is left out only while this draft can push and create itself.
+  const draftPushes = showDraft && !!canCreate && source.canWrite;
+  useEffect(() => {
+    if (!cwd) return;
+    noteDraftPushes(cwd, draftPushes);
+    return () => noteDraftPushes(cwd, false);
+  }, [cwd, draftPushes]);
   const canDelete = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
     && canDeleteMergedWorkspace(checkedWorkspace.disposition);
@@ -547,7 +557,7 @@ export function PrPanel({
       })}
 
       {/* No pull request yet: its draft, filled in here, in place of a step to push first (PRO-394, design 05.06). */}
-      {inline && !selectedPr && fresh && status && currentBranch && status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged && (
+      {showDraft && status && currentBranch && status.defaultBranch && (
         <PrDraft
           head={currentBranch}
           base={base ?? status.defaultBranch}

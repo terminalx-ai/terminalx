@@ -150,3 +150,12 @@ export function checkTime(check: PrCheck, now: number): string {
 
 /** Whether `name` is a check the merge needs. Unknown requirements say nothing. */
 export const isRequiredCheck = (pr: Pick<PullRequest, "requiredChecks">, name: string) => !!pr.requiredChecks?.includes(name);
+
+/** Provider URLs are untrusted data; only web links may leave the app. */
+export function webUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}

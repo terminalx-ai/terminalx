@@ -3,7 +3,7 @@ import { ArrowUpRight, ChevronRight, CircleAlert, CircleCheck, CircleMinus, Circ
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { CheckLog, PrCheck, PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
-import { actionsRuns, checkBucket, checkCounts, checkLine, checkMinutes, checkStateLabel, checkSummary, checkTime, isFailingCheck, isRequiredCheck, minutesLabel, RUNNING_CHECKS } from "@/lib/checks";
+import { actionsRuns, checkBucket, checkCounts, checkLine, checkMinutes, checkStateLabel, checkSummary, checkTime, isFailingCheck, isRequiredCheck, minutesLabel, RUNNING_CHECKS, webUrl } from "@/lib/checks";
 import type { PipelineChecksView } from "@/lib/issuePipeline";
 import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
@@ -256,14 +256,7 @@ function CheckIcon({ state, large = false }: { state: string; large?: boolean })
   return <CircleAlert className={cn(size, "text-faint")} aria-label="Unknown" />;
 }
 
-/** Provider URLs are untrusted data; only web links may leave the app. */
-export function webUrl(value?: string | null): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : null;
-  } catch { return null; }
-}
+export { webUrl };
 
 export function Deployments({ pr }: { pr: PullRequest }) {
   if (!pr.deployments?.length) return null;

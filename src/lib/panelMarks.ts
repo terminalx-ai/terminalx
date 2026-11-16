@@ -47,8 +47,26 @@ export function useChangesCount(sourceKey: string | undefined): number | null {
   return useSyncExternalStore(subscribe, () => (sourceKey ? changes.get(sourceKey) ?? null : null), () => null);
 }
 
+/**
+ * Whether the Checks tab's PR draft is on screen for `cwd` with its own Push
+ * and create button. Only then is the branch's Push step left out below it:
+ * when GitHub can't be read or the draft can't create, Push stays (PRO-394).
+ */
+const draftPushes = new Set<string>();
+export function noteDraftPushes(cwd: string, shown: boolean) {
+  if (draftPushes.has(cwd) === shown) return;
+  if (shown) draftPushes.add(cwd);
+  else draftPushes.delete(cwd);
+  emit();
+}
+
+export function useDraftPushes(cwd: string): boolean {
+  return useSyncExternalStore(subscribe, () => draftPushes.has(cwd), () => false);
+}
+
 /** Forget everything (tests). */
 export function resetPanelMarks() {
   checks.clear();
   changes.clear();
+  draftPushes.clear();
 }

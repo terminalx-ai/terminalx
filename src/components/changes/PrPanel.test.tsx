@@ -582,7 +582,10 @@ describe("merge state labels", () => {
     [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Waiting for 1 check", false],
     // PRO-394: GitHub says BLOCKED while required checks run; that is a wait, not a block.
     [{ mergeState: "BLOCKED", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }, { name: "b", state: "queued" }, { name: "c", state: "success" }], requiredChecks: ["a", "b", "c"] }, "Waiting for 2 checks", false],
-    [{ mergeState: "BLOCKED", reviewDecision: "REVIEW_REQUIRED", checks: [{ name: "a", state: "pending" }], requiredChecks: ["a"] }, "Waiting for 1 check", false],
+    // The wait is said only when checks are all that holds the PR: a review still needed or a stale base comes first.
+    [{ mergeState: "BLOCKED", reviewDecision: "REVIEW_REQUIRED", checks: [{ name: "a", state: "pending" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BLOCKED", reviewDecision: "CHANGES_REQUESTED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BEHIND", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Behind base", false],
     [{ checks: [{ name: "ci", state: "new_state" }], requiredChecks: ["ci"] }, "Checking mergeability", false],
     [{ detailsError: "offline" }, "Merge details unavailable", false],
     [{ mergeQueueEnabled: true, autoMergeEnabled: true }, "Waiting to enter merge queue", false],

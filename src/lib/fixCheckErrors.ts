@@ -8,7 +8,7 @@ import { usePrefs } from "./prefs";
 import { sessionPrs } from "./sessionPrs";
 import { dismissErrorKey } from "./errorToasts";
 import { showFixFailed } from "./checkToasts";
-import { isFailingCheck } from "./checks";
+import { isFailingCheck, webUrl } from "./checks";
 
 /** Fix errors asked for away from the session's own button: a check log's hand-off bar (PRO-394). */
 const fixRequests = new Set<(sessionId: string, prUrl: string) => void>();
@@ -97,7 +97,8 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
           error: errorMessage(error),
           // A second failure updates this same toast, so it stays up.
           retry: () => fix(retried).then(() => true, () => false),
-          logUrl: found?.checks.find((check) => isFailingCheck(check) && check.url)?.url ?? (found ? `${found.url}/checks` : null),
+          // Check URLs are the provider's data: only a web page is opened (as everywhere else checks link out).
+          logUrl: webUrl(found?.checks.find((check) => isFailingCheck(check) && webUrl(check.url))?.url) ?? (found ? webUrl(`${found.url}/checks`) : null),
         });
       }
       throw error;

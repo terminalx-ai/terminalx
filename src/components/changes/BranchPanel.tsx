@@ -18,6 +18,7 @@ import type { CommitInfo } from "@/types/session";
 import { localStep, NextLine } from "./NextStep";
 import { getDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
+import { useDraftPushes } from "@/lib/panelMarks";
 
 /**
  * Where the reader is working, read top down: the branch, the one thing to
@@ -145,7 +146,9 @@ export function BranchPanel({
   const baseName = (localOnly ? overview?.base : overview?.base?.replace(/^origin\//, "")) ?? "the base";
   const found = overview ? localStep(overview, pr, baseName, localOnly) : null;
   // Before a pull request exists, its draft above says what pushing is for and pushes with it (PRO-394, design 05.06).
-  const step = found?.kind === "push" && pr === null && github && overview?.hasRemote && !overview.onBase ? null : found;
+  // Only while that draft is on screen and can create: with GitHub unread, signed out or the draft unable to push, Push stays.
+  const draftPushes = useDraftPushes(cwd);
+  const step = found?.kind === "push" && draftPushes ? null : found;
   // Until the branch is read, nothing below it is the next step either.
   const held = !overview || !!found || overview.onBase || !github;
   useEffect(() => onStep?.(held), [held, onStep]);
