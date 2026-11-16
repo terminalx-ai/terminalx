@@ -42,7 +42,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); });
 
 /** The panel opens on Checks; these are about its Changes tab. */
-const openChanges = () => fireEvent.click(screen.getByRole("button", { name: /^Changes/ }));
+const openChanges = () => fireEvent.click(screen.getByRole("button", { name: /^Changes(\s*\d+)?$/ }));
 
 it("opens on Checks, with Changes a tab of its own that counts the branch's files (PRO-394)", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
@@ -52,7 +52,7 @@ it("opens on Checks, with Changes a tab of its own that counts the branch's file
   expect((await screen.findByTestId("panel-changes-count")).textContent).toBe("2");
   openChanges();
   expect(screen.queryByText("Branch overview")).toBeNull();
-  expect(screen.getByRole("button", { name: /^Changes/ }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "Files" }));
   fireEvent.click(screen.getByRole("button", { name: "Checks" }));
   expect(screen.getByText("Branch overview")).toBeTruthy();
