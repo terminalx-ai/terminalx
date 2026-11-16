@@ -1908,3 +1908,111 @@ the "Port 5173 forwarded to 127.0.0.1:5173" toast.
 
 **Open** opens the address in this Mac's built-in browser (decision 7); the
 browser runs here, and only the stream crosses.
+
+### As built (PRO-358): two machines end to end in CI
+
+Every Machines ticket changes how two processes on two computers talk, and a
+unit test on one side passes while the pair is broken. So CI runs the pair.
+
+**The world** (`src-tauri/serve/tests/common/world.rs`) starts three machines,
+each its own process with its own data directory:
+
+- **This Mac**: the operating computer's own local runtime, one project,
+  "Let other computers operate this Mac" off. It must end the run untouched:
+  not hosting, nothing paired, no session, no commit, the same project list.
+- **Mac mini**: a second `terminalx-serve` on the same host in machine mode
+  (no `--project-root`) with two projects and hosting on, started as its app
+  starts it (`TERMINALX_LOCAL_DESKTOP=1`, the key in a file). The test is its
+  window: `createCode`, `approve`, `decline` and `revoke` over the runtime
+  IPC with a fresh attachment, and a consent witness for what only a person
+  may do (`serve_cli::consent`).
+- **dev-server**: `terminalx-serve` in a Linux container
+  (`scripts/machine-e2e/Dockerfile`, ubuntu:24.04 for the runner's glibc),
+  headless, one project added with `terminalx-serve projects add`, paired as
+  a person pairs a server: `terminalx-serve pair` in a terminal on it
+  (`docker exec -it` inside a pseudo-terminal), answered `y`. The container
+  sees the test's directories, the binary and `scripts/remote-runtime` at the
+  same paths, runs as the runner's uid and gid with a passwd entry for it, and
+  publishes its port on 127.0.0.1, so its socket, token and project ids are
+  the same on both sides. It runs only when `TERMINALX_E2E_LINUX_IMAGE` names
+  the image; with `TERMINALX_E2E_REQUIRE_LINUX=1` (CI) a missing image is a
+  failure, never a skip. On a Mac it cannot run (the binary is a Mac's), so
+  the Linux scenarios are left out there with a message.
+
+The operating computer is the desktop's own code: the pairing client
+(`src-tauri/src/machines/pair.rs`, compiled at the crate root as
+`machine_pair` so headless builds and these tests have it; the desktop still
+reaches it as `machines::pair`) and `MachineSupervisor`, with the web view's
+frames sent and answered through it.
+
+**The scenarios** (`src-tauri/serve/tests/machines_e2e.rs`), against Mac mini
+and the dev-server:
+
+- pair by code and Allow (the window; the server's terminal);
+- `machine.describe` (name, OS family, `hasWindow`) and `machine.projects`;
+- a session in a project and a prompt the fake agent answers (`echo:`);
+- a shell: `pty.create`, type, `pty.resize` (checked with `stty size`), drop
+  the connection and make it again, then `pty.attach` from an offset replays
+  only what came after it;
+- `fs.write` and `git.commit`, then the file and the commit (hash, message,
+  author) read on that machine's own disk with its own git (inside the
+  container for the dev-server);
+- refusals: a wrong code, a used code from another computer, a paired token
+  with another client key (4401), a declined approval (window and
+  terminal), Mac mini's credential on the dev-server; another machine's
+  `projectId` (`not_found`), a path leaving the project (`path_forbidden`),
+  a `projectId` that is not the session's (`invalid_params`), Mac mini's
+  sessions unknown to the dev-server and the reverse, and this Mac
+  untouched. Each machine sees at most four wrong attempts, under the five
+  that pause pairing;
+- a running turn interrupted with `session.interrupt` (`slow:`) and an
+  approval answered with `session.decide` (`ask:`), last, since a refusal
+  leaves the tab busy. A refusal is collected and fails the test at its
+  end, after everything else has been checked on both machines;
+- revoke (the window's `revoke`; `terminalx-serve devices revoke` on the
+  server): the supervisor ends in "access removed" and retries nothing.
+
+**Found by these scenarios (open).** A runtime starts its agents layer
+(`start_cloud_agents` in `src/serve.rs`, which `session.interrupt` and
+`agent-commands/1` need) only with a relay link, and `WorkspaceRpc::set_agents`
+is called only on the relay route (`remote::host::serve_machine`). A machine
+reached only directly (Mac mini without `--relay-link`, a server paired with
+`terminalx-serve pair`) therefore grants no `agent-commands/1`: the
+operating computer can send prompts but cannot stop a turn (`unavailable`) or
+answer an approval (`method_not_found`). The scenarios fail on it until the
+direct route serves the same agents.
+
+**The job.** `machines-e2e` in `.github/workflows/ci.yml`, on ubuntu-latest,
+required by `check`. `check` fails on a skipped job, so it always runs and
+decides in a step (`scripts/machine-e2e/relevant.py`): every push, schedule
+and dispatch, and a pull request whose files (from the API, else the merge
+commit's diff, else assumed relevant) touch `src-tauri/src/remote`,
+`pairing`, `serve.rs`, `machine_host`, `machines`, `machine_wire.rs`,
+`relay_e2ee.rs`, `src-tauri/serve`, the scripts, `src/components/machines`,
+`src/lib/machine*` or the workflows. `scripts/machine-e2e/run.py tests
+machines_e2e machine_routes` builds the image, the runtime and the tests,
+checks the binary loads in the image (`ldd`), runs each test on its own and
+writes each test's time, each phase's and the total to the job summary. The
+cargo cache is the job's own (CI's cache policy, `infra/ci-runners`, allows
+no other job's), saved only from main, schedule and dispatch runs; a pull
+request restores main's and has ten minutes, main has 25 so a cold build can
+finish and be saved.
+
+**The break check.** `.github/workflows/machines-e2e-breaks.yml` (nightly and
+by hand) runs `run.py breaks`: for each `scripts/machine-e2e/breaks/*.patch`
+the patch must apply, the runtime and tests must still build, `machines_e2e`
+must then fail, and its output must hold the patch's `.expect` marker, the
+message of the assertion that guards that check.
+
+| Patch | Removes | Fails |
+| --- | --- | --- |
+| `pairing-check.patch` | `MachineHost::paired_with_key` pinning a paired token to its client key (rule 2 above) | `pairing_refuses_a_wrong_or_used_code_another_key_and_a_declined_approval`: the used code from another computer is let in, and the paired token with another key is admitted (`PAIRING CHECK BROKEN`) |
+| `project-scoping.patch` | `Projects::get` refusing a `projectId` the machine does not have | `a_computer_pairs_with_two_machines_and_operates_each_in_its_own_projects`: this Mac's project is served by Mac mini (`PROJECT SCOPING BROKEN`) |
+
+The workflow fails when a patch no longer applies, no longer builds, or the
+scenarios pass (or fail for another reason) with it applied. A change that
+moves either check updates its patch in the same pull request.
+
+Previous-release compatibility is the `machine-compat` job (PRO-354,
+`tests/machine_compat.rs`); this job does not repeat it. The relay route is
+`tests/machine_routes.rs` with the relay in `tests/common/relay.rs`.
