@@ -127,6 +127,10 @@ function measure(page) {
       out.qr = !!dialog.querySelector('img[alt="TerminalX phone pairing QR code"]');
       out.text = dialog.textContent;
     }
+    const code = document.querySelector('[data-testid="pairing-code"]');
+    if (code) out.code = box(code);
+    const path = document.querySelector('[role="radiogroup"][aria-label="How the phone reaches this Mac"]');
+    if (path) out.path = { ...box(path), column: box(path.parentElement) };
     if (bar) out.bar = { ...box(bar), text: bar.textContent, cut: [...bar.querySelectorAll("span")].some((s) => s.scrollWidth > s.clientWidth + 1) };
     return out;
   });
@@ -147,6 +151,10 @@ function commonChecks(m) {
     "fingerprints fit their boxes": m.fingerprints.every((f) => f.fits),
     "the connected bar is top-centre and whole": !!m.bar && Math.abs((m.bar.left + m.bar.right) / 2 - vw / 2) < 1.5 && m.bar.top < 12 && !m.bar.cut && m.bar.text.startsWith("Paresh’s iPhone is connected · it can see and drive your sessions"),
     "the connected bar is clear of the dialog": !!m.bar && !!m.dialog && m.bar.bottom <= m.dialog.top,
+    // PRO-390: just under the bar, not centred in the window; the code fills its column; the path picker spans its own.
+    "the dialog opens just under the connected bar": !!m.bar && !!m.dialog && m.dialog.top - m.bar.bottom <= 40,
+    "the code is 228 px square": !m.code || (Math.abs(m.code.width - 228) < 1 && Math.abs(m.code.height - 228) < 1),
+    "the path picker spans its column": !m.path || Math.abs(m.path.width - (m.path.column.width - 40)) < 1.5,
   };
 }
 

@@ -61,8 +61,10 @@ try {
     await page.getByRole("button", { name: "Menu for Context session", exact: true }).click();
     await menu.waitFor();
     const expected = await actions();
-    assert(expected.some((item) => item.label === "Link to issue…"));
-    assert(expected.some((item) => item.role === "menuitemcheckbox" && item.label === "Don’t share this session"));
+    // The designed list (02.13, PRO-386): the issue links are a submenu away.
+    assert(expected.some((item) => item.label === "Issue and pull request"));
+    assert.equal(expected[0].label, "Mark as unreadR");
+    assert.equal(expected.at(-1).label, "Delete session…");
     await close();
     await conversation.click({ button: "right" });
     await menu.waitFor();
@@ -92,7 +94,11 @@ try {
     await file.click({ button: "right" });
     await menu.waitFor();
     const fileActions = await actions();
-    assert(fileActions.some((item) => item.label === "Open"));
+    // PRO-402: the file menu of 06.05, in order.
+    assert.deepEqual(
+      fileActions.map((item) => item.label.replace(/(↵|⌥⌘C|Ctrl\+?Alt\+?C)$/i, "")),
+      ["View", "View diff", "Attach in chatAdds @README.md", "Open in", "Copy path", "Copy relative path", "Reveal in Finder", "Discard changes"],
+    );
     await close();
     const tree = page.getByRole("tree");
     await tree.focus();

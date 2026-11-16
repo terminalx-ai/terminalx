@@ -42,7 +42,7 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * does take it, even after the dialog said it could not confirm it, the
  * dialog closes as it would have on success (#662).
  */
-export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, onClose, onLateError, onDelivered }: {
+export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, retry = false, onClose, onLateError, onDelivered }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
   /** The new session took the handoff, just before the dialog closes: where it went (#815). */
   onDelivered?: (to: { sessionId: string; tabId: string }) => void;
@@ -51,6 +51,8 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   initialHarness?: string;
   /** A finished turn's review starts immediately, without taking over its pipeline. */
   reviewPrompt?: string;
+  /** `reviewPrompt` is a failed turn's prompt, retried as it was in a new tab: the tab's own mode, not Plan (PRO-378). */
+  retry?: boolean;
   onLateError?: (error: string) => void;
 }) {
   const [context, setContext] = useState<ContinuationContext | null>(null);
@@ -85,7 +87,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const prefs = usePrefs();
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
   const value = chosen ?? (loading ? null : handoffStart(
-    { ...launchSettingsOf(source), ...(reviewPrompt ? { permissionMode: "plan" } : {}) },
+    { ...launchSettingsOf(source), ...(reviewPrompt && !retry ? { permissionMode: "plan" } : {}) },
     initialHarness ? providers.filter((provider) => provider.id === initialHarness) : providers, models, prefs,
   ));
   const store = useSessionStore();
@@ -322,15 +324,15 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {/* Destination, agent and context stay in view; Autopilot is folded away. */}
         <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{reviewPrompt ? "Second opinion" : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">{reviewPrompt ? (retry ? "Retry in a new chat" : "Second opinion") : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
-            {reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
+            {reviewPrompt && retry ? `Sends the failed turn's prompt to ${agentName} again, in a new tab in this workspace.` : reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
               ? `Opens a new session in ${into.project.name} that carries over this chat's context. This chat is archived once it starts.`
               : "Opens a new conversation that carries over this chat's context, so the agent picks up where it left off. This chat stays open."}
           </DialogDescription>
         </DialogHeader>
         {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
-          {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
+          {agentName} · {selection.model?.label ?? (settings.model || "Agent default")}{retry ? "" : " · Plan (read-only)"}
         </p>}
         {runsOnShown && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
           Runs on
@@ -364,7 +366,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
         {/* While it reads the context, the same rows with placeholders where the pills will be: the dialog opens at
             its final height and nothing moves when they arrive. */}
-        {loading && reviewPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing the review…</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
+        {loading && reviewPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />{retry ? "Preparing the retry…" : "Preparing the review…"}</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
           <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
           <div className="flex gap-1.5" aria-hidden>
             {/* In proportion to the pills they stand for (agent, model, effort, permissions), not fixed widths. */}

@@ -430,6 +430,9 @@ pub struct WorkspaceRpc {
     /// The machine's version and updates (`machine/3`, PRO-354); absent on
     /// a workspace runtime, or one whose data directory cannot be named.
     machine_updates: Mutex<Option<Arc<super::machine_update::MachineUpdates>>>,
+    /// The status as the served updates stood when they started being
+    /// served (which updates, and what): the watcher's first compare.
+    update_baseline: Mutex<Option<(usize, String)>>,
     /// Clones started from another computer (`machine/6`, PRO-351).
     machine_clones: Arc<super::machine_projects::Clones>,
     /// Stands in for the runtime user's home directory in tests (`machine/6`).
@@ -538,6 +541,7 @@ impl WorkspaceRpc {
             machine_changed: Arc::new(tokio::sync::Notify::new()),
             machine_access: OnceLock::new(),
             machine_updates: Mutex::new(None),
+            update_baseline: Mutex::new(None),
             machine_clones: Arc::new(super::machine_projects::Clones::default()),
             #[cfg(test)]
             home_for_tests: Mutex::new(None),
@@ -798,9 +802,15 @@ impl WorkspaceRpc {
     /// record (read every [`UPDATE_STATUS_POLL`]), a release check, the
     /// blockers and the connected computers.
     fn serve_updates(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        let updates = Arc::new(updates);
+        let previous = self.machine_updates.lock().unwrap().replace(updates);
+        // What the status is as these updates start being served, taken
+        // now: a change made after this returns is sent, however late the
+        // watcher's first look at them comes on a busy machine.
+        *self.update_baseline.lock().unwrap() = self.update_fingerprint();
         // One watcher, whichever updates it serves (a test replaces them):
         // woken to take its first look at the new ones now.
-        if let Some(previous) = self.machine_updates.lock().unwrap().replace(Arc::new(updates)) {
+        if let Some(previous) = previous {
             previous.changed.notify_one();
             return;
         }
@@ -812,15 +822,22 @@ impl WorkspaceRpc {
             loop {
                 // Held only while it looks: the runtime may drop meanwhile.
                 let Some(rpc) = weak.upgrade() else { return };
-                let fingerprint = tokio::task::spawn_blocking(move || rpc.update_fingerprint()).await.ok().flatten();
-                if fingerprint.is_some() && fingerprint != last {
-                    // The first look at these updates only sets what later
-                    // ones compare with.
-                    if last.as_ref().zip(fingerprint.as_ref()).is_some_and(|(last, now)| last.0 == now.0) {
+                let looked = tokio::task::spawn_blocking(move || {
+                    let fingerprint = rpc.update_fingerprint();
+                    (fingerprint, rpc.update_baseline.lock().unwrap().clone())
+                })
+                .await
+                .ok();
+                if let Some((Some(now), baseline)) = looked {
+                    // New updates are compared with how they stood when served.
+                    if last.as_ref().is_none_or(|last| last.0 != now.0) {
+                        last = baseline.filter(|baseline| baseline.0 == now.0).or_else(|| Some(now.clone()));
+                    }
+                    if last.as_ref() != Some(&now) {
                         let Some(rpc) = weak.upgrade() else { return };
                         let _ = tokio::task::spawn_blocking(move || rpc.broadcast_update_status()).await;
+                        last = Some(now);
                     }
-                    last = fingerprint;
                 }
                 let Some(notify) = weak.upgrade().and_then(|rpc| rpc.updates()).map(|updates| updates.changed.clone()) else { return };
                 tokio::select! {
@@ -1393,10 +1410,35 @@ impl WorkspaceRpc {
         }
     }
 
+    /// Run an admitted call. On a machine, a session made, a terminal opened
+    /// or an update asked for goes in the machine's activity log (PRO-357),
+    /// with the project's name or the version and nothing else.
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        let noted = self.is_machine() && matches!(method, "session.create" | "pty.create" | "machine.update");
+        let asked_project = params["projectId"].as_str().map(str::to_string);
+        let asked_version = params["version"].as_str().filter(|_| method == "machine.update").map(str::to_string);
+        let result = self.run_method(peer, method, params, ticket).await;
+        if let (true, Ok(value), Some(access)) = (noted, &result, self.machine_access.get()) {
+            let project = value["projectId"].as_str().or(value["session"]["projectId"].as_str()).map(str::to_string).or(asked_project);
+            access.note(&peer.device_id, method, project.as_deref(), asked_version.as_deref());
+        }
+        result
+    }
+
+    async fn run_method(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
+        }
+        // A fresh device token for the paired computer that asks (`machine/5`, PRO-357).
+        if method == "machine.rotateCredential" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.rotate_credential(&peer.device_id).await,
+                None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
+            };
         }
         // A round trip to the relay, for a paired computer only (`machine/2`).
         if method == "machine.relayAccess" {

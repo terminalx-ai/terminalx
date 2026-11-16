@@ -100,7 +100,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_6]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -314,6 +314,10 @@ pub const METHODS: &[Method] = &[
     // completes it chooses the account the machine's CLI signs in to.
     method("machine.agentSetup", "machine/4", Manage, false),
     method("machine.agentSetupRunning", "machine/4", Manage, false),
+    // PRO-357: a fresh device token for the paired computer that asks, kept
+    // beside the current one until it connects with it. Not idempotent: a
+    // repeat makes another token, and the computer keeps the last it saved.
+    method("machine.rotateCredential", "machine/5", Manage, false),
     // PRO-351: a machine's projects from another computer. Each changes the
     // machine's store or names its folders, so all are the manager's. Not
     // idempotent: a browse reads the moment, add/remove answer as the store
@@ -352,6 +356,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/2" => &["machine.relayAccess"],
         "machine/3" => &["machine.updateStatus", "machine.update"],
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
+        "machine/5" => &["machine.rotateCredential"],
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
@@ -725,7 +730,7 @@ mod tests {
         let (workspace, machine) = (served(false), served(true));
         assert!(machine.contains(&"machine/6") && machine.contains(&"machine/4"));
         assert!(!workspace.contains(&"machine/6"));
-        assert!(!machine.contains(&"machine/5"), "machine/5 is PRO-357's");
+        assert!(machine.contains(&"machine/5"), "machine/5 (PRO-357) is served beside it");
         for name in ["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"] {
             let method = find_method(name).unwrap();
             assert_eq!((method.capability, method.authority, method.idempotent), ("machine/6", Manage, false), "{name}");
