@@ -396,7 +396,9 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   expect(screen.queryByRole("row", { name: /Archived cloud work/ })).toBeNull();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Filter" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Archived" }));
-  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Amy" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Amy" }));
   fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
   const row = await screen.findByRole("row", { name: /Archived cloud work/ });
   expect(within(row).getByText("Amy")).toBeTruthy();

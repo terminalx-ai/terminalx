@@ -144,7 +144,9 @@ vi.mock("@/lib/models", () => ({
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
 vi.mock("@/lib/desktopInbox", () => ({ bootDesktopInbox: vi.fn() }));
-vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
+vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn(), refreshCloudCatalog: vi.fn() }));
+vi.mock("@/lib/cloudPresence", () => ({ bootCloudPresence: vi.fn() }));
+vi.mock("@/components/layout/WorkspaceReassignedNotices", () => ({ WorkspaceReassignedNotices: () => null }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
 vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
