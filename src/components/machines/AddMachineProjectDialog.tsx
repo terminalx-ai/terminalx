@@ -30,6 +30,8 @@ export function AddMachineProjectDialog({
 }) {
   const [tab, setTab] = useState<AddTab>("folder");
   const [cloning, setCloning] = useState(false);
+  // The folder last listed in either tab: the other tab opens there.
+  const [browsed, setBrowsed] = useState<string | undefined>(undefined);
   // A clone under way when the dialog closes is stopped: nothing would follow it here.
   const stopClone = useRef<(() => void) | null>(null);
   const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ folder: null, clone: null });
@@ -97,9 +99,9 @@ export function AddMachineProjectDialog({
         </div>
         <div role="tabpanel" id={`add-machine-project-panel-${tab}`} aria-labelledby={`add-machine-project-tab-${tab}`}>
           {tab === "folder" ? (
-            <FolderTab machine={machine} client={client} where={where} onClose={close} onAdded={added} />
+            <FolderTab machine={machine} client={client} where={where} onClose={close} onAdded={added} startAt={browsed} onListed={setBrowsed} />
           ) : (
-            <CloneTab machine={machine} client={client} onClose={close} onAdded={added} onCloning={setCloning} stopRef={stopClone} />
+            <CloneTab machine={machine} client={client} onClose={close} onAdded={added} onCloning={setCloning} stopRef={stopClone} startAt={browsed} onListed={setBrowsed} />
           )}
         </div>
       </DialogContent>
@@ -108,8 +110,24 @@ export function AddMachineProjectDialog({
 }
 
 /** 21.11's own tab: browse the machine's folders and add the chosen one. */
-function FolderTab({ machine, client, where, onClose, onAdded }: { machine: PairedMachine; client: WorkspaceRpcClient; where: string; onClose: () => void; onAdded: (project: MachineProject) => void }) {
-  const folders = useMachineFolders(client);
+function FolderTab({
+  machine,
+  client,
+  where,
+  onClose,
+  onAdded,
+  startAt,
+  onListed,
+}: {
+  machine: PairedMachine;
+  client: WorkspaceRpcClient;
+  where: string;
+  onClose: () => void;
+  onAdded: (project: MachineProject) => void;
+  startAt?: string;
+  onListed?: (path: string) => void;
+}) {
+  const folders = useMachineFolders(client, startAt, onListed);
   const [chosen, setChosen] = useState<MachineFolder | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -184,6 +202,8 @@ function CloneTab({
   onAdded,
   onCloning,
   stopRef,
+  startAt,
+  onListed,
 }: {
   machine: PairedMachine;
   client: WorkspaceRpcClient;
@@ -191,8 +211,10 @@ function CloneTab({
   onAdded: (project: MachineProject) => void;
   onCloning: (cloning: boolean) => void;
   stopRef: { current: (() => void) | null };
+  startAt?: string;
+  onListed?: (path: string) => void;
 }) {
-  const folders = useMachineFolders(client);
+  const folders = useMachineFolders(client, startAt, onListed);
   const [repository, setRepository] = useState("");
   const [parentFolder, setParentFolder] = useState<MachineFolder | null>(null);
   const [starting, setStarting] = useState(false);

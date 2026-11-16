@@ -16,7 +16,7 @@ export interface MachineFolders {
 }
 
 /** The folders of one folder on a machine (`machine.browse`), read while the dialog is open, never kept. */
-export function useMachineFolders(client: WorkspaceRpcClient | null): MachineFolders {
+export function useMachineFolders(client: WorkspaceRpcClient | null, startAt?: string, onListed?: (path: string) => void): MachineFolders {
   const [listing, setListing] = useState<MachineFolderListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,12 +43,19 @@ export function useMachineFolders(client: WorkspaceRpcClient | null): MachineFol
     },
     [client],
   );
+  // Opened where the other tab was browsing; read once per client, not on every move.
+  const start = useRef(startAt);
   useEffect(() => {
-    read(undefined);
+    read(start.current);
     return () => {
       asked.current.generation++;
     };
   }, [read]);
+  const listed = useRef(onListed);
+  listed.current = onListed;
+  useEffect(() => {
+    if (listing) listed.current?.(listing.path);
+  }, [listing]);
   const refresh = useCallback(() => read(listing?.path ?? asked.current.path), [read, listing?.path]);
   return { listing, loading, error, go: read, refresh };
 }
