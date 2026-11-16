@@ -233,61 +233,15 @@ export const MACHINE_APPROVAL_TTL_MS = 120_000;
  * (`machine/3`) answer this shape.
  */
 
-/** How a machine updates: the installer's `~/.terminalx/versions`, its desktop app's updater, or neither. */
-export type MachineUpdateMethod = "installer" | "app" | "unmanaged";
-
-/** Work a handover cannot carry: it stops if the person goes ahead. */
-export interface MachineUpdateBlocker {
-  id: string;
-  kind: string;
-  title: string;
-}
-
-/** Another paired computer operating the machine right now. */
-export interface MachineUpdateOtherComputer {
-  id: string;
-  label: string;
-}
-
-export type MachineUpdatePhase = "downloading" | "verifying" | "trial" | "handingOver" | "cleaningUp";
-
-export type MachineUpdateProgress =
-  | { phase: "idle" }
-  | { phase: MachineUpdatePhase; version: string; since: number }
-  | { phase: "appUpdating"; version: string | null; since: number; step: string | null }
-  | { phase: "updated"; from: string; to: string; at: number }
-  | {
-      phase: "failed";
-      version: string;
-      at: number;
-      message: string;
-      /** The version the machine runs now. */
-      running: string;
-      /** The new version was started and the old one put back. */
-      rolledBack: boolean;
-    };
-
-export interface MachineUpdateStatus {
-  method: MachineUpdateMethod;
-  current: string;
-  /** The newest release this machine could update to; null when none is newer or it has not checked. */
-  available: { version: string } | null;
-  checkedAt: number | null;
-  blockers: MachineUpdateBlocker[];
-  otherComputers: MachineUpdateOtherComputer[];
-  /** Versions on disk, newest first (at most three). */
-  kept: string[];
-  progress: MachineUpdateProgress;
-}
-
-/** `machine.update`'s params. */
-export interface MachineUpdateRequest {
-  version: string;
-  /** Blocker ids the person agreed to stop. */
-  stop?: string[];
-  /** The person was told other computers are connected. */
-  confirmOthers?: boolean;
-}
+export type {
+  MachineUpdateBlocker,
+  MachineUpdateMethod,
+  MachineUpdateOtherComputer,
+  MachineUpdatePhase,
+  MachineUpdateProgress,
+  MachineUpdateRequest,
+  MachineUpdateStatus,
+} from "@terminalx/portable/workspace";
 
 /** The window's report of its own updater run (`machines_app_update_report`). */
 export interface MachineAppUpdateReport {

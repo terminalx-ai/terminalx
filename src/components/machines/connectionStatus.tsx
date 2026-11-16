@@ -7,7 +7,7 @@ import type { MachineConnectionState, MachineRouteUsed, PairedMachine } from "@/
  * How a machine's connection reads (screens 21.01, 21.08 and 21.09): a short
  * label beside its name, the hover text of its header chip, and a colour.
  */
-export type MachineTone = "connecting" | "connected" | "reconnecting" | "offline" | "warning" | "removed" | "idle";
+export type MachineTone = "connecting" | "connected" | "reconnecting" | "offline" | "warning" | "updating" | "removed" | "idle";
 
 export function machineTone(state: MachineConnectionState): MachineTone {
   switch (state.state) {
@@ -22,6 +22,8 @@ export function machineTone(state: MachineConnectionState): MachineTone {
       return "offline";
     case "needsUpdate":
       return "warning";
+    case "updating":
+      return "updating";
     case "accessRemoved":
       return "removed";
     default:
@@ -60,6 +62,8 @@ export function machineStateLabel(state: MachineConnectionState, machine: Paired
     }
     case "needsUpdate":
       return "Needs update";
+    case "updating":
+      return "Updating";
     case "accessRemoved":
       return "Access removed";
     default:
@@ -86,7 +90,9 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
     case "offline":
       return "Sessions there keep running";
     case "needsUpdate":
-      return "Runs an older TerminalX";
+      return state.side === "thisMac" ? "Runs a newer TerminalX than this Mac" : "Runs an older TerminalX";
+    case "updating":
+      return "Back in under a minute";
     case "accessRemoved":
       return "Revoked on that Mac";
     default:
@@ -113,6 +119,7 @@ const TONE_TEXT: Record<MachineTone, string> = {
   reconnecting: "text-warning",
   offline: "text-faint",
   warning: "text-warning",
+  updating: "text-info",
   removed: "text-destructive",
   idle: "text-faint",
 };
@@ -123,6 +130,7 @@ const TONE_DOT: Record<MachineTone, string> = {
   reconnecting: "bg-warning",
   offline: "bg-faint",
   warning: "bg-warning",
+  updating: "bg-info",
   removed: "bg-destructive",
   idle: "bg-faint",
 };
@@ -135,7 +143,7 @@ export function toneText(tone: MachineTone): string {
 /** A dot for a settled state, a spinner while it is reaching the machine (21.09). */
 export function MachineStateMark({ state, className }: { state: MachineConnectionState; className?: string }) {
   const tone = machineTone(state);
-  if (tone === "connecting" || tone === "reconnecting") {
+  if (tone === "connecting" || tone === "reconnecting" || tone === "updating") {
     return <Loader2 className={cn("size-3 shrink-0 animate-spin", TONE_TEXT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
   }
   return <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
