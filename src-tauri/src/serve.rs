@@ -400,7 +400,9 @@ fn run(options: Options) -> Result<()> {
             sink: runtime.sink.clone(),
             terminals: runtime.terminals.clone(),
             sessions: runtime.manager.clone(),
-            agents: Some(machine_agents(&runtime, &data_dir)),
+            // With a relay link the agent tabs are the relay route's
+            // (`start_cloud_agents`, below): one per state directory.
+            agents: link.is_none().then(|| machine_agents(&runtime, &data_dir)),
         };
         let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
         let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
@@ -948,11 +950,14 @@ fn open_agents(
 
 /// What a machine's direct listener opens its agent tabs with when it builds
 /// its own RPC (no relay link): every project of the machine, no mailbox.
+/// They open when hosting is first on, maybe hours after this runtime
+/// started, so they mark no turn interrupted: `Runtime::interrupted` is what
+/// was mid-turn at startup, and those tabs may have run again since.
 fn machine_agents(runtime: &Runtime, data_dir: &std::path::Path) -> crate::machine_host::OpenAgents {
-    let (manager, sink, interrupted, data_dir) = (runtime.manager.clone(), runtime.sink.clone(), runtime.interrupted.clone(), data_dir.to_path_buf());
+    let (manager, sink, data_dir) = (runtime.manager.clone(), runtime.sink.clone(), data_dir.to_path_buf());
     Arc::new(move || {
         let ops = Arc::new(crate::cloud_agents::ManagerOps { manager: manager.clone(), root: None });
-        open_agents(ops, sink.clone(), &interrupted, &data_dir, None, 0)
+        open_agents(ops, sink.clone(), &[], &data_dir, None, 0)
     })
 }
 

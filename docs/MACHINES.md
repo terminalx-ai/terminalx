@@ -2005,7 +2005,8 @@ and dispatch, and a pull request whose files (from the API, else the merge
 commit's diff, else assumed relevant) touch `src-tauri/src/remote`,
 `pairing`, `serve.rs`, `machine_host`, `machines`, `machine_wire.rs`,
 `relay_e2ee.rs`, `src-tauri/serve`, the scripts, `src/components/machines`,
-`src/lib/machine*` or the workflows. `scripts/machine-e2e/run.py tests
+`src/lib/machine*`, any other file under `src/` named for machines
+(`MachineNewSession.tsx`, `src/types/machines.ts`, ...) or the workflows. `scripts/machine-e2e/run.py tests
 machines_e2e machine_routes` builds the image, the runtime and the tests,
 checks the binary loads in the image (`ldd`), runs each test on its own and
 writes each test's time, each phase's and the total to the job summary. The

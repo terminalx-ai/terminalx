@@ -47,7 +47,12 @@ API_LIMIT = 3000
 
 
 def relevant(path):
-    return any(path == entry or path.startswith(entry) for entry in RELEVANT)
+    """A listed path, or a machine view anywhere in the frontend: any file
+    under src/ named for machines (MachineNewSession.tsx, AllowNewMachines.tsx,
+    src/types/machines.ts, ...)."""
+    if any(path == entry or path.startswith(entry) for entry in RELEVANT):
+        return True
+    return path.startswith("src/") and "machine" in path.rsplit("/", 1)[-1].lower()
 
 
 def files_from_api(repository, number, token):

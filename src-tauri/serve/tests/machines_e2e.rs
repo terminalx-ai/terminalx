@@ -233,7 +233,7 @@ async fn operate(link: &mut Link, machine: &Machine<'_>, foreign: &Foreign, fail
     link.ok("fs.write", json!({ "projectId": id, "path": "e2e-notes.txt", "text": note, "expectedEtag": null, "clientRequestId": format!("{tag}-write") })).await;
     let message = format!("Notes from the operating computer ({tag})");
     let committed = link
-        .ok("git.commit", json!({ "projectId": id, "repo": ".", "message": message, "author": { "name": COMMIT_AUTHOR.0, "email": COMMIT_AUTHOR.1 }, "paths": ["e2e-notes.txt"] }))
+        .ok("git.commit", json!({ "projectId": id, "repo": ".", "message": message, "author": { "name": COMMIT_AUTHOR.0, "email": COMMIT_AUTHOR.1 }, "paths": ["e2e-notes.txt"], "clientRequestId": format!("{tag}-commit") }))
         .await;
     let commit = committed["commit"].as_str().unwrap_or_else(|| panic!("git.commit named no commit: {committed}")).to_string();
     assert_eq!(machine.disk.read(&project.join("e2e-notes.txt")), note, "the file on {name}'s disk");
