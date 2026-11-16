@@ -649,9 +649,15 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
-    id: "organizations.compute", section: "organizations", title: "Compute",
-    description: "Cloud providers, workspaces and usage.",
-    searchTerms: ["organizations", "compute"], scope: "organization",
+    id: "organizations.providers", section: "organizations", title: "Cloud providers",
+    description: "Connect the cloud providers this organization's workspaces run on.",
+    searchTerms: ["organizations", "cloud", "compute", "providers", "hetzner", "connect", "key"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "organizations.compute", section: "organizations", title: "Compute limits",
+    description: "Cloud workspace limits, pausing new workspaces, and usage.",
+    searchTerms: ["organizations", "cloud", "compute", "limits"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
@@ -693,7 +699,7 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "organizations.environment", section: "organizations", title: "Environment",
     description: "Configure and build the cloud workspace environment.",
-    searchTerms: ["organizations", "environment"], scope: "organization",
+    searchTerms: ["organizations", "cloud", "compute", "environment", "build", "versions"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({

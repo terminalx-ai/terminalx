@@ -90,6 +90,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "organizations.sidebar",
   "organizations.organization",
   "organizations.members",
+  "organizations.providers",
   "organizations.compute",
   "organizations.agentLogins",
   "organizations.agentRoutes",
