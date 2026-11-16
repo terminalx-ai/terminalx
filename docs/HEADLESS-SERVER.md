@@ -101,8 +101,9 @@ server then appears under Machines on your computer, with its projects.
   you only. The relay carries end-to-end encrypted traffic only, and pairing
   still needs the code and `Allow? [y/N]` on the server.
 
-  Registering a signed-in server with the relay comes in a coming update of
-  TerminalX; until then, reach the server on the same network or over
+  Relay access comes with PRO-368, which registers a signed-in server with
+  the relay using this session. Until then, signing in does not make the
+  server reachable through the relay: reach it on the same network or over
   Tailscale.
 
 ## Add a project
