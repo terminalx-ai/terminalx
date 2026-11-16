@@ -144,6 +144,16 @@ impl Registry {
         }
     }
 
+    /// Ask the window to refresh the account's desktop Cloud Session if it
+    /// is about to expire (PRO-368). Nothing secret comes back: the window
+    /// keeps the runtime's copy of the session (`machine_account`) itself,
+    /// so one process alone rotates its refresh token.
+    pub(crate) fn refresh_account(&self) -> anyhow::Result<()> {
+        self.dispatch("account.refresh", json!({}))
+            .map(|_| ())
+            .map_err(|_| anyhow::anyhow!("The window could not refresh the account session."))
+    }
+
     pub(crate) fn call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         if !supported(command) { return Err(unavailable("This operation is not a window service.")); }
         self.dispatch(command, params)
@@ -164,7 +174,7 @@ impl Registry {
             let mut socket = UnixStream::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
                 .or_else(|| command.strip_prefix("machine.").map(|action| crate::machine_control::timeout_for(action,&params)+Duration::from_secs(15)))
-                .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
+                .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "account.refresh" { Duration::from_secs(45) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
             socket.set_read_timeout(Some(timeout))?;
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
             let dispatch = service.attachment.enter()?;

@@ -144,6 +144,10 @@ pub trait RuntimeLink: Send + Sync + 'static {
     /// Confirm a revocation was applied
     /// (`/v1/cloud-workspace-bootstrap/revocations/:id/complete`).
     fn complete_revocation(&self, attachment_id: &str) -> Result<()>;
+    /// The relay retired `runtime_generation` for a newer one (4101). A link
+    /// that keeps its token until it nears expiry asks the API again now, so
+    /// it learns whether it was superseded (PRO-368).
+    fn fenced(&self, _runtime_generation: u64) {}
 }
 
 /// A link read from a JSON file, for local development and tests. It is
@@ -327,6 +331,9 @@ struct HostState {
 
 enum ControlCommand {
     CreateInvite { device_id: String, respond: oneshot::Sender<Result<(String, i64)>> },
+    /// A control request the window makes through this registration
+    /// (PRO-368): sent as it is, answered with the relay's reply to its `reqId`.
+    Forward { frame: Value, req_id: String, respond: std::sync::mpsc::Sender<Result<Value>> },
     Revoke { device_id: String },
     InstallCredential { payload: Value, req_id: String, respond: oneshot::Sender<Result<Value>> },
     /// The runtime credential was revoked: stop serving.
@@ -369,6 +376,31 @@ pub struct RelayHost {
     routes: Mutex<Option<Arc<dyn MachineRoutes>>>,
     /// The live registration and the director it came from, while registered.
     registered: Mutex<Option<(Live, String)>>,
+    /// Set by [`RelayHost::stop`]: the host registers no more.
+    stopped: std::sync::atomic::AtomicBool,
+    stop: tokio::sync::Notify,
+    /// Told when the relay hints that this host's account pairing changed.
+    pairing_hint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// The control requests the window may make through a machine's
+/// registration (PRO-368): phone invites, credential installs and
+/// revocations, as it makes them on its own registration (`pairing::relay`).
+const FORWARDED_REQUESTS: &[&str] = &["invite-create", "device-revoke", "device-credential-install", "device-credential-install-status", "device-resume-confirm"];
+
+/// The relay's replies to them, each naming the request's `reqId`.
+const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
+
+/// A live registration, as the window needs it to use it (PRO-368).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registration {
+    pub relay_host_id: String,
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    /// The relay's generation for this registration (`host-hello-ack`).
+    pub generation: u64,
+    pub runtime_generation: u64,
 }
 
 /// A single-use relay invite for one device of this host, with where to use
@@ -435,7 +467,19 @@ impl RelayHost {
                 Err(error) => log::warn!("relay host: could not read the device list: {error}"),
             }
         }
-        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path, routes: Mutex::new(None), registered: Mutex::new(None) })
+        Arc::new(Self {
+            link,
+            rpc,
+            keypair,
+            state: Mutex::new(state),
+            status,
+            devices_path,
+            routes: Mutex::new(None),
+            registered: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            stop: tokio::sync::Notify::new(),
+            pairing_hint: Mutex::new(None),
+        })
     }
 
     /// Whether the device list is on disk (or there is no disk to keep it on).
@@ -490,6 +534,69 @@ impl RelayHost {
         self.registered.lock().unwrap().is_some()
     }
 
+    /// The live registration, while there is one.
+    pub fn registration(&self) -> Option<Registration> {
+        let (live, director_url) = self.registered.lock().unwrap().clone()?;
+        let runtime_generation = match &*self.status.borrow() {
+            HostStatus::Registered { runtime_generation, .. } => *runtime_generation,
+            _ => return None,
+        };
+        Some(Registration {
+            relay_host_id: self.keypair.host_id(),
+            director_url,
+            cell_url: live.cell_url,
+            assignment_epoch: live.assignment_epoch,
+            generation: live.relay_generation,
+            runtime_generation,
+        })
+    }
+
+    /// Call `hint` whenever the relay says this host's account pairing
+    /// grants or revocations changed (`account-pairing-changed`).
+    pub fn on_pairing_hint(&self, hint: Arc<dyn Fn() + Send + Sync>) {
+        *self.pairing_hint.lock().unwrap() = Some(hint);
+    }
+
+    /// End the registration and every connection it carries, and register
+    /// no more (the switch went off, the machine signed out, PRO-368). The
+    /// control socket is closed with a close frame, so the relay lets the
+    /// window register again at once.
+    pub fn stop(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
+            let _ = live.commands.send(ControlCommand::Shutdown);
+        }
+        self.stop.notify_one();
+        self.close_all_connections();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait `delay`, or less when the host is stopped meanwhile.
+    async fn pause(&self, delay: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = self.stop.notified() => self.stop.notify_one(),
+        }
+    }
+
+    /// Send a control request the window makes (PRO-368) on this
+    /// registration. The receiver yields the relay's reply to its `reqId`
+    /// (or `control-error`); dropped unanswered when the registration ends.
+    pub fn forward_control(&self, frame: Value) -> Result<std::sync::mpsc::Receiver<Result<Value>>> {
+        let kind = frame["type"].as_str().unwrap_or_default();
+        if !FORWARDED_REQUESTS.contains(&kind) {
+            bail!("the relay request {kind:?} cannot be forwarded");
+        }
+        let req_id = frame["reqId"].as_str().filter(|id| valid_opaque_id(id)).ok_or_else(|| anyhow!("reqId is required"))?.to_string();
+        let Some((live, _)) = self.registered.lock().unwrap().clone() else { bail!("relay control is offline") };
+        let (respond, receive) = std::sync::mpsc::channel();
+        live.commands.send(ControlCommand::Forward { frame, req_id, respond }).map_err(|_| anyhow!("relay control is offline"))?;
+        Ok(receive)
+    }
+
     /// A fresh single-use invite for `relay_device_id`, through the live
     /// registration's `invite-create`. `None` while not registered.
     pub async fn invite(&self, relay_device_id: &str) -> Result<Option<RelayInvite>> {
@@ -530,6 +637,9 @@ impl RelayHost {
         let mut attempt = 0u32;
         let mut fenced: Option<u64> = None;
         loop {
+            if self.is_stopped() {
+                return;
+            }
             let session = match self.fetch_session().await {
                 Ok(session) => session,
                 Err(error) if error.downcast_ref::<Revoked>().is_some() => {
@@ -540,7 +650,7 @@ impl RelayHost {
                     log::warn!("relay host: runtime session unavailable: {error:#}");
                     attempt += 1;
                     self.status.send_replace(HostStatus::Retrying { attempt });
-                    tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+                    self.pause(protocol::backoff(attempt, jitter())).await;
                     continue;
                 }
             };
@@ -548,13 +658,16 @@ impl RelayHost {
                 Ok(identity) => identity,
                 Err(error) => {
                     log::error!("relay host: {error:#}");
-                    tokio::time::sleep(REFRESH_INTERVAL).await;
+                    self.pause(REFRESH_INTERVAL).await;
                     continue;
                 }
             };
             if fenced.is_some_and(|generation| identity.runtime_generation <= generation) {
-                tokio::time::sleep(REFRESH_INTERVAL).await;
+                self.pause(REFRESH_INTERVAL).await;
                 continue;
+            }
+            if self.is_stopped() {
+                return;
             }
             fenced = None;
             self.status.send_replace(HostStatus::Connecting);
@@ -567,6 +680,7 @@ impl RelayHost {
                 Err(error) if error.downcast_ref::<Fenced>().is_some() => {
                     log::warn!("relay host: generation {} was retired by a newer runtime", identity.runtime_generation);
                     fenced = Some(identity.runtime_generation);
+                    self.link.fenced(identity.runtime_generation);
                     self.status.send_replace(HostStatus::Fenced { runtime_generation: identity.runtime_generation });
                     self.close_all_connections();
                     continue;
@@ -577,8 +691,11 @@ impl RelayHost {
                 }
             }
             self.close_all_connections();
+            if self.is_stopped() {
+                return;
+            }
             self.status.send_replace(HostStatus::Retrying { attempt });
-            tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+            self.pause(protocol::backoff(attempt, jitter())).await;
         }
     }
 
@@ -586,7 +703,7 @@ impl RelayHost {
         log::warn!("relay host: the runtime credential was rejected; not serving");
         self.status.send_replace(HostStatus::Revoked);
         self.close_all_connections();
-        tokio::time::sleep(REFRESH_INTERVAL).await;
+        self.pause(REFRESH_INTERVAL).await;
     }
 
     async fn fetch_session(&self) -> Result<RelaySession> {
@@ -615,6 +732,10 @@ impl RelayHost {
         // through this same socket.
         let refresher = tokio::spawn(self.clone().refresh_loop(live.clone(), session.director_url.clone(), identity.runtime_generation));
         *self.registered.lock().unwrap() = Some((live.clone(), session.director_url.clone()));
+        // Stopped while it registered: `stop` found no registration to close.
+        if self.is_stopped() {
+            let _ = live.commands.send(ControlCommand::Shutdown);
+        }
         let result = self.control_loop(&mut socket, &mut command_rx, &live).await;
         *self.registered.lock().unwrap() = None;
         refresher.abort();
@@ -703,6 +824,7 @@ impl RelayHost {
     ) -> Result<()> {
         let mut invites = HashMap::<String, oneshot::Sender<Result<(String, i64)>>>::new();
         let mut installs = HashMap::<String, oneshot::Sender<Result<Value>>>::new();
+        let mut forwarded = HashMap::<String, std::sync::mpsc::Sender<Result<Value>>>::new();
         loop {
             tokio::select! {
                 command = commands.recv() => {
@@ -725,8 +847,16 @@ impl RelayHost {
                             let req_id = uuid::Uuid::new_v4().simple().to_string();
                             socket.send(Message::Text(json!({ "type": "device-revoke", "reqId": req_id, "relayDeviceId": device_id }).to_string().into())).await?;
                         }
+                        ControlCommand::Forward { frame, req_id, respond } => {
+                            if forwarded.contains_key(&req_id) || installs.contains_key(&req_id) || invites.contains_key(&req_id) {
+                                let _ = respond.send(Err(anyhow!("duplicate relay request id")));
+                                continue;
+                            }
+                            socket.send(Message::Text(frame.to_string().into())).await?;
+                            forwarded.insert(req_id, respond);
+                        }
                         ControlCommand::InstallCredential { payload, req_id, respond } => {
-                            if installs.contains_key(&req_id) {
+                            if installs.contains_key(&req_id) || forwarded.contains_key(&req_id) {
                                 let _ = respond.send(Err(anyhow!("duplicate relay request id")));
                                 continue;
                             }
@@ -753,6 +883,13 @@ impl RelayHost {
                         _ => bail!("relay sent a non-text control message"),
                     };
                     let message: Value = serde_json::from_str(&text)?;
+                    // A reply to a request the window made through this registration.
+                    if FORWARDED_REPLIES.contains(&message["type"].as_str().unwrap_or_default()) {
+                        if let Some(respond) = message["reqId"].as_str().and_then(|req_id| forwarded.remove(req_id)) {
+                            let _ = respond.send(Ok(message));
+                            continue;
+                        }
+                    }
                     match message["type"].as_str().unwrap_or("") {
                         "ping" => socket.send(Message::Text(json!({ "type": "pong", "t": message["t"] }).to_string().into())).await?,
                         "invite-created" => {
@@ -767,6 +904,12 @@ impl RelayHost {
                             }
                         }
                         "device-revoked" => {}
+                        "account-pairing-changed" => {
+                            let hint = self.pairing_hint.lock().unwrap().clone();
+                            if let Some(hint) = hint {
+                                hint();
+                            }
+                        }
                         "device-credential-installed" => {
                             let req_id = message["reqId"].as_str().unwrap_or_default().to_string();
                             if let Some(respond) = installs.remove(&req_id) {

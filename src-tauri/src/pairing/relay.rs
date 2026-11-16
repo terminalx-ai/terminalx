@@ -640,6 +640,37 @@ async fn connect_once(
     retry: &mut RetryState,
     director_url: String,
 ) -> Result<()> {
+    // The relay keeps one registration per host id: while the runtime
+    // registers this Mac (PRO-368) the window uses that one, and registers
+    // itself only when the runtime does not.
+    loop {
+        match manager.runtime_relay() {
+            super::machine_route::RuntimeRelay::Registered(registration) => {
+                return through_runtime(manager, context, retry, registration).await;
+            }
+            super::machine_route::RuntimeRelay::Connecting => {
+                tokio::select! {
+                    _ = tokio::time::sleep(CONTROL_TICK) => {}
+                    _ = manager.relay_retry.notified() => {}
+                }
+                if manager.is_stopped() || manager.account_context().as_ref().map(|next| &next.user_id) != Some(&context.user_id) {
+                    return Ok(());
+                }
+            }
+            super::machine_route::RuntimeRelay::Off => break,
+        }
+    }
+    register_window(manager, context, retry, director_url).await
+}
+
+/// The window's own registration, for its phones, while no runtime
+/// registers this Mac.
+async fn register_window(
+    manager: Arc<PairingManager>,
+    context: AccountContext,
+    retry: &mut RetryState,
+    director_url: String,
+) -> Result<()> {
     let reconnect = retry.reconnect;
     let keypair = manager.host_key(true).context(Stage::LocalIdentity)?;
     let relay_host_id = keypair.host_id();
@@ -680,6 +711,136 @@ async fn connect_once(
     control_loop(manager, socket, rx, live, context, keypair, ControlTiming::default())
         .await
         .context(Stage::ControlSession)
+}
+
+/// Use the runtime's registration (PRO-368) as the window's own: phone
+/// invites, credential installs and revocations go over the runtime's control
+/// connection (`runtime.machineHost.relayControl`), and the runtime passes
+/// phones' relay connections to this window's phone route, which serves them
+/// as before. Ends when the registration does, so the supervisor picks again.
+async fn through_runtime(
+    manager: Arc<PairingManager>,
+    context: AccountContext,
+    retry: &mut RetryState,
+    registration: crate::machine_wire::RelayRegistration,
+) -> Result<()> {
+    let keypair = manager.host_key(true).context(Stage::LocalIdentity)?;
+    if keypair.host_id() != registration.relay_host_id {
+        return Err(anyhow!("the runtime is registered with another host key").context(Stage::LocalIdentity));
+    }
+    let (tx, mut commands) = mpsc::unbounded_channel();
+    let live = RelayLive {
+        tx,
+        signals: Arc::new(ControlSignals::new(now_ms())),
+        director_url: registration.director_url.clone(),
+        cell_url: registration.cell_url.clone(),
+        assignment_epoch: registration.assignment_epoch,
+        relay_host_id: registration.relay_host_id.clone(),
+        generation: registration.generation,
+    };
+    log::info!("the runtime is registered with Relay for this Mac; phones use its registration");
+    retry.connected(&manager, live.clone());
+    manager.relay_ready(context.clone(), live.clone()).await;
+    let mut tick = tokio::time::interval_at(Instant::now() + CONTROL_TICK, CONTROL_TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                Some(ControlCommand::Shutdown) | None => return Ok(()),
+                Some(command) => {
+                    tauri::async_runtime::spawn(forward_to_runtime(manager.clone(), command));
+                }
+            },
+            _ = tick.tick() => {
+                if manager.is_stopped() || manager.account_context().as_ref().map(|next| &next.user_id) != Some(&context.user_id) {
+                    return Ok(());
+                }
+                match manager.runtime_relay() {
+                    // The runtime's registration answers its own control
+                    // socket's liveness; while it says it is registered, so
+                    // is this window's use of it.
+                    super::machine_route::RuntimeRelay::Registered(current) if current == registration => live.signals.frame_received(now_ms()),
+                    _ => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// One control request through the runtime's registration, answered as on
+/// the window's own (`control_loop`).
+async fn forward_to_runtime(manager: Arc<PairingManager>, command: ControlCommand) {
+    let new_req_id = || uuid::Uuid::new_v4().simple().to_string();
+    match command {
+        ControlCommand::CreateInvite { device_id, share_expires_at, respond } => {
+            let mut frame = serde_json::json!({ "type": "invite-create", "reqId": new_req_id(), "relayDeviceId": device_id });
+            if let Some(expires_at) = share_expires_at {
+                frame["sessionShare"] = serde_json::json!({ "expiresAt": expires_at });
+            }
+            let invite = runtime_request(&manager, frame).await.and_then(|reply| {
+                let invite: InviteCreated = serde_json::from_value(reply)?;
+                if invite.kind != "invite-created" || !valid_opaque_id(&invite.req_id) || !valid_base64url_32(&invite.invite_token) || invite.expires_at <= now_ms() || invite.max_attempts == 0 || invite.max_attempts > 16 {
+                    bail!("invalid relay invite response");
+                }
+                Ok(invite)
+            });
+            let _ = respond.send(invite);
+        }
+        ControlCommand::Revoke { device_id } => {
+            let frame = serde_json::json!({ "type": "device-revoke", "reqId": new_req_id(), "relayDeviceId": device_id });
+            if let Err(error) = runtime_request(&manager, frame).await {
+                log::warn!("could not revoke a phone's relay credential through the runtime: {error:#}");
+            }
+        }
+        ControlCommand::InstallCredential { req_id, relay_device_id, new_resume_token_hash, expected_current_hash, authorization, respond } => {
+            let mut frame = serde_json::json!({
+                "type": "device-credential-install",
+                "v": 1,
+                "reqId": req_id,
+                "relayDeviceId": relay_device_id,
+                "newResumeTokenHash": new_resume_token_hash,
+                "authorization": authorization,
+            });
+            if let Some(expected) = expected_current_hash {
+                frame["expectedCurrentHash"] = serde_json::Value::String(expected);
+            }
+            let installed = runtime_request(&manager, frame).await.and_then(|reply| {
+                let installed: CredentialInstalled = serde_json::from_value(reply)?;
+                validate_installed(&installed, true)?;
+                Ok(installed)
+            });
+            let _ = respond.send(installed);
+        }
+        ControlCommand::CredentialInstallStatus { req_id, relay_device_id, respond } => {
+            let frame = serde_json::json!({ "type": "device-credential-install-status", "v": 1, "reqId": req_id, "relayDeviceId": relay_device_id });
+            let status = runtime_request(&manager, frame).await.and_then(|reply| {
+                let status: CredentialInstallStatus = serde_json::from_value(reply)?;
+                validate_install_status(&status)?;
+                Ok(status)
+            });
+            let _ = respond.send(status);
+        }
+        ControlCommand::ConfirmResume { req_id, basis_conn_id, respond } => {
+            let frame = serde_json::json!({ "type": "device-resume-confirm", "v": 1, "reqId": req_id, "basisConnId": basis_conn_id });
+            let confirmed = runtime_request(&manager, frame).await.and_then(|reply| {
+                let confirmed: ResumeConfirmed = serde_json::from_value(reply)?;
+                validate_resume_confirmed(&confirmed)?;
+                Ok(confirmed)
+            });
+            let _ = respond.send(confirmed);
+        }
+        ControlCommand::Shutdown => {}
+    }
+}
+
+/// Send `frame` on the runtime's registration and wait for the relay's reply.
+async fn runtime_request(manager: &PairingManager, frame: serde_json::Value) -> Result<serde_json::Value> {
+    let runtime = manager.runtime.lock().unwrap().clone().ok_or_else(|| anyhow!("relay control is offline"))?;
+    let reply = tauri::async_runtime::spawn_blocking(move || runtime.relay_control(frame)).await??;
+    if reply["type"] == "control-error" {
+        bail!("Relay could not complete the request. Please retry.");
+    }
+    Ok(reply)
 }
 
 type ControlSocket =

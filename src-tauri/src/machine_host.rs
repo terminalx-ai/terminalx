@@ -46,6 +46,9 @@ pub const PORT: u16 = 6768;
 const TICK: Duration = Duration::from_secs(1);
 /// Settings are read again every this many ticks without a change event.
 const SETTINGS_EVERY: u32 = 15;
+/// How long the window's relay request may wait for the relay's reply. The
+/// window's call allows a little more (`Desktop::relay_control`).
+const RELAY_CONTROL_WAIT: Duration = Duration::from_secs(15);
 
 /// Held while a computer is connected and `pairing.keepAwake` is on.
 pub const COMPUTER_CONNECTED: crate::power::Reason = crate::power::Reason::new("A computer is operating this Mac through TerminalX");
@@ -155,6 +158,20 @@ struct State {
     last: Option<Status>,
     /// The live code, the computer waiting for Allow, the attempt limit.
     pairing: Pairing,
+    /// On, but nobody is signed in on this machine: no relay registration.
+    relay_signed_out: bool,
+    /// The account a newer runtime process took the relay from this one
+    /// for (`409 machine_runtime_superseded`). It does not register for it
+    /// again; another account it would.
+    relay_superseded: Option<String>,
+}
+
+/// The machine's own relay registration from the signed-in account (PRO-368).
+struct AccountRelay {
+    host: Arc<crate::remote::host::RelayHost>,
+    link: Arc<crate::remote::account_link::AccountLink>,
+    /// Wakes the supervisor on each change of the registration.
+    watch: tokio::task::JoinHandle<()>,
 }
 
 pub struct MachineHost {
@@ -171,9 +188,14 @@ pub struct MachineHost {
     wake: Notify,
     settings_changed: Notify,
     next_connection: std::sync::atomic::AtomicU64,
-    /// The machine's relay registration, when it serves with `--relay-link`
-    /// (PRO-345): paired computers get relay access through it.
+    /// The machine's relay registration (PRO-345): paired computers get
+    /// relay access through it. With `--relay-link` it is that link's; else
+    /// the signed-in account's ([`AccountRelay`], PRO-368).
     relay: Mutex<Option<std::sync::Weak<crate::remote::host::RelayHost>>>,
+    /// Whether this host registers with the relay from the account: not
+    /// when a `--relay-link` registers it.
+    account_relay_allowed: bool,
+    account_relay: Mutex<Option<AccountRelay>>,
 }
 
 static INSTALLED: OnceLock<Arc<MachineHost>> = OnceLock::new();
@@ -221,6 +243,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            account_relay_allowed: !awaiting_rpc,
+            account_relay: Mutex::new(None),
         });
         let weak = Arc::downgrade(&host);
         sink.listen(
@@ -397,6 +421,7 @@ impl MachineHost {
         // phones on the port; a port still in use is the window's to give up.
         let takes_port = state.enabled && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
         let (pending, code, paused_until) = state.pairing.view(now_ms());
+        let (relay_state, relay) = self.relay_view(state);
         Status {
             enabled: state.enabled,
             host_key,
@@ -409,6 +434,44 @@ impl MachineHost {
             pending,
             code,
             paused_until,
+            relay_state,
+            relay,
+        }
+    }
+
+    /// The relay registration as the status says it. Takes the
+    /// `account_relay` lock under the state lock: never the other way round.
+    fn relay_view(&self, state: &State) -> (wire::RelayState, Option<wire::RelayRegistration>) {
+        use crate::remote::host::HostStatus;
+        let registration = |host: &crate::remote::host::RelayHost| {
+            host.registration().map(|registration| wire::RelayRegistration {
+                relay_host_id: registration.relay_host_id,
+                director_url: registration.director_url,
+                cell_url: registration.cell_url,
+                assignment_epoch: registration.assignment_epoch,
+                generation: registration.generation,
+                runtime_generation: registration.runtime_generation,
+            })
+        };
+        if let Some(relay) = self.account_relay.lock().unwrap().as_ref() {
+            if let Some(registration) = registration(&relay.host) {
+                return (wire::RelayState::Registered, Some(registration));
+            }
+            return match (relay.link.ended(), &*relay.host.status().borrow()) {
+                (Some(crate::remote::account_link::Ended::Superseded), _) => (wire::RelayState::Superseded, None),
+                (Some(crate::remote::account_link::Ended::SignedOut), _) | (None, HostStatus::Revoked) => (wire::RelayState::SignedOut, None),
+                _ => (wire::RelayState::Connecting, None),
+            };
+        }
+        if !state.enabled || !self.account_relay_allowed {
+            return (wire::RelayState::Off, None);
+        }
+        if state.relay_superseded.is_some() {
+            (wire::RelayState::Superseded, None)
+        } else if state.relay_signed_out {
+            (wire::RelayState::SignedOut, None)
+        } else {
+            (wire::RelayState::Off, None)
         }
     }
 
@@ -486,8 +549,128 @@ impl MachineHost {
                 state.port_busy = busy;
             }
         }
+        self.clone().reconcile_relay(read).await;
         self.hold_awake();
         self.publish();
+    }
+
+    /// Register with the relay from the signed-in account while the switch is
+    /// on (PRO-368), and stop when it goes off, the machine signs out or a
+    /// newer runtime process takes the relay. Whether someone signed in is
+    /// read from the session file on `read` passes only.
+    async fn reconcile_relay(self: Arc<Self>, read: bool) {
+        if !self.account_relay_allowed {
+            return;
+        }
+        let (enabled, secret) = {
+            let state = self.state.lock().unwrap();
+            (state.enabled, state.keypair.as_ref().map(|keypair| *keypair.secret()))
+        };
+        let rpc = match &*self.rpc.lock().unwrap() {
+            Rpc::Ready(rpc) => Some(rpc.clone()),
+            _ => None,
+        };
+        let wanted = enabled && crate::remote::account_link::relay_enabled();
+        let (Some(secret), Some(rpc), true) = (secret, rpc, wanted) else {
+            self.stop_relay("off");
+            if !enabled {
+                let mut state = self.state.lock().unwrap();
+                state.relay_signed_out = false;
+            }
+            return;
+        };
+        let running = self.account_relay.lock().unwrap().as_ref().map(|relay| (relay.link.ended(), relay.link.user_id(), relay.host.relay_host_id()));
+        if let Some((ended, user, host_id)) = running {
+            match ended {
+                Some(crate::remote::account_link::Ended::Superseded) => {
+                    self.state.lock().unwrap().relay_superseded = user;
+                    self.stop_relay("superseded");
+                }
+                Some(crate::remote::account_link::Ended::SignedOut) => {
+                    self.state.lock().unwrap().relay_signed_out = true;
+                    self.stop_relay("signed out");
+                }
+                // A key adopted from the window replaced the one it registered with.
+                None if host_id != HostKeypair::from_secret(secret).host_id() => self.stop_relay("host key changed"),
+                None => {}
+            }
+            return;
+        }
+        if !read {
+            return;
+        }
+        let data_dir = self.data_dir.clone();
+        let user = tokio::task::spawn_blocking(move || crate::machine_account::load(&data_dir)).await;
+        let user = match user {
+            Ok(Ok(session)) => session.map(|session| session.cloud.user_id),
+            Ok(Err(error)) => {
+                log::warn!("machine host: read the account session: {error:#}");
+                None
+            }
+            Err(_) => None,
+        };
+        let Some(user) = user else {
+            self.state.lock().unwrap().relay_signed_out = true;
+            return;
+        };
+        {
+            let mut state = self.state.lock().unwrap();
+            state.relay_signed_out = false;
+            if state.relay_superseded.as_deref() == Some(user.as_str()) {
+                return;
+            }
+            state.relay_superseded = None;
+        }
+        self.start_relay(secret, rpc);
+    }
+
+    /// Register with the relay as `secret`'s host, serving `rpc`.
+    fn start_relay(self: &Arc<Self>, secret: [u8; 32], rpc: Arc<WorkspaceRpc>) {
+        let link = Arc::new(crate::remote::account_link::AccountLink::new(self.data_dir.clone(), secret, self.account_window()));
+        let host = crate::remote::host::RelayHost::new(link.clone(), rpc, None);
+        // Before it registers, so no connection is answered without them.
+        host.set_routes(self.clone());
+        let sink = self.sink.clone();
+        host.on_pairing_hint(Arc::new(move || sink.emit(wire::RELAY_HINT_EVENT, &json!({}))));
+        self.use_relay(&host);
+        let mut status = host.status();
+        let weak = Arc::downgrade(self);
+        let watch = tokio::spawn(async move {
+            while status.changed().await.is_ok() {
+                let Some(machine) = weak.upgrade() else { return };
+                if matches!(&*status.borrow(), crate::remote::host::HostStatus::Registered { .. }) {
+                    log::info!("machine host: registered with the relay");
+                }
+                machine.wake.notify_one();
+            }
+        });
+        tokio::spawn(host.clone().run());
+        *self.account_relay.lock().unwrap() = Some(AccountRelay { host, link, watch });
+        log::info!("machine host: registering with the relay for the signed-in account");
+    }
+
+    /// End the account's relay registration and the connections it carried;
+    /// paired computers fall back to the direct routes.
+    fn stop_relay(&self, why: &str) {
+        let Some(relay) = self.account_relay.lock().unwrap().take() else { return };
+        relay.watch.abort();
+        relay.host.stop();
+        *self.relay.lock().unwrap() = None;
+        log::info!("machine host: no relay registration ({why})");
+    }
+
+    /// The desktop window that keeps the account's session, when the desktop
+    /// started this runtime.
+    fn account_window(&self) -> Option<Arc<dyn crate::remote::account_link::AccountWindow>> {
+        #[cfg(unix)]
+        {
+            let lifetime = self.lifetime.clone()?;
+            (std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1")).then(|| Arc::new(LifetimeWindow(lifetime)) as Arc<dyn crate::remote::account_link::AccountWindow>)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// Remove the computers whose credential went unused for 90 days
@@ -944,6 +1127,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            account_relay_allowed: false,
+            account_relay: Mutex::new(None),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         let listening = direct::listen(host.clone(), rpc, 0)?;
@@ -969,6 +1154,8 @@ impl MachineHost {
             settings_changed: Notify::new(),
             next_connection: std::sync::atomic::AtomicU64::new(1),
             relay: Mutex::new(None),
+            account_relay_allowed: false,
+            account_relay: Mutex::new(None),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         host
@@ -1199,6 +1386,18 @@ impl MachineHost {
                 let let_back = self.let_back(&target.id).map_err(ControlError::internal)?;
                 Ok(json!({ "letBack": let_back }))
             }
+            wire::RELAY_CONTROL => {
+                let request: wire::RelayControl = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and frame are required"))?;
+                self.attachment(&request.epoch, &request.lease)?;
+                let offline = |message: String| ControlError::new("relay_offline", message, None::<String>);
+                let relay = self.relay().filter(|relay| relay.is_registered()).ok_or_else(|| offline("This machine is not registered with the relay.".into()))?;
+                let reply = relay.forward_control(request.frame).map_err(|error| offline(format!("{error:#}")))?;
+                match reply.recv_timeout(RELAY_CONTROL_WAIT) {
+                    Ok(Ok(reply)) => Ok(reply),
+                    Ok(Err(error)) => Err(ControlError::invalid(format!("{error:#}"))),
+                    Err(_) => Err(offline("The relay did not answer.".into())),
+                }
+            }
             wire::DECLINE => {
                 let answer: wire::Answer = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and requestId are required"))?;
                 self.attachment(&answer.epoch, &answer.lease)?;
@@ -1371,6 +1570,21 @@ impl crate::remote::machine::MachineAccess for HostAccess {
                 None => Ok(json!({ "relay": null })),
             }
         })
+    }
+}
+
+/// The desktop window, as the account's relay session sees it (PRO-368).
+#[cfg(unix)]
+struct LifetimeWindow(Arc<crate::local_runtime::Lifetime>);
+
+#[cfg(unix)]
+impl crate::remote::account_link::AccountWindow for LifetimeWindow {
+    fn attached(&self) -> bool {
+        self.0.window.available()
+    }
+
+    fn refresh(&self) -> Result<()> {
+        self.0.window.refresh_account()
     }
 }
 

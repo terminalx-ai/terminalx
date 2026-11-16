@@ -300,14 +300,10 @@ PRO-341 settled these points while building decision 4.
   one relay registration. PRO-341 adds two hooks to its `RelayHost`: paired
   computers are admitted from the registry by their relay device id and
   token, and a `conn-open` for any other device goes to the window's phone
-  route, which opens the data leg itself. Until PRO-344 gives a personal
-  machine a relay session from the account, a runtime registers with the
-  relay only with `--relay-link`, which the desktop never passes. So a
-  desktop's phones keep the window's own relay registration, and the window
-  must stay off the relay whenever the runtime is registered. Minting a new
-  phone's relay invite through the runtime's registration is left to the
-  ticket that first registers a desktop runtime in production (PRO-344) or to
-  PRO-359.
+  route, which opens the data leg itself. PRO-368 registers a signed-in
+  machine from the account; while it is registered the window stays off the
+  relay and makes its phones' invites, credential installs and revocations
+  through the runtime's registration ("As built (PRO-368)").
 - **The switch is `machines.allowOperating`** in `settings.json`, off by
   default. The runtime watches the file. On, it is a standing service: it does
   not exit when idle, so a computer can connect with the window closed. It
@@ -1046,9 +1042,10 @@ as a user service and is paired from its own terminal. The user's guide is
 - **The account.** `login` uses the device authorization grant
   (terminalx-saas `machine-relay-access.md`, "Device-code sign-in") and keeps
   the desktop Cloud Session it ends in at `<data dir>/account/session.json`
-  (0600, in a 0700 folder; `src-tauri/src/machine_account.rs`). Nothing
-  registers with the relay from it yet: that is PRO-368, which reads this file
-  on a headless machine. The code still carries no `relay`.
+  (0600, in a 0700 folder; `src-tauri/src/machine_account.rs`). The runtime
+  registers with the relay from it while the switch is on (PRO-368). The code
+  still carries no `relay`, so a server is paired over a direct route first;
+  pairing one through the relay is a follow-up.
 - **Signed releases.** `SHA256SUMS` of each runtime release is signed as an SSH
   signature (namespace `terminalx-runtime`, principal `release@terminalx`) on
   the owner's Mac (`scripts/release/sign-runtime.py`); no signing key is on
@@ -1192,13 +1189,11 @@ PRO-345 settled these points while building Connect and Reconnect.
   With no registration it answers `{ "relay": null }`. Revoking the computer
   also sends `device-revoke` for its relay device id, so its relay credential
   ends with it.
-- A runtime registers with the relay only through `--relay-link` today. A
-  signed-in desktop or headless machine registering itself with
-  `POST /v1/desktop/machine-host/relay-session` (terminalx-saas
-  `machine-relay-access.md`) is a separate ticket, because the window's phone
-  registration uses the same host id and the relay fences one of them. Until
-  it lands, `machine.relayAccess` answers `{ "relay": null }` on a production
-  machine and the relay route is skipped.
+- A signed-in machine registers itself with
+  `POST /v1/desktop/machine-host/relay-session` while the switch is on
+  ("As built (PRO-368)"). Signed out, or with the switch off,
+  `machine.relayAccess` answers `{ "relay": null }` and the relay route is
+  skipped.
 
 **Routes.** A route is `lan` (a direct endpoint that is not Tailscale),
 `tailscale` (a host in `100.64.0.0/10` or under `.ts.net`), or `relay`. One
@@ -1299,6 +1294,100 @@ The event `machines_connection_changed` carries one `MachineConnectionView`
 whenever a machine's state changes. `machines_list` answers each record with
 `lastRoute` and `relay` (no secret). `cloud_remote_attach_dev` and the debug
 Development section are gone; their tests use `machine_remote_attach`.
+
+### As built (PRO-368): a signed-in machine registers with the relay
+
+**The registration.** While "Let other computers operate this Mac" is on, the
+host key is ready and someone is signed in on the machine, its runtime
+registers with the relay under its relay host id (`machineId`), through the
+same `RelayHost` as `--relay-link` (`MachineHost::start_relay`,
+`src-tauri/src/machine_host.rs`). It serves the machine's one `WorkspaceRpc`,
+admits paired computers by their relay device id and passes every other
+device to the window's phone route, as PRO-341 built. Its link is
+`remote::account_link::AccountLink`:
+
+- The token comes from `POST /v1/desktop/machine-host/relay-session`
+  (terminalx-saas `machine-relay-access.md`, "Machine relay session") with
+  the session's access token. A link's first request sends no
+  `runtimeGeneration`, so the server starts a new generation for this
+  process; later ones send it. The token is renewed 5 minutes before it
+  expires.
+- `409 machine_runtime_superseded` stops the relay registration for good in
+  this process: status `superseded`, and it does not register again for that
+  account until it restarts. When the relay retires the registration with
+  `4101`, the link asks the server at once instead of waiting for the token
+  to near expiry, so a fenced process learns it was superseded and stops.
+  The direct listener keeps serving: two processes cannot both hold 6768.
+- With no session file (signed out) or a refresh the account service refuses,
+  the registration ends and every connection it carried closes. Paired
+  computers fall back to their direct routes (`4404` at the relay is "offline",
+  so they keep their relay credential for when it is back).
+- Switching off ends it the same way, with a close frame, so the relay lets the
+  window register again at once.
+- A debug build registers only with `TERMINALX_DEV_RELAY_DIRECTOR_URL` set, and
+  then with that director, never production's, as the window does.
+- The registration is in the status (`machine_wire::Status`): `relayState`
+  (`off`, `signedOut`, `connecting`, `registered`, `superseded`) and, while
+  registered, `relay` (`relayHostId`, `directorUrl`, `cellUrl`,
+  `assignmentEpoch`, `generation`, `runtimeGeneration`). An older runtime says
+  neither, which reads as `off`.
+
+**The account session.** The runtime reads the desktop Cloud Session from
+`<data dir>/account/session.json` (`machine_account`). A headless machine keeps
+it there with `terminalx-serve login` (PRO-353). On a desktop the window keeps
+the same file while the switch is on (`account.rs`, "The runtime's copy"), so
+its runtime registers with the window closed. Desktop refresh tokens rotate, and
+the account service revokes the whole session when a superseded refresh token is
+presented again (`desktopTokens.ts`), so:
+
+- One process rotates at a time, under `account/session.lock` (the store's
+  cross-process transaction lock), and writes the result to the file before
+  releasing it.
+- While a window is attached, only the window rotates. The runtime asks it with
+  the private window service `account.refresh` (no secret crosses: the window
+  writes the file). A rotation by the runtime would leave the window's access
+  token dead.
+- With no window attached, the runtime rotates the session itself.
+- The window takes a rotation it finds in the file (same session family,
+  `drt_<family>.…`, a later expiry) before it uses or refreshes its own tokens:
+  on every account read (one `stat`), and under the lock before a refresh. So a
+  window that opens after the runtime rotated never presents the superseded
+  token. It signs out with the token in the file, too.
+- Switching off, or signing out, removes the file if it holds this window's
+  session, after taking any rotation in it. A session `terminalx-serve login`
+  saved for another account stays.
+- A runtime that says `signedOut` while the window is signed in gets the file
+  written at once (an app updated with the switch already on).
+
+**The window's phones.** The relay keeps one registration per host id: the
+generation-fenced runtime retires the window's (`4101`), and refuses the window
+while its own control socket is open. So while the runtime is `connecting` or
+`registered` the window does not register itself (`pairing/relay.rs`,
+`connect_once`). While it is `registered`, the window uses that registration as
+its own: a `RelayLive` whose control requests (`invite-create`, with
+`sessionShare` for a shared session, `device-revoke`,
+`device-credential-install`, `device-credential-install-status`,
+`device-resume-confirm`) go to the runtime as
+`runtime.machineHost.relayControl` `{ epoch, lease, frame }`. The runtime sends
+each frame on its control socket and answers the relay's reply to its `reqId`
+(`control-error` included) within 15 s, or `relay_offline`. The relay's
+`account-pairing-changed` hint on the runtime's registration reaches the window
+as `machine_host_relay_hint`, so account grants are answered as promptly. The
+window registers its phone route whenever the runtime is registered, whoever
+holds the direct port, so phones' relay connections reach it as before. When
+the runtime's registration ends or changes, the window's use of it ends and the
+supervisor picks again.
+
+**Capability.** The window's host binding advertises `machine-operating.v1`
+only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
+headless machine has no host binding yet: it is reachable by its paired
+computers, and is not listed in the account directory.
+
+**Not yet.** A pairing code still carries no `relay`, so a computer pairs with
+a machine over a direct route first and gets its relay credential from
+`machine.relayAccess` then. Pairing a headless server that has no open port
+through the relay, and the design's "It needs no open port" intro on the
+headless server tab (21.06), are a follow-up.
 
 ### As built (PRO-346): the overview, the badge and the key guards
 
@@ -1698,6 +1787,16 @@ which runs in a child process because data privacy is one switch per process.
   revokes the computer on the machine, checks the activity log, and pairs again.
 - **An agent on the machine can Revoke or Disconnect a computer.** It attaches
   as any process of the user can. That takes access away and gives it none.
+- **The runtime's copy of the account session is a file** (PRO-368). On a
+  desktop the window keeps the desktop Cloud Session in the Keychain; with the
+  switch on it also writes it to `<data dir>/account/session.json`, mode 0600
+  in a 0700 folder, as a headless machine keeps its own. The runtime is a
+  separate executable, and a Keychain item it reads with the window closed
+  would need someone to answer a prompt after a reboot; a file the window and
+  the runtime share under one lock is also what keeps a rotating refresh
+  token from being presented twice. Any process of the same user can read it,
+  as it can use the user's other credentials on disk. It exists only while
+  the switch is on and someone is signed in.
 - **An expired computer's account grant** ends when the operating computer
   removes the machine, as it is asked to on "Access removed"; the machine ends
   its connections and relay credential itself.
