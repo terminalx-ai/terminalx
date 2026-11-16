@@ -11,6 +11,8 @@
 //! - [`collab`]: who may do what in a shared workspace (`collab/1`, PRO-30).
 //! - [`machine`]: `machine/1`, one runtime serving every project of its
 //!   machine (PRO-340).
+//! - [`machine_client`]: the operating computer's one connection per paired
+//!   machine, over its direct routes and the relay (PRO-345).
 //! - [`agent_commands`]: receipts of live agent commands on a runtime with
 //!   no cloud mailbox (`agent-commands/1`, PRO-343).
 
@@ -22,6 +24,7 @@ pub mod files;
 pub mod git;
 pub mod host;
 pub mod machine;
+pub mod machine_client;
 pub mod mirror;
 pub mod ports;
 pub mod protocol;
