@@ -108,14 +108,15 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
 }
 
 /** Reuse PRO-128's current roster and profile. Missing roles/emails stay unavailable. */
-export function PresenceFaces({ orgId, workspaceId, othersOnly = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean }) {
+export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean; compact?: boolean }) {
   const presence = useCloudPresence(orgId);
   const { roster } = useOrganizationRoster(orgId, presence.state === "live");
   const catalog = useCloudCatalog();
   const privacy = useDataPrivacy();
-  if (privacy.enabled || presence.state !== "live") return <span className="text-[10px] text-faint">{presence.state === "loading" ? "Loading presence…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable"}</span>;
+  const unavailable = (label: string) => <span className="shrink-0 text-[10px] text-faint" aria-label={compact ? label : undefined} title={compact ? label : undefined}>{compact ? "—" : label}</span>;
+  if (privacy.enabled || presence.state !== "live") return unavailable(presence.state === "loading" ? "Loading presence…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable");
   const people = (workspaceId ? presence.workspaces.find((row) => row.workspaceId === workspaceId)?.activeMembers : presence.activeMembers);
-  if (!people) return <span className="text-[10px] text-faint">Presence unavailable</span>;
+  if (!people) return unavailable("Presence unavailable");
   const visible = othersOnly ? people.filter((person) => person.userId !== catalog.viewerUserId) : people;
   return <span className="inline-flex items-center gap-1" aria-label={workspaceId ? "People here" : "Active now"}>
     {!workspaceId && <span className="mr-1 text-xs text-faint">Active now</span>}

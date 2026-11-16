@@ -15,11 +15,13 @@ export function WorkspaceFollowingSection({ orgId }: { orgId: string }) {
     <h3 className="flex items-center gap-1 px-2 py-1 text-[10px] uppercase text-faint"><Eye className="size-3" />Following <span className="ml-auto">{rows.length}</span></h3>
     <ul>{rows.map((item) => <li key={item.workspace.id} className="flex min-w-0 items-center gap-1 rounded px-2 hover:bg-selected/50">
       <button type="button" className="min-w-0 flex-1 truncate py-1 text-left text-xs" onClick={() => selectCloudWorkspace(`cloud:${orgId}:${item.workspace.id}`)}>{item.workspace.name}</button>
-      <PresenceFaces orgId={orgId} workspaceId={item.workspace.id} othersOnly />
+      <PresenceFaces orgId={orgId} workspaceId={item.workspace.id} othersOnly compact />
     </li>)}</ul>
   </section>;
 }
 export function OrganizationPresenceCount({ orgId }: { orgId: string }) {
   const presence = useCloudPresence(orgId);
-  return <span className="shrink-0 text-[10px] text-faint" title="People active in workspaces visible to you">{presence.state === "live" ? `cloud · ${new Set(presence.activeMembers.map((person) => person.userId)).size} online` : presence.state === "loading" ? "Presence loading…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable"}</span>;
+  const count = new Set(presence.activeMembers.map((person) => person.userId)).size;
+  const label = presence.state === "live" ? `cloud · ${count} online` : presence.state === "loading" ? "Presence loading…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable";
+  return <span className="max-w-10 shrink-0 truncate text-[10px] text-faint" aria-label={label} title={label}>{presence.state === "live" ? `${count} online` : "—"}</span>;
 }
