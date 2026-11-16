@@ -135,6 +135,15 @@ impl MachineStore {
         })
     }
 
+    /// Forget a machine (Settings → Machines → Remove). The record it had,
+    /// or `None` when it was not paired. Its sessions stay on the machine.
+    pub fn remove(&self, machine_id: &str) -> Result<Option<PairedMachine>> {
+        self.rewrite(|file| {
+            let Some(index) = file.machines.iter().position(|machine| machine.machine_id == machine_id) else { return Ok(None) };
+            Ok(Some(file.machines.remove(index)))
+        })
+    }
+
     /// Change how a machine is reached. `None` when it is not paired.
     pub fn set_route(&self, machine_id: &str, route: MachineRoute) -> Result<Option<PairedMachine>> {
         self.rewrite(|file| {
@@ -192,6 +201,17 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(dir.path().join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn removing_a_machine_drops_only_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MachineStore::in_dir(dir.path());
+        store.put(machine("m1")).unwrap();
+        store.put(machine("m2")).unwrap();
+        assert_eq!(store.remove("m1").unwrap().unwrap().machine_id, "m1");
+        assert!(store.remove("m1").unwrap().is_none(), "already gone");
+        assert_eq!(store.list().unwrap().iter().map(|machine| machine.machine_id.as_str()).collect::<Vec<_>>(), vec!["m2"]);
     }
 
     #[test]

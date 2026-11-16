@@ -658,6 +658,7 @@ pub fn run() {
             machines::connect::machine_remote_attach,
             machines::connect::machines_connections,
             machines::connect::machines_reconnect,
+            machines::connect::machines_remove,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,

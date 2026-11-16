@@ -11,6 +11,7 @@
 //!
 //! The shapes are `src/types/machines.ts`.
 
+pub mod account;
 pub mod connect;
 pub mod pair;
 pub mod secrets;
@@ -280,11 +281,12 @@ pub async fn machines_host_status(state: tauri::State<'_, crate::AppState>, mach
 /// "Let other computers operate this Mac". The runtime watches the file.
 #[tauri::command]
 pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
-    let (runtime, machines) = (state.runtime(), machines.inner().clone());
+    let (runtime, machines, pairing) = (state.runtime(), machines.inner().clone(), state.pairing.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = crate::store::settings::load();
         settings.machines.allow_operating = enabled;
         crate::store::settings::save(&settings).map_err(err)?;
+        pairing.machine_operating_changed();
         Ok(host_view(&machines, runtime))
     })
     .await

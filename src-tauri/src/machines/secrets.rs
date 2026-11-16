@@ -71,6 +71,10 @@ impl MachineSecrets {
         self.load_text(&machine_account(machine_id)).context("read the machine's device token from the Keychain")
     }
 
+    pub fn delete_token(&self, machine_id: &str) -> Result<()> {
+        self.store.delete(self.service()?, &machine_account(machine_id)).context("delete the machine's device token from the Keychain")
+    }
+
     pub fn save_relay_token(&self, machine_id: &str, token: &str) -> Result<()> {
         self.store.set(self.service()?, &relay_account(machine_id), token.as_bytes()).context("save the machine's relay credential to the Keychain")
     }
@@ -115,6 +119,10 @@ mod tests {
         secrets.save_token("cs1uhCLEB_ttCYaQ", "token").unwrap();
         assert_eq!(store.get("ai.terminalx.app.machines", "machine:cs1uhCLEB_ttCYaQ").unwrap().unwrap(), b"token");
         assert_eq!(secrets.load_token("cs1uhCLEB_ttCYaQ").unwrap().unwrap().as_str(), "token");
+        secrets.save_token("dYd7tB05O1-4RVzm", "other").unwrap();
+        secrets.delete_token("dYd7tB05O1-4RVzm").unwrap();
+        assert!(secrets.load_token("dYd7tB05O1-4RVzm").unwrap().is_none(), "removed");
+        secrets.delete_token("dYd7tB05O1-4RVzm").unwrap();
         assert!(secrets.load_token("dYd7tB05O1-4RVzm").unwrap().is_none());
         assert!(secrets.load_relay_token("cs1uhCLEB_ttCYaQ").unwrap().is_none());
         secrets.save_relay_token("cs1uhCLEB_ttCYaQ", "resume").unwrap();

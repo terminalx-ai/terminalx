@@ -7,6 +7,8 @@
 //! - `machines_connections` and the `machines_connection_changed` event give
 //!   each machine's [`MachineConnectionState`].
 //! - `machines_reconnect` is "Try again".
+//! - `machines_remove` forgets a machine: its owner stops, its record and
+//!   its credentials go. Its sessions stay on the machine.
 //! - A wake (the wall clock jumping past the monotonic one) and a change of
 //!   this computer's interface addresses nudge every owner; a change of the
 //!   signed-in account tells each one, so a relay link closes on sign-out.
@@ -279,6 +281,30 @@ pub fn machines_reconnect(machine_id: String, connections: tauri::State<'_, Arc<
     if let Some(owner) = connections.owners.get(&machine_id) {
         owner.try_again();
     }
+}
+
+impl MachineConnections {
+    /// Forget a machine: stop its connection, then delete its record, its
+    /// device token and its relay credential. Nothing on the machine
+    /// changes: its sessions keep running there, and it lists this computer
+    /// until someone revokes it there. `false` when it was not paired.
+    fn remove(&self, machine_id: &str) -> Result<bool> {
+        self.owners.remove(machine_id);
+        let removed = self.machines.store()?.remove(machine_id)?;
+        self.machines.secrets.delete_token(machine_id)?;
+        self.machines.secrets.delete_relay_token(machine_id)?;
+        if removed.is_some() {
+            self.emit(&MachineConnectionView { machine_id: machine_id.to_string(), state: MachineConnectionState::Idle });
+        }
+        Ok(removed.is_some())
+    }
+}
+
+/// Settings → Machines → Remove. Answers whether the machine was paired.
+#[tauri::command]
+pub async fn machines_remove(machine_id: String, connections: tauri::State<'_, Arc<MachineConnections>>) -> Result<bool, String> {
+    let connections = connections.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || connections.remove(&machine_id)).await.map_err(super::err)?.map_err(super::err)
 }
 
 #[cfg(test)]

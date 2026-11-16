@@ -201,6 +201,13 @@ enum PairingConnectionContext {
 }
 
 impl PairingManager {
+    /// "Let other computers operate this Mac" changed (Settings → Machines).
+    /// The host binding advertises `machine-operating.v1` only while it is on,
+    /// so the account directory hears of the change now, not at the next
+    /// heartbeat (terminalx-server `machine-relay-access.md`, "Operating
+    /// capability"). PRO-349 fills this in.
+    pub fn machine_operating_changed(&self) {}
+
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
             guest: guest::GuestClient::default(),
