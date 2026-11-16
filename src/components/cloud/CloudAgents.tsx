@@ -5,6 +5,7 @@ import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, Worksp
 import { Chat } from "@/components/chat/Chat";
 import { LinkedText } from "@/components/chat/LinkedText";
 import { Composer } from "@/components/chat/Composer";
+import { goalCommand } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -774,7 +775,8 @@ function CloudAgentPane({
 
   const steer = async () => {
     const text = draft.trim();
-    if (!text) return;
+    // A /goal is checked as it is sent (PRO-380): never steered past that check.
+    if (!text || goalCommand(text) !== null) return;
     await interactive(() => steerCloudAgent(scope, tab.tabId, text, connected ? client : null)).then(() => setDraft(""), () => undefined);
   };
 
@@ -874,7 +876,7 @@ function CloudAgentPane({
             sending={sending}
             footer={
               <div className="flex flex-col">
-                {live && draft.trim() && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
+                {live && draft.trim() && goalCommand(draft) === null && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
                   <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
                     <span>Send now queues it for when the agent pauses.</span>
                     <Button size="xs" variant="outline" onClick={() => void steer()}>

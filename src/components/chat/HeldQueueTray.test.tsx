@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { HeldQueueTray } from "./HeldQueueTray";
+import { HeldQueueTray, againNow } from "./HeldQueueTray";
 import type { HeldQueue } from "@/types/events";
 import type { HeldQueueChange } from "@/lib/heldQueue";
 import { dismissError, getErrorToasts, runErrorAction } from "@/lib/errorToasts";
@@ -188,4 +188,43 @@ it("hides an empty paused tray and does not let editing cancel a pending Send no
   expect(screen.getByLabelText("Drag follow-up 1").tabIndex).toBe(-1);
   fireEvent.click(screen.getByLabelText("Edit follow-up 1"));
   expect(change).not.toHaveBeenCalled();
+});
+
+it("tries a failed move again to the same position in the queue as it is by then, and not for a message no longer held", () => {
+  const move: HeldQueueChange = { type: "move", id: "third", beforeId: "first" };
+  // "first" has since moved to the end: the move still goes to the top.
+  const reordered = { ...initial, items: [initial.items[1], initial.items[2], initial.items[0]] };
+  expect(againNow(move, 0, reordered)).toEqual({ type: "move", id: "third", beforeId: "second" });
+  expect(againNow({ type: "move", id: "first", beforeId: null }, 2, initial)).toEqual({ type: "move", id: "first", beforeId: null });
+  const gone = { ...initial, items: initial.items.filter(item => item.id !== "third") };
+  expect(() => againNow(move, 0, gone)).toThrow("That message is no longer held.");
+  expect(() => againNow({ type: "delete", id: "third" }, -1, gone)).toThrow("That message is no longer held.");
+  expect(againNow({ type: "pause", paused: false }, -1, gone)).toEqual({ type: "pause", paused: false });
+});
+
+it("runs Try again through the tray's lock: not while another change or a delivery is under way", async () => {
+  let release!: () => void;
+  const change = vi.fn<(change: HeldQueueChange) => Promise<void>>()
+    .mockRejectedValueOnce(new Error("Codex didn't answer within 10 seconds"))
+    .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }))
+    .mockResolvedValue();
+  const { rerender } = render(<HeldQueueTray queue={{ ...initial, paused: true }} busy scope="lock" onChange={change} />);
+  fireEvent.click(screen.getByText("Resume"));
+  await waitFor(() => expect(getErrorToasts()).toHaveLength(1));
+  const [toast] = getErrorToasts();
+  // Another change is under way: the retry says so and changes nothing.
+  fireEvent.click(await enabled(screen.getByLabelText("Delete follow-up 1")));
+  await runErrorAction(toast.id, toast.actions![0]);
+  expect(change).toHaveBeenCalledTimes(2);
+  expect(getErrorToasts()[0].cause).toBe("The held messages are changing. Try again in a moment.");
+  release();
+  // A delivery is being claimed: the same.
+  rerender(<HeldQueueTray queue={{ ...initial, paused: true, sending: "first" }} busy scope="lock" onChange={change} />);
+  await runErrorAction(toast.id, getErrorToasts()[0].actions![0]);
+  expect(change).toHaveBeenCalledTimes(2);
+  rerender(<HeldQueueTray queue={{ ...initial, paused: true }} busy scope="lock" onChange={change} />);
+  await waitFor(() => expect((screen.getByText("Resume") as HTMLButtonElement).disabled).toBe(false));
+  await runErrorAction(toast.id, getErrorToasts()[0].actions![0]);
+  expect(change).toHaveBeenLastCalledWith({ type: "pause", paused: false });
+  expect(getErrorToasts()).toHaveLength(0);
 });

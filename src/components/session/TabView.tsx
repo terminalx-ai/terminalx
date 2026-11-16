@@ -9,7 +9,8 @@ import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
-import { setDraft, useDraft } from "@/lib/drafts";
+import { getDraft, setDraft, useDraft } from "@/lib/drafts";
+import { showError } from "@/lib/errorToasts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
@@ -23,6 +24,7 @@ import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MES
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer, type Handoff } from "@/components/chat/Composer";
+import { goalCommand } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -660,7 +662,7 @@ export function TabView({
 
   // The goal card's Pause and Resume are Codex's own `/goal pause` and `/goal resume`, sent now rather than held
   // behind the turn; Edit puts the goal in the composer to change (PRO-380).
-  const goalCommand = useCallback((command: string) => {
+  const sendGoalCommand = useCallback((command: string) => {
     if (blockedRef.current) return;
     setError(null);
     void backend.send(tab.id, command, []).then((out) => {
@@ -668,17 +670,35 @@ export function TabView({
     }, (e) => setError(local ? safeError(e) : commandError(e)));
   }, [backend, local, tab.id]);
   const editGoal = useCallback((objective: string) => {
-    setDraft(tab.id, `/goal ${objective}`);
+    const put = () => {
+      setDraft(tab.id, `/goal ${objective}`);
+      focusDraftEnd();
+    };
+    // A message half written in the composer is not lost to the goal: the reader says whether it goes.
+    const current = getDraft(tab.id).trim();
+    if (!current || goalCommand(current) !== null) return put();
+    showError("Edit puts the goal in the composer, which holds a message you haven't sent", undefined, {
+      title: "Replace your draft with the goal?",
+      key: `goal-edit:${tab.id}`,
+      tone: "warning",
+      icon: "target",
+      copy: false,
+      actions: [{ label: "Replace the draft", primary: true, run: put }],
+    });
+  }, [tab.id]);
+  const focusDraftEnd = useCallback(() => {
     requestAnimationFrame(() => {
       const composer = document.querySelector<HTMLTextAreaElement>(`[data-tab-composer="${CSS.escape(tab.id)}"] textarea[data-composer]`);
       composer?.focus({ preventScroll: true });
       composer?.setSelectionRange(composer.value.length, composer.value.length);
     });
   }, [tab.id]);
+  // A /goal is checked as it is sent (PRO-380): it never goes as a steer, which would pass it to the agent as words.
+  const steerable = goalCommand(draft) === null;
   const chatAgent = useMemo(() => ({ id: tab.harness, name: agentLabel }), [tab.harness, agentLabel]);
   const steer = useCallback(async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || goalCommand(text) !== null) return;
     setError(null);
     try {
       await backend.steer(tab.id, text);
@@ -862,7 +882,7 @@ export function TabView({
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       agent={chatAgent}
-      onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? goalCommand : undefined}
+      onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}
       onEditGoal={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? editGoal : undefined}
       footer={
         <>
@@ -893,7 +913,7 @@ export function TabView({
         <AccountSwitchNote tabId={tab.id} reportedModel={transcript.model} modelName={(id) => modelLabel(tab.harness, id)} />
         {recovery !== "signed_out" && <AccountGoneNotice gone={accountSwitch.gone} targets={tab.providerSessionId ? accountSwitch.targets : []} switching={accountSwitch.switching} error={accountSwitch.error} onSwitch={(account) => void accountSwitch.switchTo(account)} />}
         {banner("composer")}
-        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
+        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && steerable && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>

@@ -5,6 +5,7 @@ import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, CircleAlert, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { showError } from "@/lib/errorToasts";
+import { goalCommand } from "@/lib/goalCommand";
 import { openSettingRow } from "@/lib/settingsLinks";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -932,10 +933,5 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
 
 const NO_TURNS: readonly Turn[] = [];
 
-/** What follows `/goal` in a message that is a goal command, trimmed; null for any other message. */
-export function goalCommand(text: string): string | null {
-  const match = /^\/goal(?:\s+([\s\S]*))?$/.exec(text.trim());
-  return match ? (match[1] ?? "").trim() : null;
-}
 
 const isEmptyGoal = (draft: string) => goalCommand(draft) === "";

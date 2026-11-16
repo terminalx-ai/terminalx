@@ -192,6 +192,16 @@ try {
     assert.equal(await composer.getAttribute("aria-invalid"), "true");
     assert.notEqual(await page.locator("[data-composer-box]:visible").evaluate((el) => getComputedStyle(el).outlineStyle), "none");
     if (screenshots) await page.screenshot({ path: `${screenshots}/03.20-codex-${colorScheme}.png`, animations: "disabled" });
+    // The goal card's Edit does not throw away a half-written message: it asks first.
+    await composer.fill("Also check the empty state");
+    await page.getByRole("region", { name: "Codex goal" }).filter({ visible: true }).getByRole("button", { name: "Edit" }).click();
+    const replace = page.locator("[data-error-toast]").filter({ hasText: "Replace your draft with the goal?" });
+    await replace.waitFor();
+    assert.equal(await composer.inputValue(), "Also check the empty state");
+    await replace.getByRole("button", { name: "Replace the draft" }).click();
+    await replace.waitFor({ state: "detached" });
+    assert.equal(await composer.inputValue(), "/goal Ship the overview table with sorting, grouping and saved views");
+    await composer.fill("");
     await tab(page, "Review saved views").click();
     const claude = page.locator("textarea[data-composer]:visible");
     await claude.fill("/goal Keep the overview tests green while you refactor");

@@ -39,6 +39,19 @@ function failure(change: HeldQueueChange, queue: HeldQueue): { title: string; st
 }
 
 /**
+ * A failed change as it is tried again on `queue` as it is now: a move goes to
+ * the same position (`target`), and one about a message that is no longer
+ * held cannot be tried at all.
+ */
+export function againNow(action: HeldQueueChange, target: number, queue: HeldQueue): HeldQueueChange {
+  if (!("id" in action)) return action;
+  if (!queue.items.some(item => item.id === action.id)) throw new Error("That message is no longer held.");
+  if (action.type !== "move") return action;
+  const others = queue.items.filter(item => item.id !== action.id);
+  return { ...action, beforeId: others[target]?.id ?? null };
+}
+
+/**
  * The follow-ups held until the agent's turn ends (PRO-380, design 03.12):
  * one card above the composer, a one-line row each. Editing one keeps the
  * queue running; a change that fails is said in a toast with Try again.
@@ -80,8 +93,17 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
   }, [editedGone]);
   const textProps = usePromptTextProps();
   const locked = disabled || pending || !!queue.sending;
-  const change = async (action: HeldQueueChange) => {
-    if (locked || changing.current) return false;
+  // A toast's Try again runs after this render: it reads the queue and what blocks a change as they are then.
+  // A change under way is `changing`, set and cleared at once; `pending` follows it a render later.
+  const latest = useRef({ queue, blocked: disabled || !!queue.sending });
+  latest.current = { queue, blocked: disabled || !!queue.sending };
+  /** `retry`: from a toast's Try again, which says why it cannot run rather than doing nothing. */
+  const change = async (action: HeldQueueChange, retry = false): Promise<boolean> => {
+    if (latest.current.blocked || changing.current) {
+      if (retry) throw new Error("The held messages are changing. Try again in a moment.");
+      return false;
+    }
+    const queue = latest.current.queue;
     changing.current = true;
     setPending(true);
     setAnnouncement("");
@@ -101,6 +123,9 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
       return true;
     } catch (cause) {
       if (action.type === "move") setMovedBack(action.id);
+      // A move is tried again to the same place in the queue as it is by then, not before a row that moved since.
+      const others = queue.items.filter(item => item.id !== ("id" in action ? action.id : null));
+      const target = action.type === "move" ? (action.beforeId ? others.findIndex(item => item.id === action.beforeId) : others.length) : -1;
       showError(said.state, cause, {
         title: said.title,
         key,
@@ -108,8 +133,10 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
           label: "Try again",
           icon: "retry",
           run: async () => {
-            await onChange(action);
-            if (mounted.current && action.type === "move") setMovedBack(null);
+            const again = againNow(action, target, latest.current.queue);
+            // The tray has gone (its tab closed): nothing else here changes the queue.
+            if (!mounted.current) return onChange(again);
+            return change(again, true);
           },
         }],
       });
