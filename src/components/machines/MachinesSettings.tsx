@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Check, ChevronRight, Copy, Ellipsis, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { RegisteredSetting } from "@/components/settings/settingsRegistry";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
@@ -10,7 +9,7 @@ import { minutesSeconds, useSecondsLeft } from "@/components/pairing/pairingText
 import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
-import { bootMachineHost, createMachineCode, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { bootMachineHost, createMachineCode, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
@@ -22,6 +21,8 @@ import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connecti
 import { PlatformIcon, keyLabel, osLabel, routeLabel, seenText, shortDate, soft } from "./machineText";
 import { runningText, useRunningSessions } from "./useRunningSessions";
 import { MachinePage } from "./MachinePage";
+import { RemoveMachineDialog } from "./RemoveMachineDialog";
+import { takeMachinePageRequest, useMachinePageRequest } from "@/lib/machinePage";
 
 const heading = "text-[14px] font-semibold";
 const card = "flex min-h-14 items-center gap-3 rounded-lg border border-hairline px-3 py-2.5";
@@ -41,6 +42,13 @@ export function MachinesSettings() {
 function MachinesSettingsContent() {
   // A machine's page (21.10) in place of the list; Machines in its breadcrumb comes back.
   const [page, setPage] = useState<string | null>(null);
+  // Asked for from elsewhere (the new-session form's "Open its machine page").
+  const requested = useMachinePageRequest();
+  useEffect(() => {
+    if (!requested) return;
+    setPage(requested);
+    takeMachinePageRequest(requested);
+  }, [requested]);
   if (page) return <MachinePage machineId={page} onBack={() => setPage(null)} />;
   return <MachinesList onOpen={setPage} />;
 }
@@ -388,50 +396,6 @@ function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMachine; on
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
-  );
-}
-
-/**
- * Remove a machine: its sidebar section and its credential go. Nothing on the
- * machine changes; its sessions keep running there.
- */
-function RemoveMachineDialog({ machine, onClose }: { machine: PairedMachine | null; onClose: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setError(null);
-    setBusy(false);
-  }, [machine]);
-  if (!machine) return null;
-  const remove = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await machinesApi.remove(machine.machineId);
-      await refreshPairedMachines();
-      onClose();
-    } catch (e) {
-      setError(errorMessage(e));
-      setBusy(false);
-    }
-  };
-  return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent width="max-w-[440px]" data-testid="remove-machine">
-        <DialogTitle className="text-sm font-semibold">Remove {machine.name}?</DialogTitle>
-        <DialogDescription className={cn(soft, "grid gap-2")}>
-          <span>{machine.name} leaves the sidebar, and this Mac forgets its credential. To operate it again, pair it again.</span>
-          <span>Sessions on {machine.name} stay there and keep running. Nothing on {machine.name} is changed or deleted.</span>
-        </DialogDescription>
-        {error && <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
-          <Button variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
-            {busy ? <LoaderCircle className="animate-spin" /> : null} Remove
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
