@@ -60,7 +60,7 @@ pub struct InspectedMachineCode {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub enum MachinePairResult {
-    Paired { paired: bool, machine: PairedMachine },
+    Paired { paired: bool, machine: Box<PairedMachine> },
     NotPaired { paired: bool, reason: &'static str, message: String },
 }
 
@@ -191,7 +191,7 @@ impl Machines {
         })
         .await??;
         log::info!("machines: paired with machine {}", machine.machine_id);
-        Ok(MachinePairResult::Paired { paired: true, machine })
+        Ok(MachinePairResult::Paired { paired: true, machine: Box::new(machine) })
     }
 
     pub fn cancel_pairing(&self) {

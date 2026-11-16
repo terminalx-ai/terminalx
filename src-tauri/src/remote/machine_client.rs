@@ -765,7 +765,7 @@ enum Background {
 
 /// How a round ended.
 enum RoundEnd {
-    Connected(Route, u64, Established),
+    Connected(Route, u64, Box<Established>),
     Failed,
     AccessRemoved,
     NeedsUpdate(Option<String>),
@@ -867,13 +867,13 @@ impl Run {
                 }
             }
             let end = match ready {
-                Some((route, link, established)) => RoundEnd::Connected(route, link, established),
+                Some((route, link, established)) => RoundEnd::Connected(route, link, Box::new(established)),
                 None => self.round().await,
             };
             match end {
                 RoundEnd::Stopped => break,
                 RoundEnd::Connected(route, link, established) => {
-                    if !self.connected(&mut commands, route, link, established).await {
+                    if !self.connected(&mut commands, route, link, *established).await {
                         break;
                     }
                 }
@@ -987,7 +987,7 @@ impl Run {
                 _ = self.stopped.changed() => return RoundEnd::Stopped,
             };
             match dialed {
-                Ok(established) => return RoundEnd::Connected(route, link, established),
+                Ok(established) => return RoundEnd::Connected(route, link, Box::new(established)),
                 Err(DialFailure::AccessRemoved) => return RoundEnd::AccessRemoved,
                 Err(DialFailure::NeedsUpdate { version }) => return RoundEnd::NeedsUpdate(version),
                 Err(DialFailure::RelayCredentialRefused) => {
