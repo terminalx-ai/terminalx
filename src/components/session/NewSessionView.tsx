@@ -387,7 +387,8 @@ export function NewSessionView({
     let held = false;
     try {
       if (plan.kind === "create") {
-        setStarting("Checking your organization's limits…");
+        // The limits are still checked first; the wait reads as one step, the create the person asked for.
+        setStarting("Creating the workspace…");
         const request = cloudRequest();
         const unsettled = unsettledCreate.current;
         const resend =
