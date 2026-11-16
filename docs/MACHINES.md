@@ -1242,6 +1242,54 @@ whenever a machine's state changes. `machines_list` answers each record with
 `lastRoute` and `relay` (no secret). `cloud_remote_attach_dev` and the debug
 Development section are gone; their tests use `machine_remote_attach`.
 
+### As built (PRO-346): the overview, the badge and the key guards
+
+All of this is behind Settings → Experimental → Machines. AppShell passes
+the switch to `setMachineDashboardEnabled` (`src/lib/machineDashboard.ts`),
+and while it is off every reader below gets no machine session.
+
+**The overview.** The owner decided (2026-11-16) to fit machines into the
+PRO-194 board and table instead of building a new left column. Each machine
+session is projected into a `DashboardSession` (`MachineDashboardSession`,
+`kind: "machine"`) from the machine catalog, the same way as cloud sessions
+(`cloudDashboard.ts`). A saved wait still counts. A saved "working" does not,
+so only a connected machine shows a session as Working. A finished turn
+counts while it is unread. With a machine paired and Machines on:
+
+- The table has a **Where** column after Project: This Mac, the machine's
+  name with its icon, or Cloud (`WHERE_COLUMN`, `tableColumns(true)`).
+  `TABLE_COLUMNS` itself is unchanged.
+- The toolbar has an **All machines** menu with All machines, This Mac, each
+  paired machine (icon, state mark and session count) and Cloud (only when
+  cloud sessions exist). This menu replaces the design's "By machine" group.
+- Machine projects appear in the Project filter as "name · machine".
+  Opening a machine card or row selects its key, and AppShell shows it in
+  its machine's view.
+
+Without a paired machine, or with Machines off, the overview looks the same
+as before.
+
+**Badge, notices, stepping.** In the main window, the dock badge counts
+machine sessions that are waiting or finished unread, the same way it counts
+cloud sessions. `createMachineAttentionTracker` raises a notice when a tab
+starts waiting, or when a working tab finishes unread. It only does this on
+a machine that was also connected on the previous pass. As a result, the
+first connected pass (at launch or after a reconnect) counts as already
+known, and nothing comes from the save alone. A notice opens the machine
+session. Next session and Next needs-you step through machine sessions too.
+A custom sidebar order applies only to this Mac's sessions; cloud and
+machine sessions follow by recent activity.
+
+**Key guards.** On top of the sites decision 8 listed, these now use
+`isLocalKey`: reporting the shown session, the idle sweep, row statuses, PR
+linking, merged-cleanup local toggles, the environment and layered settings
+project lists, and the Archive shortcut. The Archive shortcut sends a machine
+session's archive to the machine (`updateMachineSession`). `CloudCollab` and
+`CloudNewSession` read an organization only through `cloudKeyOrgId`, which
+answers null for a machine key. `src/lib/machineGuards.test.ts` lists every
+remaining `"cloud:"` / `isCloudKey(` site with the reason it is safe, and
+fails on any new one.
+
 ## Trust model
 
 PRO-357 adds the threat model and its tests here. What each party can see and do:
