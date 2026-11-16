@@ -649,7 +649,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.
@@ -1138,7 +1138,14 @@ impl Run {
         if self.updating.as_ref().is_some_and(|(_, _, heard)| heard.elapsed() >= UPDATING_FOR) {
             self.updating = None;
         }
-        let state = if let Some((version, since, _)) = self.updating.as_ref().filter(|_| self.lost_at.is_some()) {
+        let updating = self.updating.as_ref().filter(|_| self.lost_at.is_some()).cloned();
+        // A round starting (`retry` zero) past the offline mark has no next
+        // try to name yet: the state already shown stays, with its real
+        // retry time, rather than an `offline` that says it retries in 0 ms.
+        if retry.is_zero() && updating.is_none() && since.elapsed() >= OFFLINE_AFTER {
+            return;
+        }
+        let state = if let Some((version, since, _)) = updating.as_ref() {
             MachineConnectionState::Updating { version: version.clone(), since: *since }
         } else if since.elapsed() >= OFFLINE_AFTER {
             MachineConnectionState::Offline { last_seen_at: self.last_seen_at, retry_in_ms, local_network_denied: self.local_network_denied }

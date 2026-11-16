@@ -745,7 +745,7 @@ the pull request that adds it.
 | `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |
 | `session.stop` | `agent-commands/1` | Served | Drops queued sends, stops the agent; applied again after a crash (decision 3) |
 | `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |
-| `runtime.agents` | `agents/1` | Served | Machine-wide; PRO-350 adds each agent's sign-in state as a field |
+| `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
 | `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3) |
@@ -813,7 +813,7 @@ the pull request that adds it.
 | `pipeline.noteMerge` | `pipeline/1` | Not served | Exists because a cloud runtime cannot merge; a machine's pipelines merge with the machine's own `gh` (`src-tauri/src/issue_pipeline/host.rs`) |
 | `pipeline.noteTracker` | `pipeline/1` | Not served | Exists because a cloud runtime holds no Linear key; a machine uses its own (`src-tauri/src/issue_pipeline/host.rs:81`) |
 | `lifecycle.dispositionFacts` | `lifecycle/1` | Not served | Facts before a cloud workspace is archived or deleted; nothing archives a machine |
-| `lifecycle.resources` | `lifecycle/1` | Served | Measures the disk of the root it is given (`src-tauri/src/remote/server.rs:1064`); a machine measures its data directory's disk |
+| `lifecycle.resources` | `lifecycle/1` | Served | Measures the disk of the root it is given (`src-tauri/src/remote/server.rs:1064`); a machine measures its data directory's disk, its memory and its processor (PRO-350) |
 | `collab.state` | `collab/1` | Not served | Sharing with other people is out of scope (PRO-338) |
 | `presence.update` | `collab/1` | Not served | As `collab.state` |
 | `notes.list` | `collab/1` | Not served | As `collab.state` |
@@ -831,6 +831,8 @@ the pull request that adds it.
 | `machine.relayAccess` | `machine/2` | Served | A paired computer's relay invite, or `{ relay: null }` with no relay registration (PRO-345) |
 | `machine.updateStatus` | `machine/3` | Served | The machine's version and what it could update to (PRO-354, [Versions and updates](#versions-and-updates-pro-354)) |
 | `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
+| `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
+| `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1343,6 +1345,78 @@ session's archive to the machine (`updateMachineSession`). `CloudCollab` and
 answers null for a machine key. `src/lib/machineGuards.test.ts` lists every
 remaining `"cloud:"` / `isCloudKey(` site with the reason it is safe, and
 fails on any new one.
+
+### As built (PRO-350): the machine page
+
+Settings → Machines opens a machine's page from its card (screen 21.10):
+the header (name, state, system, route, key fingerprint, paired date and
+Rename), the version banner (PRO-354), **Agents**, **Resources** and
+**Remove this machine**. Projects on the page are PRO-351.
+
+**Sign-in state.** `runtime.agents` (still `agents/1`; every field is
+additive) gives each installed agent `version` (its CLI's, or null),
+`signIn` (`signedIn`, `signedOut` or `unknown`) and `signInCheckedAt`, read
+with the same probe Settings → Agents uses on this Mac
+(`harness::readiness`: `claude auth status --json`, Codex's
+`account/read`). A probe that fails or cannot tell is `unknown`, never
+signed out. The result also lists `missing: { id, name, installable }[]`,
+the agents the runtime knows with no CLI there. With agent accounts (#980)
+the login read is the agent's default account's, the one new sessions
+there start on: a subscription account's own directory, else the CLI's own
+login. The probes start a process each, so the runtime keeps their answers
+for a minute; `{ refresh: true }` from a manager asks again now (anyone
+else is answered from the kept check), and a setup step's exit drops them. An older runtime sends
+none of these fields: its agents show without a state, and nothing offers
+Install.
+
+**Install and Sign in on the machine (`machine/4`).** Only a runtime that
+serves its machine grants it.
+
+| Method | Authority | Params | Result |
+| --- | --- | --- | --- |
+| `machine.agentSetup` | `Manage` | `{ harness, step: "install" \| "login", cols, rows }` | the terminal, as `pty.create` describes one, with `setup: { harness, step }` |
+| `machine.agentSetupRunning` | `Manage` | `{ harness }` | `{ run: { ptyId, step } \| null }` |
+
+- The command is the runtime's, made from its harness registry
+  (`harness::setup::command`), exactly as a setup pane on that computer runs
+  it: the provider's official installer, then the CLI's own sign-in. The
+  caller names only the agent and the step.
+- A sign-in run for a computer that is not the machine uses the CLI's
+  sign-in for a device without a browser where the CLI has one (Codex:
+  `codex login --device-auth`); Claude Code's `claude auth login` prints its
+  address and takes the code pasted back. The address opens in this Mac's
+  browser; the login it makes stays on the machine. Nothing of this Mac's
+  (no key, token, file or environment) is sent: the terminal starts with
+  the machine's own environment, in the machine user's home.
+- One step at a time per agent, whichever computer or the machine's own
+  window asks (`harness::setup` notes the steps started for other
+  computers, and the window's own setup counts them): a second start is
+  refused with `setup_busy`. Its `data` is
+  the run (`{ ptyId, step }`), which the caller attaches to instead, when it
+  runs in a terminal of the connection; there is none when the machine's own
+  window runs the step in one of its setup panes.
+- The terminal is attached, typed into, sized and killed as any other
+  (`pty.attach`, `pty.write`, `pty.resize`, `pty.kill`), by a manager
+  only: a sign-in shows a device code or a login address, and whoever
+  completes it chooses the account the machine's CLI signs in to. It is never in
+  `pty.list`, and ends with `pty.exit`; its exit code is the setup wrapper's
+  (`harness::setup::exit`, `SETUP_EXIT` in `src/lib/agentSetupFlow.ts`). The
+  page then reads `runtime.agents` with `refresh` and says what the probe
+  says; the exit code alone is never taken as signed in.
+- The new-session form for a machine names an agent that is not signed in
+  there and says to sign in from the machine's page.
+
+**Resources.** `lifecycle.resources` adds `cpu: { cores, usage }`, where
+`usage` (0 to 1) is how busy every core was since the previous call on that
+runtime, null on the first. A Mac machine reports its memory too (it was
+Linux only). The page asks every 5 seconds while it is open.
+
+**Rename** (`machines_rename { machineId, name }`) changes the name this
+computer shows for the machine, on its card, sidebar and page; the record
+keeps `namedHere: true`, so the name the machine gives itself in
+`machine.describe` no longer replaces it. Nothing on the machine changes.
+
+**Remove** is `machines_remove`, as on the card (PRO-349).
 
 ### Versions and updates (PRO-354)
 

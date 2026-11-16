@@ -126,8 +126,8 @@ try {
       // Check the bridge contract directly: do not depend on the 15s background
       // timer firing before this layout finishes to catch a bogus updater handle.
       assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, `${context}: fixture reports no app update`);
-      // The sidebar's destination is "Dashboard, <counts>" since the chat-first sidebar (#484); it was "Agent Dashboard".
-      await page.getByRole("button", { name: /^Dashboard/ }).click();
+      // The sidebar's destination is "Overview, <counts>" (PRO-384); it was "Dashboard" (#484) and "Agent Dashboard" before.
+      await page.getByRole("button", { name: /^Overview/ }).click();
       await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
       await page.getByText(`${count * 8} total`, { exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();

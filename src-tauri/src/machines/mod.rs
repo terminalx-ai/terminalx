@@ -198,6 +198,7 @@ impl Machines {
             last_seen_at: Some(now),
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         };
         let keep = self.clone();

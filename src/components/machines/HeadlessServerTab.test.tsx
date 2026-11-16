@@ -84,9 +84,7 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
     ]);
     expect(within(dialog).getByRole("region", { name: "On the server" })).toBeTruthy();
 
-    const note = within(dialog).getByTestId("headless-agents-note");
-    expect(note.textContent).toBe("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.");
-    expect([...note.querySelectorAll("code")].map((code) => code.textContent)).toEqual(["claude", "codex login --device-auth"]);
+    expect(within(dialog).getByText("Agents sign in on the server after pairing, from its machine page.")).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeTruthy();
     expect((within(dialog).getByRole("button", { name: "Continue" }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command !== "machines_account_list")).toEqual(["machine_name"]);

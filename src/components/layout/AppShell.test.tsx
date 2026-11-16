@@ -107,7 +107,8 @@ const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }))
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
 // PRO-346: machine sessions in the overview, badge and notices follow the switch; Archive goes to the machine.
 const machineSessions = vi.hoisted(() => ({ enabled: vi.fn(), update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
-vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled }));
+// The shell reads the switch back (PRO-348): on once it was last set on.
+vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled, useMachineDashboardEnabled: () => machineSessions.enabled.mock.lastCall?.[0] === true }));
 vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
 vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
@@ -156,7 +157,7 @@ vi.mock("@/lib/models", () => ({
 }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
-vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn() }));
+vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
 vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));

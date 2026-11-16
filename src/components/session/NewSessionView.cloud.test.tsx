@@ -194,13 +194,14 @@ describe("new session in a cloud project", () => {
 
   /** The catalog with the workspace Create just made, at this point of its start. */
   const listed = (launch: Record<string, unknown>) => ({ orgs: { "org-a": { workspaces: [{ workspace: { id: "ws-new", orgId: "org-a", name: "Start the API", state: "provisioning", launch } }] } } });
-  const form = <NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />;
+  // A new element each time: React skips a rerender handed the same one, and the catalog would not be read again.
+  const form = () => <NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />;
 
   it("creates the workspace on Create, with no second confirmation, and stays busy until its session opens (PRO-409)", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "create" });
     flow.prepareCloudCreate.mockResolvedValue(prepared);
     flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
-    const view = render(form);
+    const view = render(form());
     type("Start the API");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
@@ -212,12 +213,12 @@ describe("new session in a cloud project", () => {
 
     // Where the start is comes from the catalog.
     catalog.value = listed({ phase: "syncing-repository" });
-    view.rerender(form);
+    view.rerender(form());
     await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("syncing repository"));
 
     // Its first session is there: the wait is over (the session is opened by `followLaunch`).
     catalog.value = listed({ phase: "running", sessionId: "s-1" });
-    view.rerender(form);
+    view.rerender(form());
     await waitFor(() => expect(screen.queryByTestId("cloud-start-status")).toBeNull());
   });
 
@@ -225,12 +226,12 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "create" });
     flow.prepareCloudCreate.mockResolvedValue(prepared);
     flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
-    const view = render(form);
+    const view = render(form());
     type("Start the API");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("Starting the workspace"));
     catalog.value = listed({ phase: "failed", state: "failed", category: "payload-invalid" });
-    view.rerender(form);
+    view.rerender(form());
     expect(await screen.findByText(/The launch settings were not accepted by the workspace\./)).toBeTruthy();
     expect(screen.queryByTestId("cloud-start-status")).toBeNull();
   });
@@ -243,7 +244,7 @@ describe("new session in a cloud project", () => {
       form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode },
     }));
     flow.confirmCloudCreate.mockRejectedValueOnce({ code: "cloud_workspace_request_timeout", status: 0, retryWithSameIdempotencyKey: true }).mockResolvedValue({ workspace: { id: "ws-new" } });
-    render(form);
+    render(form());
     type("Start the API");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
