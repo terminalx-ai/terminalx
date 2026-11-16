@@ -2696,6 +2696,8 @@ export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  /** Exclusive create: rejects when the path already exists, leaving that file as it is. */
+  createText: (path: string, content: string) => invoke<number>("create_text_file", { path, content }),
   /** A file's whole text, past the 4 MB the editor shows (the file tab's Copy file contents). */
   readWholeText: (path: string) => invoke<string>("read_whole_text_file", { path }),
   /** Save a copy at `to`: the exact bytes of the local file `from`, or `content`. */
