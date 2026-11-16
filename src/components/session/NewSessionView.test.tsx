@@ -863,6 +863,58 @@ describe("what the new-session view says about the project and the agents (PRO-2
     expect(screen.queryByRole("region", { name: "Codex setup" })).toBeNull();
   });
 
+  it("keeps the notice and its open details through a re-check when no agent can start (#1064 review)", async () => {
+    let release: (() => void) | null = null;
+    let held = false;
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? held ? new Promise((resolve) => { release = () => resolve({ state: "signed_out", checkedAt: null, version: null }); })
+        : Promise.resolve({ state: "signed_out", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.click(within(await screen.findByTestId("agent-setup-notice")).getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+    held = true;
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(release).not.toBeNull());
+    // The re-check is under way: the last answer still stands, and the open card stays open.
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+    await act(async () => { release!(); });
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+  });
+
+  it("drops an agent picked for setup when dismissed, or when another agent is picked, so a later sign-in never switches the chat (#1064 review)", async () => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex", installable: true, installUrl: "https://example.com/codex" }, { ...harness, id: "gemini", name: "Gemini" }];
+    let codex = "signed_out";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: args.harness === "codex" ? codex : "ready", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    const pick = async (name: string) => {
+      fireEvent.click(screen.getByTestId("agent-menu"));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+      for (const menu of screen.queryAllByRole("menu", { hidden: true }).reverse()) fireEvent.keyDown(menu, { key: "Escape" });
+    };
+
+    await pick("Codex");
+    fireEvent.click(within(await screen.findByTestId("agent-setup-notice")).getByRole("button", { name: "Dismiss Codex setup" }));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    await pick("Codex");
+    await screen.findByTestId("agent-setup-notice");
+    await pick("Gemini");
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Gemini · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    codex = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command, args]) => command === "check_agent_readiness" && args.harness === "codex").length).toBeGreaterThan(1));
+    await act(async () => {});
+    expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Gemini · Bypass");
+  });
+
   it("lists only the agents that are installed and signed in, beside the Create note", async () => {
     const codex = { id: "codex", name: "Codex", available: true, installHint: "" } as HarnessInfo;
     const gemini = { id: "gemini", name: "Gemini", available: true, installHint: "" } as HarnessInfo;

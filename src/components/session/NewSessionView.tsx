@@ -231,7 +231,8 @@ export function NewSessionView({
   const machineSignIn = machine ? agentSignIn(machine.agents, harness?.id) : null;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
   // Setup belongs to the agent the person picks (#1064): one notice, for one agent, only when this Mac
-  // knows it is missing or signed out. A check under way or an unverified login shows nothing.
+  // knows it is missing or signed out. The first check under way (no answer yet) or an unverified login
+  // shows nothing; a re-check keeps the last answer, so the notice and its open card stay put.
   const [setupPick, setSetupPick] = useState<string | null>(null);
   const needsSetup = (id: string) => {
     const state = readiness.values?.[id]?.state;
@@ -240,8 +241,7 @@ export function NewSessionView({
   const setupTarget = remote ? null
     : store.harnesses.find((item) => item.id === setupPick && needsSetup(item.id))
       ?? (harness ? (needsSetup(harness.id) ? harness : null)
-      // Nothing can start: the agent last used, else the first, once the check has answered.
-      : readiness.checking ? null
+      // Nothing can start: the agent last used, else the first, once a check has answered.
       : store.harnesses.find((item) => item.id === prefs.lastAgent && needsSetup(item.id)) ?? store.harnesses.find((item) => needsSetup(item.id)) ?? null);
   // The agent picked for setup is ready now: it is the one the chat starts with.
   const pickedReady = !!setupPick && readiness.values?.[setupPick]?.state === "ready";
@@ -250,6 +250,8 @@ export function NewSessionView({
     agentSelection.selectHarness(setupPick);
     setSetupPick(null);
   }, [pickedReady, setupPick]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Picking an agent that can start drops the setup pick: a later sign-in elsewhere never overrides that choice.
+  const menuSelection = setupPick ? { ...agentSelection, selectHarness: (id: string) => { setSetupPick(null); agentSelection.selectHarness(id); } } : agentSelection;
 
   useEffect(() => {
     let cancelled = false;
@@ -915,7 +917,7 @@ export function NewSessionView({
             </div>
 
             <div className="flex items-center gap-1 px-2.5 pb-2.5">
-              <AgentMenu split selection={agentSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
+              <AgentMenu split selection={menuSelection} disabled={busy} onSetup={remote ? undefined : setSetupPick} />
               {!remote && harness && !available && (
                 <span className="min-w-0 truncate text-xs text-warning" title={harness.installHint}>
                   {harness.name} isn't installed
@@ -974,7 +976,8 @@ export function NewSessionView({
               {!remote && !projectless && preset && !project && <p role="alert" className="text-xs text-destructive">The requested project is no longer attached. Add it again or choose a project before sending.</p>}
               {/* One notice, for one agent, only when it is known missing or signed out (#1064): never a card per agent, nothing while checking. */}
               {setupTarget && (
-                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness} onRefresh={() => {
+                <AgentSetupNotice key={setupTarget.id} harness={setupTarget} value={readiness.values?.[setupTarget.id] ?? null} checking={readiness.checking || busy} blocking={!harness}
+                  onDismiss={setupTarget.id === setupPick ? () => setSetupPick(null) : undefined} onRefresh={() => {
                   void Promise.all([readiness.refresh(), refreshHarnesses()]).catch(() => setError("Could not re-check installed agents. Try again."));
                 }} />
               )}
@@ -983,10 +986,10 @@ export function NewSessionView({
                   {busy && <Loader2 className="size-3.5 animate-spin" />} {starting}
                 </div>
               )}
-              {!remote && harness && !available && (
+              {/* The notice above already offers the install when it is for this agent. */}
+              {!remote && harness && !available && setupTarget?.id !== harness.id && (
                 <p className="text-xs text-muted-foreground">
-                  {harness.installable ? <>Install it with <span className="font-medium text-foreground">Install and sign in</span> above, or run </> : "Install it with "}
-                  <code className="font-mono">{harness.installHint}</code>
+                  Install {harness.name} by running <code className="font-mono">{harness.installHint}</code>
                 </p>
               )}
               {/* Reached with a role that changed meanwhile (demoted while drafting): Create is off, with the reason. */}

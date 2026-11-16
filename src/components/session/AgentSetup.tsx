@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Download, Loader2, RotateCw } from "@/icons";
+import { Download, Loader2, RotateCw, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { copyText } from "@/lib/clipboard";
@@ -112,13 +112,15 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
  * work. The line offers the install or sign-in and the setup guide; the full setup opens from it on
  * demand, and shows by itself while a run it started is under way or has stopped.
  */
-export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking }: {
+export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking, onDismiss }: {
   harness: HarnessInfo;
   value: AgentReadiness | null;
   checking: boolean;
   onRefresh: () => void;
   /** No other agent can start this chat: say so, and that the draft stays. */
   blocking: boolean;
+  /** Set when the person picked this agent for setup: closing the notice drops that pick. */
+  onDismiss?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const flow = useAgentSetupFlow(harness.id);
@@ -144,6 +146,7 @@ export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking
     </Button>}
     <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
     <Button type="button" size="xs" variant="ghost" aria-expanded={false} onClick={() => setOpen(true)}>Details</Button>
+    {onDismiss && <Button type="button" size="icon-xs" variant="ghost" aria-label={`Dismiss ${harness.name} setup`} onClick={onDismiss}><X /></Button>}
   </div>;
 }
 
