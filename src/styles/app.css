@@ -444,6 +444,61 @@
   padding: 10px 12px;
 }
 
+/* A file's Markdown preview (PRO-397), laid over .prose-chat: a document, not a reply. The headings have sizes, the
+   checklist shows its boxes only, and a code block is a plain mono block with no header, buttons or numbers. */
+.prose-preview .prose-chat p,
+.prose-preview .prose-chat li,
+.prose-preview .prose-chat blockquote,
+.prose-preview .prose-chat h1,
+.prose-preview .prose-chat h2,
+.prose-preview .prose-chat h3,
+.prose-preview .prose-chat h4 {
+  max-width: none;
+}
+.prose-preview .prose-chat h1 {
+  font-size: 22px;
+  line-height: 1.3;
+  margin: 0 0 0.6em;
+}
+.prose-preview .prose-chat h2 {
+  font-size: 15px;
+  line-height: 1.4;
+  margin: 1.6em 0 0.7em;
+  padding-bottom: 0.45em;
+  border-bottom: 1px solid var(--hairline);
+}
+.prose-preview .prose-chat ul.contains-task-list,
+.prose-preview .prose-chat ul:has(> li.task-list-item) {
+  list-style: none;
+  padding-left: 0;
+}
+.prose-preview .prose-chat li.task-list-item {
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+}
+.prose-preview .prose-chat li.task-list-item > input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+  align-self: center;
+}
+.prose-preview .prose-chat [data-streamdown="code-block-header"],
+.prose-preview .prose-chat [data-streamdown="code-block-actions"] {
+  display: none !important;
+}
+.prose-preview .prose-chat [data-streamdown="code-block"] > [data-streamdown="code-block-header"] + div:not([data-streamdown]) {
+  margin-top: 0 !important;
+}
+.prose-preview .prose-chat [data-streamdown="code-block-body"] pre {
+  font-family: var(--font-mono);
+}
+.prose-preview .prose-chat [data-streamdown="code-block-body"] pre code > span::before,
+.prose-preview .prose-chat [data-streamdown="code-block-body"] pre code .line::before {
+  content: none !important;
+  display: none !important;
+}
+
 /* Terminal panels supply the ground; xterm's own viewport stays clear. */
 .terminal-host .xterm,
 .terminal-host .xterm .xterm-viewport,
