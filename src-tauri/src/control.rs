@@ -521,6 +521,16 @@ impl ControlService {
                         None => Err(ControlError::new("unsupported", "This runtime does not host operating computers.", None::<String>)),
                     };
                 }
+                // The window's report of the app's own updater run, for a
+                // computer that asked this machine to update (PRO-354). Only
+                // the attached window reports.
+                if command == "runtime.machineUpdate.report" {
+                    let epoch = params["epoch"].as_str().unwrap_or_default();
+                    let lease = params["lease"].as_str().unwrap_or_default();
+                    lifetime.attachment(epoch, lease).map_err(|_| ControlError::new("unavailable", "The desktop attachment is no longer current.", None::<String>))?;
+                    let data = crate::store::root().map_err(ControlError::internal)?;
+                    return crate::remote::machine_update::report(&data, &params).map_err(|error| ControlError::invalid(format!("{error:#}")));
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
