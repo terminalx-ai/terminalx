@@ -418,6 +418,19 @@ const CHANGE_LABEL: Record<string, string> = {
 
 export const changeLabel = (change: string) => CHANGE_LABEL[change] ?? change;
 
+// The same changes said briefly, for the "Unbuilt changes · Changed: install script" bar.
+const SHORT_CHANGE_LABEL: Record<string, string> = {
+  "install-script": "install script",
+  "repositories-added": "repositories added",
+  "repositories-removed": "repositories removed",
+  "repository-branch": "default branch",
+  "setup-steps": "setup steps",
+  toolchain: "base tools",
+  runtime: "TerminalX runtime",
+};
+
+export const shortChangeLabel = (change: string) => SHORT_CHANGE_LABEL[change] ?? change;
+
 export const CHECK_LABEL: Record<RecipeCheckKind, string> = { install: "Install", lint: "Lint", test: "Test", build: "Build", start: "Start" };
 
 /**

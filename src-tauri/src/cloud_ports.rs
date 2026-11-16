@@ -4,12 +4,21 @@
 //! already open.
 //!
 //! A [`PortForwarder`] belongs to one connection, so to one workspace of one
-//! account: its listeners are never handed to another workspace. They close
-//! when the connection stops being live (the workspace stopped, access was
-//! revoked, the relay dropped), when it is detached, and when the active
-//! organization changes; a preview is opened again by the person, never
-//! revived. It only sends `ports.*` requests and never changes the
-//! connection's activation, so nothing here can resume a stopped workspace.
+//! account (or one paired machine): its listeners are never handed to another.
+//! They close when the connection stops being live (the workspace stopped,
+//! access was revoked, the relay dropped), when it is detached, and when the
+//! active organization changes. A cloud workspace's forwards are then gone: a
+//! preview is opened again by the person, never revived. A paired machine's
+//! forwards wait instead and open again when its link returns (PRO-355,
+//! docs/MACHINES.md). Detaching forgets everything either way.
+//!
+//! Two switches per connection (PRO-355): Forwarding (on by default; off
+//! closes every listener and keeps the forwards waiting) and auto-forward (off
+//! by default; while on and connected, `ports.list` is read every
+//! [`AUTO_POLL`] and each port that starts listening after the switch was
+//! turned on is forwarded, outside [`AUTO_SKIPPED`]). The forwarder only sends
+//! `ports.*` requests and never changes the connection's activation, so
+//! nothing here can resume a stopped workspace.
 //!
 //! What a listener on loopback exposes is stated in docs/CLOUD-PREVIEWS.md:
 //! any program of this user can connect, and a web page in the person's
@@ -18,7 +27,7 @@
 //! `Host` is not this loopback address is refused, which is what stops a web
 //! page from reading a preview through DNS rebinding.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,8 +61,26 @@ const DEFAULT_WINDOW: usize = 256 * 1024;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Streams whose data arrived before their `ports.open` answer.
 const MAX_EARLY_STREAMS: usize = 64;
+/// How often auto-forward reads `ports.list`.
+pub const AUTO_POLL: Duration = Duration::from_secs(2);
+/// Ports auto-forward leaves alone: the ephemeral range, where clients bind,
+/// not servers (`AUTO_FORWARD_SKIPPED` in src/lib/api.ts).
+pub const AUTO_SKIPPED: std::ops::RangeInclusive<u16> = 32768..=60999;
+/// Auto-forwards one connection keeps at once: a workspace that starts many
+/// listeners does not take as many ports on this Mac.
+pub const MAX_AUTO_FORWARDS: usize = 16;
 
-/// One forwarded port, as the interface shows it.
+/// Whether a forward is listening on this Mac now.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ForwardState {
+    Open,
+    /// Kept while the connection is away or Forwarding is off; opened again
+    /// (on the same local port when it is free) once both are back.
+    Waiting,
+}
+
+/// One forwarded port, as the interface shows it (`CloudPortForward`).
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Forward {
@@ -63,11 +90,41 @@ pub struct Forward {
     pub local_port: u16,
     /// The wanted local port was taken and another was used.
     pub reassigned: bool,
+    pub state: ForwardState,
+    /// Opened by auto-forward, not by the person.
+    pub auto: bool,
+}
+
+/// A connection's two switches (`CloudPortSettings`).
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSettings {
+    /// Forwarding: off closes every listener and keeps the forwards waiting.
+    pub enabled: bool,
+    /// Forward ports that start listening after this was turned on.
+    pub auto: bool,
+}
+
+impl Default for PortSettings {
+    fn default() -> Self {
+        Self { enabled: true, auto: false }
+    }
+}
+
+/// What changed, for `cloud_port_forwards_changed`: the forwards and switches
+/// as they now are, and the forwards that opened without a click (auto, or
+/// returned after a reconnect).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardsChanged {
+    pub forwards: Vec<Forward>,
+    pub settings: PortSettings,
+    pub opened: Vec<Forward>,
 }
 
 struct Listening {
     forward: Forward,
-    stop: CancellationToken,
+    /// Closes the listener; `None` while the forward is waiting.
+    stop: Option<CancellationToken>,
 }
 
 struct Stream {
@@ -97,21 +154,43 @@ struct State {
     /// The active organization when the first forward was made; a forward
     /// does not outlive a switch to another.
     scope: Option<String>,
+    /// Requests awaiting their answer: `ports.open`, and auto-forward's `ports.list`.
     opens: HashMap<String, oneshot::Sender<Result<Value, String>>>,
     streams: HashMap<String, Stream>,
     early: HashMap<String, Early>,
+    settings: PortSettings,
+    /// The ports auto-forward's last list reported listening; `None` until its
+    /// first list, which only records what already listens. A port missing
+    /// from a later list is forgotten, so a server that stops and starts again
+    /// is new to it.
+    seen: Option<HashSet<u16>>,
+    /// Ports the person stopped while auto-forward was on: not taken again
+    /// while they keep listening, forgotten once a list no longer has them.
+    stopped: HashSet<u16>,
+    /// The active organization when auto-forward was turned on.
+    auto_scope: Option<String>,
+    /// Stops the auto-forward reader while one runs.
+    poll: Option<CancellationToken>,
+    /// What was last told, so an unchanged state is not told again.
+    told: Option<(Vec<Forward>, PortSettings)>,
 }
 
 type Send = Box<dyn Fn(Value) -> bool + std::marker::Send + Sync>;
+type OnChange = Box<dyn Fn(ForwardsChanged) + std::marker::Send + Sync>;
 
 struct Inner {
     send: Send,
+    /// A paired machine's connection: forwards wait through a dropped link
+    /// and return with it, and no organization scopes them.
+    returns: bool,
     /// Connected, with `ports/1` granted.
     ready: AtomicBool,
     state: Mutex<State>,
     next: AtomicUsize,
     /// Local connections being carried.
     carried: AtomicUsize,
+    /// Told every change. Held while telling, so changes are told in order.
+    on_change: Mutex<Option<OnChange>>,
 }
 
 #[derive(Clone)]
@@ -142,97 +221,380 @@ fn refusal(code: &str, port: u16) -> (&'static str, String) {
 const STOPPED: &str = "This cloud workspace is stopped or not connected. Start it in TerminalX, then reload. Nothing was started by opening this page.";
 
 impl PortForwarder {
-    /// `send` hands a request frame to the workspace connection; false when
-    /// it could not be sent.
+    /// A cloud workspace's forwarder. `send` hands a request frame to the
+    /// workspace connection; false when it could not be sent.
     pub fn new(send: impl Fn(Value) -> bool + std::marker::Send + Sync + 'static) -> Self {
+        Self::with(send, false)
+    }
+
+    /// A paired machine's forwarder: its forwards wait through a dropped link
+    /// and open again when it returns.
+    pub fn for_machine(send: impl Fn(Value) -> bool + std::marker::Send + Sync + 'static) -> Self {
+        Self::with(send, true)
+    }
+
+    fn with(send: impl Fn(Value) -> bool + std::marker::Send + Sync + 'static, returns: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 send: Box::new(send),
+                returns,
                 ready: AtomicBool::new(false),
                 state: Mutex::new(State::default()),
                 next: AtomicUsize::new(0),
                 carried: AtomicUsize::new(0),
+                on_change: Mutex::new(None),
             }),
         }
+    }
+
+    /// Be told each change of the forwards or switches. `on_change` must not
+    /// call back into the forwarder.
+    pub fn on_change(&self, on_change: impl Fn(ForwardsChanged) + std::marker::Send + Sync + 'static) {
+        *self.inner.on_change.lock().unwrap() = Some(Box::new(on_change));
     }
 
     fn id(&self, kind: &str) -> String {
         format!("{REQUEST_PREFIX}{kind}-{}", self.inner.next.fetch_add(1, Ordering::Relaxed))
     }
 
+    fn ready(&self) -> bool {
+        self.inner.ready.load(Ordering::SeqCst)
+    }
+
+    /// Tell the forwards and switches as they now are, unless nothing changed
+    /// since last told and nothing `opened` by itself.
+    fn tell(&self, opened: Vec<Forward>) {
+        let on_change = self.inner.on_change.lock().unwrap();
+        let changed = {
+            let mut state = self.inner.state.lock().unwrap();
+            let now = (listed(&state), state.settings);
+            if opened.is_empty() && state.told.as_ref() == Some(&now) {
+                return;
+            }
+            state.told = Some(now.clone());
+            ForwardsChanged { forwards: now.0, settings: now.1, opened }
+        };
+        if let Some(on_change) = on_change.as_ref() {
+            on_change(changed);
+        }
+    }
+
     /// The connection's state changed. `capabilities` is what a connected
     /// runtime granted; `None` when it is not connected. Whatever ended the
     /// connection (the workspace stopped, access was revoked, the relay
     /// dropped), its streams and its listeners end with it: nothing keeps
-    /// answering on this Mac for a workspace that is not there, and nothing
-    /// comes back by itself when it returns.
+    /// answering on this Mac for a workspace that is not there. A cloud
+    /// workspace's forwards are gone and nothing comes back by itself when it
+    /// returns; a machine's wait and open again when it is connected.
     pub fn set_connected(&self, capabilities: Option<&[String]>) {
         let ready = capabilities.is_some_and(|granted| granted.iter().any(|capability| capability == "ports/1"));
         self.inner.ready.store(ready, Ordering::SeqCst);
-        if !ready {
-            self.shutdown();
-        }
+        let opened = if ready {
+            self.reopen()
+        } else {
+            if self.inner.returns {
+                self.hold();
+            } else {
+                self.close(false);
+            }
+            Vec::new()
+        };
+        self.poll_while_wanted();
+        self.tell(opened);
     }
 
     /// Close every forward unless `active` is still the organization they
-    /// were made under.
+    /// (or auto-forward) were made under.
     pub fn keep_scope(&self, active: Option<&str>) {
-        let changed = self.inner.state.lock().unwrap().scope.as_deref().is_some_and(|made_under| Some(made_under) != active);
+        let made_under = {
+            let state = self.inner.state.lock().unwrap();
+            [state.scope.clone(), state.auto_scope.clone()]
+        };
+        let changed = made_under.iter().flatten().any(|made_under| Some(made_under.as_str()) != active);
         if changed {
             log::info!("closing port forwards: the active organization changed");
             self.shutdown();
         }
     }
 
+    /// End every stream. Each one the runtime still holds is closed there
+    /// too while the connection is live.
     fn drop_streams(&self) {
-        let mut state = self.inner.state.lock().unwrap();
-        state.epoch += 1;
-        for (_, stream) in state.streams.drain() {
-            stream.end.cancel();
+        let ended: Vec<String> = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.epoch += 1;
+            let ended = state
+                .streams
+                .drain()
+                .map(|(id, stream)| {
+                    stream.end.cancel();
+                    id
+                })
+                .collect();
+            for (_, answer) in state.opens.drain() {
+                let _ = answer.send(Err("disconnected".into()));
+            }
+            state.early.clear();
+            ended
+        };
+        if self.ready() {
+            for stream_id in ended {
+                (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
+            }
         }
-        for (_, answer) in state.opens.drain() {
-            let _ = answer.send(Err("disconnected".into()));
-        }
-        state.early.clear();
     }
 
-    /// The connection is gone for good: listeners too.
-    /// Close every listener and stream. The connection itself is untouched.
-    pub fn shutdown(&self) {
+    /// Close every listener and keep each forward as waiting.
+    fn hold(&self) {
+        self.drop_streams();
+        let mut state = self.inner.state.lock().unwrap();
+        for listening in state.forwards.values_mut() {
+            if let Some(stop) = listening.stop.take() {
+                stop.cancel();
+            }
+            listening.forward.state = ForwardState::Waiting;
+        }
+    }
+
+    /// Close every listener and forget every forward; with `forget_settings`,
+    /// the switches and what auto-forward has seen too.
+    fn close(&self, forget_settings: bool) {
         self.drop_streams();
         let mut state = self.inner.state.lock().unwrap();
         for (_, listening) in state.forwards.drain() {
-            listening.stop.cancel();
+            if let Some(stop) = listening.stop {
+                stop.cancel();
+            }
         }
         state.scope = None;
+        if forget_settings {
+            state.settings = PortSettings::default();
+            state.seen = None;
+            state.stopped.clear();
+            state.auto_scope = None;
+            if let Some(poll) = state.poll.take() {
+                poll.cancel();
+            }
+        }
+    }
+
+    /// Open every waiting forward again, while connected with Forwarding on:
+    /// on the same local port when it is free, else on a new one
+    /// (`reassigned`). Returns those that opened.
+    fn reopen(&self) -> Vec<Forward> {
+        let mut opened = Vec::new();
+        let mut listeners = Vec::new();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if !self.ready() || !state.settings.enabled {
+                return opened;
+            }
+            for listening in state.forwards.values_mut().filter(|listening| listening.stop.is_none()) {
+                let wanted = listening.forward.local_port;
+                let Ok((listener, moved)) = bind(Some(wanted).filter(|wanted| *wanted != 0), false) else { continue };
+                let Ok(local) = listener.local_addr().map(|address| address.port()) else { continue };
+                let stop = CancellationToken::new();
+                listening.forward.local_port = local;
+                listening.forward.reassigned |= moved;
+                listening.forward.state = ForwardState::Open;
+                listening.stop = Some(stop.clone());
+                opened.push(listening.forward.clone());
+                listeners.push((listening.forward.port, listener, local, stop));
+            }
+        }
+        for (port, listener, local, stop) in listeners {
+            self.accept(port, listener, local, stop);
+        }
+        opened.sort_by_key(|forward| forward.port);
+        opened
+    }
+
+    /// The connection is gone for good (detached, or no longer this
+    /// person's): every listener and stream closes, and every forward and
+    /// switch is forgotten. The connection itself is untouched.
+    pub fn shutdown(&self) {
+        self.close(true);
+        self.tell(Vec::new());
     }
 
     pub fn forwards(&self) -> Vec<Forward> {
-        let mut forwards: Vec<Forward> = self.inner.state.lock().unwrap().forwards.values().map(|listening| listening.forward.clone()).collect();
-        forwards.sort_by_key(|forward| forward.port);
-        forwards
+        listed(&self.inner.state.lock().unwrap())
+    }
+
+    pub fn settings(&self) -> PortSettings {
+        self.inner.state.lock().unwrap().settings
+    }
+
+    /// Change either switch; answers the switches as they now are. `scope` is
+    /// the active organization, which auto-forward does not outlive.
+    pub fn set_settings(&self, enabled: Option<bool>, auto: Option<bool>, scope: Option<String>) -> PortSettings {
+        let (hold, reopen) = {
+            let mut state = self.inner.state.lock().unwrap();
+            if let Some(auto) = auto {
+                if auto && !state.settings.auto {
+                    // Only ports that start listening from now on.
+                    state.seen = None;
+                    state.stopped.clear();
+                    state.auto_scope = if self.inner.returns { None } else { scope };
+                }
+                state.settings.auto = auto;
+            }
+            let was = state.settings.enabled;
+            if let Some(enabled) = enabled {
+                state.settings.enabled = enabled;
+            }
+            (was && !state.settings.enabled, !was && state.settings.enabled)
+        };
+        if hold {
+            self.hold();
+        }
+        if reopen {
+            // Turned on by the person: not "opened without a click".
+            self.reopen();
+        }
+        self.poll_while_wanted();
+        self.tell(Vec::new());
+        self.settings()
+    }
+
+    /// Run auto-forward's reader while connected with both switches on, and
+    /// only then.
+    fn poll_while_wanted(&self) {
+        let mut state = self.inner.state.lock().unwrap();
+        let wanted = self.ready() && state.settings.enabled && state.settings.auto;
+        if !wanted {
+            if let Some(poll) = state.poll.take() {
+                poll.cancel();
+            }
+            return;
+        }
+        if state.poll.is_some() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let stop = CancellationToken::new();
+        state.poll = Some(stop.clone());
+        tokio::spawn(self.clone().poll(stop));
+    }
+
+    /// Read `ports.list` every [`AUTO_POLL`] until stopped. Its answers stay
+    /// native (`ports-` request ids).
+    async fn poll(self, stop: CancellationToken) {
+        loop {
+            let request = self.id("list");
+            let (answer, answered) = oneshot::channel();
+            self.inner.state.lock().unwrap().opens.insert(request.clone(), answer);
+            let listed = if (self.inner.send)(json!({ "id": request, "method": "ports.list", "params": {} })) {
+                tokio::select! {
+                    _ = stop.cancelled() => None,
+                    answer = tokio::time::timeout(OPEN_TIMEOUT, answered) => answer.ok().and_then(Result::ok),
+                }
+            } else {
+                None
+            };
+            self.inner.state.lock().unwrap().opens.remove(&request);
+            if stop.is_cancelled() {
+                return;
+            }
+            if let Some(Ok(result)) = listed {
+                self.auto_forward(&result);
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(AUTO_POLL) => {}
+            }
+        }
+    }
+
+    /// Forward each port in a `ports.list` answer that started listening
+    /// since auto-forward was turned on, outside [`AUTO_SKIPPED`], on the
+    /// same local port when it is free.
+    fn auto_forward(&self, listed: &Value) {
+        // A runtime that cannot tell what listens says nothing about what stopped.
+        if listed.get("detected").and_then(Value::as_bool) != Some(true) {
+            return;
+        }
+        let ports: HashSet<u16> = listed
+            .get("ports")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("port").and_then(Value::as_u64))
+            .filter_map(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)
+            .collect();
+        let (fresh, scope) = {
+            let mut guard = self.inner.state.lock().unwrap();
+            let state = &mut *guard;
+            if !state.settings.auto || !state.settings.enabled {
+                return;
+            }
+            let Some(seen) = state.seen.as_mut() else {
+                // The first list: what already listens is left to the person.
+                state.seen = Some(ports);
+                return;
+            };
+            let mut fresh: Vec<u16> = ports
+                .iter()
+                .copied()
+                .filter(|port| !seen.contains(port) && !state.stopped.contains(port) && !AUTO_SKIPPED.contains(port) && !state.forwards.contains_key(port))
+                .collect();
+            state.stopped.retain(|port| ports.contains(port));
+            *seen = ports;
+            fresh.sort_unstable();
+            // Past the cap the rest are left to the person, as already seen.
+            let room = MAX_AUTO_FORWARDS.saturating_sub(state.forwards.values().filter(|listening| listening.forward.auto).count());
+            fresh.truncate(room);
+            (fresh, state.auto_scope.clone())
+        };
+        // The same local number when it is free, except a privileged one
+        // (below 1024), which this Mac's own services may want: a random one.
+        let opened: Vec<Forward> = fresh.into_iter().filter_map(|port| self.open(port, Some(port).filter(|port| *port >= 1024), false, scope.clone(), true).ok()).collect();
+        if !opened.is_empty() {
+            self.tell(opened);
+        }
     }
 
     /// Listen on this Mac's loopback for `port` of the workspace. Asking
-    /// again for a port already forwarded returns the same forward. The
-    /// local port is a random free one unless `local` names one; when that
-    /// one is taken by any program on any address, a random one is used and
-    /// the forward says so, unless `exact`, which refuses instead. `scope`
-    /// is the active organization, which the forward does not outlive.
-    /// Never wakes the workspace: a connection that is not live is refused.
+    /// again for a port already forwarded returns the same forward (opened
+    /// again if it was waiting and can be). The local port is a random free
+    /// one unless `local` names one; when that one is taken by any program on
+    /// any address, a random one is used and the forward says so, unless
+    /// `exact`, which refuses instead. `scope` is the active organization,
+    /// which a cloud workspace's forward does not outlive. Never wakes the
+    /// workspace: a connection that is not live is refused, and so is any
+    /// new forward while Forwarding is off (`cloud_port_forwarding_off`).
     pub async fn forward(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>) -> Result<Forward, String> {
+        let forward = self.open(port, local, exact, scope, false)?;
+        self.tell(Vec::new());
+        Ok(forward)
+    }
+
+    fn open(&self, port: u16, local: Option<u16>, exact: bool, scope: Option<String>, auto: bool) -> Result<Forward, String> {
         if port == 0 {
             return Err("cloud_port_invalid".into());
         }
-        if let Some(listening) = self.inner.state.lock().unwrap().forwards.get(&port) {
-            return Ok(listening.forward.clone());
+        let mut wanted = local.filter(|local| *local != 0);
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if let Some(listening) = state.forwards.get(&port) {
+                // Open, or waiting and not to be opened yet: as it is.
+                if listening.stop.is_some() || !self.ready() || !state.settings.enabled {
+                    return Ok(listening.forward.clone());
+                }
+                // Waiting, and asked for again: on its own local port unless another is named.
+                wanted = wanted.or(Some(listening.forward.local_port).filter(|local| *local != 0));
+                state.forwards.remove(&port);
+            }
+            if !self.ready() {
+                return Err("cloud_port_not_connected".into());
+            }
+            if !state.settings.enabled {
+                return Err("cloud_port_forwarding_off".into());
+            }
         }
-        if !self.inner.ready.load(Ordering::SeqCst) {
-            return Err("cloud_port_not_connected".into());
-        }
-        let (listener, reassigned) = bind(local.filter(|local| *local != 0), exact)?;
+        let (listener, reassigned) = bind(wanted, exact)?;
         let local_port = listener.local_addr().map_err(|error| error.to_string())?.port();
-        let forward = Forward { port, local_port, reassigned };
+        let forward = Forward { port, local_port, reassigned, state: ForwardState::Open, auto };
         let stop = CancellationToken::new();
         {
             let mut state = self.inner.state.lock().unwrap();
@@ -243,14 +605,24 @@ impl PortForwarder {
             // Read again under the lock that a disconnect takes to close
             // everything: a forward made here cannot outlive it. (The
             // listener is dropped on return.)
-            if !self.inner.ready.load(Ordering::SeqCst) {
+            if !self.ready() {
                 return Err("cloud_port_not_connected".into());
             }
-            if state.scope.is_none() {
+            if !state.settings.enabled {
+                return Err("cloud_port_forwarding_off".into());
+            }
+            // A machine is no organization's: its forwards outlive a switch.
+            if state.scope.is_none() && !self.inner.returns {
                 state.scope = scope;
             }
-            state.forwards.insert(port, Listening { forward: forward.clone(), stop: stop.clone() });
+            state.forwards.insert(port, Listening { forward: forward.clone(), stop: Some(stop.clone()) });
         }
+        self.accept(port, listener, local_port, stop);
+        Ok(forward)
+    }
+
+    /// Accept local connections on `listener` until `stop`.
+    fn accept(&self, port: u16, listener: TcpListener, local_port: u16, stop: CancellationToken) {
         let forwarder = self.clone();
         tokio::spawn(async move {
             loop {
@@ -271,16 +643,21 @@ impl PortForwarder {
                 });
             }
         });
-        Ok(forward)
     }
 
     /// Stop forwarding `port`: the listener closes, and so does every
-    /// connection it was carrying.
+    /// connection it was carrying. A waiting forward is forgotten.
     pub fn unforward(&self, port: u16) -> bool {
         let closed: Vec<String> = {
             let mut state = self.inner.state.lock().unwrap();
             let Some(listening) = state.forwards.remove(&port) else { return false };
-            listening.stop.cancel();
+            // Stopped by the person: auto-forward leaves it while it keeps listening.
+            if state.settings.auto {
+                state.stopped.insert(port);
+            }
+            if let Some(stop) = listening.stop {
+                stop.cancel();
+            }
             let ids: Vec<String> = state.streams.iter().filter(|(_, stream)| stream.port == port).map(|(id, _)| id.clone()).collect();
             for id in &ids {
                 if let Some(stream) = state.streams.remove(id) {
@@ -292,6 +669,7 @@ impl PortForwarder {
         for stream_id in closed {
             (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
         }
+        self.tell(Vec::new());
         true
     }
 
@@ -304,7 +682,7 @@ impl PortForwarder {
     /// protocol whose server speaks first works; what the client then sends
     /// is still judged before it goes anywhere.
     async fn serve(&self, mut socket: TcpStream, port: u16, local_port: u16) {
-        if !self.inner.ready.load(Ordering::SeqCst) {
+        if !self.ready() {
             answer_and_close(&mut socket, &page("503 Service Unavailable", STOPPED)).await;
             return;
         }
@@ -382,7 +760,14 @@ impl PortForwarder {
             }
         };
         match registered {
-            None => return,
+            None => {
+                // Forwarding was turned off meanwhile on a live connection:
+                // the runtime still holds the stream.
+                if self.ready() {
+                    (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
+                }
+                return;
+            }
             Some(false) => {
                 (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
                 return;
@@ -572,6 +957,13 @@ impl PortForwarder {
     }
 }
 
+/// The forwards, by workspace port.
+fn listed(state: &State) -> Vec<Forward> {
+    let mut forwards: Vec<Forward> = state.forwards.values().map(|listening| listening.forward.clone()).collect();
+    forwards.sort_by_key(|forward| forward.port);
+    forwards
+}
+
 /// Send `answer`, then close without a reset: what the client already sent
 /// is read and dropped first, because closing a socket with unread data
 /// resets it and the client would never see the answer.
@@ -597,23 +989,31 @@ fn release(counter: &AtomicUsize, bytes: usize) {
     }
 }
 
-/// Listen on `127.0.0.1:port` (0: any free port) **without address reuse**.
-/// tokio's `TcpListener::bind` sets `SO_REUSEADDR`, and on macOS that lets a
-/// loopback bind succeed while another program listens on the wildcard
-/// address of the same port; the new socket then takes that program's
-/// loopback traffic.
+/// Listen on `127.0.0.1:port` (0: any free port), with `SO_REUSEADDR`.
+///
+/// Without it a forward that carried a connection could not come back on its
+/// own port: closing it from this side (Forwarding off, a machine's link
+/// dropping) leaves the port in TIME_WAIT, and a plain bind is refused until
+/// that ends. With it, on macOS, a loopback bind would also succeed while
+/// another program listens on the wildcard address of the same port, and take
+/// that program's loopback traffic; that is why [`bind`] asks
+/// [`taken_elsewhere`] first, whose probes (also with `SO_REUSEADDR`) still see
+/// every listener on the IPv4 wildcard, IPv6 loopback and IPv6 wildcard. A
+/// program on `127.0.0.1` itself is refused by this bind.
 fn listen_on(port: u16) -> std::io::Result<TcpListener> {
     let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
     socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
     socket.listen(128)
 }
 
 /// Whether another program already listens on `port` on an address that a
 /// browser's `localhost`, or loopback traffic, could reach: the IPv4
-/// wildcard, IPv6 loopback or the IPv6 wildcard.
+/// wildcard, IPv6 loopback or the IPv6 wildcard. A connection of ours in
+/// TIME_WAIT on the port does not count (`SO_REUSEADDR`); a listener does.
 fn taken_elsewhere(port: u16) -> bool {
     let in_use = |socket: std::io::Result<TcpSocket>, address: SocketAddr| {
-        socket.and_then(|socket| socket.bind(address)).is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
+        socket.and_then(|socket| socket.set_reuseaddr(true).map(|()| socket)).and_then(|socket| socket.bind(address)).is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
     };
     in_use(TcpSocket::new_v4(), SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         || in_use(TcpSocket::new_v6(), SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
@@ -737,6 +1137,34 @@ mod tests {
         let forwarder = PortForwarder::new(move |frame| sent.send(frame).is_ok());
         forwarder.set_connected(Some(&["ports/1".to_string()]));
         (forwarder, requests)
+    }
+
+    /// A forwarder (a machine's when `machine`) whose requests and told
+    /// changes land in channels.
+    fn watched(machine: bool) -> (PortForwarder, mpsc::UnboundedReceiver<Value>, mpsc::UnboundedReceiver<ForwardsChanged>) {
+        let (sent, requests) = mpsc::unbounded_channel();
+        let send = move |frame| sent.send(frame).is_ok();
+        let forwarder = if machine { PortForwarder::for_machine(send) } else { PortForwarder::new(send) };
+        let (told, changes) = mpsc::unbounded_channel();
+        forwarder.on_change(move |changed| {
+            let _ = told.send(changed);
+        });
+        forwarder.set_connected(Some(&["ports/1".to_string()]));
+        (forwarder, requests, changes)
+    }
+
+    /// Every change told so far.
+    fn told(changes: &mut mpsc::UnboundedReceiver<ForwardsChanged>) -> Vec<ForwardsChanged> {
+        std::iter::from_fn(|| changes.try_recv().ok()).collect()
+    }
+
+    fn ports(capabilities: &[&str]) -> Vec<String> {
+        capabilities.iter().map(|capability| capability.to_string()).collect()
+    }
+
+    async fn closed(local: u16) -> bool {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        TcpStream::connect((Ipv4Addr::LOCALHOST, local)).await.is_err()
     }
 
     async fn next(requests: &mut mpsc::UnboundedReceiver<Value>, method: &str) -> Value {
@@ -1010,6 +1438,234 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_machines_forwards_wait_through_a_dropped_link_and_return_on_the_same_local_port() {
+        let (forwarder, mut requests, mut changes) = watched(true);
+        let forward = forwarder.forward(3000, None, false, None).await.unwrap();
+        assert_eq!((forward.state, forward.auto), (ForwardState::Open, false));
+        let local = forward.local_port;
+        let waiting = Forward { state: ForwardState::Waiting, ..forward.clone() };
+        let open = forward.clone();
+        told(&mut changes);
+        // A preview is open when the link drops: closing its connection from
+        // this side leaves the local port in TIME_WAIT, which must not keep
+        // the forward off its own port when it returns.
+        let mut browser = connect(local).await;
+        let opened = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({ "id": opened["id"], "ok": true, "result": { "streamId": "port-1" } }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The link drops: the listener closes, the forward is kept as waiting.
+        forwarder.set_connected(None);
+        assert_eq!(read_all(&mut browser).await, "", "the preview's connection ended with the link");
+        assert_eq!(forwarder.forwards(), vec![waiting.clone()]);
+        assert!(closed(local).await, "nothing answers on this Mac while the machine is away");
+        assert_eq!(told(&mut changes).last().map(|changed| changed.forwards.clone()), Some(vec![waiting.clone()]));
+        // Asked for again meanwhile: as it is. A new one is refused.
+        assert_eq!(forwarder.forward(3000, None, false, None).await.unwrap(), waiting);
+        assert_eq!(forwarder.forward(4000, None, false, None).await.unwrap_err(), "cloud_port_not_connected");
+
+        // Connected again: the same local port, and told as opened by itself.
+        forwarder.set_connected(Some(&ports(&["ports/1"])));
+        assert_eq!(forwarder.forwards(), vec![open.clone()]);
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, local)).await.is_ok());
+        let changed = told(&mut changes).pop().expect("the return is told");
+        assert_eq!((changed.forwards, changed.opened), (vec![open.clone()], vec![open.clone()]));
+
+        // Dropped again, and another program takes the local port meanwhile:
+        // it returns on a new one and says so.
+        forwarder.set_connected(None);
+        assert!(closed(local).await);
+        let other = listen_on(local).unwrap();
+        forwarder.set_connected(Some(&ports(&["ports/1"])));
+        let [moved] = forwarder.forwards().try_into().unwrap();
+        assert!(moved.state == ForwardState::Open && moved.reassigned && moved.local_port != local, "{moved:?}");
+        drop(other);
+
+        // A link that comes back without `ports/1` keeps it waiting.
+        forwarder.set_connected(None);
+        forwarder.set_connected(Some(&ports(&["pty/1"])));
+        assert_eq!(forwarder.forwards()[0].state, ForwardState::Waiting);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cloud_workspaces_forwards_do_not_return_after_a_dropped_link() {
+        let (forwarder, _requests, mut changes) = watched(false);
+        let local = forwarder.forward(3000, None, false, None).await.unwrap().local_port;
+        forwarder.set_connected(None);
+        assert!(forwarder.forwards().is_empty(), "dropped, not waiting");
+        assert!(closed(local).await);
+        forwarder.set_connected(Some(&ports(&["ports/1"])));
+        assert!(forwarder.forwards().is_empty());
+        assert!(closed(local).await);
+        assert!(told(&mut changes).iter().all(|changed| changed.opened.is_empty()), "nothing opened by itself");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machines_forwards_and_switches_are_forgotten_when_it_is_detached() {
+        let (forwarder, _requests, _changes) = watched(true);
+        let local = forwarder.forward(3000, None, false, None).await.unwrap().local_port;
+        forwarder.set_settings(None, Some(true), None);
+        forwarder.set_connected(None);
+        assert_eq!(forwarder.forwards().len(), 1);
+        // The registration loop ends: detached for good.
+        forwarder.shutdown();
+        assert!(forwarder.forwards().is_empty());
+        assert_eq!(forwarder.settings(), PortSettings::default());
+        forwarder.set_connected(Some(&ports(&["ports/1"])));
+        assert!(forwarder.forwards().is_empty(), "nothing comes back");
+        assert!(closed(local).await);
+        // A machine's forwards are no organization's: a switch keeps them.
+        forwarder.forward(3000, None, false, Some("org-a".into())).await.unwrap();
+        forwarder.keep_scope(Some("org-b"));
+        assert_eq!(forwarder.forwards().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forwarding_off_closes_every_listener_and_on_opens_them_again() {
+        let (forwarder, mut requests, mut changes) = watched(false);
+        assert_eq!(forwarder.settings(), PortSettings { enabled: true, auto: false });
+        let forward = forwarder.forward(3000, None, false, None).await.unwrap();
+        let local = forward.local_port;
+        // A connection in flight is ended, and its stream closed in the workspace.
+        let mut browser = connect(local).await;
+        let open = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({ "id": open["id"], "ok": true, "result": { "streamId": "port-1" } }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(forwarder.set_settings(Some(false), None, None), PortSettings { enabled: false, auto: false });
+        assert_eq!(forwarder.forwards(), vec![Forward { state: ForwardState::Waiting, ..forward.clone() }]);
+        assert_eq!(next(&mut requests, "ports.close").await["params"], json!({ "streamId": "port-1" }));
+        assert_eq!(read_all(&mut browser).await, "");
+        assert!(closed(local).await, "the listener is closed");
+        assert_eq!(forwarder.forward(4000, None, false, None).await.unwrap_err(), "cloud_port_forwarding_off");
+        let off = told(&mut changes).pop().unwrap();
+        assert_eq!(off.settings, PortSettings { enabled: false, auto: false });
+
+        // On again: the same forward, on the same local port.
+        assert_eq!(forwarder.set_settings(Some(true), None, None), PortSettings { enabled: true, auto: false });
+        assert_eq!(forwarder.forwards(), vec![forward]);
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, local)).await.is_ok());
+        // Turned on by the person: nothing was "opened by itself".
+        assert!(told(&mut changes).iter().all(|changed| changed.opened.is_empty()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_forward_takes_only_ports_that_start_listening_after_it_is_turned_on() {
+        let (forwarder, mut requests, mut changes) = watched(true);
+        // Off by default: the runtime is not asked.
+        assert!(tokio::time::timeout(AUTO_POLL + Duration::from_millis(500), requests.recv()).await.is_err());
+
+        assert_eq!(forwarder.set_settings(None, Some(true), None), PortSettings { enabled: true, auto: true });
+        // What already listens when it is turned on is left to the person.
+        let list = next(&mut requests, "ports.list").await;
+        assert!(list["id"].as_str().unwrap().starts_with(REQUEST_PREFIX), "the answer stays native");
+        assert!(forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": [{ "port": 3000 }], "streams": [] } })));
+        assert!(forwarder.forwards().is_empty());
+
+        // Two seconds later: 5173 and 40000 have started. 40000 is in the ephemeral range.
+        let list = next(&mut requests, "ports.list").await;
+        let listed = json!({ "detected": true, "ports": [{ "port": 3000 }, { "port": 5173, "process": { "name": "vite", "pid": 9 } }, { "port": 40000 }], "streams": [] });
+        assert!(forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed })));
+        let mut forwards = Vec::new();
+        for _ in 0..100 {
+            forwards = forwarder.forwards();
+            if !forwards.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let [forward] = forwards.try_into().unwrap();
+        assert!(forward.port == 5173 && forward.auto && forward.state == ForwardState::Open, "{forward:?}");
+        // The same local port when it is free.
+        assert!(forward.local_port == 5173 || forward.reassigned, "{forward:?}");
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, forward.local_port)).await.is_ok());
+        assert!(told(&mut changes).iter().any(|changed| changed.opened == vec![forward.clone()]), "told for the toast");
+
+        // Unforwarded by the person, it is not taken again while it keeps listening.
+        assert!(forwarder.unforward(5173));
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(forwarder.forwards().is_empty());
+
+        // A list that cannot tell what listens forgets nothing.
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": false, "ports": [], "streams": [] } }));
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(forwarder.forwards().is_empty(), "nothing looks new after a list that saw nothing");
+
+        // Both servers stop, then start again: the one that listened before the
+        // switch and the one the person stopped are new now, and taken.
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": [{ "port": 40000 }], "streams": [] } }));
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": listed }));
+        let mut taken = Vec::new();
+        for _ in 0..100 {
+            taken = forwarder.forwards().into_iter().map(|forward| forward.port).collect::<Vec<_>>();
+            if taken.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(taken, vec![3000, 5173], "a restarted server is auto-forwarded again; 40000 stays skipped");
+        for port in [3000, 5173] {
+            forwarder.unforward(port);
+        }
+
+        // Off: the runtime is no longer asked.
+        forwarder.set_settings(None, Some(false), None);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while requests.try_recv().is_ok() {}
+        assert!(tokio::time::timeout(AUTO_POLL + Duration::from_millis(500), requests.recv()).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_forward_takes_at_most_its_cap_and_never_a_privileged_local_port() {
+        let (forwarder, mut requests, _changes) = watched(false);
+        forwarder.set_settings(None, Some(true), None);
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": [], "streams": [] } }));
+        // Then 80 and 30 ports start at once.
+        let started: Vec<Value> = std::iter::once(80).chain(20000..20030).map(|port| json!({ "port": port })).collect();
+        let list = next(&mut requests, "ports.list").await;
+        forwarder.on_message(&json!({ "id": list["id"], "ok": true, "result": { "detected": true, "ports": started, "streams": [] } }));
+        let mut forwards = Vec::new();
+        for _ in 0..100 {
+            forwards = forwarder.forwards();
+            if !forwards.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(forwards.len(), MAX_AUTO_FORWARDS);
+        let http = forwards.iter().find(|forward| forward.port == 80).expect("the lowest ports first");
+        assert!(http.local_port >= 1024, "{http:?}");
+        // The person may still forward more themselves.
+        assert!(forwarder.forward(20031, None, false, None).await.is_ok());
+    }
+
+    #[test]
+    fn auto_forward_skips_the_ephemeral_range() {
+        for port in [32768, 45000, 60999] {
+            assert!(AUTO_SKIPPED.contains(&port), "{port}");
+        }
+        for port in [3000, 5173, 8080, 32767, 61000] {
+            assert!(!AUTO_SKIPPED.contains(&port), "{port}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_listener_binds_loopback_only() {
+        assert_eq!(listen_on(0).unwrap().local_addr().unwrap().ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+        // Including one opened again on a named port (a forward that returns).
+        let (listener, _) = bind(Some(listen_on(0).unwrap().local_addr().unwrap().port()), false).unwrap();
+        assert_eq!(listener.local_addr().unwrap().ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_forward_does_not_outlive_a_switch_of_the_active_organization() {
         let (forwarder, _requests) = forwarder();
         let local = forwarder.forward(3000, None, false, Some("org-a".into())).await.unwrap().local_port;
@@ -1070,7 +1726,7 @@ mod tests {
         assert_eq!(second.forward(3000, Some(forward.local_port), true, None).await.unwrap_err(), "cloud_port_in_use");
         // A free named port is used as asked.
         let free = listen_on(0).unwrap().local_addr().unwrap().port();
-        assert_eq!(second.forward(5000, Some(free), true, None).await.unwrap(), Forward { port: 5000, local_port: free, reassigned: false });
+        assert_eq!(second.forward(5000, Some(free), true, None).await.unwrap(), Forward { port: 5000, local_port: free, reassigned: false, state: ForwardState::Open, auto: false });
         assert!(forwarder.unforward(3000));
         assert!(!forwarder.unforward(3000));
         assert_eq!(forwarder.forward(0, None, false, None).await.unwrap_err(), "cloud_port_invalid");

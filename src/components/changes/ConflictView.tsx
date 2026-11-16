@@ -241,10 +241,10 @@ export function ConflictView({ entry, visible, source: given, files: givenFiles 
   const writing = !!busy || rereading;
 
   return <div className="flex h-full min-h-0 flex-col bg-background" data-testid="conflict-view">
-    <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5">
+    <header className="flex min-h-11 min-w-0 shrink-0 items-center gap-x-2 border-b border-hairline px-3 py-1.5">
       <TriangleAlert className="size-3.5 shrink-0 text-warning" aria-hidden />
-      <span className="min-w-0 truncate font-mono text-[12.5px]" title={entry.rel}>{entry.rel}</span>
-      {ready && <span className="min-w-0 truncate text-xs text-faint">{ready.file.theirs.branch} into {ready.file.ours.branch}</span>}
+      <span className="min-w-0 shrink truncate font-mono text-[12.5px]" title={entry.rel}>{entry.rel}</span>
+      {ready && <span className="min-w-0 flex-1 truncate text-xs text-faint" title={`${ready.file.theirs.branch} into ${ready.file.ours.branch}`}>{ready.file.theirs.branch} into {ready.file.ours.branch}</span>}
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         {ready && total > 0 && <>
           <span className="whitespace-nowrap text-xs text-muted-foreground" aria-live="polite">Conflict {Math.min(current, total - 1) + 1} of {total}</span>

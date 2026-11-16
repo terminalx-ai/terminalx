@@ -178,9 +178,9 @@ const DEFAULTS: Prefs = {
   sounds: true,
   animations: true,
   fontScale: "md",
-  transcriptLayout: "wide",
-  // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
-  foldToolCalls: false,
+  transcriptLayout: "chat",
+  // On: a settled turn's steps fold behind one summary row; opened, they read in the order the agent did them.
+  foldToolCalls: true,
   turnChanges: true,
   writeCommitMessagesWithAgent: false,
   promptMap: true,

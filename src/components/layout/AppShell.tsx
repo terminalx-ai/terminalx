@@ -39,7 +39,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
-import { archiveSession, getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
 import { sendFirstMessage } from "@/lib/sessionBackend";
@@ -50,6 +50,10 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
+import { ToastCorner } from "@/components/ui/ToastCorner";
+import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
+import { archiveWithUndo } from "@/lib/archiveNotices";
+import { reportError } from "@/lib/errorToasts";
 import { NotificationsOffCard } from "@/components/ui/NotificationsOffCard";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
@@ -207,8 +211,9 @@ export function AppShell() {
   const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
   useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
-  useEffect(() => onProjectSettingsRequest((projectPath) => {
-    setSettingsTab("repositories.scripts");
+  // Or from a project's menu: its general page (Project settings) or its Scripts (Scripts and actions).
+  useEffect(() => onProjectSettingsRequest((projectPath, page) => {
+    setSettingsTab(page === "general" ? "repositories.rootPath" : "repositories.scripts");
     setSettingsProjectPath(projectPath);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
@@ -269,7 +274,7 @@ export function AppShell() {
   useShortcut("session.archive", () => {
     const id = getSessionStore().selectedSessionId;
     // A cloud session is archived from its workspace; a machine session on its machine (PRO-346).
-    if (id && isLocalKey(id)) void archiveSession(id, true).catch(() => {});
+    if (id && isLocalKey(id)) void archiveWithUndo(id).catch(reportError("Couldn't archive the session"));
     else if (machineKeyKind(id) === "session") void updateMachineSession(id as string, { archived: true }).catch(() => {});
   });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
@@ -331,15 +336,16 @@ export function AppShell() {
         <NotificationsOffCard />
         <MergedCleanupNotices />
       </div>
-      <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <ToastCorner className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <CloseUndoNotices />
+        <ArchiveNotices />
         <Toasts />
         <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
-      </div>
+      </ToastCorner>
       <BypassDialog />
       <ImageViewerHost />
       <SessionDialogs />

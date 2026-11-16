@@ -40,6 +40,10 @@ pub const MACHINE_3: &str = "machine/3";
 /// on the machine (docs/MACHINES.md, "As built (PRO-350): the machine page").
 pub const MACHINE_4: &str = "machine/4";
 
+/// `machine/5` (PRO-357): `machine.rotateCredential`, a fresh device token
+/// each time a computer connects (docs/MACHINES.md, "Trust model").
+pub const MACHINE_5: &str = "machine/5";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -117,6 +121,15 @@ pub trait MachineAccess: Send + Sync + 'static {
     /// A desktop window is attached to this runtime now, so the app on this
     /// machine can run its updater (`machine/3`, `method: "app"`).
     fn window_available(&self) -> bool;
+    /// Put what the connection of `device_id` did in the machine's activity
+    /// log (PRO-357): `method` succeeded in `project_id`, with `detail` (a
+    /// version). Never a prompt, a command or a file's contents.
+    fn note(&self, _device_id: &str, _method: &str, _project_id: Option<&str>, _detail: Option<&str>) {}
+    /// `machine.rotateCredential` for the connection of `device_id`:
+    /// `{ deviceToken }`, a fresh token the computer keeps in place of its own.
+    fn rotate_credential(&self, _device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
+        Box::pin(async { Err(RpcError::new("method_not_found", "this runtime does not rotate credentials")) })
+    }
 }
 
 /// `macos` or `linux`, as Rust names them.

@@ -1352,7 +1352,7 @@ describe("#644 on a cloud agent tab", () => {
     await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
     runtime.events.push(lifecycle({ type: "item_completed", turnId: "turn", itemId: "item" }), lifecycle({ type: "turn_ended", turnId: "turn", outcome: "completed" }));
     await act(async () => runtime.connect());
-    expect(await screen.findByText(/Context compacted/)).toBeTruthy();
+    expect(await screen.findByText(/Chat compacted/)).toBeTruthy();
     expect(screen.queryByText("Compacting context…")).toBeNull();
     expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
   });
