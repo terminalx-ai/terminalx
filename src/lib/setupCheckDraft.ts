@@ -20,7 +20,7 @@ interface Entry {
 }
 
 const KEY = "terminalx.setup-check-draft.v1";
-/** A launch that never reports its tab within a day is not waited on. */
+/** An entry is kept for a day: a launch that never reports its tab is not waited on, nor a coach mark never seen. */
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function load(): Entry[] {
@@ -37,11 +37,13 @@ function load(): Entry[] {
   }
 }
 
-let entries = load();
+let entries = load().filter((entry) => !entry.coachDismissed && Date.now() - entry.createdAt < MAX_AGE_MS);
 const listeners = new Set<() => void>();
 
 function store(next: Entry[]) {
-  entries = next.filter((entry) => entry.tabId !== null || Date.now() - entry.createdAt < MAX_AGE_MS);
+  // A dismissed coach mark has nothing left to show; any entry is dropped after a day either way
+  // (its draft is in the tab's own draft store once the tab is known).
+  entries = next.filter((entry) => !entry.coachDismissed && Date.now() - entry.createdAt < MAX_AGE_MS);
   try {
     if (entries.length) globalThis.localStorage?.setItem(KEY, JSON.stringify(entries));
     else globalThis.localStorage?.removeItem(KEY);

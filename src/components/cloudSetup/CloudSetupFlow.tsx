@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import { refreshAccount, useAccount } from "@/lib/account";
 import { defaultOrgId } from "@/lib/cloudCatalog";
-import { FLOW_LABELS, FLOW_STEPS, flowOf, moveFlow, type CloudSetupTarget, type FlowStep } from "@/lib/cloudSetupFlow";
+import { FLOW_LABELS, FLOW_STEPS, flowOf, moveFlow, setCloudSetupLeave, type CloudSetupTarget, type FlowStep } from "@/lib/cloudSetupFlow";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
-import { loadSetups, newSetup, saveSetup, setupFor, type OrganizationSetupRecord } from "@/lib/organizationSetup";
+import { dropSetup, loadSetups, newSetup, saveSetup, setupFor, type OrganizationSetupRecord } from "@/lib/organizationSetup";
 import { cn } from "@/lib/cn";
 import { LeaveGuardContext, type LeaveGuard } from "./FlowLayout";
 import { OrganizationStep } from "./OrganizationStep";
@@ -93,9 +93,18 @@ export function CloudSetupFlow({ target, onExit, onDone }: { target: CloudSetupT
     action();
   }, []);
 
+  // Navigation elsewhere in the app (a session, Settings) closes the flow through the same guard.
+  useEffect(() => setCloudSetupLeave(leave), [leave]);
+
   const go = (next: FlowStep) => {
     if (!record || !organization || next === step) return;
-    leave(() => persist(moveFlow(record, next)));
+    // Moved from what is stored now, not from this render's record: a step stores its own change
+    // (the logins choice, the machine) and goes on in the same tick, before a render could show it.
+    const requestId = record.requestId;
+    leave(() => {
+      const stored = (email ? loadSetups(email) : []).find((item) => item.requestId === requestId) ?? record;
+      persist(moveFlow(stored, next));
+    });
   };
   const goNext = () => {
     const next = FLOW_STEPS[FLOW_STEPS.indexOf(step) + 1];
@@ -189,7 +198,18 @@ export function CloudSetupFlow({ target, onExit, onDone }: { target: CloudSetupT
               </div>
             </div>
           ) : step === "organization" || !props ? (
-            <OrganizationStep accountEmail={email} contextRevision={revision} creation={creation} onRecord={persist} onCreated={created} />
+            <OrganizationStep
+              accountEmail={email}
+              contextRevision={revision}
+              creation={creation}
+              onRecord={persist}
+              onForget={(requestId) => {
+                if (!email) return;
+                dropSetup(email, requestId);
+                setRecords(loadSetups(email));
+              }}
+              onCreated={created}
+            />
           ) : needsSelection ? (
             <div role="status" className="flex max-w-[660px] items-center gap-2 text-sm text-muted-foreground">
               {selecting?.error ? (

@@ -35,14 +35,14 @@ const STAGES = ["creating-builder", "toolchain", "install", "repositories", "set
 const LOG_TAIL = 4;
 
 /** A repository chosen in the GitHub step: the only ones the environment may clone. */
-interface ChosenRepository {
+export interface ChosenRepository {
   owner: string;
   name: string;
   defaultBranch: string;
 }
 
 /** What the person changed on top of the saved template, and the revision they started from. */
-interface Edits {
+export interface Edits {
   revision: number;
   installScript?: string;
   scripts: Record<string, string>;
@@ -69,7 +69,17 @@ function singleScript(repository: EnvironmentRepository | undefined): string | n
  * the template already had keep its order, so an unchanged template compares
  * equal; repositories no longer chosen are left out.
  */
-function draftOf(saved: EnvironmentDefinition, chosen: ChosenRepository[] | null, edits: Edits | null): EnvironmentDefinition {
+/** The repositories the GitHub step chose that the organization can still reach: the only ones offered here. */
+export function chosenRepositories(repositories: readonly { fullName: string; state: string; defaultBranch?: string | null }[]): ChosenRepository[] {
+  return repositories
+    .filter((repository) => repository.state === "accessible")
+    .flatMap((repository) => {
+      const [owner, name] = repository.fullName.split("/");
+      return owner && name ? [{ owner, name, defaultBranch: repository.defaultBranch ?? "" }] : [];
+    });
+}
+
+export function draftOf(saved: EnvironmentDefinition, chosen: ChosenRepository[] | null, edits: Edits | null): EnvironmentDefinition {
   const installScript = edits?.installScript ?? saved.installScript;
   if (!chosen) return { installScript, repositories: saved.repositories };
   const savedByKey = new Map(saved.repositories.map((repository) => [keyOf(repository), repository]));
@@ -517,14 +527,7 @@ export function EnvironmentStep(props: StepProps) {
     try {
       const summary = await organizationGithubApp.summary();
       if (!alive.current) return;
-      setChosen(
-        summary.repositories
-          .filter((repository) => repository.state === "accessible")
-          .flatMap((repository) => {
-            const [owner, name] = repository.fullName.split("/");
-            return owner && name ? [{ owner, name, defaultBranch: repository.defaultBranch ?? "" }] : [];
-          }),
-      );
+      setChosen(chosenRepositories(summary.repositories));
     } catch {
       if (alive.current) setChosenError("TerminalX could not read the repositories chosen in the GitHub step.");
     }

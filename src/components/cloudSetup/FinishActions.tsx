@@ -47,12 +47,22 @@ function selection(setup: CloudWorkspaceSetup, machine: StepProps["record"]["mac
  * on the setup record before it is sent, so a retry is the same workspace.
  * "Go to sessions" finishes without it.
  */
-export function FinishActions({ organization, record, onRecord, onDone }: StepProps & { onDone: () => void }) {
+export function FinishActions({ organization, record, onRecord: store, onDone }: StepProps & { onDone: () => void }) {
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The newest record, for the steps of one action that write it one after another (the
+  // workspace id, then the finish) before a render brings the stored one back as a prop.
   const current = useRef(record);
-  current.current = record;
+  const given = useRef(record);
+  if (given.current !== record) {
+    given.current = record;
+    current.current = record;
+  }
+  const onRecord = (next: typeof record) => {
+    current.current = next;
+    store(next);
+  };
   const mounted = useRef(true);
   useEffect(
     () => () => {

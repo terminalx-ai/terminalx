@@ -139,6 +139,14 @@ export function saveSetup(user: string, record: OrganizationSetupRecord): void {
   store(user, [...records, record]);
 }
 
+/** Forget one record: a creation the server refused for good, which made nothing. */
+export function dropSetup(user: string, requestId: string): void {
+  store(
+    user,
+    loadSetups(user).filter((record) => record.requestId !== requestId),
+  );
+}
+
 /** Forget what is left of organizations `gone` names (the user left them). */
 export function forgetSetups(user: string, gone: (organizationId: string) => boolean): void {
   store(

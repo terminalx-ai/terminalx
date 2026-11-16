@@ -11,6 +11,17 @@ const POINTS = [
   { icon: Smartphone, title: "Steer from anywhere", text: "From this Mac, your phone, or the terminalx command line." },
 ];
 
+/**
+ * A create the server answered with a definite refusal (400, 403, 404, 409, 422): it made no
+ * organization, so replaying the same request can only be refused again. A lost answer, a 5xx,
+ * an expired sign-in (401) or a rate limit (429) may still be retried as the same request.
+ */
+export function refusedForGood(failure: unknown): boolean {
+  const text = typeof failure === "string" ? failure : failure instanceof Error ? failure.message : String((failure as { message?: unknown } | null)?.message ?? "");
+  const status = /status code (\d{3})/.exec(text)?.[1];
+  return status !== undefined && ["400", "403", "404", "409", "422"].includes(status);
+}
+
 /** "Paresh Dudhat" → "PD"; an email's first letter when there is no name. */
 export function initials(name: string | null | undefined, email = ""): string {
   const words = (name ?? "").trim().split(/\s+/).filter(Boolean);
@@ -29,6 +40,7 @@ export function OrganizationStep({
   contextRevision,
   creation,
   onRecord,
+  onForget,
   onCreated,
 }: {
   accountEmail: string;
@@ -36,6 +48,8 @@ export function OrganizationStep({
   /** A creation already asked for and not confirmed: resumed with its name, never asked for again. */
   creation: OrganizationSetupRecord | null;
   onRecord: (record: OrganizationSetupRecord) => void;
+  /** Forget a creation request the server refused for good. */
+  onForget: (requestId: string) => void;
   onCreated: (organizationId: string) => void;
 }) {
   const { status } = useAccount();
@@ -44,6 +58,7 @@ export function OrganizationStep({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const flight = useRef(false);
+  const pendingRequest = useRef<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -60,6 +75,7 @@ export function OrganizationStep({
     setError(null);
     try {
       const next: OrganizationSetupRecord = creation ?? { ...newSetup(trimmed, crypto.randomUUID()), flow: { step: "organization", passed: [], finishedAt: null } };
+      pendingRequest.current = next.requestId;
       onRecord(next);
       const created = await api.organizationCreate(next.name, next.requestId);
       const selected = created.selected !== false;
@@ -69,6 +85,11 @@ export function OrganizationStep({
       await refreshAccount();
       if (mounted.current) onCreated(created.id);
     } catch (failure) {
+      // Refused for good (a bad name, a key the server will not replay): nothing was made, so the
+      // request is forgotten and the name can be changed. Anything else may have made it: kept, to replay.
+      if (refusedForGood(failure) && pendingRequest.current) {
+        onForget(pendingRequest.current);
+      }
       if (mounted.current) setError(errorMessage(failure));
     } finally {
       flight.current = false;

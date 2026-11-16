@@ -2,10 +2,10 @@ import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
 import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
-import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
+import { leaveCloudSetup, onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
@@ -136,8 +136,16 @@ export function AppShell() {
   useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
   // The full-window cloud setup (PRO-370), opened from Settings → Organizations in Settings' place.
   // Any other request for Settings, or any navigation, ends it: its progress is already saved.
+  // It stays on screen until it lets go: a step with unbuilt changes asks first (14.15), and only then
+  // does the session or Settings section asked for show.
   const [cloudSetup, setCloudSetup] = useState<CloudSetupTarget | null>(null);
-  useEffect(() => setCloudSetup(null), [settingsRequest, store.navigationVersion]);
+  const leaveRequests = useRef({ settingsRequest, navigationVersion: store.navigationVersion });
+  useEffect(() => {
+    const seen = leaveRequests.current;
+    if (seen.settingsRequest === settingsRequest && seen.navigationVersion === store.navigationVersion) return;
+    leaveRequests.current = { settingsRequest, navigationVersion: store.navigationVersion };
+    leaveCloudSetup(() => setCloudSetup(null));
+  }, [settingsRequest, store.navigationVersion]);
   useEffect(() => onOpenCloudSetup((target) => {
     setCloudSetup(target);
     setSettingsOpen(true);
@@ -338,11 +346,14 @@ export function AppShell() {
       <MachineApprovalHost />
       <ConnectedBar />
       <div className="flex min-h-0 flex-1">
-        {settingsOpen && cloudSetup ? (
+        {cloudSetup ? (
           <CloudSetupFlow
             key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
             target={cloudSetup}
-            onExit={() => setCloudSetup(null)}
+            onExit={() => {
+              setCloudSetup(null);
+              setSettingsOpen(true);
+            }}
             onDone={() => {
               setCloudSetup(null);
               setSettingsOpen(false);

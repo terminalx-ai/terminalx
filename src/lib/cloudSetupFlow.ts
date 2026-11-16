@@ -78,3 +78,21 @@ export function onOpenCloudSetup(listener: (target: CloudSetupTarget) => void): 
   window.addEventListener(OPEN_CLOUD_SETUP, handler);
   return () => window.removeEventListener(OPEN_CLOUD_SETUP, handler);
 }
+
+// ---- leaving the flow from elsewhere in the app
+
+/** The open flow's way out, which asks first while a step holds the person back (unbuilt Environment changes). */
+let activeLeave: ((action: () => void) => void) | null = null;
+
+export function setCloudSetupLeave(leave: ((action: () => void) => void) | null): () => void {
+  activeLeave = leave;
+  return () => {
+    if (activeLeave === leave) activeLeave = null;
+  };
+}
+
+/** Close the flow for something else the person asked for (a session, Settings): through its guard when one is open. */
+export function leaveCloudSetup(action: () => void): void {
+  if (activeLeave) activeLeave(action);
+  else action();
+}
