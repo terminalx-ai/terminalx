@@ -349,6 +349,7 @@ pub fn run() {
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
     let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
+    let account_machines = Arc::new(machines::account::AccountPairing::new(machines.clone(), account.clone(), pairing.clone()));
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -410,6 +411,7 @@ pub fn run() {
         .manage(cloud_agents)
         .manage(machines.clone())
         .manage(machine_connections.clone())
+        .manage(account_machines)
         .setup(move |app| {
             #[cfg(unix)]
             match app.path().app_log_dir() {
@@ -676,6 +678,7 @@ pub fn run() {
             machines::connect::machine_remote_attach,
             machines::connect::machines_connections,
             machines::connect::machines_reconnect,
+            machines::connect::machines_remove,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
@@ -714,6 +717,10 @@ pub fn run() {
             machines::machines_cancel_pairing,
             machines::machines_list,
             machines::machines_set_route,
+            machines::account::machines_account_list,
+            machines::account::machines_account_request,
+            machines::account::machines_account_cancel,
+            machines::account::machines_account_finish,
             machines::machines_app_update_report,
             commands::pairing_retry_relay,
             commands::session_share_create,

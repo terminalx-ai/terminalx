@@ -425,6 +425,11 @@ export function selectCloudWorkspace(key: string | null) {
   set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "welcome", newSessionPreset: null, selectedAutomationId: null });
 }
 
+/** Open a workspace's view from elsewhere (a machine's card in Settings → Machines): selects it and leaves Settings. */
+export function openCloudWorkspace(key: string) {
+  set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "welcome", newSessionPreset: null, selectedAutomationId: null, navigationVersion: state.navigationVersion + 1 });
+}
+
 /** Open the new-session form for a cloud project, as the project row's `+` does. */
 export function startCloudSessionIn(projectKey: string) {
   // Every way into the cloud new-session form passes here. A member (or an
