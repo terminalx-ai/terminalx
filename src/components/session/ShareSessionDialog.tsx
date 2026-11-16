@@ -78,6 +78,8 @@ function RolePicker({ value, onChange, label, className }: { value: ShareRole; o
 
 /** The session's tabs in different permission modes, as the picker shows it. */
 const MIXED = "__mixed__";
+/** The dialog's choice of a new link while others are live. */
+const NEW = "__new__";
 
 /**
  * The link's settings, every one in view: who can join, their access, how
@@ -363,8 +365,9 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
   const relay = usePairing().status.relay.phase === "connected";
   // The link the dialog shows: the one picked, else the newest still live. Its settings are the form's.
   const live = (share.links ?? []).filter((link) => !link.revoked);
+  // Another link (NEW) shows the form for a new one beside those live, as many as the host wants side by side.
   const [picked, setPicked] = useState<string | null>(null);
-  const link = live.find((candidate) => candidate.id === picked) ?? live.at(-1) ?? null;
+  const link = picked === NEW ? null : (live.find((candidate) => candidate.id === picked) ?? live.at(-1) ?? null);
   const [settings, setSettings] = useState(defaultShareSettings);
   // Whenever the link shown changes, or its settings do, the form starts from the link's real settings.
   const linkSettings = link ? JSON.stringify(link.settings) : "";
@@ -396,7 +399,8 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
     const tab = session?.tabs?.find((candidate) => candidate.id === id);
     return tab ? tab.title?.trim() || "a tab" : null;
   };
-  const admitted = share.people.filter((guest) => guest.admitted).length;
+  // The count beside a link's limit is of that link's people; with no link shown, of everyone in.
+  const admitted = share.people.filter((guest) => guest.admitted && (!link || guest.linkIds.includes(link.id))).length;
   const allLinks = share.links ?? [];
   function create() {
     if (unguarded && !bypassConfirmed) { setBypassConfirmed(true); return; }
@@ -527,14 +531,19 @@ function ShareSessionDialog({ sessionId }: { sessionId: string }) {
                     </Button>
                   </>
                 )}
-                {live.length > 1 && (
-                  <div className="flex flex-col gap-1 border-t border-hairline pt-2 text-[11.5px] text-faint">
-                    <span>{live.length} live links</span>
+                {live.length > 0 && (
+                  <div className="flex flex-col items-start gap-1 border-t border-hairline pt-2 text-[11.5px] text-faint" data-testid="share-links">
+                    {live.length > 1 && <span>{live.length} live links</span>}
                     {live.map((candidate, i) => candidate.id !== link?.id && (
                       <button key={candidate.id} type="button" className="text-left text-muted-foreground underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => setPicked(candidate.id)}>
                         Show link {i + 1} · {roleLabel(candidate.settings.role)} · expires {clockTime(candidate.settings.expiresAt)}
                       </button>
                     ))}
+                    {link && (
+                      <button type="button" className="flex items-center gap-1 text-muted-foreground hover:text-foreground" onClick={() => setPicked(NEW)}>
+                        <Plus className="size-3" aria-hidden /> Another link
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

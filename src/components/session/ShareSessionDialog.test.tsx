@@ -196,6 +196,27 @@ describe("Share session", () => {
     fireEvent.click(within(rows[1]).getByRole("button", { name: "Remove Sam Rivera" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("session_share_change", { sessionId: "local-session", action: "remove", params: { linkId: "link-1", userId: "sam" } }));
   });
+  it("makes another link beside a live one, and counts each link's own people against its limit", async () => {
+    const make = (id: string, maximumPeople: number): ShareLink => ({ id, url: `https://console.terminalx.ai/join#${id}`, directOnly: false, revoked: false, settings: { ...defaultShareSettings(), maximumPeople } });
+    const person = (userId: string, linkId: string): ShareState["people"][number] => ({
+      person: { userId, displayName: userId, email: `${userId}@example.com`, emailVerified: true },
+      role: "viewer", canApprove: false, admitted: true, connections: 1, viewing: [], typing: false, linkIds: [linkId], pendingLinkIds: [],
+    });
+    mocks.invoke.mockResolvedValue({ ...EMPTY_SHARE, active: true, links: [make("one", 5), make("two", 2)], people: [person("ana", "one"), person("kim", "one"), person("lee", "two")] });
+    render(<ShareSessionDialogHost />);
+    act(() => openSessionShare("local-session"));
+    await screen.findByRole("button", { name: "Save settings" });
+    // The newest link is shown, and only its one person counts against its 2.
+    await waitFor(() => expect(screen.getByRole("region", { name: "People" }).textContent).toContain("1 of 2"));
+    fireEvent.click(screen.getByRole("button", { name: /Show link 1/ }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "People" }).textContent).toContain("2 of 5"));
+    // Another link opens the form for a new one, without revoking those live.
+    fireEvent.click(screen.getByRole("button", { name: "Another link" }));
+    expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("session_share_create", expect.anything()));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("session_share_change", expect.objectContaining({ action: "revoke" }));
+  });
   it("shows on the session's Share button who waits to be admitted, not only inside Share (PRO-162)", async () => {
     const guest = (userId: string, displayName: string, admitted: boolean): ShareState["people"][number] => ({
       person: { userId, displayName, email: `${userId}@example.com`, emailVerified: true },

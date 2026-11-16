@@ -320,16 +320,40 @@ fn host_access_for_one_person_demotes_now_survives_rejoin_and_fails_closed_on_ed
     // A second device of the same person joins read only too.
     share.join(guest("three", "alice"), 3500).unwrap();
     assert_eq!(share.guests["three"].role, Role::Viewer);
-    // The host lets someone on a read-only link drive; new settings take that back but keep the demotion.
+    // The host lets someone on a read-only link drive. An unrelated edit keeps that; one that takes driving away
+    // takes it from them too, while the demotion stays throughout.
     let mut policy = settings();
     policy.role = Role::Viewer;
     share.edit("link", policy.clone(), 4000).unwrap();
     share.set_role("link", "bob", Role::Driver, 4500).unwrap();
     assert_eq!(share.guests["two"].role, Role::Driver);
+    let mut later = policy.clone();
+    later.expires_at = 90_000;
+    share.edit("link", later, 4800).unwrap();
+    assert_eq!(share.guests["two"].role, Role::Driver);
     share.edit("link", settings(), 5000).unwrap();
     assert_eq!(share.guests["one"].role, Role::Viewer);
+    assert_eq!(share.guests["two"].role, Role::Driver);
     share.edit("link", policy, 5500).unwrap();
     assert_eq!(share.guests["two"].role, Role::Viewer);
     share.revoke("link", false, 6000).unwrap();
     assert!(share.set_role("link", "bob", Role::Driver, 6500).is_err());
+}
+#[test]
+fn read_only_on_one_link_keeps_a_lease_held_through_another() {
+    let mut share = fixture();
+    let mut second = share.links["link"].clone();
+    second.id = "other".into();
+    share.links.insert("other".into(), second);
+    share.join(guest("one", "alice"), 1000).unwrap();
+    let mut other = guest("two", "alice");
+    other.link_id = "other".into();
+    share.join(other, 1000).unwrap();
+    share.admit("two", Some("tab"), true, false, 2000).unwrap();
+    share.set_role("link", "alice", Role::Viewer, 3000).unwrap();
+    assert_eq!(share.guests["one"].role, Role::Viewer);
+    assert_eq!(share.guests["two"].role, Role::Driver);
+    assert!(!share.leases.is_empty());
+    share.set_role("other", "alice", Role::Viewer, 4000).unwrap();
+    assert!(share.leases.is_empty());
 }

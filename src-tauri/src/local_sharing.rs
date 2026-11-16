@@ -138,6 +138,22 @@ pub struct Link {
     pub access: HashMap<String, Role>,
 }
 
+/// Whether new settings take Can drive from anyone the old ones gave it: the link's own access, or a named account's.
+fn takes_driving_away(old: &LinkSettings, new: &LinkSettings) -> bool {
+    let driving = |settings: &LinkSettings, email: &str| {
+        settings
+            .people
+            .iter()
+            .any(|entry| entry.email.trim().eq_ignore_ascii_case(email.trim()) && entry.role == Role::Driver)
+    };
+    old.role == Role::Driver && new.role == Role::Viewer
+        || old.audience != new.audience
+        || old
+            .people
+            .iter()
+            .any(|entry| entry.role == Role::Driver && !driving(new, &entry.email))
+}
+
 impl Link {
     /// What this person may do through the link: none when its settings keep
     /// them out, else the host's choice for them, else the link's.
@@ -416,9 +432,14 @@ impl Share {
             connections.insert(guest.connection_id.clone());
         }
         if role == Role::Viewer {
-            self.leases.retain(|_, lease| lease.holder.user_id != user);
             self.queue
                 .retain(|input| !connections.contains(&input.connection_id));
+            // A lease is the person's, not the link's: it ends only when no link lets them drive any more.
+            if !self.guests.values().any(|g| {
+                g.admitted && g.role == Role::Driver && g.person.user_id == user
+            }) {
+                self.leases.retain(|_, lease| lease.holder.user_id != user);
+            }
         }
         self.record(
             &self.host_id.clone(),
@@ -474,10 +495,12 @@ impl Share {
                 .map(|g| g.person.user_id.clone())
                 .min();
         }
+        // The host's choices for single people outlive an edit, except that an edit taking Can drive away (the link
+        // goes read only, or a named account loses it) takes it from those the host let drive too: it fails closed.
+        if takes_driving_away(&link.settings, &settings) {
+            link.access.retain(|_, role| *role == Role::Viewer);
+        }
         link.settings = settings.clone();
-        // New settings fail closed: a person the host let drive goes back to the link's access, while one the host
-        // kept to read only stays so.
-        link.access.retain(|_, role| *role == Role::Viewer);
         let mut remove = Vec::new();
         let mut demoted = HashSet::new();
         let mut admitted = HashSet::new();
