@@ -100,6 +100,8 @@ export function Chat({
   answering,
   answerBlockedReason,
   askDetail = false,
+  askMeta = null,
+  takesKeys = active,
   loading = false,
   footer,
   onSendQueuedNow,
@@ -124,6 +126,10 @@ export function Chat({
   answerBlockedReason?: string | null;
   /** Quote the command, file or tool a permission request is about (a shared cloud workspace). */
   askDetail?: boolean;
+  /** At the end of a permission card's header: the session's permission mode and project. */
+  askMeta?: string | null;
+  /** This chat's view has the keys (focused and on screen): a permission card's Escape denies. */
+  takesKeys?: boolean;
   /** The conversation is on its way (a cloud tab opened here for the first time): empty is not "nothing yet". */
   loading?: boolean;
   footer: React.ReactNode;
@@ -479,7 +485,7 @@ export function Chat({
           {transcript.pendingAsks.map((ask) => (
             <div key={ask.requestId} className="mb-3">
               {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} meta={askMeta} takesKeys={takesKeys} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
               ) : (
                 <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
               )}

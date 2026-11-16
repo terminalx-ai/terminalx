@@ -626,7 +626,7 @@ describe("cloud session actions", () => {
     await screen.findByText("Fix login redirect");
 
     await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(0));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     // Answer the permission.
     fireEvent.click(await screen.findByRole("button", { name: /^Allow/ }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "permission-decision")?.payload).toEqual({ requestId: "req-9", optionId: "allow" }));
@@ -1470,7 +1470,7 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     const allow = await screen.findByRole("button", { name: /^Allow/ });
     expect((allow as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
@@ -2153,7 +2153,7 @@ describe("sharing states found in the live two-user test", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission to run a command/);
+    await screen.findByText("Run a command");
     expect((await screen.findByTestId("permission-detail")).textContent).toBe("touch /tmp/bob-asked");
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
   });
