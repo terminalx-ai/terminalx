@@ -25,6 +25,7 @@ pub mod git;
 pub mod host;
 pub mod machine;
 pub mod machine_client;
+pub mod machine_update;
 pub mod mirror;
 pub mod ports;
 pub mod protocol;
