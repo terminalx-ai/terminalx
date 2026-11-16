@@ -162,7 +162,7 @@ fn update(args: &[String]) -> Result<i32> {
     }
     println!("Updating terminalx-serve {installed} to {} ({})...", newest.version, newest.tag);
     let mut reporter = Reporter::open(&path, &data, &root);
-    let ended = Update { root: &root, data: &data, source: &source, asset, fetch: &fetch, release: &newest, stop: &[] }.run(&mut reporter);
+    let ended = Update { root: &root, data: &data, source: &source, asset, fetch: &fetch, release: &newest, stop: &[], steps: &STEPS }.run(&mut reporter);
     Ok(if ended == Ended::Updated { 0 } else { 1 })
 }
 
@@ -200,7 +200,7 @@ fn apply_requested(root: &Path, data: &Path, version: &semver::Version, status: 
     };
     let agent = crate::data_privacy::http_agent().timeout(std::time::Duration::from_secs(300)).build();
     let fetch = |url: &str| download(&agent, url);
-    let ended = Update { root, data, source: &source, asset, fetch: &fetch, release: &release, stop }.run(&mut reporter);
+    let ended = Update { root, data, source: &source, asset, fetch: &fetch, release: &release, stop, steps: &STEPS }.run(&mut reporter);
     i32::from(ended != Ended::Updated)
 }
 
@@ -271,6 +271,31 @@ enum Ended {
     Failed { rolled_back: bool },
 }
 
+/// The steps of an update that start or touch a runtime, in one place so a
+/// test can have the new runtime fail after the handover ([`STEPS`] is what
+/// every update runs).
+struct Steps {
+    /// Start the new binary on a scratch data directory: [`trial`].
+    trial: fn(&Path, &semver::Version, &Path) -> Result<()>,
+    /// Hand the running runtime over: `super::handover::begin`.
+    #[cfg(unix)]
+    begin: fn(&Path, &Path, &[String]) -> Result<super::handover::Handed>,
+    /// The runtime that took over says the new version: [`ready`].
+    #[cfg(unix)]
+    ready: fn(&Path, &str, &semver::Version) -> Result<()>,
+    /// Run the version `current` names again: [`restart`].
+    restart: fn(&Path, &Path) -> Result<()>,
+}
+
+const STEPS: Steps = Steps {
+    trial,
+    #[cfg(unix)]
+    begin: super::handover::begin,
+    #[cfg(unix)]
+    ready,
+    restart,
+};
+
 /// One update of the install at `root`, whose runtime keeps its data in `data`.
 struct Update<'a> {
     root: &'a Path,
@@ -281,6 +306,7 @@ struct Update<'a> {
     release: &'a Release,
     /// Blocker ids (`machine_update::Blocker::of`) agreed to stop.
     stop: &'a [String],
+    steps: &'a Steps,
 }
 
 impl Update<'_> {
@@ -303,14 +329,14 @@ impl Update<'_> {
         let binary = dest.join("terminalx-serve");
         let from = reporter.from();
         reporter.phase(phase(|version, since| Progress::Trial { version, since }), "Starting it on its own to check it runs...");
-        if let Err(error) = trial(&binary, &self.release.version, self.data) {
+        if let Err(error) = (self.steps.trial)(&binary, &self.release.version, self.data) {
             remove_version(self.root, &dest);
             reporter.failed(&version, format!("TerminalX {version} did not start: {error:#}. Nothing was changed; {from} keeps running."), false);
             return Ended::Failed { rolled_back: false };
         }
         reporter.phase(phase(|version, since| Progress::HandingOver { version, since }), "Handing the running runtime over to it...");
         #[cfg(unix)]
-        match super::handover::begin(self.data, &binary, self.stop).map_err(|error| format!("{error:#}")) {
+        match (self.steps.begin)(self.data, &binary, self.stop).map_err(|error| format!("{error:#}")) {
             Err(error) | Ok(super::handover::Handed::Refused(error)) => {
                 remove_version(self.root, &dest);
                 reporter.failed(&version, format!("{error}. Nothing was changed; {from} keeps running."), false);
@@ -318,12 +344,12 @@ impl Update<'_> {
             }
             Ok(super::handover::Handed::NotRunning) => println!("The runtime is not running; it starts as terminalx-serve {version}."),
             Ok(super::handover::Handed::Exec { epoch }) => {
-                if let Err(error) = ready(self.data, &epoch, &self.release.version) {
+                if let Err(error) = (self.steps.ready)(self.data, &epoch, &self.release.version) {
                     remove_version(self.root, &dest);
                     // Said first: restarting the service may end this process too.
                     let message = format!("TerminalX {version} did not come up after the handover ({error:#}). {from} was started again; its agents and terminals restarted.");
                     reporter.failed(&version, message, true);
-                    if let Err(error) = restart(self.root, self.data) {
+                    if let Err(error) = (self.steps.restart)(self.root, self.data) {
                         reporter.failed(&version, format!("TerminalX {version} did not come up after the handover, and {from} could not be started again ({error:#}); start it with `terminalx-serve service install`."), true);
                     }
                     return Ended::Failed { rolled_back: true };
@@ -915,6 +941,11 @@ mod tests {
         /// The whole update, as `update --apply 9.9.9` runs it, reported to
         /// the record of a data directory no runtime runs.
         fn update(&self) -> (Ended, Record) {
+            self.update_with(&STEPS)
+        }
+
+        /// The whole update with `steps` starting and handing over runtimes.
+        fn update_with(&self, steps: &Steps) -> (Ended, Record) {
             let files = self.files.clone();
             let fetch = move |url: &str| files.get(url).cloned().ok_or_else(|| anyhow!("{url} answered 404"));
             let data = self._dir.path().join("data");
@@ -922,7 +953,7 @@ mod tests {
             let path = record::status_path(&data);
             let mut reporter = Reporter::open(&path, &data, &self.root);
             let release = parse_tag(TAG).unwrap();
-            let ended = Update { root: &self.root, data: &data, source: &self.source, asset: ASSET, fetch: &fetch, release: &release, stop: &[] }.run(&mut reporter);
+            let ended = Update { root: &self.root, data: &data, source: &self.source, asset: ASSET, fetch: &fetch, release: &release, stop: &[], steps }.run(&mut reporter);
             (ended, record::read_record(&path))
         }
 
@@ -1015,6 +1046,71 @@ mod tests {
         }
         assert_eq!(record.helper_pid, None, "nothing runs the update any more");
         assert_eq!(record.from.as_deref(), Some("1.0.0"));
+    }
+
+    /// The install root of a fixture whose data directory is `data`.
+    fn root_of(data: &Path) -> PathBuf {
+        data.parent().unwrap().join("install")
+    }
+
+    /// A release that passes its trial and is handed over to, as a runtime
+    /// that execs it (`epoch` "before" goes); how it comes up is `ready`'s.
+    fn handed_over(ready: fn(&Path, &str, &semver::Version) -> Result<()>) -> Steps {
+        Steps {
+            trial: |_, _, _| Ok(()),
+            begin: |_, _, _| Ok(crate::serve_cli::handover::Handed::Exec { epoch: "before".into() }),
+            ready,
+            // What a service restart does here: says it ran the old version.
+            restart: |root, data| {
+                std::fs::write(data.join("restarted"), std::fs::read_link(root.join("current"))?.to_string_lossy().as_bytes())?;
+                Ok(())
+            },
+        }
+    }
+
+    /// PRO-354: the runtime that took over does not say it is ready. `current`
+    /// never moved, the new version is removed, the old one is started again,
+    /// and the record says `failed`, `rolledBack`, running the old version.
+    #[test]
+    fn a_runtime_that_does_not_come_up_after_the_handover_is_rolled_back() {
+        let fixture = Fixture::new();
+        let steps = handed_over(|data, epoch, _| {
+            assert_eq!(epoch, "before");
+            assert_eq!(std::fs::read_link(root_of(data).join("current")).unwrap(), Path::new("versions/1.0.0"), "current has not moved before ready");
+            bail!("the updated TerminalX runtime did not answer after the handover")
+        });
+        let (ended, record) = fixture.update_with(&steps);
+        assert_eq!(ended, Ended::Failed { rolled_back: true });
+        fixture.assert_unchanged();
+        let data = fixture._dir.path().join("data");
+        assert_eq!(std::fs::read_to_string(data.join("restarted")).unwrap(), "versions/1.0.0", "the old version was started again");
+        match record.progress {
+            Progress::Failed { version, running, rolled_back, message, .. } => {
+                assert_eq!((version.as_str(), running.as_str(), rolled_back), ("9.9.9", "1.0.0", true));
+                assert!(message.contains("did not come up after the handover") && message.contains("1.0.0 was started again"), "{message}");
+            }
+            other => panic!("expected failed, got {other:?}"),
+        }
+        assert_eq!(record.helper_pid, None);
+    }
+
+    /// The runtime that took over says the new version: only then does
+    /// `current` move, and the update ends `updated`, nothing restarted.
+    #[test]
+    fn current_moves_once_the_runtime_that_took_over_is_ready() {
+        let fixture = Fixture::new();
+        let steps = handed_over(|data, _, version| {
+            let root = root_of(data);
+            assert_eq!(std::fs::read_link(root.join("current")).unwrap(), Path::new("versions/1.0.0"), "current has not moved before ready");
+            assert!(root.join("versions").join(version.to_string()).join("terminalx-serve").exists());
+            Ok(())
+        });
+        let (ended, record) = fixture.update_with(&steps);
+        assert_eq!(ended, Ended::Updated);
+        assert_eq!(fixture.current(), Path::new("versions/9.9.9"));
+        assert!(!fixture._dir.path().join("data/restarted").exists(), "nothing was restarted");
+        assert!(matches!(record.progress, Progress::Updated { ref from, ref to, .. } if from == "1.0.0" && to == "9.9.9"), "{record:?}");
+        assert_eq!(versions_on_disk(&fixture.root).iter().map(ToString::to_string).collect::<Vec<_>>(), ["9.9.9", "1.0.0"]);
     }
 
     /// A release whose signature does not verify fails before anything is
